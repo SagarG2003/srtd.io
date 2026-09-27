@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Client } from '@srtdio/rpc';
 import {
   addReactionRecord,
+  chunkIds,
+  deleteMessagesRecord,
   removeReactionRecord,
+  resolveMarkRecord,
+  setMarkRecord,
   sendMessageRecord,
   setReadCursorRecord,
 } from '@/lib/chat/record';
@@ -186,5 +190,136 @@ describe('reaction and read-cursor records', () => {
     expect(
       await setReadCursorRecord({ client, channelId: CHANNEL, messageId: 'x', traceId: 't' }),
     ).toEqual({ ok: false, message: 'message not found' });
+  });
+});
+
+/** A recording rpc whose nth call can fail. */
+function voidClient(failOnCall?: number) {
+  let n = 0;
+  const rpc = vi.fn(() => {
+    n += 1;
+    return Promise.resolve(
+      n === failOnCall
+        ? { data: null, error: { message: 'marked messages cannot be deleted' } }
+        : { data: null, error: null },
+    );
+  });
+  return { client: { rpc } as unknown as Client, rpc };
+}
+
+describe('sendMessageRecord with shared briefs', () => {
+  it('sends p_shared_brief_ids; a briefs-only send carries no body', async () => {
+    const { client, rpc } = makeClient({ data: row, error: null });
+    await sendMessageRecord({
+      client,
+      id: ID,
+      channelId: CHANNEL,
+      traceId: 'trace-1',
+      body: '',
+      attachmentAssetIds: [],
+      sharedBriefIds: ['brief-1'],
+    });
+    expect(rpc).toHaveBeenCalledWith('chat_message_send', {
+      p_id: ID,
+      p_channel_id: CHANNEL,
+      p_trace_id: 'trace-1',
+      p_shared_brief_ids: ['brief-1'],
+    });
+  });
+});
+
+describe('mark records', () => {
+  it('a pending priority change calls chat_mark_set with the same type and the new priority', async () => {
+    const { client, rpc } = voidClient();
+    const result = await setMarkRecord({
+      client,
+      channelId: CHANNEL,
+      messageId: 'm1',
+      type: 'pending',
+      priority: 2,
+      traceId: 't1',
+    });
+    expect(result.ok).toBe(true);
+    expect(rpc).toHaveBeenCalledWith('chat_mark_set', {
+      p_message_id: 'm1',
+      p_channel_id: CHANNEL,
+      p_mark_type: 'pending',
+      p_priority: 2,
+      p_trace_id: 't1',
+    });
+  });
+
+  it('commitment and decision always send a null priority; unranked pending sends null', async () => {
+    const { client, rpc } = voidClient();
+    await setMarkRecord({
+      client,
+      channelId: CHANNEL,
+      messageId: 'm1',
+      type: 'commitment',
+      priority: 1,
+      traceId: 't1',
+    });
+    await setMarkRecord({
+      client,
+      channelId: CHANNEL,
+      messageId: 'm2',
+      type: 'pending',
+      priority: null,
+      traceId: 't2',
+    });
+    expect(rpc.mock.calls.map((c) => (c as unknown[])[1])).toEqual([
+      expect.objectContaining({ p_mark_type: 'commitment', p_priority: null }),
+      expect.objectContaining({ p_mark_type: 'pending', p_priority: null }),
+    ]);
+  });
+
+  it('resolve calls chat_mark_resolve with the explicit trace id', async () => {
+    const { client, rpc } = voidClient();
+    await resolveMarkRecord({ client, channelId: CHANNEL, messageId: 'm1', traceId: 't1' });
+    expect(rpc).toHaveBeenCalledWith('chat_mark_resolve', {
+      p_message_id: 'm1',
+      p_channel_id: CHANNEL,
+      p_trace_id: 't1',
+    });
+  });
+});
+
+describe('deleteMessagesRecord', () => {
+  const ids = Array.from({ length: 250 }, (_, i) => `m${i}`);
+
+  it('chunks at 100 ids per chat_message_delete call, in order', async () => {
+    const { client, rpc } = voidClient();
+    const onChunkDeleted = vi.fn();
+    const result = await deleteMessagesRecord({
+      client,
+      channelId: CHANNEL,
+      messageIds: ids,
+      traceId: 't1',
+      onChunkDeleted,
+    });
+    expect(result).toEqual({ ok: true, deleted: ids });
+    const sizes = rpc.mock.calls.map(
+      (c) => ((c as unknown[])[1] as { p_message_ids: string[] }).p_message_ids.length,
+    );
+    expect(sizes).toEqual([100, 100, 50]);
+    expect((rpc.mock.calls[0] as unknown[] | undefined)?.[0]).toBe('chat_message_delete');
+    expect(onChunkDeleted).toHaveBeenCalledTimes(3);
+    expect(chunkIds(['a', 'b', 'c'], 2)).toEqual([['a', 'b'], ['c']]);
+  });
+
+  it('stops at the first failing chunk and returns the proc message', async () => {
+    const { client, rpc } = voidClient(2);
+    const result = await deleteMessagesRecord({
+      client,
+      channelId: CHANNEL,
+      messageIds: ids,
+      traceId: 't1',
+    });
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      ok: false,
+      deleted: ids.slice(0, 100),
+      message: 'marked messages cannot be deleted',
+    });
   });
 });

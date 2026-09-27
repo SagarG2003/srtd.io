@@ -41,6 +41,7 @@ function makeMessage(over: Partial<ThreadMessage>): ThreadMessage {
     mine: false,
     attachments: [],
     sharedPostIds: [],
+    sharedBriefIds: [],
     reply: null,
     state: 'sent',
     status: 'sent',

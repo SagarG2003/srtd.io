@@ -1,6 +1,7 @@
 // Postgres writes for chat, through the SECURITY DEFINER procs that are the
 // only write paths: chat_message_send (the record, called BEFORE Agora),
-// chat_reaction_add / chat_reaction_remove, and chat_read_cursor_set. The actor
+// chat_reaction_add / chat_reaction_remove, chat_read_cursor_set,
+// chat_mark_set / chat_mark_resolve and chat_message_delete. The actor
 // is auth.uid() server-side (never passed), and the trace id is the explicit
 // p_trace_id parameter of every proc (minted with uuid_v7 at the user action,
 // never inferred). The Supabase client is injected so each proc call is
@@ -31,6 +32,8 @@ export interface SendRecordParams {
   mentions?: Json;
   /** Post uuids shared into the message; persisted so history renders the cards. */
   sharedPostIds?: readonly string[];
+  /** Brief uuids shared into the message; persisted so history renders the cards. */
+  sharedBriefIds?: readonly string[];
   /** The quoted message's id when this is a reply. */
   replyToMessageId?: string | null;
   /** Render metadata per attachment id (mime, name, size, duration, transcript). */
@@ -48,7 +51,8 @@ export type SendRecordResult =
  * An empty body is omitted (the row's body is nullable and CHECKed non-empty
  * when present) and so are an empty attachment list, empty shared posts, no
  * reply and empty attachment meta, matching the proc's defaults. A shared-posts
- * only send (no body) is valid: the proc accepts body, attachments or posts. Never throws: a timeout, transport error or proc exception resolves
+ * or shared-briefs only send (no body) is valid: the proc accepts body,
+ * attachments, posts or briefs. Never throws: a timeout, transport error or proc exception resolves
  * to { ok: false } so the caller can mark the bubble failed and offer Retry.
  */
 export async function sendMessageRecord(params: SendRecordParams): Promise<SendRecordResult> {
@@ -66,6 +70,9 @@ export async function sendMessageRecord(params: SendRecordParams): Promise<SendR
     ...(params.mentions !== undefined ? { p_mentions: params.mentions } : {}),
     ...(params.sharedPostIds !== undefined && params.sharedPostIds.length > 0
       ? { p_shared_post_ids: [...params.sharedPostIds] }
+      : {}),
+    ...(params.sharedBriefIds !== undefined && params.sharedBriefIds.length > 0
+      ? { p_shared_brief_ids: [...params.sharedBriefIds] }
       : {}),
     ...(params.replyToMessageId != null && params.replyToMessageId !== ''
       ? { p_reply_to_message_id: params.replyToMessageId }
@@ -95,7 +102,13 @@ export async function sendMessageRecord(params: SendRecordParams): Promise<SendR
 export type WriteResult = { ok: true } | { ok: false; message: string };
 
 async function voidProc<
-  N extends 'chat_reaction_add' | 'chat_reaction_remove' | 'chat_read_cursor_set',
+  N extends
+    | 'chat_reaction_add'
+    | 'chat_reaction_remove'
+    | 'chat_read_cursor_set'
+    | 'chat_mark_set'
+    | 'chat_mark_resolve'
+    | 'chat_message_delete',
 >(client: Client, fn: N, args: Functions[N]['Args']): Promise<WriteResult> {
   try {
     const { error } = await client.rpc(fn, args);
@@ -148,4 +161,101 @@ export function setReadCursorRecord(params: ReadCursorParams): Promise<WriteResu
     p_message_id: params.messageId,
     p_trace_id: params.traceId,
   });
+}
+
+export type MarkType = 'commitment' | 'decision' | 'pending';
+
+/** Pending priority: 1 (P1), 2 (P2), or null (unranked). */
+export type MarkPriority = 1 | 2 | null;
+
+export interface MarkSetParams {
+  client: Client;
+  channelId: string;
+  messageId: string;
+  type: MarkType;
+  /** Pending only; always null for commitment and decision. */
+  priority: MarkPriority;
+  traceId: string;
+}
+
+/**
+ * Mark a message, or (same type 'pending' on an already pending message) change
+ * its priority: the proc inserts the first mark and updates priority after.
+ * The generated Args type declares p_priority as a plain number because the
+ * SQL smallint parameter has no default; SQL NULL (unranked) is valid there, so
+ * the args are built with the nullable shape and narrowed once for the call.
+ */
+export function setMarkRecord(params: MarkSetParams): Promise<WriteResult> {
+  const args: Omit<Functions['chat_mark_set']['Args'], 'p_priority'> & {
+    p_priority: number | null;
+  } = {
+    p_message_id: params.messageId,
+    p_channel_id: params.channelId,
+    p_mark_type: params.type,
+    p_priority: params.type === 'pending' ? params.priority : null,
+    p_trace_id: params.traceId,
+  };
+  return voidProc(params.client, 'chat_mark_set', args as Functions['chat_mark_set']['Args']);
+}
+
+export interface MarkResolveParams {
+  client: Client;
+  channelId: string;
+  messageId: string;
+  traceId: string;
+}
+
+/** Resolve an open pending mark (the row stays; it leaves the lists and badges). */
+export function resolveMarkRecord(params: MarkResolveParams): Promise<WriteResult> {
+  return voidProc(params.client, 'chat_mark_resolve', {
+    p_message_id: params.messageId,
+    p_channel_id: params.channelId,
+    p_trace_id: params.traceId,
+  });
+}
+
+/** The proc's per-call cap on chat_message_delete ids. */
+export const DELETE_CHUNK_SIZE = 100;
+
+/** Split ids into consecutive chunks of at most `size` (order kept). */
+export function chunkIds(ids: readonly string[], size: number = DELETE_CHUNK_SIZE): string[][] {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) chunks.push(ids.slice(i, i + size));
+  return chunks;
+}
+
+export interface DeleteMessagesParams {
+  client: Client;
+  channelId: string;
+  messageIds: readonly string[];
+  traceId: string;
+  /** Called after each chunk the record accepted, with that chunk's ids. */
+  onChunkDeleted?: (ids: string[]) => void;
+}
+
+/** Deleted ids so far, plus the proc's message when a chunk failed. */
+export type DeleteMessagesResult =
+  | { ok: true; deleted: string[] }
+  | { ok: false; deleted: string[]; message: string };
+
+/**
+ * Soft-delete own messages for everyone through chat_message_delete, chunked at
+ * DELETE_CHUNK_SIZE ids per call and run in order. The first failing chunk stops
+ * the run; the chunks already accepted stay deleted and are reported.
+ */
+export async function deleteMessagesRecord(
+  params: DeleteMessagesParams,
+): Promise<DeleteMessagesResult> {
+  const deleted: string[] = [];
+  for (const chunk of chunkIds(params.messageIds)) {
+    const result = await voidProc(params.client, 'chat_message_delete', {
+      p_message_ids: chunk,
+      p_channel_id: params.channelId,
+      p_trace_id: params.traceId,
+    });
+    if (!result.ok) return { ok: false, deleted, message: result.message };
+    deleted.push(...chunk);
+    params.onChunkDeleted?.(chunk);
+  }
+  return { ok: true, deleted };
 }

@@ -42,6 +42,8 @@ import {
 } from '@/lib/chat/record';
 import { createDebouncer, READ_CURSOR_DEBOUNCE_MS } from '@/lib/chat/read-cursor';
 import { runSend } from '@/lib/chat/send-flow';
+import { runDelete } from '@/lib/chat/delete-flow';
+import { findInOlderPages, type FindOlderOutcome } from '@/lib/chat/marks';
 import {
   createInFlightGuard,
   recordThenSignal,
@@ -58,6 +60,7 @@ import {
   oldestCursor,
   reactionEventExt,
   readEventExt,
+  removeMessages,
   rowToThreadMessage,
   sendText,
   setMessageState,
@@ -82,13 +85,27 @@ export interface UseChatThread {
   hasMore: boolean;
   /** Fetch the page before the oldest loaded message. */
   loadOlder: () => void;
-  /** Record + publish text and/or attachments and/or shared posts; a send with none is a no-op. */
+  /** Record + publish text and/or attachments and/or shared posts/briefs; a send with none is a no-op. */
   send: (
     text: string,
     attachments?: readonly MessageAttachment[],
     sharedPostIds?: readonly string[],
     reply?: ReplyQuote | null,
+    sharedBriefIds?: readonly string[],
   ) => Promise<void>;
+  /**
+   * Delete own messages for everyone (chunked at 100 per proc call). Accepted
+   * chunks leave the thread at once and are signalled live; the first failing
+   * chunk stops the run and its proc message is returned.
+   */
+  deleteMessages: (
+    messageIds: readonly string[],
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  /**
+   * Make sure a message is loaded: 'found' when it already is or an older page
+   * brought it in (at most 10 pages), otherwise why it is not.
+   */
+  ensureLoaded: (messageId: string) => Promise<FindOlderOutcome>;
   /** Re-run a failed send with the SAME message id. */
   retry: (messageId: string) => void;
   /** Add or remove the current user's reaction: optimistic, recorded, signalled live. */
@@ -118,8 +135,10 @@ export function useChatThread(params: {
   peerUserId: string | null;
   /** Called after a successful record write so the live store can show 'You: ...'. */
   onOwnMessage?: (channelId: string, text: string, ts: number) => void;
-  /** Called after each catch-up so the caller can refresh unread counts. */
+  /** Called after each catch-up so the caller can refresh unread counts and marks. */
   onCaughtUp?: () => void;
+  /** Called when messages of the open channel were deleted (by us or live by a peer). */
+  onMessagesDeleted?: (channelId: string, messageIds: readonly string[]) => void;
   /** Per-channel unrecorded sends (the chat store's); a hook-local one when absent. */
   outbox?: ChannelOutbox;
   /** Injected in tests; the app uses the shared Supabase client. */
@@ -155,6 +174,8 @@ export function useChatThread(params: {
   onOwnMessageRef.current = onOwnMessage;
   const onCaughtUpRef = useRef(onCaughtUp);
   onCaughtUpRef.current = onCaughtUp;
+  const onMessagesDeletedRef = useRef(params.onMessagesDeleted);
+  onMessagesDeletedRef.current = params.onMessagesDeleted;
   const inFlight = useMemo(() => createInFlightGuard(), []);
   const catchingUpRef = useRef(false);
   const loadingOlderRef = useRef(false);
@@ -305,6 +326,12 @@ export function useChatThread(params: {
         if (fromUserId === currentUserId) return;
         setMessages((prev) => markReadUpToMessage(prev, messageId));
       },
+      onDelete: ({ messageIds }) => {
+        if (channelRef.current !== channelId) return;
+        const present = messagesRef.current.some((m) => messageIds.includes(m.id));
+        setMessages((prev) => removeMessages(prev, messageIds));
+        if (present) onMessagesDeletedRef.current?.(channelId, messageIds);
+      },
     });
     return unsubscribe;
   }, [client, channelId, currentUserId, verifier, foldRows]);
@@ -387,6 +414,42 @@ export function useChatThread(params: {
     })();
   }, [db, currentUserId, foldRows]);
 
+  const ensureLoaded = useCallback(
+    async (messageId: string): Promise<FindOlderOutcome> => {
+      if (messagesRef.current.some((m) => m.id === messageId)) return 'found';
+      const forChannel = channelRef.current;
+      if (forChannel === null || loadingOlderRef.current) return 'error';
+      loadingOlderRef.current = true;
+      setLoadingOlder(true);
+      try {
+        const outcome = await findInOlderPages({
+          start: oldestCursor(messagesRef.current),
+          targetId: messageId,
+          loadPage: (cursor) => loadOlderMessages(db, forChannel, cursor),
+          onPage: (rows, more) => {
+            if (channelRef.current !== forChannel) return;
+            const fetched = rows.map((row) => rowToThreadMessage(row, currentUserId));
+            // Keep the next page's cursor current before React re-renders.
+            messagesRef.current = [...fetched, ...messagesRef.current];
+            foldRows(fetched, forChannel);
+            setHasMore(more);
+          },
+        });
+        if (outcome === 'error') {
+          logger.warn('chat: jump-to page load failed', {
+            channel_id: forChannel,
+            message_id: messageId,
+          });
+        }
+        return outcome;
+      } finally {
+        loadingOlderRef.current = false;
+        if (channelRef.current === forChannel) setLoadingOlder(false);
+      }
+    },
+    [db, currentUserId, foldRows],
+  );
+
   /**
    * Record a message (Postgres first), then publish it live. The outcome is
    * written to the channel's outbox whatever channel is open now; the visible
@@ -456,19 +519,27 @@ export function useChatThread(params: {
   );
 
   const send = useCallback<UseChatThread['send']>(
-    async (text, attachments = [], sharedPostIds = [], reply = null) => {
+    async (text, attachments = [], sharedPostIds = [], reply = null, sharedBriefIds = []) => {
       const forChannel = channelRef.current;
       const trimmed = text.trim();
       if (
         forChannel === null ||
-        (trimmed === '' && attachments.length === 0 && sharedPostIds.length === 0)
+        (trimmed === '' &&
+          attachments.length === 0 &&
+          sharedPostIds.length === 0 &&
+          sharedBriefIds.length === 0)
       )
         return;
       const id = newMessageId();
       const entry: OutboxEntry = {
         id,
         text: trimmed,
-        local: { attachments: [...attachments], sharedPostIds: [...sharedPostIds], reply },
+        local: {
+          attachments: [...attachments],
+          sharedPostIds: [...sharedPostIds],
+          sharedBriefIds: [...sharedBriefIds],
+          reply,
+        },
         state: 'sending',
       };
       outboxRef.current.put(forChannel, entry);
@@ -540,6 +611,48 @@ export function useChatThread(params: {
     [db],
   );
 
+  const deleteMessages = useCallback<UseChatThread['deleteMessages']>(
+    async (messageIds) => {
+      const forChannel = channelRef.current;
+      if (forChannel === null || messageIds.length === 0) return { ok: true };
+      const traceId = generateTraceId();
+      const connection = clientRef.current;
+      const liveTarget = targetRef.current;
+      const result = await runDelete(
+        {
+          client: db,
+          removeLocal: (ids) => {
+            if (channelRef.current === forChannel) {
+              setMessages((prev) => removeMessages(prev, ids));
+            }
+            onMessagesDeletedRef.current?.(forChannel, ids);
+          },
+          signal:
+            connection !== null && liveTarget !== null
+              ? (ext) =>
+                  sendSignal({
+                    connection: asSignalConnection(connection),
+                    target: liveTarget,
+                    createCmd: createCmdMessage,
+                    ext,
+                  })
+              : undefined,
+          onSignalFailed: (error) =>
+            logger.warn('chat: delete signal failed', { trace_id: traceId, error: String(error) }),
+        },
+        { channelId: forChannel, messageIds, traceId },
+      );
+      if (result.ok) return { ok: true };
+      logger.warn('chat: delete failed', {
+        trace_id: traceId,
+        deleted: result.deleted.length,
+        error: result.message,
+      });
+      return { ok: false, message: result.message };
+    },
+    [db],
+  );
+
   // Read position: debounced 1s, forward-only server-side, plus a live signal
   // for the peer's seen ticks. Skips when the newest message is unchanged.
   const readCursor = useMemo(
@@ -595,6 +708,8 @@ export function useChatThread(params: {
     hasMore,
     loadOlder,
     send,
+    deleteMessages,
+    ensureLoaded,
     retry,
     toggleReaction,
     markNewestVisible,

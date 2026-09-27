@@ -1,5 +1,8 @@
 import {
+  useCallback,
+  useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type MouseEvent,
@@ -23,6 +26,22 @@ import { Composer } from '@/components/chat/Composer';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
 import { SharedPostCards } from '@/components/chat/PostCard';
 import { MessageActionMenu } from '@/components/chat/MessageActionMenu';
+import { SharedBriefCards } from '@/components/chat/BriefCard';
+import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
+import { MarkStrip, MarksSheet, PrioritySheet } from '@/components/chat/MarksSheet';
+import { SelectionBar } from '@/components/chat/SelectionBar';
+import {
+  markMenuOptions,
+  pruneSelection,
+  selectionRole,
+  toggleSelected,
+  type ChatMark,
+  type FindOlderOutcome,
+  type MarkPriority,
+  type MarkType,
+  type SelectionRole,
+} from '@/lib/chat/marks';
+import type { WriteResult } from '@/lib/chat/record';
 
 interface MessageThreadProps {
   title: string;
@@ -46,7 +65,22 @@ interface MessageThreadProps {
     attachments: MessageAttachment[],
     sharedPostIds: string[],
     reply: ReplyQuote | null,
+    sharedBriefIds: string[],
   ) => Promise<void>;
+  /** Every mark of the channel keyed by message id (resolved included); absent = no marks UI. */
+  marks?: Map<string, ChatMark>;
+  /** Marked messages read from the record, for sheet rows beyond loaded history. */
+  markedMessages?: Map<string, ThreadMessage>;
+  /** Mark a message, or change an open pending mark's priority (same type). */
+  onSetMark?: (messageId: string, type: MarkType, priority: MarkPriority) => Promise<WriteResult>;
+  /** Resolve an open pending mark. */
+  onResolveMark?: (messageId: string) => Promise<WriteResult>;
+  /** Delete own messages for everyone; absent hides "Select". */
+  onDeleteMessages?: (
+    messageIds: readonly string[],
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  /** Load older pages until a message is present (jump-to). */
+  onEnsureLoaded?: (messageId: string) => Promise<FindOlderOutcome>;
   /** Re-run a failed send with the same message id. */
   onRetry?: (messageId: string) => void;
   /** Present on small screens only; renders a back affordance to the list. */
@@ -69,6 +103,21 @@ interface MessageThreadProps {
 
 /** Scroll positions within this many px of the top request the older page. */
 const LOAD_OLDER_THRESHOLD_PX = 80;
+
+/** How long a jumped-to message stays highlighted. */
+const JUMP_HIGHLIGHT_MS = 2000;
+
+/** Toast when jump-to cannot bring the message into the loaded history. */
+export const JUMP_NOT_LOADED_TOAST = 'Message is older than loaded history';
+
+const NO_MARKS: Map<string, ChatMark> = new Map();
+
+/** Selection-mode state for one row, when selection mode is on. */
+export interface RowSelection {
+  role: SelectionRole;
+  checked: boolean;
+  onToggle: () => void;
+}
 
 /**
  * Coarse "last seen" label from a timestamp, bucketed minutes/hours/days. Null
@@ -219,6 +268,12 @@ export function MessageBubble(props: {
   onBadgeClick: () => void;
   onRetry?: (messageId: string) => void;
   onJumpToMessage?: (messageId: string) => void;
+  /** The message's mark; drives the badge. */
+  mark?: ChatMark | undefined;
+  /** Opens the priority chooser from an open pending badge. */
+  onChangePriority?: () => void;
+  /** Present while selection mode is on. */
+  selection?: RowSelection;
   bubbleRef?: Ref<HTMLDivElement>;
   press?: {
     handlers: LongPressHandlers;
@@ -237,10 +292,12 @@ export function MessageBubble(props: {
   const hasReactions = message.reactions.length > 0;
   const failed = message.state === 'failed';
   const sending = message.state === 'sending';
+  const selection = props.selection;
   const textOnly =
     message.body.trim() !== '' &&
     message.attachments.length === 0 &&
-    message.sharedPostIds.length === 0;
+    message.sharedPostIds.length === 0 &&
+    message.sharedBriefIds.length === 0;
   const totalReactions = message.reactions.reduce((sum, r) => sum + r.count, 0);
   const distinctEmojis = message.reactions.map((r) => r.emoji).join('');
   const time = (
@@ -253,12 +310,17 @@ export function MessageBubble(props: {
     <li
       data-msg-id={message.id}
       data-state={message.state}
+      data-selection={selection?.role}
       className={cn(
         'flex items-start gap-2 px-4 py-2',
         mine ? 'flex-row-reverse' : 'flex-row',
         hasReactions && 'mb-3',
       )}
     >
+      {selection?.role === 'selectable' ? (
+        <SelectCheckbox checked={selection.checked} onToggle={selection.onToggle} />
+      ) : null}
+      {selection?.role === 'locked' ? <SelectLock /> : null}
       {showMeta ? <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" /> : null}
       {gutter ? <span className="w-[26px] shrink-0" aria-hidden="true" /> : null}
       <div className={cn('flex min-w-0 max-w-[75%] flex-col gap-1', mine && 'items-end')}>
@@ -269,6 +331,12 @@ export function MessageBubble(props: {
           {...press?.handlers}
           onContextMenu={press?.onContextMenu}
           onClickCapture={(e) => {
+            if (selection !== undefined) {
+              e.preventDefault();
+              e.stopPropagation();
+              if (selection.role === 'selectable') selection.onToggle();
+              return;
+            }
             if (press?.consumeClick()) {
               e.preventDefault();
               e.stopPropagation();
@@ -281,8 +349,15 @@ export function MessageBubble(props: {
               : 'rounded-bl-sm border-border bg-panel-2',
             sending && 'opacity-70',
             failed && 'border-bad',
+            selection?.checked === true && 'ring-2 ring-accent',
           )}
         >
+          <MarkBadge
+            mark={props.mark}
+            {...(props.onChangePriority !== undefined && selection === undefined
+              ? { onChangePriority: props.onChangePriority }
+              : {})}
+          />
           {reply !== null ? (
             <button
               type="button"
@@ -335,6 +410,7 @@ export function MessageBubble(props: {
                 presignEnabled={presignEnabled}
               />
               <SharedPostCards postIds={message.sharedPostIds} />
+              <SharedBriefCards briefIds={message.sharedBriefIds} />
               <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-fg-3">
                 {time}
               </div>
@@ -395,15 +471,20 @@ function MessageRow(props: {
   onOpen: (message: ThreadMessage, rect: DOMRect | null) => void;
   onRetry?: (messageId: string) => void;
   onJumpToMessage?: (messageId: string) => void;
+  mark: ChatMark | undefined;
+  onChangePriority?: (messageId: string) => void;
+  selection?: RowSelection;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
-  const { handlers, consumeClickSuppression } = useLongPress(() =>
-    props.onOpen(props.message, bubbleRef.current?.getBoundingClientRect() ?? null),
-  );
+  const selecting = props.selection !== undefined;
+  const { handlers, consumeClickSuppression } = useLongPress(() => {
+    if (!selecting) props.onOpen(props.message, bubbleRef.current?.getBoundingClientRect() ?? null);
+  });
   const onContextMenu = (e: MouseEvent): void => {
     e.preventDefault();
-    props.onOpen(props.message, bubbleRef.current?.getBoundingClientRect() ?? null);
+    if (!selecting) props.onOpen(props.message, bubbleRef.current?.getBoundingClientRect() ?? null);
   };
+  const onChangePriority = props.onChangePriority;
   return (
     <MessageBubble
       message={props.message}
@@ -418,6 +499,11 @@ function MessageRow(props: {
       press={{ handlers, onContextMenu, consumeClick: consumeClickSuppression }}
       {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
       {...(props.onJumpToMessage !== undefined ? { onJumpToMessage: props.onJumpToMessage } : {})}
+      mark={props.mark}
+      {...(onChangePriority !== undefined
+        ? { onChangePriority: () => onChangePriority(props.message.id) }
+        : {})}
+      {...(props.selection !== undefined ? { selection: props.selection } : {})}
       onBadgeClick={() =>
         props.onOpen(props.message, bubbleRef.current?.getBoundingClientRect() ?? null)
       }
@@ -445,9 +531,20 @@ function ThreadBody(
     showTicks: boolean;
     isGroup: boolean;
     onReply: (message: ThreadMessage) => void;
+    marks: Map<string, ChatMark>;
+    /** Present while selection mode is on. */
+    selection?: { selected: ReadonlySet<string>; onToggle: (id: string) => void };
+    /** Menu "Mark as ..." picked; absent hides mark actions. */
+    onMark?: (message: ThreadMessage, type: MarkType) => void;
+    /** Menu "Select" picked; absent hides it. */
+    onStartSelect?: (message: ThreadMessage) => void;
+    onChangePriority?: (messageId: string) => void;
+    /** A jump-to request (seq makes a repeat of the same id fire again). */
+    jumpRequest: { id: string; seq: number } | null;
+    onEnsureLoaded?: (messageId: string) => Promise<FindOlderOutcome>;
   },
 ): ReactElement {
-  const { onNewestVisible } = props;
+  const { onNewestVisible, jumpRequest } = props;
   const [menu, setMenu] = useState<{ message: ThreadMessage; rect: DOMRect | null } | null>(null);
   const toast = useToast();
   const listRef = useRef<HTMLUListElement>(null);
@@ -459,6 +556,48 @@ function ThreadBody(
   // do not move what the reader was looking at.
   const anchorHeightRef = useRef<number | null>(null);
   const newestIdRef = useRef<string | null>(null);
+  // A jump target waiting for its older page to render.
+  const pendingJumpRef = useRef<string | null>(null);
+  const ensureLoadedRef = useRef(props.onEnsureLoaded);
+  ensureLoadedRef.current = props.onEnsureLoaded;
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
+  /** Scroll a loaded message into view and ring it; false when it is not rendered. */
+  const reveal = useCallback((id: string, highlightMs: number): boolean => {
+    const el = listRef.current?.querySelector(`[data-msg-id="${CSS.escape(id)}"]`);
+    if (el == null) return false;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const flash = el.querySelector('[data-bubble]') ?? el;
+    const ring = ['ring-2', 'ring-accent', 'ring-inset'];
+    flash.classList.add(...ring);
+    window.setTimeout(() => flash.classList.remove(...ring), highlightMs);
+    return true;
+  }, []);
+  // Jump-to: reveal at once when loaded, else page older history (capped) and
+  // reveal once the page carrying it renders.
+  useEffect(() => {
+    if (jumpRequest === null) return;
+    const id = jumpRequest.id;
+    if (reveal(id, JUMP_HIGHLIGHT_MS)) return;
+    const ensure = ensureLoadedRef.current;
+    if (ensure === undefined) {
+      toastRef.current.show({ title: JUMP_NOT_LOADED_TOAST });
+      return;
+    }
+    pendingJumpRef.current = id;
+    atBottomRef.current = false;
+    void ensure(id).then((outcome) => {
+      if (pendingJumpRef.current !== id) return;
+      if (outcome !== 'found') {
+        pendingJumpRef.current = null;
+        toastRef.current.show({
+          title: outcome === 'error' ? 'Could not load older messages' : JUMP_NOT_LOADED_TOAST,
+        });
+        return;
+      }
+      if (reveal(id, JUMP_HIGHLIGHT_MS)) pendingJumpRef.current = null;
+    });
+  }, [jumpRequest, reveal]);
   // Reset on conversation switch so a fresh thread always lands at the latest
   // message even if the previous one was scrolled up. `title` is the only
   // per-conversation identifier reaching this component. Declared BEFORE the
@@ -475,6 +614,12 @@ function ThreadBody(
   useLayoutEffect(() => {
     const el = listRef.current;
     if (el === null || props.messages.length === 0) return;
+    if (pendingJumpRef.current !== null) {
+      // A jump owns the scroll position while its pages land.
+      anchorHeightRef.current = null;
+      if (reveal(pendingJumpRef.current, JUMP_HIGHLIGHT_MS)) pendingJumpRef.current = null;
+      return;
+    }
     if (anchorHeightRef.current !== null) {
       el.scrollTop += el.scrollHeight - anchorHeightRef.current;
       anchorHeightRef.current = null;
@@ -491,7 +636,7 @@ function ThreadBody(
       newestIdRef.current = last.id;
       onNewestVisible?.();
     }
-  }, [props.messages, onNewestVisible]);
+  }, [props.messages, onNewestVisible, reveal]);
   const scrollToMessage = (id: string): void => {
     const el = listRef.current?.querySelector(`[data-msg-id="${CSS.escape(id)}"]`);
     if (el == null) {
@@ -558,6 +703,15 @@ function ThreadBody(
             timeZone={props.timeZone}
             onOpen={(m, rect) => setMenu({ message: m, rect })}
             onJumpToMessage={scrollToMessage}
+            mark={props.marks.get(message.id)}
+            {...(props.onChangePriority !== undefined
+              ? { onChangePriority: props.onChangePriority }
+              : {})}
+            {...(props.selection !== undefined
+              ? {
+                  selection: rowSelection(message, props.marks, props.selection),
+                }
+              : {})}
             {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
           />
         ))}
@@ -569,6 +723,18 @@ function ThreadBody(
         mine={menu?.message.mine ?? false}
         currentReaction={menu ? (menu.message.reactions.find((r) => r.mine)?.emoji ?? null) : null}
         canCopy={menu ? menu.message.body.trim() !== '' : false}
+        markOptions={
+          menu && props.onMark !== undefined
+            ? markMenuOptions(menu.message, props.marks.get(menu.message.id))
+            : []
+        }
+        onMark={(type) => {
+          if (menu) props.onMark?.(menu.message, type);
+        }}
+        canSelect={props.onStartSelect !== undefined}
+        onSelect={() => {
+          if (menu) props.onStartSelect?.(menu.message);
+        }}
         onReact={(emoji) => {
           if (menu && menu.message.state === 'sent')
             props.onToggleReaction?.(
@@ -591,6 +757,19 @@ function ThreadBody(
   );
 }
 
+/** Selection-mode state for one row. */
+function rowSelection(
+  message: ThreadMessage,
+  marks: Map<string, ChatMark>,
+  selection: { selected: ReadonlySet<string>; onToggle: (id: string) => void },
+): RowSelection {
+  return {
+    role: selectionRole(message, marks),
+    checked: selection.selected.has(message.id),
+    onToggle: () => selection.onToggle(message.id),
+  };
+}
+
 /** The thread pane: header (+ optional back), message list, and composer. */
 export function MessageThread(props: MessageThreadProps): ReactElement {
   const { canAttach, presignEnabled, presignCache, uploadFile, transcribe, canTranscribe } =
@@ -598,6 +777,61 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const [replyDraft, setReplyDraft] = useState<{ authorName: string; quote: ReplyQuote } | null>(
     null,
   );
+  const toast = useToast();
+  const marks = props.marks ?? NO_MARKS;
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [marksOpen, setMarksOpen] = useState(false);
+  const [priorityFor, setPriorityFor] = useState<{
+    messageId: string;
+    mode: 'mark' | 'change';
+  } | null>(null);
+  const [priorityBusy, setPriorityBusy] = useState(false);
+  const [jumpRequest, setJumpRequest] = useState<{ id: string; seq: number } | null>(null);
+
+  // A conversation switch leaves selection mode and closes the marks surfaces.
+  useEffect(() => {
+    setSelecting(false);
+    setSelected(new Set());
+    setMarksOpen(false);
+    setPriorityFor(null);
+    setJumpRequest(null);
+  }, [props.title]);
+
+  // A delete or a new mark landing meanwhile drops ids that are no longer selectable.
+  useEffect(() => {
+    setSelected((prev) => {
+      const next = pruneSelection(prev, props.messages, marks);
+      return next.size === prev.size ? prev : next;
+    });
+  }, [props.messages, marks]);
+
+  const messagesById = useMemo(
+    () => new Map(props.messages.map((m) => [m.id, m])),
+    [props.messages],
+  );
+  const markedMessages = props.markedMessages;
+  const messageFor = useCallback(
+    (id: string): ThreadMessage | undefined => messagesById.get(id) ?? markedMessages?.get(id),
+    [messagesById, markedMessages],
+  );
+
+  const onSetMark = props.onSetMark;
+  const applyMark = async (
+    messageId: string,
+    type: MarkType,
+    priority: MarkPriority,
+  ): Promise<void> => {
+    if (onSetMark === undefined) return;
+    const result = await onSetMark(messageId, type, priority);
+    if (!result.ok) toast.show({ title: result.message });
+  };
+
+  const onDeleteMessages = props.onDeleteMessages;
+  const exitSelection = (): void => {
+    setSelecting(false);
+    setSelected(new Set());
+  };
   const handleReply = (message: ThreadMessage): void => {
     const preview = replyPreview(message);
     setReplyDraft({
@@ -635,8 +869,47 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           </IconButton>
         ) : null}
       </div>
+      {props.marks !== undefined && !selecting ? (
+        <MarkStrip marks={marks} onOpen={() => setMarksOpen(true)} />
+      ) : null}
       <ThreadBody
         title={props.title}
+        marks={marks}
+        jumpRequest={jumpRequest}
+        {...(props.onEnsureLoaded !== undefined ? { onEnsureLoaded: props.onEnsureLoaded } : {})}
+        {...(onSetMark !== undefined && !selecting
+          ? {
+              onMark: (message: ThreadMessage, type: MarkType) => {
+                if (type === 'pending') {
+                  setPriorityFor({ messageId: message.id, mode: 'mark' });
+                  return;
+                }
+                void applyMark(message.id, type, null);
+              },
+              onChangePriority: (messageId: string) =>
+                setPriorityFor({ messageId, mode: 'change' }),
+            }
+          : {})}
+        {...(onDeleteMessages !== undefined && !selecting
+          ? {
+              onStartSelect: (message: ThreadMessage) => {
+                setSelecting(true);
+                setSelected(
+                  selectionRole(message, marks) === 'selectable'
+                    ? new Set([message.id])
+                    : new Set(),
+                );
+              },
+            }
+          : {})}
+        {...(selecting
+          ? {
+              selection: {
+                selected,
+                onToggle: (id: string) => setSelected((prev) => toggleSelected(prev, id)),
+              },
+            }
+          : {})}
         messages={props.messages}
         loading={props.loading}
         profiles={props.profiles}
@@ -656,14 +929,59 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           : {})}
       />
       <TypingIndicator ids={props.typingUserIds} profiles={props.profiles} />
-      <Composer
-        onSend={props.onSend}
-        disabled={!props.canSend}
-        onTyping={props.onTyping}
-        onCancelReply={() => setReplyDraft(null)}
-        {...(replyDraft !== null ? { reply: replyDraft } : {})}
-        {...(canAttach ? { uploadFile } : {})}
-        {...(canTranscribe ? { transcribe } : {})}
+      {selecting && onDeleteMessages !== undefined ? (
+        <SelectionBar
+          count={selected.size}
+          onCancel={exitSelection}
+          onDelete={async () => {
+            const result = await onDeleteMessages([...selected]);
+            if (result.ok) exitSelection();
+            return result;
+          }}
+        />
+      ) : (
+        <Composer
+          onSend={props.onSend}
+          disabled={!props.canSend}
+          onTyping={props.onTyping}
+          onCancelReply={() => setReplyDraft(null)}
+          {...(replyDraft !== null ? { reply: replyDraft } : {})}
+          {...(canAttach ? { uploadFile } : {})}
+          {...(canTranscribe ? { transcribe } : {})}
+        />
+      )}
+      {props.marks !== undefined && props.onResolveMark !== undefined ? (
+        <MarksSheet
+          open={marksOpen}
+          onClose={() => setMarksOpen(false)}
+          marks={marks}
+          messageFor={messageFor}
+          profiles={props.profiles}
+          timeZone={props.timeZone}
+          onJump={(id) => {
+            setMarksOpen(false);
+            setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
+          }}
+          onResolve={props.onResolveMark}
+        />
+      ) : null}
+      <PrioritySheet
+        open={priorityFor !== null}
+        title={priorityFor?.mode === 'change' ? 'Change priority' : 'Mark as Pending'}
+        current={
+          priorityFor?.mode === 'change' ? marks.get(priorityFor.messageId)?.priority : undefined
+        }
+        busy={priorityBusy}
+        onClose={() => setPriorityFor(null)}
+        onChoose={(priority) => {
+          const target = priorityFor;
+          if (target === null) return;
+          setPriorityBusy(true);
+          void applyMark(target.messageId, 'pending', priority).finally(() => {
+            setPriorityBusy(false);
+            setPriorityFor(null);
+          });
+        }}
       />
     </div>
   );

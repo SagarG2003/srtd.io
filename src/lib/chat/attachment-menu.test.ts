@@ -6,10 +6,10 @@ function handlers() {
 }
 
 describe('attachmentMenuItems', () => {
-  it('is config-driven: Photo + File + Share a post, in order', () => {
+  it('is config-driven: Photo + File + Share a post or brief, in order', () => {
     const items = attachmentMenuItems(handlers());
     expect(items.map((item) => item.id)).toEqual(['photo', 'file', 'post']);
-    expect(items.map((item) => item.label)).toEqual(['Photo', 'File', 'Share a post']);
+    expect(items.map((item) => item.label)).toEqual(['Photo', 'File', 'Share a post or brief']);
     for (const item of items) {
       expect(item.Icon).toBeTypeOf('function');
     }

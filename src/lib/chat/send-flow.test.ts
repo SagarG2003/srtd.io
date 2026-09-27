@@ -76,6 +76,7 @@ describe('runSend', () => {
       body: 'hello',
       attachmentAssetIds: [],
       sharedPostIds: [],
+      sharedBriefIds: [],
       replyToMessageId: null,
       attachmentMeta: {},
     });
@@ -206,6 +207,23 @@ describe('runSend', () => {
         },
       }),
     );
+  });
+});
+
+describe('runSend shared briefs', () => {
+  it('passes shared brief ids to the record; a briefs-only send is valid', async () => {
+    const d = deps();
+    const outcome = await runSend(
+      d,
+      input({
+        text: '',
+        local: { attachments: [], sharedPostIds: [], sharedBriefIds: ['brief-1'], reply: null },
+      }),
+    );
+    expect(d.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ body: '', sharedBriefIds: ['brief-1'], sharedPostIds: [] }),
+    );
+    expect(outcome.ok && outcome.message.sharedBriefIds).toEqual(['brief-1']);
   });
 });
 

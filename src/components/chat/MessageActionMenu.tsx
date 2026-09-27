@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 import { ActionRow } from '@/components/ui';
-import { IconCopy, IconReply } from '@/components/ui/icons';
+import { IconCheck, IconCopy, IconPin, IconReply } from '@/components/ui/icons';
+import { markMenuLabel, type MarkType } from '@/lib/chat/marks';
 import { cn } from '@/lib/cn';
 
 /** Quick-react row offered when a message's action menu is opened. */
@@ -18,6 +19,12 @@ interface MessageActionMenuProps {
   onReact: (emoji: string) => void;
   onReply: () => void;
   onCopy: () => void;
+  /** "Mark as ..." options for this message; empty for a marked (frozen) one. */
+  markOptions?: readonly MarkType[];
+  onMark?: (type: MarkType) => void;
+  /** Offers "Select" (multi-select delete). */
+  canSelect?: boolean;
+  onSelect?: () => void;
 }
 
 interface Coords {
@@ -131,6 +138,27 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
               onClose();
             }}
           />
+          {(props.markOptions ?? []).map((type) => (
+            <ActionRow
+              key={type}
+              icon={<IconPin />}
+              label={markMenuLabel(type)}
+              onClick={() => {
+                props.onMark?.(type);
+                onClose();
+              }}
+            />
+          ))}
+          {props.canSelect === true ? (
+            <ActionRow
+              icon={<IconCheck />}
+              label="Select"
+              onClick={() => {
+                props.onSelect?.();
+                onClose();
+              }}
+            />
+          ) : null}
           {canCopy ? (
             <ActionRow
               icon={<IconCopy />}

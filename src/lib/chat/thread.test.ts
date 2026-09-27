@@ -4,8 +4,10 @@ import {
   appendMessage,
   applyReactionOp,
   compareMessages,
+  deleteEventExt,
   hydrateReplies,
   mapLiveTextMessage,
+  markEventExt,
   missingReplyIds,
   markReadUpTo,
   markReadUpToMessage,
@@ -18,6 +20,7 @@ import {
   pendingMessage,
   reactionEventExt,
   readEventExt,
+  removeMessages,
   rowToThreadMessage,
   sendText,
   setMessageState,
@@ -141,6 +144,7 @@ function mine(over: Partial<ThreadMessage>): ThreadMessage {
     mine: true,
     attachments: [],
     sharedPostIds: [],
+    sharedBriefIds: [],
     reply: null,
     state: 'sent',
     status: 'sent',
@@ -661,5 +665,72 @@ describe('sendText', () => {
       to: 'agora-group-1',
       msg: 'plain',
     });
+  });
+});
+
+describe('delete and mark live events', () => {
+  it('parses delete and mark signals, rejecting empty or malformed ids', () => {
+    expect(parseLiveEvent(deleteEventExt({ messageIds: ['a', 'b'] }))).toEqual({
+      kind: 'delete',
+      messageIds: ['a', 'b'],
+    });
+    expect(parseLiveEvent({ sorted_event: 'delete', message_ids: [] })).toEqual({
+      kind: 'unknown',
+    });
+    expect(parseLiveEvent({ sorted_event: 'delete', message_ids: 'a' })).toEqual({
+      kind: 'unknown',
+    });
+    expect(parseLiveEvent(markEventExt({ messageId: 'm' }))).toEqual({
+      kind: 'mark',
+      messageId: 'm',
+    });
+    expect(parseLiveEvent({ sorted_event: 'mark' })).toEqual({ kind: 'unknown' });
+  });
+
+  it('receivers drop deleted ids: onDelete fires with the ids and removeMessages drops them', () => {
+    const handlers: Record<string, AgoraChat.EventHandlerType> = {};
+    const connection = fakeConnection({
+      addEventHandler: vi.fn((id: string, handler: AgoraChat.EventHandlerType) => {
+        handlers[id] = handler;
+      }),
+    });
+    const onDelete = vi.fn();
+    const onRead = vi.fn();
+    subscribeIncoming({
+      connection,
+      channelId: CHANNEL,
+      currentUserId: ME,
+      onMessage: vi.fn(),
+      onIgnored: vi.fn(),
+      onReaction: vi.fn(),
+      onRead,
+      onDelete,
+    });
+    const handler = handlers[THREAD_EVENT_HANDLER_ID];
+    handler?.onCmdMessage?.(cmd({ ext: deleteEventExt({ messageIds: ['x', 'y'] }) }));
+    // A mark signal is not a read signal and is left to the marks subscription.
+    handler?.onCmdMessage?.(cmd({ ext: markEventExt({ messageId: 'x' }) }));
+    expect(onDelete).toHaveBeenCalledWith({ messageIds: ['x', 'y'], fromUserId: PEER });
+    expect(onRead).not.toHaveBeenCalled();
+
+    const list = [mine({ id: 'x' }), mine({ id: 'k', time: 2 }), mine({ id: 'y', time: 3 })];
+    expect(removeMessages(list, ['x', 'y']).map((m) => m.id)).toEqual(['k']);
+    expect(removeMessages(list, ['nope'])).toBe(list);
+  });
+});
+
+describe('shared briefs on a row', () => {
+  it('reads shared_brief_ids off the row, and local briefs win on the own echo', () => {
+    const fromRow = rowToThreadMessage(row({ body: null, shared_brief_ids: ['b1', 'b2'] }), ME);
+    expect(fromRow.sharedBriefIds).toEqual(['b1', 'b2']);
+    expect(fromRow.body).toBe('');
+    expect(rowToThreadMessage(row({}), ME).sharedBriefIds).toEqual([]);
+    const echo = rowToThreadMessage(row({ sender_user_id: ME }), ME, {
+      attachments: [],
+      sharedPostIds: [],
+      sharedBriefIds: ['b9'],
+      reply: null,
+    });
+    expect(echo.sharedBriefIds).toEqual(['b9']);
   });
 });
