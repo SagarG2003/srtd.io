@@ -155,3 +155,44 @@ describe('runUploadPipeline image dimensions', () => {
     expect(version?.height).toBeNull();
   });
 });
+
+describe('runUploadPipeline audio kind', () => {
+  // Minimal leading bytes that pass the magic-byte check for each voice-note format.
+  const cases: ReadonlyArray<{ contentType: string; filename: string; bytes: Uint8Array }> = [
+    {
+      contentType: 'audio/mp4',
+      filename: 'note.m4a',
+      // 4-byte box size, then the "ftyp" box type and an "M4A " brand.
+      bytes: Uint8Array.from([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x4d, 0x34, 0x41, 0x20]),
+    },
+    {
+      contentType: 'audio/webm',
+      filename: 'note.webm',
+      bytes: Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81, 0x01]),
+    },
+    {
+      contentType: 'audio/mpeg',
+      filename: 'note.mp3',
+      bytes: Uint8Array.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    },
+  ];
+
+  for (const c of cases) {
+    it(`stores ${c.contentType} as kind 'audio' with null dimensions`, async () => {
+      const d = deps();
+      const res = await runUploadPipeline(
+        d,
+        input({ filename: c.filename, contentType: c.contentType, bytes: c.bytes }),
+      );
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+
+      const version = d.repository.versions[0];
+      expect(version).toBeDefined();
+      expect(version?.kind).toBe('audio');
+      expect(version?.mime_type).toBe(c.contentType);
+      expect(version?.width).toBeNull();
+      expect(version?.height).toBeNull();
+    });
+  }
+});
