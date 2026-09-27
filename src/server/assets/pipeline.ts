@@ -51,7 +51,7 @@ export interface PipelineDeps {
 /**
  * Map a normalized, already-allowlisted MIME type to its stored-file kind.
  * Allowlist (mime.ts): image/* -> 'image', video/* -> 'video',
- * application/pdf -> 'pdf'. Anything else is impossible past the allowlist and
+ * audio/* -> 'audio', application/pdf -> 'pdf'. Anything else is impossible past the allowlist and
  * is a programming error, so it throws rather than guessing a kind.
  */
 function fileKindForMime(mimeType: string): FileVersionKind {
@@ -60,6 +60,9 @@ function fileKindForMime(mimeType: string): FileVersionKind {
   }
   if (mimeType.startsWith('video/')) {
     return 'video';
+  }
+  if (mimeType.startsWith('audio/')) {
+    return 'audio';
   }
   if (mimeType === 'application/pdf') {
     return 'pdf';
