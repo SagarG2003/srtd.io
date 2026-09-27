@@ -12,11 +12,17 @@ import {
 import { isNearBottom } from '@/lib/chat/scroll';
 import { Avatar } from '@/components/ui/Avatar';
 import { IconButton } from '@/components/ui/IconButton';
-import { IconChat, IconChevronRight, IconRotateCcw, IconSettings } from '@/components/ui/icons';
+import {
+  IconChat,
+  IconChevronRight,
+  IconForward,
+  IconRotateCcw,
+  IconSettings,
+} from '@/components/ui/icons';
 import { useLongPress, type LongPressHandlers } from '@/components/ui';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
-import type { ChatProfile } from '@/lib/chat-reads';
+import type { ChannelSummary, ChatProfile } from '@/lib/chat-reads';
 import { replyPreview, type MessageStatus, type ThreadMessage } from '@/lib/chat/thread';
 import type { MessageAttachment, ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
@@ -30,10 +36,17 @@ import { SharedBriefCards } from '@/components/chat/BriefCard';
 import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
 import { MarkStrip, MarksSheet, PrioritySheet } from '@/components/chat/MarksSheet';
 import { SelectionBar } from '@/components/chat/SelectionBar';
+import { ForwardPicker, type ForwardSendResult } from '@/components/chat/ForwardPicker';
+import {
+  FORWARDED_LABEL,
+  canDeleteSelection,
+  canForward,
+  pruneThreadSelection,
+  selectedForForward,
+  threadSelectable,
+} from '@/lib/chat/forward';
 import {
   markMenuOptions,
-  pruneSelection,
-  selectionRole,
   toggleSelected,
   type ChatMark,
   type FindOlderOutcome,
@@ -99,6 +112,13 @@ interface MessageThreadProps {
   showTicks?: boolean;
   /** Add or remove the current user's reaction on a message. */
   onToggleReaction?: (messageId: string, emoji: string, currentlyMine: boolean) => void;
+  /** Chats the forward picker lists (every chat the caller is in); absent hides Forward. */
+  forwardChannels?: readonly ChannelSummary[];
+  /** Forward messages to chats; absent hides Forward. */
+  onForward?: (
+    messages: readonly ThreadMessage[],
+    targets: ChannelSummary[],
+  ) => Promise<ForwardSendResult>;
 }
 
 /** Scroll positions within this many px of the top request the older page. */
@@ -358,6 +378,7 @@ export function MessageBubble(props: {
               ? { onChangePriority: props.onChangePriority }
               : {})}
           />
+          {message.forwarded === true ? <ForwardedLabel /> : null}
           {reply !== null ? (
             <button
               type="button"
@@ -443,6 +464,19 @@ export function MessageBubble(props: {
         </IconButton>
       ) : null}
     </li>
+  );
+}
+
+/** The small "Forwarded" line above a forwarded message's body (own and incoming). */
+export function ForwardedLabel(): ReactElement {
+  return (
+    <span
+      data-forwarded=""
+      className="mb-1 flex items-center gap-1 text-[12px] leading-none text-fg-2"
+    >
+      <IconForward size={12} />
+      {FORWARDED_LABEL}
+    </span>
   );
 }
 
@@ -538,6 +572,8 @@ function ThreadBody(
     onMark?: (message: ThreadMessage, type: MarkType) => void;
     /** Menu "Select" picked; absent hides it. */
     onStartSelect?: (message: ThreadMessage) => void;
+    /** Menu "Forward" picked; absent hides it. */
+    onForwardMessage?: (message: ThreadMessage) => void;
     onChangePriority?: (messageId: string) => void;
     /** A jump-to request (seq makes a repeat of the same id fire again). */
     jumpRequest: { id: string; seq: number } | null;
@@ -709,7 +745,7 @@ function ThreadBody(
               : {})}
             {...(props.selection !== undefined
               ? {
-                  selection: rowSelection(message, props.marks, props.selection),
+                  selection: rowSelection(message, props.selection),
                 }
               : {})}
             {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
@@ -730,6 +766,12 @@ function ThreadBody(
         }
         onMark={(type) => {
           if (menu) props.onMark?.(menu.message, type);
+        }}
+        canForward={
+          menu !== null && props.onForwardMessage !== undefined && canForward(menu.message)
+        }
+        onForward={() => {
+          if (menu) props.onForwardMessage?.(menu.message);
         }}
         canSelect={props.onStartSelect !== undefined}
         onSelect={() => {
@@ -757,14 +799,13 @@ function ThreadBody(
   );
 }
 
-/** Selection-mode state for one row. */
+/** Selection-mode state for one row: any recorded message can be checked. */
 function rowSelection(
   message: ThreadMessage,
-  marks: Map<string, ChatMark>,
   selection: { selected: ReadonlySet<string>; onToggle: (id: string) => void },
 ): RowSelection {
   return {
-    role: selectionRole(message, marks),
+    role: threadSelectable(message) ? 'selectable' : 'none',
     checked: selection.selected.has(message.id),
     onToggle: () => selection.onToggle(message.id),
   };
@@ -788,6 +829,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   } | null>(null);
   const [priorityBusy, setPriorityBusy] = useState(false);
   const [jumpRequest, setJumpRequest] = useState<{ id: string; seq: number } | null>(null);
+  const [forwardFor, setForwardFor] = useState<ThreadMessage[] | null>(null);
 
   // A conversation switch leaves selection mode and closes the marks surfaces.
   useEffect(() => {
@@ -796,15 +838,16 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setMarksOpen(false);
     setPriorityFor(null);
     setJumpRequest(null);
+    setForwardFor(null);
   }, [props.title]);
 
   // A delete or a new mark landing meanwhile drops ids that are no longer selectable.
   useEffect(() => {
     setSelected((prev) => {
-      const next = pruneSelection(prev, props.messages, marks);
+      const next = pruneThreadSelection(prev, props.messages);
       return next.size === prev.size ? prev : next;
     });
-  }, [props.messages, marks]);
+  }, [props.messages]);
 
   const messagesById = useMemo(
     () => new Map(props.messages.map((m) => [m.id, m])),
@@ -828,6 +871,9 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   };
 
   const onDeleteMessages = props.onDeleteMessages;
+  const onForward = props.onForward;
+  const forwardChannels = props.forwardChannels;
+  const canForwardHere = onForward !== undefined && forwardChannels !== undefined;
   const exitSelection = (): void => {
     setSelecting(false);
     setSelected(new Set());
@@ -894,13 +940,12 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           ? {
               onStartSelect: (message: ThreadMessage) => {
                 setSelecting(true);
-                setSelected(
-                  selectionRole(message, marks) === 'selectable'
-                    ? new Set([message.id])
-                    : new Set(),
-                );
+                setSelected(threadSelectable(message) ? new Set([message.id]) : new Set());
               },
             }
+          : {})}
+        {...(canForwardHere && !selecting
+          ? { onForwardMessage: (message: ThreadMessage) => setForwardFor([message]) }
           : {})}
         {...(selecting
           ? {
@@ -932,6 +977,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       {selecting && onDeleteMessages !== undefined ? (
         <SelectionBar
           count={selected.size}
+          canDelete={canDeleteSelection(selected, props.messages, marks)}
+          {...(canForwardHere
+            ? { onForward: () => setForwardFor(selectedForForward(selected, props.messages)) }
+            : {})}
           onCancel={exitSelection}
           onDelete={async () => {
             const result = await onDeleteMessages([...selected]);
@@ -963,6 +1012,24 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
             setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
           }}
           onResolve={props.onResolveMark}
+        />
+      ) : null}
+      {onForward !== undefined && forwardChannels !== undefined ? (
+        <ForwardPicker
+          open={forwardFor !== null && forwardFor.length > 0}
+          onClose={() => setForwardFor(null)}
+          channels={forwardChannels}
+          onSend={(targets) =>
+            // A source deleted while the picker was open is no longer forwardable.
+            onForward(
+              (forwardFor ?? []).filter((m) => messagesById.has(m.id)),
+              targets,
+            )
+          }
+          onSent={() => {
+            setForwardFor(null);
+            exitSelection();
+          }}
         />
       ) : null}
       <PrioritySheet

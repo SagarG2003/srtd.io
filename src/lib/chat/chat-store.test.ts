@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyClear,
+  applyClears,
+  isChannelHidden,
+  outboxDropChannel,
+  selectHidden,
   applyIncoming,
   applyPreviews,
   applyUnreadCounts,
@@ -250,5 +255,84 @@ describe('pending open', () => {
     const requested = requestOpen(initialState(), 'a');
     expect(requested.pendingOpenConversationId).toBe('a');
     expect(clearPendingOpen(requested).pendingOpenConversationId).toBeNull();
+  });
+});
+
+describe('isChannelHidden', () => {
+  it('is false for a channel with no clear', () => {
+    expect(isChannelHidden({ lastMessageTs: 5 }, undefined)).toBe(false);
+    expect(isChannelHidden(undefined, undefined)).toBe(false);
+  });
+
+  it('hides a cleared channel while no known message is newer than the clear', () => {
+    expect(isChannelHidden({ lastMessageTs: 0 }, 100)).toBe(true);
+    expect(isChannelHidden({ lastMessageTs: 100 }, 100)).toBe(true);
+    expect(isChannelHidden(undefined, 100)).toBe(true);
+  });
+
+  it('unhides once a message newer than the clear is known', () => {
+    expect(isChannelHidden({ lastMessageTs: 101 }, 100)).toBe(false);
+  });
+});
+
+describe('delete chat for me (clears)', () => {
+  it('applyClear empties the card, zeroes unread and hides the channel', () => {
+    const state = applyClear(seeded(), 'b', 1000);
+    expect(selectConversation(state, 'b')).toEqual({
+      lastMessageText: '',
+      lastMessageTs: 0,
+      unread: 0,
+    });
+    expect(selectHidden(state, 'b')).toBe(true);
+    expect(selectHidden(state, 'a')).toBe(false);
+    expect(selectTotalUnread(state)).toBe(1);
+  });
+
+  it('a live incoming or own message newer than the clear unhides it', () => {
+    const cleared = applyClear(seeded(), 'b', 1000);
+    const incoming = applyIncoming(cleared, {
+      channelId: 'b',
+      senderIsSelf: false,
+      text: 'back',
+      ts: 1001,
+    });
+    expect(selectHidden(incoming, 'b')).toBe(false);
+    const own = updateOwnMessage(cleared, { channelId: 'b', text: 'hi', ts: 2000 });
+    expect(selectHidden(own, 'b')).toBe(false);
+  });
+
+  it('an unread refresh keeps a cleared channel hidden at 0 until a newer message lands', () => {
+    const cleared = applyClear(seeded(), 'b', 1000);
+    const stale = applyUnreadCounts(cleared, [
+      { channelId: 'b', unread: 4, lastMessageAt: '1970-01-01T00:00:00.500Z' },
+    ]);
+    expect(selectConversation(stale, 'b')?.unread).toBe(0);
+    expect(selectHidden(stale, 'b')).toBe(true);
+    const fresh = applyUnreadCounts(cleared, [
+      { channelId: 'b', unread: 1, lastMessageAt: '1970-01-01T00:00:02.000Z' },
+    ]);
+    expect(selectConversation(fresh, 'b')?.unread).toBe(1);
+    expect(selectHidden(fresh, 'b')).toBe(false);
+  });
+
+  it('applyClears reads the rows (later clear wins) and skips bad times', () => {
+    const state = applyClears(initialState(), [
+      { channelId: 'a', clearedAt: '1970-01-01T00:00:01.000Z' },
+      { channelId: 'a', clearedAt: '1970-01-01T00:00:00.500Z' },
+      { channelId: 'x', clearedAt: 'not a time' },
+    ]);
+    expect(state.clears).toEqual({ a: 1000 });
+  });
+
+  it('outboxDropChannel drops only that channel', () => {
+    const entry: OutboxEntry = {
+      id: 'm',
+      text: 't',
+      local: { attachments: [], sharedPostIds: [], reply: null },
+      state: 'failed',
+    };
+    const outbox: Outbox = { a: [entry], b: [entry] };
+    expect(outboxDropChannel(outbox, 'a')).toEqual({ b: [entry] });
+    expect(outboxDropChannel(outbox, 'z')).toBe(outbox);
   });
 });

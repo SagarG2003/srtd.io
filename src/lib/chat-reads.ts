@@ -18,6 +18,7 @@ type ChatChannelRow = Database['public']['Tables']['chat_channels']['Row'];
 type GroupRow = Database['public']['Tables']['groups']['Row'];
 type GroupMemberRow = Database['public']['Tables']['group_members']['Row'];
 type UserRow = Database['public']['Tables']['users']['Row'];
+type ChannelClearRow = Database['public']['Tables']['chat_channel_clears']['Row'];
 
 /** A user's display info, the slice the chat UI shows. */
 export interface ChatProfile {
@@ -176,6 +177,33 @@ export async function listGroupMemberIds(
   if (res.error) return fail(`listGroupMemberIds: ${res.error.message}`);
   const rows = (res.data ?? []) as Pick<GroupMemberRow, 'user_id'>[];
   return { ok: true, data: rows.map((r) => r.user_id) };
+}
+
+/** One "delete chat for me" row: when the caller cleared a channel. */
+export interface ChannelClearRecord {
+  channelId: string;
+  clearedAt: string;
+}
+
+/**
+ * The caller's chat_channel_clears rows for a workspace. RLS scopes the read to
+ * the caller's own rows, so no user filter is passed. The list hides a channel
+ * whose newest known message is not newer than its clear.
+ */
+export async function listChannelClears(
+  client: Client,
+  params: { workspaceId: string },
+): Promise<Result<ChannelClearRecord[]>> {
+  const res = await client
+    .from('chat_channel_clears')
+    .select('channel_id, cleared_at')
+    .eq('workspace_id', params.workspaceId);
+  if (res.error) return fail(`listChannelClears: ${res.error.message}`);
+  const rows = (res.data ?? []) as Pick<ChannelClearRow, 'channel_id' | 'cleared_at'>[];
+  return {
+    ok: true,
+    data: rows.map((r) => ({ channelId: r.channel_id, clearedAt: r.cleared_at })),
+  };
 }
 
 async function readGroups(client: Client, ids: string[]): Promise<Result<GroupRow[]>> {

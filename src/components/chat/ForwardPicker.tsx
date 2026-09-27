@@ -1,0 +1,146 @@
+// The forward picker: a sheet listing every chat the caller is in (hidden ones
+// included, most recent first), a name search, multi-select with checkmarks,
+// and a sticky "Send to N chats" footer button disabled at 0. The same visual
+// language as NewChatSheet and MemberPicker (Sheet, Input, 44px avatar rows,
+// accent-soft selected state). The send runs through the caller's forward
+// action; a failure toasts "Could not forward to [chat name]." and keeps the
+// sheet open. Design tokens only, so light and dark stay at parity.
+
+import { useCallback, useEffect, useState } from 'react';
+import type { ReactElement } from 'react';
+import { Avatar } from '@/components/ui/Avatar';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { Sheet } from '@/components/ui/Sheet';
+import { IconCheck } from '@/components/ui/icons';
+import { useToast } from '@/components/ui/toast';
+import { cn } from '@/lib/cn';
+import type { ChannelSummary } from '@/lib/chat-reads';
+import { selectConversation } from '@/lib/chat/chat-store';
+import {
+  forwardFailedMessage,
+  forwardPickerChannels,
+  sendToLabel,
+  toggleForwardTarget,
+} from '@/lib/chat/forward';
+import { useChatStore } from '@/components/chat/ChatStoreProvider';
+
+export type ForwardSendResult = { ok: true } | { ok: false; failed: ChannelSummary | null };
+
+interface ForwardPickerProps {
+  open: boolean;
+  onClose: () => void;
+  channels: readonly ChannelSummary[];
+  /** Forward to the chosen chats; resolves once every send settled or one failed. */
+  onSend: (targets: ChannelSummary[]) => Promise<ForwardSendResult>;
+  /** Called after every chat received every message. */
+  onSent: () => void;
+}
+
+export function ForwardPicker(props: ForwardPickerProps): ReactElement {
+  const { state } = useChatStore();
+  const toast = useToast();
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!props.open) return;
+    setSearch('');
+    setSelected(new Set());
+  }, [props.open]);
+
+  const summaryFor = useCallback(
+    (channelId: string) => selectConversation(state, channelId),
+    [state],
+  );
+  const listed = forwardPickerChannels(props.channels, summaryFor, search);
+
+  async function send(): Promise<void> {
+    if (busy || selected.size === 0) return;
+    const targets = forwardPickerChannels(props.channels, summaryFor, '').filter((c) =>
+      selected.has(c.channelId),
+    );
+    setBusy(true);
+    const result = await props.onSend(targets);
+    setBusy(false);
+    if (result.ok) {
+      props.onSent();
+      return;
+    }
+    if (result.failed !== null) toast.show({ title: forwardFailedMessage(result.failed.title) });
+  }
+
+  return (
+    <Sheet
+      open={props.open}
+      onClose={() => {
+        if (!busy) props.onClose();
+      }}
+      title="Forward to"
+      footer={
+        <Button
+          variant="primary"
+          size="lg"
+          className="w-full"
+          disabled={selected.size === 0 || busy}
+          onClick={() => void send()}
+        >
+          {sendToLabel(selected.size)}
+        </Button>
+      }
+    >
+      <Input
+        type="search"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Search chats"
+        aria-label="Search chats"
+      />
+      {listed.length === 0 ? (
+        <p className="px-1 py-3 text-sm text-fg-3">No matches</p>
+      ) : (
+        <ul className="mt-3 flex flex-col">
+          {listed.map((channel) => {
+            const isSelected = selected.has(channel.channelId);
+            return (
+              <li key={channel.channelId}>
+                <button
+                  type="button"
+                  aria-pressed={isSelected}
+                  onClick={() =>
+                    setSelected((prev) => toggleForwardTarget(prev, channel.channelId))
+                  }
+                  className={cn(
+                    'flex w-full min-h-[44px] items-center gap-3 rounded-md px-2 py-1 text-left transition-colors',
+                    isSelected ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-panel-2',
+                  )}
+                >
+                  <Avatar
+                    name={channel.title}
+                    {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
+                    size="md"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                    {channel.title}
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
+                      isSelected
+                        ? 'border-accent bg-accent text-accent-fg'
+                        : 'border-border-strong bg-panel',
+                    )}
+                  >
+                    {isSelected ? <IconCheck size={14} /> : null}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Sheet>
+  );
+}

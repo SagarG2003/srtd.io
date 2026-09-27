@@ -1,5 +1,6 @@
-// Bottom bar for selection mode (delete own messages): the selected count, a
-// 44x44 Delete that opens the confirm sheet, and Cancel. The confirm sheet runs
+// Bottom bar for selection mode: the selected count, a 44px Forward (any
+// recorded message), a 44x44 Delete that opens the confirm sheet (own, unmarked
+// messages only; disabled otherwise), and Cancel. The confirm sheet runs
 // the delete; on failure the proc's message shows as a toast and the selection
 // is kept (the caller only clears it on success). Design tokens only.
 
@@ -8,12 +9,16 @@ import type { ReactElement } from 'react';
 import { Button } from '@/components/ui/Button';
 import { IconButton } from '@/components/ui/IconButton';
 import { Sheet } from '@/components/ui/Sheet';
-import { IconTrash } from '@/components/ui/icons';
+import { IconForward, IconTrash } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { deleteConfirmTitle } from '@/lib/chat/marks';
 
 export function SelectionBar(props: {
   count: number;
+  /** False when a selected message is not the caller's own unmarked one. */
+  canDelete?: boolean;
+  /** Opens the forward picker for the selection; absent hides Forward. */
+  onForward?: () => void;
   onCancel: () => void;
   /** Runs the delete; resolves ok, or the proc's message. */
   onDelete: () => Promise<{ ok: true } | { ok: false; message: string }>;
@@ -34,10 +39,16 @@ export function SelectionBar(props: {
   return (
     <div className="flex items-center gap-2 border-t border-border bg-panel px-4 py-3">
       <span className="flex-1 text-sm text-fg-2">{`${props.count} selected`}</span>
+      {props.onForward !== undefined ? (
+        <Button variant="ghost" size="lg" disabled={props.count === 0} onClick={props.onForward}>
+          <IconForward size={18} />
+          Forward
+        </Button>
+      ) : null}
       <IconButton
         label="Delete selected messages"
         className="text-bad hover:bg-bad-soft hover:text-bad disabled:opacity-50"
-        disabled={props.count === 0}
+        disabled={props.count === 0 || props.canDelete === false}
         onClick={() => setConfirming(true)}
       >
         <IconTrash size={20} />

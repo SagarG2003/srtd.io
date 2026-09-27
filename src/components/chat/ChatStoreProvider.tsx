@@ -31,7 +31,7 @@ import { useSession } from '@/lib/session-context';
 import { useWorkspace } from '@/lib/workspace-context';
 import { useToast } from '@/components/ui/toast';
 import { Avatar } from '@/components/ui/Avatar';
-import { listChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
+import { listChannelClears, listChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
 import { useChat } from '@/lib/chat/chat-context';
 import { mapLiveTextMessage } from '@/lib/chat/thread';
 import { liveVerifierFor } from '@/lib/chat/live-verify';
@@ -62,6 +62,11 @@ export interface ChatStoreContextValue {
   clearPendingOpen: () => void;
   /** Unrecorded own sends per channel; survives channel switches. */
   outbox: ChannelOutbox;
+  /**
+   * The chat was deleted for the caller (chat_channel_clear accepted): record the
+   * clear time, empty its card and drop its unrecorded sends.
+   */
+  clearConversation: (channelId: string, clearedAtMs: number) => void;
 }
 
 const ChatStoreContext = createContext<ChatStoreContextValue | null>(null);
@@ -123,6 +128,11 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     setState((prev) => store.updateOwnMessage(prev, { channelId, text, ts }));
   }, []);
 
+  const clearConversation = useCallback((channelId: string, clearedAtMs: number) => {
+    outboxRef.current = store.outboxDropChannel(outboxRef.current, channelId);
+    setState((prev) => store.applyClear(prev, channelId, clearedAtMs));
+  }, []);
+
   const requestOpen = useCallback((channelId: string) => {
     setState((prev) => store.requestOpen(prev, channelId));
   }, []);
@@ -173,9 +183,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       const roster = rosterRes.data;
       summariesRef.current = indexSummaries(roster);
       setState(store.mergeInitial(roster));
-      const [counts, previews] = await Promise.all([
+      const [counts, previews, clears] = await Promise.all([
         loadUnreadCounts(supabase, workspaceId),
         loadConversationPreviews(supabase, workspaceId),
+        listChannelClears(supabase, { workspaceId }),
       ]);
       if (cancelled) return;
       if (!counts.ok) {
@@ -184,10 +195,15 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       if (!previews.ok) {
         logger.warn('chat store: previews load failed', { error: previews.error.message });
       }
+      if (!clears.ok) {
+        logger.warn('chat store: clears load failed', { error: clears.error.message });
+      }
       setState((prev) => {
+        // Clears first, so the unread overlay already knows what was deleted.
+        const withClears = clears.ok ? store.applyClears(prev, clears.data) : prev;
         const withPreviews = previews.ok
-          ? store.applyPreviews(prev, previews.data, currentUserId)
-          : prev;
+          ? store.applyPreviews(withClears, previews.data, currentUserId)
+          : withClears;
         return counts.ok ? store.applyUnreadCounts(withPreviews, counts.data) : withPreviews;
       });
     })();
@@ -288,9 +304,11 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       requestOpen,
       clearPendingOpen,
       outbox,
+      clearConversation,
     }),
     [
       outbox,
+      clearConversation,
       state,
       setActive,
       markConversationRead,

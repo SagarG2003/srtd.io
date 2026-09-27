@@ -41,7 +41,14 @@ import {
   setReadCursorRecord,
 } from '@/lib/chat/record';
 import { createDebouncer, READ_CURSOR_DEBOUNCE_MS } from '@/lib/chat/read-cursor';
-import { runSend } from '@/lib/chat/send-flow';
+import { LIVE_PUBLISH_TIMEOUT_MS, publishWithTimeout, runSend } from '@/lib/chat/send-flow';
+import {
+  forwardPreviewText,
+  forwardRecordInput,
+  forwardableInOrder,
+  runForward,
+} from '@/lib/chat/forward';
+import type { ChannelSummary } from '@/lib/chat-reads';
 import { runDelete } from '@/lib/chat/delete-flow';
 import { findInOlderPages, type FindOlderOutcome } from '@/lib/chat/marks';
 import {
@@ -65,6 +72,7 @@ import {
   sendText,
   setMessageState,
   subscribeIncoming,
+  targetFromSummary,
   upsertMessage,
   withOutboxBubbles,
   type ChannelTarget,
@@ -106,12 +114,35 @@ export interface UseChatThread {
    * brought it in (at most 10 pages), otherwise why it is not.
    */
   ensureLoaded: (messageId: string) => Promise<FindOlderOutcome>;
+  /**
+   * Forward messages to chats: for each chat, each message in thread order, a
+   * fresh record (same body, attachments, shared posts and briefs; no reply)
+   * then a live publish. Sequential; the first failure stops the run and names
+   * its chat. A second call while one runs is ignored (resolves ok: false with
+   * no chat).
+   */
+  forward: (
+    messages: readonly ThreadMessage[],
+    targets: readonly ChannelSummary[],
+  ) => Promise<{ ok: true } | { ok: false; failed: ChannelSummary | null }>;
   /** Re-run a failed send with the SAME message id. */
   retry: (messageId: string) => void;
   /** Add or remove the current user's reaction: optimistic, recorded, signalled live. */
   toggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void;
   /** The newest message is on screen: advance the read cursor (debounced). */
   markNewestVisible: () => void;
+}
+
+/** In-flight guard key for a forward run (message ids are uuids, never this). */
+const FORWARD_GUARD_KEY = 'forward';
+
+/** A forward target's Agora target; a bad row yields none (the record still holds it). */
+function liveTargetFor(channel: ChannelSummary): ChannelTarget | null {
+  try {
+    return targetFromSummary(channel);
+  } catch {
+    return null;
+  }
 }
 
 /** The Foundation client is the real connection; widen it to the messaging surface. */
@@ -550,6 +581,87 @@ export function useChatThread(params: {
     [currentUserId, deliver, inFlight],
   );
 
+  const forward = useCallback<UseChatThread['forward']>(
+    async (messages, targets) => {
+      const sources = forwardableInOrder(messages);
+      if (sources.length === 0 || targets.length === 0) return { ok: true };
+      // One forward at a time: a double tap on "Send" never sends twice.
+      if (!inFlight.tryStart(FORWARD_GUARD_KEY)) return { ok: false, failed: null };
+      try {
+        const result = await runForward({
+          targets,
+          messages: sources,
+          sendOne: async (channel, source) => {
+            const id = newMessageId();
+            const traceId = generateTraceId();
+            const input = forwardRecordInput(source, { id, channelId: channel.channelId, traceId });
+            let recorded: ThreadMessage | null = null;
+            let failure = '';
+            await recordThenSignal({
+              record: async () => {
+                const outcome = await sendMessageRecord({ client: db, ...input });
+                if (!outcome.ok) return { ok: false, message: outcome.message };
+                recorded = rowToThreadMessage(outcome.row, currentUserId);
+                if (channelRef.current === channel.channelId) {
+                  const shown = recorded;
+                  setMessages((prev) => upsertMessage(prev, shown));
+                }
+                onOwnMessageRef.current?.(
+                  channel.channelId,
+                  forwardPreviewText(source),
+                  recorded.time,
+                );
+                return { ok: true };
+              },
+              // The row exists; a slow or failed live publish never fails the forward.
+              signal: async () => {
+                const connection = clientRef.current;
+                const liveTarget = liveTargetFor(channel);
+                if (connection === null || liveTarget === null) return;
+                const published = await publishWithTimeout(
+                  sendText({
+                    connection: asThreadConnection(connection),
+                    target: liveTarget,
+                    text: input.body,
+                    attachments: source.attachments,
+                    sharedPostIds: source.sharedPostIds,
+                    reply: null,
+                    createMessage: createTextMessage,
+                    liveIds: { sorted_message_id: id, sorted_channel_id: channel.channelId },
+                    forwardedFrom: source.id,
+                  }),
+                  LIVE_PUBLISH_TIMEOUT_MS,
+                );
+                if (!published.ok) throw new Error(published.error);
+              },
+              onRecordFailed: (message) => {
+                failure = message;
+                logger.error('chat: forward record failed', {
+                  trace_id: traceId,
+                  message_id: id,
+                  channel_id: channel.channelId,
+                  forwarded_from: source.id,
+                  error: message,
+                });
+              },
+              onSignalFailed: (error) =>
+                logger.warn('chat: live publish did not complete', {
+                  trace_id: traceId,
+                  message_id: id,
+                  error: String(error),
+                }),
+            });
+            return recorded !== null ? { ok: true } : { ok: false, message: failure };
+          },
+        });
+        return result.ok ? { ok: true } : { ok: false, failed: result.failed };
+      } finally {
+        inFlight.finish(FORWARD_GUARD_KEY);
+      }
+    },
+    [db, currentUserId, inFlight],
+  );
+
   const retry = useCallback(
     (messageId: string): void => {
       const forChannel = channelRef.current;
@@ -708,6 +820,7 @@ export function useChatThread(params: {
     hasMore,
     loadOlder,
     send,
+    forward,
     deleteMessages,
     ensureLoaded,
     retry,

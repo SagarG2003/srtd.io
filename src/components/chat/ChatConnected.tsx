@@ -12,6 +12,9 @@ import {
   type ChatProfile,
 } from '@/lib/chat-reads';
 import { targetFromSummary, type ChannelTarget } from '@/lib/chat/thread';
+import { generateTraceId } from '@/lib/trace';
+import { clearChannelRecord } from '@/lib/chat/record';
+import { runClearChannels, type ClearRunResult } from '@/lib/chat/clear-flow';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { useChatThread } from '@/lib/chat/use-chat-thread';
 import { useChatMarks } from '@/lib/chat/use-chat-marks';
@@ -145,7 +148,36 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     refreshPreviews,
     clearPendingOpen,
     outbox,
+    clearConversation,
   } = useChatStore();
+
+  // Delete chats for me: one trace for the action, one proc call per chat in
+  // order, stopping at the first failure. Each accepted clear empties the card
+  // and drops its unrecorded sends at once; an open thread goes back to the list.
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const onDeleteChats = useCallback(
+    async (list: ChannelSummary[]): Promise<ClearRunResult<ChannelSummary>> => {
+      const traceId = generateTraceId();
+      const result = await runClearChannels({
+        channels: list,
+        clear: (channelId) => clearChannelRecord({ client: supabase, channelId, traceId }),
+        onCleared: (channel) => {
+          clearConversation(channel.channelId, Date.now());
+          if (selectedRef.current?.channelId === channel.channelId) setSelected(null);
+        },
+      });
+      if (!result.ok) {
+        logger.warn('chat: delete chat failed', {
+          trace_id: traceId,
+          channel_id: result.failed.channelId,
+          error: result.message,
+        });
+      }
+      return result;
+    },
+    [clearConversation],
+  );
 
   // Keep the live store's active conversation in step with the open channel:
   // opening one zeroes its badge locally (the thread records the read cursor);
@@ -248,6 +280,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
             onSelect={setSelected}
             onNewChat={() => setNewChatOpen(true)}
             timeZone={timeZone}
+            onDeleteChats={onDeleteChats}
           />
         </div>
       ) : null}
@@ -276,6 +309,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               onSetMark={marks.setMark}
               onResolveMark={marks.resolve}
               onDeleteMessages={thread.deleteMessages}
+              forwardChannels={channels}
+              onForward={thread.forward}
               onEnsureLoaded={thread.ensureLoaded}
               showTicks={selected.channelType === 'dm'}
               {...(selected.peerUserId != null ? { presence } : {})}

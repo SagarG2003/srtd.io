@@ -8,7 +8,13 @@ vi.mock('agora-chat', () => ({
   default: { connection: vi.fn(), message: { create: vi.fn() } },
 }));
 
-import { channelListContent, channelListView } from '@/components/chat/ChannelList';
+import {
+  ChannelCard,
+  channelListContent,
+  channelListView,
+  visibleChannels,
+  type ChannelSelectMode,
+} from '@/components/chat/ChannelList';
 import { SectionHeader } from '@/components/shell/SectionHeader';
 import { EmptyState } from '@/components/ui/EmptyState';
 import type { ChannelSummary } from '@/lib/chat-reads';
@@ -173,5 +179,136 @@ describe('channelListContent', () => {
     expect(findAll(tree, (el) => el.type === SectionHeader)).toHaveLength(1);
     expect(findAll(tree, (el) => el.type === 'h2')).toHaveLength(0);
     expect(texts(tree)).not.toContain('Chat');
+  });
+});
+
+describe('hidden chats (deleted for me)', () => {
+  const channels = [
+    summary({ channelId: 'a', title: 'Design team' }),
+    summary({ channelId: 'h', title: 'Hidden peer', channelType: 'dm' }),
+  ];
+  const isHidden = (id: string): boolean => id === 'h';
+  const none = (): undefined => undefined;
+
+  it('leaves a hidden chat out of the plain list', () => {
+    expect(visibleChannels(channels, none, isHidden, '').map((c) => c.channelId)).toEqual(['a']);
+  });
+
+  it('search still finds a hidden chat', () => {
+    expect(visibleChannels(channels, none, isHidden, 'hidden').map((c) => c.channelId)).toEqual([
+      'h',
+    ]);
+  });
+
+  it('renders only the visible rows and the zero-state when every chat is hidden', () => {
+    const tree = channelListContent({
+      channels,
+      selectedChannelId: null,
+      onSelect: () => {},
+      onNewChat: () => {},
+      search: '',
+      onSearchChange: () => {},
+      isHidden,
+    });
+    const lists = findAll(tree, (el) => el.type === 'ul');
+    expect((lists[0]!.props as { children: ReactElement[] }).children).toHaveLength(1);
+
+    const allHidden = channelListContent({
+      channels,
+      selectedChannelId: null,
+      onSelect: () => {},
+      onNewChat: () => {},
+      search: '',
+      onSearchChange: () => {},
+      isHidden: () => true,
+    });
+    expect(findAll(allHidden, (el) => el.type === EmptyState)).toHaveLength(1);
+  });
+});
+
+describe('select mode', () => {
+  const channels = [
+    summary({ channelId: 'a', title: 'Design team' }),
+    summary({ channelId: 'b', title: 'Client Acme' }),
+  ];
+
+  function select(over: Partial<ChannelSelectMode>): ChannelSelectMode {
+    return {
+      active: false,
+      selectedIds: new Set(),
+      onStart: vi.fn(),
+      onCancel: vi.fn(),
+      onToggle: vi.fn(),
+      onDelete: vi.fn(),
+      ...over,
+    };
+  }
+
+  function tree(mode: ChannelSelectMode): ReactElement {
+    return channelListContent({
+      channels,
+      selectedChannelId: null,
+      onSelect: () => {},
+      onNewChat: () => {},
+      search: '',
+      onSearchChange: () => {},
+      select: mode,
+    });
+  }
+
+  it('offers Select next to search and new chat, which starts select mode', () => {
+    const mode = select({});
+    const buttons = findAll(tree(mode), (el) => texts(el).includes('Select'));
+    const selectButton = buttons.find(
+      (el) => (el.props as { children?: unknown }).children === 'Select',
+    );
+    expect(selectButton).toBeDefined();
+    (selectButton!.props as { onClick: () => void }).onClick();
+    expect(mode.onStart).toHaveBeenCalledTimes(1);
+    expect(findAll(tree(mode), (el) => ariaLabel(el) === 'New chat')).toHaveLength(1);
+  });
+
+  it('in select mode shows N selected + Cancel, checks rows, and taps toggle', () => {
+    const mode = select({ active: true, selectedIds: new Set(['b']) });
+    const t = tree(mode);
+    expect(texts(t)).toContain('1 selected');
+    expect(texts(t)).toContain('Cancel');
+    expect(findAll(t, (el) => el.type === SectionHeader)).toHaveLength(0);
+    const cards = findAll(t, (el) => el.type === ChannelCard);
+    expect(cards.map((c) => (c.props as { checked?: boolean }).checked)).toEqual([false, true]);
+    (cards[0]!.props as { onToggle: (id: string) => void }).onToggle('a');
+    expect(mode.onToggle).toHaveBeenCalledWith('a');
+  });
+
+  it('the bottom Delete is disabled at 0 and opens the confirm otherwise', () => {
+    const deleteOf = (t: ReactElement): ReactElement =>
+      findAll(t, (el) => {
+        const c = (el.props as { children?: unknown }).children;
+        return Array.isArray(c) && c.includes('Delete');
+      })[0]!;
+    const empty = select({ active: true });
+    expect((deleteOf(tree(empty)).props as { disabled: boolean }).disabled).toBe(true);
+    const some = select({ active: true, selectedIds: new Set(['a']) });
+    const button = deleteOf(tree(some));
+    expect((button.props as { disabled: boolean }).disabled).toBe(false);
+    (button.props as { onClick: () => void }).onClick();
+    expect(some.onDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it('no long-press menu on rows while selecting', () => {
+    const t = channelListContent({
+      channels,
+      selectedChannelId: null,
+      onSelect: () => {},
+      onNewChat: () => {},
+      search: '',
+      onSearchChange: () => {},
+      select: select({ active: true }),
+      onLongPress: () => {},
+    });
+    const cards = findAll(t, (el) => el.type === ChannelCard);
+    expect(
+      cards.every((c) => (c.props as { onLongPress?: unknown }).onLongPress === undefined),
+    ).toBe(true);
   });
 });

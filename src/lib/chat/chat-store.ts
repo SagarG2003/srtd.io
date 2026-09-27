@@ -37,6 +37,18 @@ export interface ChatStoreState {
   activeConversationId: string | null;
   /** A channel a toast asked to open, consumed once the chat page reads it. */
   pendingOpenConversationId: string | null;
+  /**
+   * The caller's "delete chat for me" time per channel (epoch ms), from
+   * chat_channel_clears. A channel stays hidden from the list until a message
+   * newer than this arrives; the record hides older rows itself (RLS).
+   */
+  clears: Record<string, number>;
+}
+
+/** One chat_channel_clears row as the store reads it. */
+export interface ChannelClear {
+  channelId: string;
+  clearedAt: string;
 }
 
 /** A channel present in the workspace roster; only its id matters to the store. */
@@ -62,7 +74,12 @@ export interface OwnMessage {
 
 /** Empty store: no conversations, nothing active, nothing pending. */
 export function initialState(): ChatStoreState {
-  return { conversations: {}, activeConversationId: null, pendingOpenConversationId: null };
+  return {
+    conversations: {},
+    activeConversationId: null,
+    pendingOpenConversationId: null,
+    clears: {},
+  };
 }
 
 function summary(text: string, ts: number, unread: number, prefix?: string): ConversationSummary {
@@ -102,7 +119,12 @@ export function mergeInitial(roster: readonly RosterEntry[]): ChatStoreState {
   for (const entry of roster) {
     conversations[entry.channelId] = emptySummary();
   }
-  return { conversations, activeConversationId: null, pendingOpenConversationId: null };
+  return {
+    conversations,
+    activeConversationId: null,
+    pendingOpenConversationId: null,
+    clears: {},
+  };
 }
 
 /**
@@ -123,9 +145,13 @@ export function applyUnreadCounts(
   for (const row of rows) {
     const existing = conversations[row.channelId] ?? emptySummary();
     const ts = Date.parse(row.lastMessageAt);
+    // Nothing at or before the caller's clear counts: a cleared chat with no
+    // newer message stays at unread 0 (and so stays hidden).
+    const clearedAt = state.clears[row.channelId];
+    const clearedOnly = clearedAt !== undefined && !Number.isNaN(ts) && ts <= clearedAt;
     conversations[row.channelId] = {
       ...existing,
-      unread: state.activeConversationId === row.channelId ? 0 : row.unread,
+      unread: state.activeConversationId === row.channelId || clearedOnly ? 0 : row.unread,
       lastMessageTs: Number.isNaN(ts)
         ? existing.lastMessageTs
         : Math.max(existing.lastMessageTs, ts),
@@ -225,6 +251,54 @@ export function clearPendingOpen(state: ChatStoreState): ChatStoreState {
   return { ...state, pendingOpenConversationId: null };
 }
 
+/**
+ * Whether a channel is hidden from the chat list: the caller deleted it for
+ * themselves and no known message is newer than that (lastMessageTs <=
+ * clearedAt). Any newer live message, catch-up row or own send unhides it.
+ */
+export function isChannelHidden(
+  summary: Pick<ConversationSummary, 'lastMessageTs'> | undefined,
+  clearedAtMs: number | undefined,
+): boolean {
+  if (clearedAtMs === undefined) return false;
+  return (summary?.lastMessageTs ?? 0) <= clearedAtMs;
+}
+
+/** Store-level form of {@link isChannelHidden}. */
+export function selectHidden(state: ChatStoreState, channelId: string): boolean {
+  return isChannelHidden(state.conversations[channelId], state.clears[channelId]);
+}
+
+/**
+ * Overlay the caller's chat_channel_clears rows (a later clear wins). An
+ * unparseable time is skipped rather than hiding a channel forever.
+ */
+export function applyClears(state: ChatStoreState, rows: readonly ChannelClear[]): ChatStoreState {
+  if (rows.length === 0) return state;
+  const clears = { ...state.clears };
+  for (const row of rows) {
+    const ts = Date.parse(row.clearedAt);
+    if (Number.isNaN(ts)) continue;
+    clears[row.channelId] = Math.max(clears[row.channelId] ?? 0, ts);
+  }
+  return { ...state, clears };
+}
+
+/**
+ * The caller deleted a chat for themselves: remember when, and empty its card
+ * (no preview, no time, unread 0) so it hides until a newer message arrives.
+ */
+export function applyClear(
+  state: ChatStoreState,
+  channelId: string,
+  clearedAtMs: number,
+): ChatStoreState {
+  return {
+    ...setConversation(state, channelId, emptySummary()),
+    clears: { ...state.clears, [channelId]: clearedAtMs },
+  };
+}
+
 /** Sum of unread across every channel; 0 for an empty store. */
 export function selectTotalUnread(state: ChatStoreState): number {
   let total = 0;
@@ -286,6 +360,14 @@ export function outboxRemove(outbox: Outbox, channelId: string, id: string): Out
   const copy = { ...outbox };
   if (next.length === 0) delete copy[channelId];
   else copy[channelId] = next;
+  return copy;
+}
+
+/** Drop every unrecorded send of one channel (the chat was deleted for the caller). */
+export function outboxDropChannel(outbox: Outbox, channelId: string): Outbox {
+  if (outbox[channelId] === undefined) return outbox;
+  const copy = { ...outbox };
+  delete copy[channelId];
   return copy;
 }
 
