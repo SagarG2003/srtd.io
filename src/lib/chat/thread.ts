@@ -4,7 +4,7 @@
 // from a chat_messages row and from a live Agora event, the live `ext` contract
 // that carries the Sorted ids on every Agora message, keyset cursors for
 // pagination and catch-up, and the pure list transitions (merge, upsert, state,
-// reactions, read ticks). The SDK connection and message factory are injected,
+// reactions, read ticks, deletes). The SDK connection and message factory are injected,
 // so every branch is unit-tested under the node test job with no SDK and no DOM.
 //
 // Agora type names are taken verbatim from the installed agora-chat 1.3.1
@@ -84,6 +84,8 @@ export interface ThreadMessage {
   attachments: MessageAttachment[];
   /** Shared post uuids (row `shared_post_ids` or live `ext`); empty when there are none. */
   sharedPostIds: string[];
+  /** Shared brief uuids (row `shared_brief_ids`); empty when there are none. */
+  sharedBriefIds: string[];
   /** The quoted message when this is a reply; null otherwise. */
   reply: ReplyQuote | null;
   state: MessageState;
@@ -162,6 +164,8 @@ export function parseLiveIds(ext: unknown): { ok: true; ids: LiveMessageIds } | 
 export type LiveEvent =
   | { kind: 'reaction'; messageId: string; emoji: string; op: 'add' | 'remove' }
   | { kind: 'read'; channelId: string; messageId: string }
+  | { kind: 'mark'; messageId: string }
+  | { kind: 'delete'; messageIds: string[] }
   | { kind: 'unknown' };
 
 /** Read a live signal off a command message's `ext`; 'unknown' for anything else. */
@@ -169,8 +173,15 @@ export function parseLiveEvent(ext: unknown): LiveEvent {
   if (typeof ext !== 'object' || ext === null) return { kind: 'unknown' };
   const record = ext as Record<string, unknown>;
   const event = record[LIVE_EVENT_KEY];
+  if (event === 'delete') {
+    const ids = record.message_ids;
+    if (!Array.isArray(ids)) return { kind: 'unknown' };
+    const messageIds = ids.filter((id): id is string => typeof id === 'string' && id !== '');
+    return messageIds.length > 0 ? { kind: 'delete', messageIds } : { kind: 'unknown' };
+  }
   const messageId = record.message_id;
   if (typeof messageId !== 'string' || messageId === '') return { kind: 'unknown' };
+  if (event === 'mark') return { kind: 'mark', messageId };
   if (event === 'reaction') {
     const emoji = record.emoji;
     const op = record.op;
@@ -208,10 +219,22 @@ export function readEventExt(input: {
   return { [LIVE_EVENT_KEY]: 'read', channel_id: input.channelId, message_id: input.messageId };
 }
 
+/** Build the `ext` for a live mark signal (receivers re-read that one mark row). */
+export function markEventExt(input: { messageId: string }): Record<string, unknown> {
+  return { [LIVE_EVENT_KEY]: 'mark', message_id: input.messageId };
+}
+
+/** Build the `ext` for a live delete signal (receivers drop these ids). */
+export function deleteEventExt(input: { messageIds: readonly string[] }): Record<string, unknown> {
+  return { [LIVE_EVENT_KEY]: 'delete', message_ids: [...input.messageIds] };
+}
+
 /** Sender-side content the row does not carry, kept from the local send. */
 export interface LocalMessageContent {
   attachments: readonly MessageAttachment[];
   sharedPostIds: readonly string[];
+  /** Shared brief uuids; absent is the same as none. */
+  sharedBriefIds?: readonly string[];
   reply: ReplyQuote | null;
 }
 
@@ -237,6 +260,9 @@ export function rowToThreadMessage(
     local !== undefined && local.sharedPostIds.length > 0
       ? [...local.sharedPostIds]
       : [...(row.shared_post_ids ?? [])];
+  const localBriefs = local?.sharedBriefIds ?? [];
+  const sharedBriefIds =
+    localBriefs.length > 0 ? [...localBriefs] : [...(row.shared_brief_ids ?? [])];
   const reply =
     local?.reply ??
     (row.reply_to_message_id !== null && row.reply_to_message_id !== ''
@@ -252,6 +278,7 @@ export function rowToThreadMessage(
     mine: senderUserId !== null && senderUserId === currentUserId,
     attachments,
     sharedPostIds,
+    sharedBriefIds,
     reply,
     state: 'sent',
     status: 'sent',
@@ -264,7 +291,8 @@ export const REPLY_PREVIEW_LIMIT = 120;
 
 /** The quote line for a message: its body (clipped), else a label for its content. */
 export function replyPreview(
-  message: Pick<ThreadMessage, 'body' | 'attachments' | 'sharedPostIds'>,
+  message: Pick<ThreadMessage, 'body' | 'attachments' | 'sharedPostIds'> &
+    Partial<Pick<ThreadMessage, 'sharedBriefIds'>>,
 ): string {
   const body = message.body.trim();
   if (body !== '') {
@@ -272,6 +300,7 @@ export function replyPreview(
   }
   if (message.attachments.length > 0) return 'Attachment';
   if (message.sharedPostIds.length > 0) return 'Shared post';
+  if ((message.sharedBriefIds ?? []).length > 0) return 'Shared brief';
   return 'Message';
 }
 
@@ -346,6 +375,7 @@ export function mapLiveTextMessage(
       mine: senderUserId !== null && senderUserId === currentUserId,
       attachments: parseAttachments(raw.ext),
       sharedPostIds: parseSharedPostIds(raw.ext),
+      sharedBriefIds: [],
       reply: parseReply(raw.ext),
       state: 'sent',
       status: 'sent',
@@ -382,6 +412,8 @@ export function mergeFetched(messages: ThreadMessage[], fetched: ThreadMessage[]
       attachments: existing.attachments.length > 0 ? existing.attachments : incoming.attachments,
       sharedPostIds:
         existing.sharedPostIds.length > 0 ? existing.sharedPostIds : incoming.sharedPostIds,
+      sharedBriefIds:
+        existing.sharedBriefIds.length > 0 ? existing.sharedBriefIds : incoming.sharedBriefIds,
       reply: existing.reply ?? incoming.reply,
       reactions: existing.reactions,
       status: existing.status,
@@ -403,6 +435,13 @@ export function upsertMessage(messages: ThreadMessage[], message: ThreadMessage)
   const next = [...messages];
   next[index] = message;
   return next.sort(compareMessages);
+}
+
+/** Drop messages by id (deleted for everyone); the same list when none match. */
+export function removeMessages(messages: ThreadMessage[], ids: readonly string[]): ThreadMessage[] {
+  const drop = new Set(ids);
+  if (!messages.some((m) => drop.has(m.id))) return messages;
+  return messages.filter((m) => !drop.has(m.id));
 }
 
 /** Set one message's delivery state; other messages unchanged. */
@@ -438,6 +477,7 @@ export function pendingMessage(params: {
     mine: true,
     attachments: [...params.local.attachments],
     sharedPostIds: [...params.local.sharedPostIds],
+    sharedBriefIds: [...(params.local.sharedBriefIds ?? [])],
     reply: params.local.reply,
     state: 'sending',
     status: 'sent',
@@ -599,8 +639,11 @@ export function subscribeIncoming(params: {
   }) => void;
   /** A peer reported reading this channel up to a message id. */
   onRead: (input: { messageId: string; fromUserId: string }) => void;
+  /** A sender deleted their messages for everyone; ids are globally unique. */
+  onDelete?: (input: { messageIds: string[]; fromUserId: string }) => void;
 }): () => void {
   const { connection, channelId, currentUserId, onMessage, onIgnored, onReaction, onRead } = params;
+  const { onDelete } = params;
   const senderOf = (from: string | undefined): string | undefined => {
     if (from === undefined) return undefined;
     const mapped = userIdFromAgoraUsername(from);
@@ -624,6 +667,12 @@ export function subscribeIncoming(params: {
         onReaction({ messageId: event.messageId, emoji: event.emoji, op: event.op, fromUserId });
         return;
       }
+      if (event.kind === 'delete') {
+        onDelete?.({ messageIds: event.messageIds, fromUserId });
+        return;
+      }
+      // Mark signals are consumed by the marks subscription (subscribeMarkEvents).
+      if (event.kind === 'mark') return;
       if (event.channelId === channelId) onRead({ messageId: event.messageId, fromUserId });
     },
   });

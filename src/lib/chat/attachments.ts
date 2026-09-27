@@ -274,11 +274,17 @@ export function canSendAttachmentMessage(input: {
   text: string;
   attachmentCount: number;
   sharedPostCount?: number;
+  sharedBriefCount?: number;
   uploading: boolean;
   sending: boolean;
 }): boolean {
   if (input.uploading || input.sending) return false;
-  return input.text.trim() !== '' || input.attachmentCount > 0 || (input.sharedPostCount ?? 0) > 0;
+  return (
+    input.text.trim() !== '' ||
+    input.attachmentCount > 0 ||
+    (input.sharedPostCount ?? 0) > 0 ||
+    (input.sharedBriefCount ?? 0) > 0
+  );
 }
 
 /**

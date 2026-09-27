@@ -54,6 +54,8 @@ export interface ChatStoreContextValue {
   updateOwnMessage: (channelId: string, text: string, ts: number) => void;
   /** Re-read chat_unread_counts now (after a catch-up). */
   refreshUnreadCounts: () => void;
+  /** Re-read the last-line previews (after messages were deleted for everyone). */
+  refreshPreviews: () => void;
   /** Ask the chat page to open a channel (consumed via pendingOpenConversationId). */
   requestOpen: (channelId: string) => void;
   /** Clear the pending-open request once the chat page has acted on it. */
@@ -138,6 +140,18 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         return;
       }
       setState((prev) => store.applyUnreadCounts(prev, result.data));
+    });
+  }, [workspaceId, currentUserId]);
+
+  const refreshPreviews = useCallback(() => {
+    if (workspaceId === null || currentUserId === null) return;
+    const forUser = currentUserId;
+    void loadConversationPreviews(supabase, workspaceId).then((result) => {
+      if (!result.ok) {
+        logger.warn('chat store: previews load failed', { error: result.error.message });
+        return;
+      }
+      setState((prev) => store.applyPreviews(prev, result.data, forUser));
     });
   }, [workspaceId, currentUserId]);
 
@@ -226,7 +240,9 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         const text = store.previewText({
           body: row.body ?? '',
           hasAttachments:
-            (row.attachment_asset_ids ?? []).length > 0 || (row.shared_post_ids ?? []).length > 0,
+            (row.attachment_asset_ids ?? []).length > 0 ||
+            (row.shared_post_ids ?? []).length > 0 ||
+            (row.shared_brief_ids ?? []).length > 0,
         });
         const ts = Date.parse(row.created_at);
         setState((prev) =>
@@ -268,6 +284,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       markConversationRead,
       updateOwnMessage,
       refreshUnreadCounts,
+      refreshPreviews,
       requestOpen,
       clearPendingOpen,
       outbox,
@@ -279,6 +296,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       markConversationRead,
       updateOwnMessage,
       refreshUnreadCounts,
+      refreshPreviews,
       requestOpen,
       clearPendingOpen,
     ],

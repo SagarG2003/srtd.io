@@ -51,7 +51,7 @@ export function attachmentMenuItems(handlers: AttachmentMenuHandlers): Attachmen
     },
     {
       id: 'post',
-      label: 'Share a post',
+      label: 'Share a post or brief',
       Icon: IconPipeline,
       onSelect: handlers.onSharePost,
     },

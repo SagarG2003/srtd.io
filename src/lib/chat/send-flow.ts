@@ -38,6 +38,7 @@ export interface SendFlowDeps {
     body: string;
     attachmentAssetIds: string[];
     sharedPostIds: string[];
+    sharedBriefIds: string[];
     replyToMessageId: string | null;
     attachmentMeta: AttachmentMetaMap;
   }) => Promise<SendRecordResult>;
@@ -96,6 +97,7 @@ export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<Sen
     body: input.text,
     attachmentAssetIds: input.local.attachments.map((a) => a.assetId),
     sharedPostIds: [...input.local.sharedPostIds],
+    sharedBriefIds: [...(input.local.sharedBriefIds ?? [])],
     replyToMessageId: input.local.reply?.id ?? null,
     attachmentMeta: buildAttachmentMeta(input.local.attachments),
   });

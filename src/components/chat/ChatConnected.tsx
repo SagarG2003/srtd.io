@@ -14,6 +14,7 @@ import {
 import { targetFromSummary, type ChannelTarget } from '@/lib/chat/thread';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { useChatThread } from '@/lib/chat/use-chat-thread';
+import { useChatMarks } from '@/lib/chat/use-chat-marks';
 import { useChatTyping } from '@/lib/chat/use-chat-typing';
 import { useChatPresence } from '@/lib/chat/use-chat-presence';
 import { useChatStore } from '@/components/chat/ChatStoreProvider';
@@ -141,6 +142,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     markConversationRead,
     updateOwnMessage,
     refreshUnreadCounts,
+    refreshPreviews,
     clearPendingOpen,
     outbox,
   } = useChatStore();
@@ -176,6 +178,14 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   );
 
   const target = useMemo(() => safeTarget(selected), [selected]);
+  const marks = useChatMarks({ client, channelId: selectedChannelId, target, currentUserId });
+  const refetchMarks = marks.refetch;
+  // Every catch-up refreshes the unread counts and re-reads the channel's marks.
+  const onCaughtUp = useCallback(() => {
+    refreshUnreadCounts();
+    refetchMarks();
+  }, [refreshUnreadCounts, refetchMarks]);
+  const onMessagesDeleted = useCallback(() => refreshPreviews(), [refreshPreviews]);
   const thread = useChatThread({
     client,
     status,
@@ -184,7 +194,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     currentUserId,
     peerUserId: selected?.peerUserId ?? null,
     onOwnMessage,
-    onCaughtUp: refreshUnreadCounts,
+    onCaughtUp,
+    onMessagesDeleted,
     outbox,
   });
   const typing = useChatTyping({ client, target, currentUserId });
@@ -260,6 +271,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               typingUserIds={typing.typingUserIds}
               onTyping={typing.notifyTyping}
               onToggleReaction={thread.toggleReaction}
+              marks={marks.marks}
+              markedMessages={marks.markedMessages}
+              onSetMark={marks.setMark}
+              onResolveMark={marks.resolve}
+              onDeleteMessages={thread.deleteMessages}
+              onEnsureLoaded={thread.ensureLoaded}
               showTicks={selected.channelType === 'dm'}
               {...(selected.peerUserId != null ? { presence } : {})}
               {...(isDesktop ? {} : { onBack })}

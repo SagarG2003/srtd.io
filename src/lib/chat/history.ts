@@ -29,7 +29,7 @@ type ChatReadCursorRow = Database['public']['Tables']['chat_read_cursors']['Row'
 type UnreadCountRow = Database['public']['Functions']['chat_unread_counts']['Returns'][number];
 
 const MESSAGE_COLUMNS =
-  'id, channel_id, workspace_id, sender_user_id, body, mentions, attachment_asset_ids, shared_post_ids, reply_to_message_id, attachment_meta, agora_event_id, created_at, edited_at, deleted_at';
+  'id, channel_id, workspace_id, sender_user_id, body, mentions, attachment_asset_ids, shared_post_ids, shared_brief_ids, reply_to_message_id, attachment_meta, agora_event_id, created_at, edited_at, deleted_at';
 
 function fail<T>(message: string): Result<T> {
   return { ok: false, error: { code: 'unknown', message } };

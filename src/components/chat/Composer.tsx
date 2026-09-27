@@ -12,6 +12,8 @@ import type { TranscribeResult } from '@/lib/chat/transcribe';
 import { AttachmentMenu } from '@/components/chat/AttachmentMenu';
 import { PostPicker } from '@/components/chat/PostPicker';
 import { SharedPostChip } from '@/components/chat/SharedPostChip';
+import { SharedBriefChip } from '@/components/chat/SharedBriefChip';
+import { toggleBrief, type BriefCardFields } from '@/lib/chat/briefs';
 import { togglePost } from '@/components/chat/post-picker';
 import { attachmentMenuItems } from '@/lib/chat/attachment-menu';
 import { fileExtension } from '@/lib/assets';
@@ -27,12 +29,13 @@ import {
 import type { PostCardFields } from '@srtdio/posts';
 
 interface ComposerProps {
-  /** Sends the trimmed text plus any completed attachments and shared posts. */
+  /** Sends the trimmed text plus any completed attachments and shared posts and briefs. */
   onSend: (
     text: string,
     attachments: MessageAttachment[],
     sharedPostIds: string[],
     reply: ReplyQuote | null,
+    sharedBriefIds: string[],
   ) => Promise<void>;
   disabled: boolean;
   /** Upload one picked file via the asset pipeline; absent disables attaching. */
@@ -145,6 +148,7 @@ export function Composer(props: ComposerProps): ReactElement {
   const [text, setText] = useState('');
   const [pending, setPending] = useState<Pending[]>([]);
   const [sharedPosts, setSharedPosts] = useState<PostCardFields[]>([]);
+  const [sharedBriefs, setSharedBriefs] = useState<BriefCardFields[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -165,6 +169,7 @@ export function Composer(props: ComposerProps): ReactElement {
       text,
       attachmentCount: ready.length,
       sharedPostCount: sharedPosts.length,
+      sharedBriefCount: sharedBriefs.length,
       uploading,
       sending: submitting,
     });
@@ -223,6 +228,10 @@ export function Composer(props: ComposerProps): ReactElement {
     setSharedPosts((prev) => togglePost(prev, post));
   }
 
+  function toggleSharedBrief(brief: BriefCardFields): void {
+    setSharedBriefs((prev) => toggleBrief(prev, brief));
+  }
+
   // Enter sends on desktop; Shift+Enter, IME composition, and touch-primary
   // devices keep the default newline. Route through the form's submit so the
   // Send button's exact handler and guard run.
@@ -246,15 +255,17 @@ export function Composer(props: ComposerProps): ReactElement {
     const pendingText = text;
     const attachments = ready;
     const postIds = sharedPosts.map((post) => post.id);
+    const briefIds = sharedBriefs.map((brief) => brief.id);
     setSubmitting(true);
     try {
-      await props.onSend(pendingText, attachments, postIds, props.reply?.quote ?? null);
+      await props.onSend(pendingText, attachments, postIds, props.reply?.quote ?? null, briefIds);
       for (const item of pending) {
         if (item.previewUrl != null) URL.revokeObjectURL(item.previewUrl);
       }
       setText('');
       setPending([]);
       setSharedPosts([]);
+      setSharedBriefs([]);
       props.onCancelReply?.();
     } catch (error) {
       // Unexpected: the thread reports record failures on the bubble instead of
@@ -307,7 +318,7 @@ export function Composer(props: ComposerProps): ReactElement {
       ...(transcript !== undefined ? { transcript } : {}),
     };
     try {
-      await props.onSend('', [attachment], [], props.reply?.quote ?? null);
+      await props.onSend('', [attachment], [], props.reply?.quote ?? null, []);
       props.onCancelReply?.();
     } catch (error) {
       logger.error('chat composer: voice note send threw', { error: String(error) });
@@ -322,7 +333,7 @@ export function Composer(props: ComposerProps): ReactElement {
     disabled: props.disabled,
     text,
     attachmentCount: ready.length,
-    sharedPostCount: sharedPosts.length,
+    sharedPostCount: sharedPosts.length + sharedBriefs.length,
     recording: recorder.recording,
     voiceBusy,
   });
@@ -346,13 +357,20 @@ export function Composer(props: ComposerProps): ReactElement {
         </div>
       ) : null}
 
-      {pending.length > 0 || sharedPosts.length > 0 ? (
+      {pending.length > 0 || sharedPosts.length > 0 || sharedBriefs.length > 0 ? (
         <ul className="flex flex-wrap gap-2">
           {pending.map((item) => (
             <PendingChip key={item.id} item={item} onRemove={() => removePending(item.id)} />
           ))}
           {sharedPosts.map((post) => (
             <SharedPostChip key={post.id} post={post} onRemove={() => toggleSharedPost(post)} />
+          ))}
+          {sharedBriefs.map((brief) => (
+            <SharedBriefChip
+              key={brief.id}
+              brief={brief}
+              onRemove={() => toggleSharedBrief(brief)}
+            />
           ))}
         </ul>
       ) : null}
@@ -467,6 +485,8 @@ export function Composer(props: ComposerProps): ReactElement {
         onClose={() => setPickerOpen(false)}
         selected={sharedPosts}
         onToggle={toggleSharedPost}
+        selectedBriefs={sharedBriefs}
+        onToggleBrief={toggleSharedBrief}
       />
     </form>
   );
