@@ -41,6 +41,9 @@
 //      stores the source id when it is readable.
 //  13. chat_channel_clear hides the caller's rows at or before cleared_at;
 //      later rows stay visible and other members are unaffected.
+//  14. Table grants: a channel member can SELECT chat_message_marks,
+//      chat_reactions, chat_read_cursors and chat_channel_clears directly
+//      (no permission-denied error); a non-member still reads zero rows.
 //
 // Seeding goes through the service role (the privileged path), following the
 // rationale in packages/test-utils/rls.ts.
@@ -1278,6 +1281,86 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
     it('raises for a non-member', async () => {
       const res = await clientFor(userC.id).rpc('chat_channel_clear', clearArgs(dmChannelId));
       expect(res.error?.message).toBe('not a member of this chat');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 14. Table grants: authenticated SELECT reaches RLS
+  // -------------------------------------------------------------------------
+
+  describe('chat table grants: authenticated SELECT', () => {
+    /** Direct SELECT as a channel member: no permission-denied error. */
+    async function memberSelect(client: GenericClient, table: string, match: MatchSpec) {
+      let q = client.from(table).select('*');
+      for (const [column, value] of match) q = q.eq(column, value);
+      const res = await q;
+      expect(res.error).toBeNull();
+      return (res.data as unknown[] | null) ?? [];
+    }
+
+    it('chat_message_marks: a member can SELECT; a non-member reads zero rows', async () => {
+      const id = await seedMessage(adminGeneric, ctx.channelId, wsA.id, owner.id);
+      await insertRow(adminGeneric, 'chat_message_marks', {
+        message_id: id,
+        channel_id: ctx.channelId,
+        workspace_id: wsA.id,
+        mark_type: 'decision',
+      });
+      const match: MatchSpec = [['message_id', id]];
+      expect(await memberSelect(bClient, 'chat_message_marks', match)).toHaveLength(1);
+      expect(await visibleRowCount(cClient, 'chat_message_marks', match)).toBe(0);
+      expect(await visibleRowCount(outsiderClient, 'chat_message_marks', match)).toBe(0);
+    });
+
+    it('chat_reactions: a member can SELECT; a non-member reads zero rows', async () => {
+      const id = await seedMessage(adminGeneric, ctx.channelId, wsA.id, owner.id);
+      await insertRow(adminGeneric, 'chat_reactions', {
+        message_id: id,
+        channel_id: ctx.channelId,
+        workspace_id: wsA.id,
+        user_id: owner.id,
+        emoji: 'grant',
+      });
+      const match: MatchSpec = [['message_id', id]];
+      expect(await memberSelect(bClient, 'chat_reactions', match)).toHaveLength(1);
+      expect(await visibleRowCount(cClient, 'chat_reactions', match)).toBe(0);
+      expect(await visibleRowCount(outsiderClient, 'chat_reactions', match)).toBe(0);
+    });
+
+    it('chat_read_cursors: a member can SELECT; a non-member reads zero rows', async () => {
+      const seeded = await admin.from('chat_read_cursors').upsert({
+        channel_id: ctx.channelId,
+        user_id: userB.id,
+        workspace_id: wsA.id,
+        last_read_message_id: ctx.chatMessageId,
+        last_read_at: partitionTimestamp,
+      });
+      expect(seeded.error).toBeNull();
+      const match: MatchSpec = [
+        ['channel_id', ctx.channelId],
+        ['user_id', userB.id],
+      ];
+      expect(await memberSelect(bClient, 'chat_read_cursors', match)).toHaveLength(1);
+      expect(await visibleRowCount(cClient, 'chat_read_cursors', match)).toBe(0);
+      expect(await visibleRowCount(outsiderClient, 'chat_read_cursors', match)).toBe(0);
+    });
+
+    it('chat_channel_clears: a member can SELECT; a non-member reads zero rows', async () => {
+      // '-infinity' records a clear row without hiding any message from the owner.
+      const seeded = await admin.from('chat_channel_clears').upsert({
+        channel_id: ctx.channelId,
+        user_id: owner.id,
+        workspace_id: wsA.id,
+        cleared_at: '-infinity',
+      });
+      expect(seeded.error).toBeNull();
+      const match: MatchSpec = [
+        ['channel_id', ctx.channelId],
+        ['user_id', owner.id],
+      ];
+      expect(await memberSelect(ownerClient, 'chat_channel_clears', match)).toHaveLength(1);
+      expect(await visibleRowCount(cClient, 'chat_channel_clears', match)).toBe(0);
+      expect(await visibleRowCount(outsiderClient, 'chat_channel_clears', match)).toBe(0);
     });
   });
 });
