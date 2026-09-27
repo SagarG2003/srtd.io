@@ -56,25 +56,60 @@ function parseEnv(envOutput: string): RlsEnv {
 // Whether this process started the stack (and so must stop it on teardown).
 let startedHere = false;
 
+/** The CLI's registry override (viper INTERNAL_IMAGE_REGISTRY, SUPABASE_ env prefix). */
+const REGISTRY_ENV = 'SUPABASE_INTERNAL_IMAGE_REGISTRY';
+
+/** Fallback registry when the default (public.ecr.aws) refuses anonymous pulls. */
+const FALLBACK_REGISTRY = 'docker.io';
+
+/** The CLI's stderr from a failed execFileSync, or '' when there is none. */
+function stderrOf(error: unknown): string {
+  const stderr = (error as { stderr?: unknown } | null)?.stderr;
+  return typeof stderr === 'string' ? stderr : '';
+}
+
+/**
+ * public.ecr.aws caps anonymous pulls per source IP, and GitHub-hosted runners
+ * share IPs, so a start can fail with "toomanyrequests: Data limit exceeded"
+ * before any test runs. That is a registry limit, not a test failure.
+ */
+export function isPullRateLimited(stderr: string): boolean {
+  return /toomanyrequests|data limit exceeded|rate limit/i.test(stderr);
+}
+
+function stopQuietly(): void {
+  try {
+    supabase(['stop', '--no-backup']);
+  } catch {
+    // Best effort: nothing to stop, or already gone.
+  }
+}
+
+function pause(ms: number): void {
+  // Synchronous pause, matching this file's blocking execFileSync style.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 // `supabase start` has an intra-start Docker race: if the db container fails its
 // first health check the CLI recreates it, but the old docker-proxy holding the
 // published port may not have released it yet, so the rebind collides with
 // "port 54322 already in use". Re-running clears it. This wraps the single start
 // with one self-healing retry: stop (best effort), pause, then start once more.
+// When the first start failed because the image registry refused the pull, the
+// retry pulls the same images from Docker Hub instead (set on process.env so
+// every later CLI call in this process agrees on the registry).
 function startWithRetry(): void {
   try {
     supabase(['start', '-x', EXCLUDE]);
     return;
-  } catch {
+  } catch (error) {
     // Attempt 1 failed; tear down whatever came up so the port is released.
-    try {
-      supabase(['stop', '--no-backup']);
-    } catch {
-      // Best effort: nothing to stop, or already gone.
+    stopQuietly();
+    if (isPullRateLimited(stderrOf(error)) && process.env[REGISTRY_ENV] === undefined) {
+      process.env[REGISTRY_ENV] = FALLBACK_REGISTRY;
     }
-    // Synchronous ~3s pause to let docker-proxy release the published port,
-    // matching this file's blocking execFileSync style.
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
+    // ~3s to let docker-proxy release the published port.
+    pause(3000);
     // Attempt 2: if this throws, it propagates to the caller.
     supabase(['start', '-x', EXCLUDE]);
   }

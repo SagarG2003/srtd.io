@@ -3,6 +3,7 @@ import type { Client } from '@srtdio/rpc';
 import {
   addReactionRecord,
   chunkIds,
+  clearChannelRecord,
   deleteMessagesRecord,
   removeReactionRecord,
   resolveMarkRecord,
@@ -321,5 +322,82 @@ describe('deleteMessagesRecord', () => {
       deleted: ids.slice(0, 100),
       message: 'marked messages cannot be deleted',
     });
+  });
+});
+
+describe('sendMessageRecord forward', () => {
+  it('maps forwardedFromMessageId to p_forwarded_from_message_id with no reply', async () => {
+    const { client, rpc } = makeClient({ data: row, error: null });
+    await sendMessageRecord({
+      client,
+      id: ID,
+      channelId: CHANNEL,
+      traceId: 'trace-1',
+      body: 'hello',
+      attachmentAssetIds: [],
+      replyToMessageId: null,
+      forwardedFromMessageId: 'source-1',
+    });
+    expect(rpc).toHaveBeenCalledWith('chat_message_send', {
+      p_id: ID,
+      p_channel_id: CHANNEL,
+      p_trace_id: 'trace-1',
+      p_body: 'hello',
+      p_forwarded_from_message_id: 'source-1',
+    });
+  });
+
+  it('omits the forward param on a plain send', async () => {
+    const { client, rpc } = makeClient({ data: row, error: null });
+    await sendMessageRecord({
+      client,
+      id: ID,
+      channelId: CHANNEL,
+      traceId: 'trace-1',
+      body: 'hello',
+      attachmentAssetIds: [],
+      forwardedFromMessageId: null,
+    });
+    const args = rpc.mock.calls[0]![1] as Record<string, unknown>;
+    expect(args).not.toHaveProperty('p_forwarded_from_message_id');
+  });
+});
+
+describe('clearChannelRecord', () => {
+  it('calls chat_channel_clear with the channel and the explicit trace id, under an abort signal', async () => {
+    const { client, rpc, abortSignal } = makeClient({ data: null, error: null });
+    const result = await clearChannelRecord({ client, channelId: CHANNEL, traceId: 'trace-9' });
+    expect(rpc).toHaveBeenCalledWith('chat_channel_clear', {
+      p_channel_id: CHANNEL,
+      p_trace_id: 'trace-9',
+    });
+    expect(abortSignal).toHaveBeenCalledOnce();
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('surfaces a proc error as a WriteResult without throwing', async () => {
+    const { client } = makeClient({ data: null, error: { message: 'denied' } });
+    expect(await clearChannelRecord({ client, channelId: CHANNEL, traceId: 't' })).toEqual({
+      ok: false,
+      message: 'denied',
+    });
+  });
+
+  it('aborts after the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeClient('hang');
+      const pending = clearChannelRecord({
+        client,
+        channelId: CHANNEL,
+        traceId: 't',
+        timeoutMs: 50,
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      const result = await pending;
+      expect(result.ok).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

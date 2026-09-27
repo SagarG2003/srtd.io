@@ -735,3 +735,51 @@ describe('shared briefs on a row', () => {
     expect(echo.sharedBriefIds).toEqual(['b9']);
   });
 });
+
+describe('forwarded messages', () => {
+  it('rowToThreadMessage maps forwarded_from_message_id to forwarded', () => {
+    expect(rowToThreadMessage(row({ forwarded_from_message_id: 'src' }), ME).forwarded).toBe(true);
+    expect(rowToThreadMessage(row({}), ME).forwarded).toBeUndefined();
+  });
+
+  it('the live path reads ext.forwarded_from', () => {
+    const mapped = mapLiveTextMessage(
+      txt({
+        ext: { sorted_message_id: 'm-live', sorted_channel_id: CHANNEL, forwarded_from: 'src' },
+      }),
+      ME,
+    );
+    expect(mapped.ok && mapped.message.forwarded).toBe(true);
+    const plain = mapLiveTextMessage(txt({}), ME);
+    expect(plain.ok && plain.message.forwarded).toBeUndefined();
+  });
+
+  it('sendText stamps forwarded_from on the live ext', async () => {
+    const createMessage = vi.fn().mockReturnValue({});
+    await sendText({
+      connection: { send: vi.fn().mockResolvedValue({}) } as unknown as ThreadConnection,
+      target: GROUP_TARGET,
+      text: 'fwd',
+      attachments: [],
+      sharedPostIds: [],
+      reply: null,
+      createMessage,
+      liveIds: { sorted_message_id: 'm-new', sorted_channel_id: CHANNEL },
+      forwardedFrom: 'src',
+    });
+    expect(createMessage).toHaveBeenCalledWith({
+      chatType: 'groupChat',
+      type: 'txt',
+      to: 'agora-group-1',
+      msg: 'fwd',
+      ext: {
+        attachment_asset_ids: [],
+        attachment_meta: [],
+        shared_post_ids: [],
+        forwarded_from: 'src',
+        sorted_message_id: 'm-new',
+        sorted_channel_id: CHANNEL,
+      },
+    });
+  });
+});

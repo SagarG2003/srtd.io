@@ -9,7 +9,12 @@ vi.mock('agora-chat', () => ({
 }));
 
 import { Avatar } from '@/components/ui/Avatar';
-import { bubbleTimeLabel, lastSeenLabel, MessageBubble } from '@/components/chat/MessageThread';
+import {
+  bubbleTimeLabel,
+  ForwardedLabel,
+  lastSeenLabel,
+  MessageBubble,
+} from '@/components/chat/MessageThread';
 import { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
 import type { ThreadMessage } from '@/lib/chat/thread';
@@ -253,5 +258,30 @@ describe('MessageBubble reply quote', () => {
     onClick?.({ stopPropagation: () => {} });
     expect(onJumpToMessage).toHaveBeenCalledTimes(1);
     expect(onJumpToMessage).toHaveBeenCalledWith('orig-7');
+  });
+});
+
+describe('MessageBubble forwarded label', () => {
+  it('shows a small Forwarded label on incoming and own forwarded messages', () => {
+    for (const mine of [false, true]) {
+      let count = 0;
+      walk(renderBubble(makeMessage({ mine, forwarded: true })), (el) => {
+        if (el.type === ForwardedLabel) count += 1;
+      });
+      expect(count).toBe(1);
+    }
+    const label = ForwardedLabel();
+    const cls = (label.props as { className: string }).className;
+    expect(cls).toContain('text-fg-2');
+    expect(cls).toContain('text-[12px]');
+    expect((label.props as { children: unknown[] }).children).toContain('Forwarded');
+  });
+
+  it('has no label on a message that was not forwarded', () => {
+    let count = 0;
+    walk(renderBubble(makeMessage({})), (el) => {
+      if (el.type === ForwardedLabel) count += 1;
+    });
+    expect(count).toBe(0);
   });
 });

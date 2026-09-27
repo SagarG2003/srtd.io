@@ -67,7 +67,7 @@ export type SendOutcome =
   | { ok: false; reason: 'timeout' | 'error'; error: string };
 
 /** Race the publish against a timer; the timer is always cleared. */
-async function publishWithTimeout(
+export async function publishWithTimeout(
   publish: Promise<unknown>,
   timeoutMs: number,
 ): Promise<{ ok: true } | { ok: false; error: string }> {

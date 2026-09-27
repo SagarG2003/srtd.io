@@ -20,6 +20,7 @@ import type { ChannelSummary } from '@/lib/chat-reads';
 import {
   buildMessageExt,
   parseAttachmentMeta,
+  parseForwardedFrom,
   parseAttachments,
   parseReply,
   parseSharedPostIds,
@@ -93,6 +94,8 @@ export interface ThreadMessage {
   status: MessageStatus;
   /** Emoji reactions on this message; empty when there are none. */
   reactions: MessageReaction[];
+  /** True when this message was forwarded from another; absent is the same as false. */
+  forwarded?: boolean;
 }
 
 /**
@@ -283,6 +286,9 @@ export function rowToThreadMessage(
     state: 'sent',
     status: 'sent',
     reactions: [],
+    ...(row.forwarded_from_message_id != null && row.forwarded_from_message_id !== ''
+      ? { forwarded: true }
+      : {}),
   };
 }
 
@@ -380,6 +386,7 @@ export function mapLiveTextMessage(
       state: 'sent',
       status: 'sent',
       reactions: [],
+      ...(parseForwardedFrom(raw.ext) !== null ? { forwarded: true } : {}),
     },
   };
 }
@@ -695,9 +702,15 @@ export function sendText(params: {
   reply: ReplyQuote | null;
   createMessage: CreateTextMessage;
   liveIds?: LiveMessageIds;
+  /** The source message id when this send forwards it. */
+  forwardedFrom?: string | null;
 }): Promise<AgoraChat.SendMsgResult> {
+  const forwardedFrom = params.forwardedFrom ?? null;
   const hasContentExt =
-    params.attachments.length > 0 || params.sharedPostIds.length > 0 || params.reply !== null;
+    params.attachments.length > 0 ||
+    params.sharedPostIds.length > 0 ||
+    params.reply !== null ||
+    forwardedFrom !== null;
   const hasExt = hasContentExt || params.liveIds !== undefined;
   const message = params.createMessage({
     chatType: params.target.chatType,
@@ -711,6 +724,7 @@ export function sendText(params: {
               attachments: params.attachments,
               sharedPostIds: params.sharedPostIds,
               reply: params.reply,
+              forwardedFrom,
             }),
             ...(params.liveIds !== undefined ? params.liveIds : {}),
           },

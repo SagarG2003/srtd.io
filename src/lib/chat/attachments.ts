@@ -172,6 +172,8 @@ export interface MessageExt extends AttachmentExt {
   shared_post_ids: string[];
   /** Quoted message (snake_case on the wire); present only when this is a reply. */
   reply_to?: { id: string; author_user_id: string | null; preview: string };
+  /** The source message id; present only when this message was forwarded. */
+  forwarded_from?: string;
 }
 
 /**
@@ -183,10 +185,15 @@ export function buildMessageExt(input: {
   attachments: readonly MessageAttachment[];
   sharedPostIds: readonly string[];
   reply: ReplyQuote | null;
+  /** The source message id when this send forwards it. */
+  forwardedFrom?: string | null;
 }): MessageExt {
   return {
     ...buildAttachmentExt(input.attachments),
     shared_post_ids: [...input.sharedPostIds],
+    ...(input.forwardedFrom != null && input.forwardedFrom !== ''
+      ? { forwarded_from: input.forwardedFrom }
+      : {}),
     ...(input.reply !== null
       ? {
           reply_to: {
@@ -197,6 +204,13 @@ export function buildMessageExt(input: {
         }
       : {}),
   };
+}
+
+/** Read the forwarded-from source id off a message's `ext`; null when not forwarded. */
+export function parseForwardedFrom(ext: unknown): string | null {
+  if (typeof ext !== 'object' || ext === null) return null;
+  const value = (ext as Record<string, unknown>).forwarded_from;
+  return typeof value === 'string' && value !== '' ? value : null;
 }
 
 /**

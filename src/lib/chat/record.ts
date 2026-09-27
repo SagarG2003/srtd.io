@@ -1,7 +1,8 @@
 // Postgres writes for chat, through the SECURITY DEFINER procs that are the
 // only write paths: chat_message_send (the record, called BEFORE Agora),
 // chat_reaction_add / chat_reaction_remove, chat_read_cursor_set,
-// chat_mark_set / chat_mark_resolve and chat_message_delete. The actor
+// chat_mark_set / chat_mark_resolve, chat_message_delete and
+// chat_channel_clear (delete a chat for the caller only). The actor
 // is auth.uid() server-side (never passed), and the trace id is the explicit
 // p_trace_id parameter of every proc (minted with uuid_v7 at the user action,
 // never inferred). The Supabase client is injected so each proc call is
@@ -38,6 +39,8 @@ export interface SendRecordParams {
   replyToMessageId?: string | null;
   /** Render metadata per attachment id (mime, name, size, duration, transcript). */
   attachmentMeta?: AttachmentMetaMap;
+  /** The source message's id when this send forwards it. */
+  forwardedFromMessageId?: string | null;
   /** Override for tests; defaults to SEND_TIMEOUT_MS. */
   timeoutMs?: number;
 }
@@ -79,6 +82,9 @@ export async function sendMessageRecord(params: SendRecordParams): Promise<SendR
       : {}),
     ...(params.attachmentMeta !== undefined && Object.keys(params.attachmentMeta).length > 0
       ? { p_attachment_meta: params.attachmentMeta }
+      : {}),
+    ...(params.forwardedFromMessageId != null && params.forwardedFromMessageId !== ''
+      ? { p_forwarded_from_message_id: params.forwardedFromMessageId }
       : {}),
   };
   const reason = (): 'timeout' | 'error' => (controller.signal.aborted ? 'timeout' : 'error');
@@ -258,4 +264,38 @@ export async function deleteMessagesRecord(
     params.onChunkDeleted?.(chunk);
   }
   return { ok: true, deleted };
+}
+
+export interface ClearChannelParams {
+  client: Client;
+  channelId: string;
+  traceId: string;
+  /** Override for tests; defaults to SEND_TIMEOUT_MS. */
+  timeoutMs?: number;
+}
+
+/**
+ * Delete a chat for the caller only through chat_channel_clear: the proc
+ * upserts the caller's cleared_at, and the read policy then hides every row at
+ * or before it. Other members keep their copy; the channel row stays. Aborted
+ * after SEND_TIMEOUT_MS. Never throws: any failure resolves to { ok: false }.
+ */
+export async function clearChannelRecord(params: ClearChannelParams): Promise<WriteResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? SEND_TIMEOUT_MS);
+  const args: Functions['chat_channel_clear']['Args'] = {
+    p_channel_id: params.channelId,
+    p_trace_id: params.traceId,
+  };
+  try {
+    const { error } = await params.client
+      .rpc('chat_channel_clear', args)
+      .abortSignal(controller.signal);
+    if (error) return { ok: false, message: error.message };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: String(error) };
+  } finally {
+    clearTimeout(timer);
+  }
 }

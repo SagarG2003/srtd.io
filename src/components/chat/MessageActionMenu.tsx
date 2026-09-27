@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ReactElement } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { ActionRow } from '@/components/ui';
-import { IconCheck, IconCopy, IconPin, IconReply } from '@/components/ui/icons';
+import { IconCheck, IconCopy, IconForward, IconPin, IconReply } from '@/components/ui/icons';
 import { markMenuLabel, type MarkType } from '@/lib/chat/marks';
 import { cn } from '@/lib/cn';
 
@@ -22,9 +22,71 @@ interface MessageActionMenuProps {
   /** "Mark as ..." options for this message; empty for a marked (frozen) one. */
   markOptions?: readonly MarkType[];
   onMark?: (type: MarkType) => void;
-  /** Offers "Select" (multi-select delete). */
+  /** Offers "Forward" (a recorded message, anyone's). */
+  canForward?: boolean;
+  onForward?: () => void;
+  /** Offers "Select" (multi-select forward and delete). */
   canSelect?: boolean;
   onSelect?: () => void;
+}
+
+/** One row of the message action menu. */
+export interface MessageMenuItem {
+  key: string;
+  label: string;
+  icon: ReactNode;
+  run: () => void;
+}
+
+/**
+ * The action rows in display order: Reply, Forward, the "Mark as ..." items,
+ * Select, Copy. Pure (no hooks) so the order is unit-tested without a DOM.
+ */
+export function messageMenuItems(
+  props: Pick<
+    MessageActionMenuProps,
+    | 'canCopy'
+    | 'onReply'
+    | 'onCopy'
+    | 'markOptions'
+    | 'onMark'
+    | 'canForward'
+    | 'onForward'
+    | 'canSelect'
+    | 'onSelect'
+  >,
+): MessageMenuItem[] {
+  const items: MessageMenuItem[] = [
+    { key: 'reply', label: 'Reply', icon: <IconReply />, run: props.onReply },
+  ];
+  if (props.canForward === true) {
+    items.push({
+      key: 'forward',
+      label: 'Forward',
+      icon: <IconForward />,
+      run: () => props.onForward?.(),
+    });
+  }
+  for (const type of props.markOptions ?? []) {
+    items.push({
+      key: `mark-${type}`,
+      label: markMenuLabel(type),
+      icon: <IconPin />,
+      run: () => props.onMark?.(type),
+    });
+  }
+  if (props.canSelect === true) {
+    items.push({
+      key: 'select',
+      label: 'Select',
+      icon: <IconCheck />,
+      run: () => props.onSelect?.(),
+    });
+  }
+  if (props.canCopy) {
+    items.push({ key: 'copy', label: 'Copy', icon: <IconCopy />, run: props.onCopy });
+  }
+  return items;
 }
 
 interface Coords {
@@ -42,7 +104,7 @@ interface Coords {
  * colours are design tokens, so light and dark stay at parity.
  */
 export function MessageActionMenu(props: MessageActionMenuProps): ReactElement | null {
-  const { open, onClose, anchor, mine, currentReaction, canCopy, onReact, onReply, onCopy } = props;
+  const { open, onClose, anchor, mine, currentReaction, onReact } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<Coords | null>(null);
   const [shown, setShown] = useState(false);
@@ -130,45 +192,17 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
           ))}
         </div>
         <div className="min-w-[200px] rounded-xl border border-border-strong bg-panel p-1 shadow-2xl">
-          <ActionRow
-            icon={<IconReply />}
-            label="Reply"
-            onClick={() => {
-              onReply();
-              onClose();
-            }}
-          />
-          {(props.markOptions ?? []).map((type) => (
+          {messageMenuItems(props).map((item) => (
             <ActionRow
-              key={type}
-              icon={<IconPin />}
-              label={markMenuLabel(type)}
+              key={item.key}
+              icon={item.icon}
+              label={item.label}
               onClick={() => {
-                props.onMark?.(type);
+                item.run();
                 onClose();
               }}
             />
           ))}
-          {props.canSelect === true ? (
-            <ActionRow
-              icon={<IconCheck />}
-              label="Select"
-              onClick={() => {
-                props.onSelect?.();
-                onClose();
-              }}
-            />
-          ) : null}
-          {canCopy ? (
-            <ActionRow
-              icon={<IconCopy />}
-              label="Copy"
-              onClick={() => {
-                onCopy();
-                onClose();
-              }}
-            />
-          ) : null}
         </div>
       </div>
     </>,
