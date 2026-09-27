@@ -25,6 +25,15 @@
 //   8. Flipping workspace_members.active enqueues member_remove / member_add
 //      for every group channel the user is in.
 //
+// Marks, delete, brief sharing (20260927131500_chat_marks_delete_briefs.sql):
+//
+//   9. chat_message_send accepts a shared-briefs-only message.
+//  10. chat_mark_set / chat_mark_resolve: commitment and decision marks are
+//      frozen, pending priority can change until resolved, resolve works once,
+//      non-members cannot mark, and chat_message_marks SELECT is channel-gated.
+//  11. chat_message_delete soft-deletes the caller's own messages only and
+//      never a marked one.
+//
 // Seeding goes through the service role (the privileged path), following the
 // rationale in packages/test-utils/rls.ts.
 
@@ -64,6 +73,9 @@ type SendArgs = Database['public']['Functions']['chat_message_send']['Args'];
 // chat_reaction_add and chat_reaction_remove share one argument shape.
 type ReactionArgs = Database['public']['Functions']['chat_reaction_add']['Args'];
 type CursorArgs = Database['public']['Functions']['chat_read_cursor_set']['Args'];
+type MarkSetArgs = Database['public']['Functions']['chat_mark_set']['Args'];
+type MarkResolveArgs = Database['public']['Functions']['chat_mark_resolve']['Args'];
+type DeleteArgs = Database['public']['Functions']['chat_message_delete']['Args'];
 
 // Proc arguments are built here (not inline at the .rpc() call) so each call
 // carries a fresh trace id the way the app's callRpc() wrapper does.
@@ -80,11 +92,41 @@ function cursorArgs(channelId: string, messageId: string): CursorArgs {
   return { p_channel_id: channelId, p_message_id: messageId, p_trace_id: generateTraceId() };
 }
 
+function markSetArgs(
+  messageId: string,
+  channelId: string,
+  markType: 'commitment' | 'decision' | 'pending',
+  priority: 1 | 2 | null = null,
+): MarkSetArgs {
+  // p_priority is nullable in SQL; the generated Args type marks it required.
+  return {
+    p_message_id: messageId,
+    p_channel_id: channelId,
+    p_mark_type: markType,
+    p_priority: priority as number,
+    p_trace_id: generateTraceId(),
+  };
+}
+
+function markResolveArgs(messageId: string, channelId: string): MarkResolveArgs {
+  return { p_message_id: messageId, p_channel_id: channelId, p_trace_id: generateTraceId() };
+}
+
+function deleteArgs(messageIds: string[], channelId: string): DeleteArgs {
+  return { p_message_ids: messageIds, p_channel_id: channelId, p_trace_id: generateTraceId() };
+}
+
 /** Build chat_message_send args; `body` null omits p_body (attachments-only sends). */
 function sendArgs(
   channelId: string,
   body: string | null,
-  extra: { id?: string; attachments?: string[]; sharedPosts?: string[]; replyTo?: string } = {},
+  extra: {
+    id?: string;
+    attachments?: string[];
+    sharedPosts?: string[];
+    sharedBriefs?: string[];
+    replyTo?: string;
+  } = {},
 ): SendArgs {
   const args: SendArgs = {
     p_id: extra.id ?? crypto.randomUUID(),
@@ -94,6 +136,7 @@ function sendArgs(
   if (body !== null) args.p_body = body;
   if (extra.attachments) args.p_attachment_asset_ids = extra.attachments;
   if (extra.sharedPosts) args.p_shared_post_ids = extra.sharedPosts;
+  if (extra.sharedBriefs) args.p_shared_brief_ids = extra.sharedBriefs;
   if (extra.replyTo) args.p_reply_to_message_id = extra.replyTo;
   return args;
 }
@@ -293,16 +336,22 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
     it('raises when the body is empty or blank and there are no attachments', async () => {
       const empty = sendArgs(ctx.channelId, '');
       const res = await clientFor(userB.id).rpc('chat_message_send', empty);
-      expect(res.error?.message).toBe('message has no body, attachments or shared posts');
+      expect(res.error?.message).toBe(
+        'message has no body, attachments, shared posts or shared briefs',
+      );
       expect(await countWhere(adminGeneric, 'chat_messages', [['id', empty.p_id]])).toBe(0);
 
       const blank = sendArgs(ctx.channelId, '   ');
       const resBlank = await clientFor(userB.id).rpc('chat_message_send', blank);
-      expect(resBlank.error?.message).toBe('message has no body, attachments or shared posts');
+      expect(resBlank.error?.message).toBe(
+        'message has no body, attachments, shared posts or shared briefs',
+      );
 
       const missing = sendArgs(ctx.channelId, null);
       const resMissing = await clientFor(userB.id).rpc('chat_message_send', missing);
-      expect(resMissing.error?.message).toBe('message has no body, attachments or shared posts');
+      expect(resMissing.error?.message).toBe(
+        'message has no body, attachments, shared posts or shared briefs',
+      );
     });
 
     it('accepts an attachments-only message', async () => {
@@ -326,6 +375,15 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
       expect(res.data?.body).toBeNull();
       expect(res.data?.attachment_asset_ids).toBeNull();
       expect(res.data?.shared_post_ids).toEqual([ctx.postId]);
+    });
+
+    it('accepts a shared-briefs-only message', async () => {
+      const args = sendArgs(ctx.channelId, null, { sharedBriefs: [ctx.briefId] });
+      const res = await clientFor(userB.id).rpc('chat_message_send', args);
+      expect(res.error).toBeNull();
+      expect(res.data?.body).toBeNull();
+      expect(res.data?.shared_post_ids).toBeNull();
+      expect(res.data?.shared_brief_ids).toEqual([ctx.briefId]);
     });
 
     it('raises when the reply target is a message from another channel', async () => {
@@ -845,6 +903,288 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
 
       const del = await adminGeneric.from('workspaces').delete().eq('id', wsFlip.id);
       expect(del.error).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 10. chat_message_marks
+  // -------------------------------------------------------------------------
+
+  describe('chat_message_marks', () => {
+    interface MarkRow {
+      mark_type: string;
+      priority: number | null;
+      marked_by: string | null;
+      resolved_by: string | null;
+      resolved_at: string | null;
+    }
+
+    async function markRow(messageId: string): Promise<MarkRow | undefined> {
+      const res = await adminGeneric
+        .from('chat_message_marks')
+        .select('*')
+        .eq('message_id', messageId);
+      if (res.error) throw new Error(`chat_message_marks read failed: ${res.error.message}`);
+      return ((res.data as MarkRow[] | null) ?? [])[0];
+    }
+
+    async function groupMessage(): Promise<string> {
+      return seedMessage(adminGeneric, ctx.channelId, wsA.id, owner.id);
+    }
+
+    it('a commitment mark is frozen: a second mark of any type raises', async () => {
+      const id = await groupMessage();
+      const set = await clientFor(userB.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'commitment'),
+      );
+      expect(set.error).toBeNull();
+      const row = await markRow(id);
+      expect(row?.mark_type).toBe('commitment');
+      expect(row?.marked_by).toBe(userB.id);
+
+      for (const type of ['commitment', 'decision', 'pending'] as const) {
+        const again = await clientFor(owner.id).rpc(
+          'chat_mark_set',
+          markSetArgs(id, ctx.channelId, type),
+        );
+        expect(again.error?.message).toBe('mark is frozen');
+      }
+      expect((await markRow(id))?.mark_type).toBe('commitment');
+
+      // Not pending, so it cannot be resolved either.
+      const resolve = await clientFor(owner.id).rpc(
+        'chat_mark_resolve',
+        markResolveArgs(id, ctx.channelId),
+      );
+      expect(resolve.error?.message).toBe('no open pending mark on this message');
+    });
+
+    it('a decision mark is frozen', async () => {
+      const id = await groupMessage();
+      const set = await clientFor(owner.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'decision'),
+      );
+      expect(set.error).toBeNull();
+      const again = await clientFor(userB.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'pending', 1),
+      );
+      expect(again.error?.message).toBe('mark is frozen');
+    });
+
+    it('priority applies to pending only', async () => {
+      const id = await groupMessage();
+      const res = await clientFor(userB.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'decision', 1),
+      );
+      expect(res.error?.message).toBe('priority applies to pending only');
+      expect(await markRow(id)).toBeUndefined();
+    });
+
+    it('pending: priority changes, retyping raises, resolve works once then freezes', async () => {
+      const id = await groupMessage();
+      const set = await clientFor(userB.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'pending', 1),
+      );
+      expect(set.error).toBeNull();
+      expect((await markRow(id))?.priority).toBe(1);
+
+      // Any member may change the priority of an open pending mark.
+      const bump = await clientFor(owner.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'pending', 2),
+      );
+      expect(bump.error).toBeNull();
+      expect((await markRow(id))?.priority).toBe(2);
+
+      const clear = await clientFor(owner.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'pending'),
+      );
+      expect(clear.error).toBeNull();
+      expect((await markRow(id))?.priority).toBeNull();
+
+      const retype = await clientFor(owner.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'decision'),
+      );
+      expect(retype.error?.message).toBe('one mark per message');
+      expect((await markRow(id))?.mark_type).toBe('pending');
+
+      // Resolvable by any member (not only the marker), exactly once.
+      const resolved = await clientFor(owner.id).rpc(
+        'chat_mark_resolve',
+        markResolveArgs(id, ctx.channelId),
+      );
+      expect(resolved.error).toBeNull();
+      const row = await markRow(id);
+      expect(row?.resolved_by).toBe(owner.id);
+      expect(row?.resolved_at).not.toBeNull();
+
+      const second = await clientFor(userB.id).rpc(
+        'chat_mark_resolve',
+        markResolveArgs(id, ctx.channelId),
+      );
+      expect(second.error?.message).toBe('no open pending mark on this message');
+
+      const afterResolve = await clientFor(userB.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'pending', 1),
+      );
+      expect(afterResolve.error?.message).toBe('mark is frozen');
+    });
+
+    it('a message from another channel is message not found', async () => {
+      const res = await clientFor(userB.id).rpc(
+        'chat_mark_set',
+        markSetArgs(dmMessageId, ctx.channelId, 'pending'),
+      );
+      expect(res.error?.message).toBe('message not found');
+    });
+
+    it('non-members cannot mark or resolve', async () => {
+      const id = await groupMessage();
+      for (const user of [userC, outsider]) {
+        const set = await clientFor(user.id).rpc(
+          'chat_mark_set',
+          markSetArgs(id, ctx.channelId, 'pending'),
+        );
+        expect(set.error?.message).toBe('not a member of this chat');
+      }
+      expect(await markRow(id)).toBeUndefined();
+
+      const open = await clientFor(userB.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'pending'),
+      );
+      expect(open.error).toBeNull();
+      const resolve = await clientFor(userC.id).rpc(
+        'chat_mark_resolve',
+        markResolveArgs(id, ctx.channelId),
+      );
+      expect(resolve.error?.message).toBe('not a member of this chat');
+      expect((await markRow(id))?.resolved_at).toBeNull();
+    });
+
+    it('SELECT is gated by chat_channel_member', async () => {
+      const groupId = await groupMessage();
+      const dmId = await seedMessage(adminGeneric, dmChannelId, wsA.id, userB.id);
+      expect(
+        (
+          await clientFor(owner.id).rpc(
+            'chat_mark_set',
+            markSetArgs(groupId, ctx.channelId, 'decision'),
+          )
+        ).error,
+      ).toBeNull();
+      expect(
+        (
+          await clientFor(owner.id).rpc(
+            'chat_mark_set',
+            markSetArgs(dmId, dmChannelId, 'commitment'),
+          )
+        ).error,
+      ).toBeNull();
+
+      for (const [messageId, members] of [
+        [groupId, [ownerClient, bClient]],
+        [dmId, [ownerClient, bClient]],
+      ] as const) {
+        const match: MatchSpec = [['message_id', messageId]];
+        expect(await countWhere(adminGeneric, 'chat_message_marks', match)).toBe(1);
+        for (const client of members)
+          expect(await ownReadCount(client, 'chat_message_marks', match)).toBe(1);
+        expect(await visibleRowCount(cClient, 'chat_message_marks', match)).toBe(0);
+        expect(await visibleRowCount(outsiderClient, 'chat_message_marks', match)).toBe(0);
+      }
+    });
+
+    it('direct INSERT as authenticated is denied even for a channel member', async () => {
+      const id = await groupMessage();
+      const res = await authInsert(bClient, 'chat_message_marks', {
+        message_id: id,
+        channel_id: ctx.channelId,
+        workspace_id: wsA.id,
+        mark_type: 'decision',
+      });
+      expect(res.ok && res.count > 0).toBe(false);
+      expect(await markRow(id)).toBeUndefined();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 11. chat_message_delete
+  // -------------------------------------------------------------------------
+
+  describe('chat_message_delete', () => {
+    async function deletedAt(id: string): Promise<string | null> {
+      const res = await adminGeneric.from('chat_messages').select('deleted_at').eq('id', id);
+      if (res.error) throw new Error(`chat_messages read failed: ${res.error.message}`);
+      const rows = (res.data as { deleted_at: string | null }[] | null) ?? [];
+      if (rows.length !== 1) throw new Error(`expected one chat_messages row for ${id}`);
+      return rows[0]?.deleted_at ?? null;
+    }
+
+    it('soft-deletes the caller own messages', async () => {
+      const a = await seedMessage(adminGeneric, ctx.channelId, wsA.id, userB.id);
+      const b = await seedMessage(adminGeneric, ctx.channelId, wsA.id, userB.id);
+      const res = await clientFor(userB.id).rpc(
+        'chat_message_delete',
+        deleteArgs([a, b], ctx.channelId),
+      );
+      expect(res.error).toBeNull();
+      expect(await deletedAt(a)).not.toBeNull();
+      expect(await deletedAt(b)).not.toBeNull();
+      // Soft-deleted rows drop out of the member-visible history.
+      expect(await visibleRowCount(ownerClient, 'chat_messages', [['id', a]])).toBe(0);
+    });
+
+    it("raises on another member's message and deletes nothing", async () => {
+      const own = await seedMessage(adminGeneric, ctx.channelId, wsA.id, userB.id);
+      const theirs = await seedMessage(adminGeneric, ctx.channelId, wsA.id, owner.id);
+      const res = await clientFor(userB.id).rpc(
+        'chat_message_delete',
+        deleteArgs([own, theirs], ctx.channelId),
+      );
+      expect(res.error?.message).toBe('only your own messages in this chat can be deleted');
+      // The whole call rolls back, including the caller's own message.
+      expect(await deletedAt(own)).toBeNull();
+      expect(await deletedAt(theirs)).toBeNull();
+    });
+
+    it('raises on a marked message, even the caller own', async () => {
+      const id = await seedMessage(adminGeneric, ctx.channelId, wsA.id, userB.id);
+      const mark = await clientFor(owner.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'pending'),
+      );
+      expect(mark.error).toBeNull();
+      const res = await clientFor(userB.id).rpc(
+        'chat_message_delete',
+        deleteArgs([id], ctx.channelId),
+      );
+      expect(res.error?.message).toBe('marked messages cannot be deleted');
+      expect(await deletedAt(id)).toBeNull();
+    });
+
+    it('raises for a non-member and for an empty selection', async () => {
+      const id = await seedMessage(adminGeneric, ctx.channelId, wsA.id, owner.id);
+      const res = await clientFor(userC.id).rpc(
+        'chat_message_delete',
+        deleteArgs([id], ctx.channelId),
+      );
+      expect(res.error?.message).toBe('not a member of this chat');
+      expect(await deletedAt(id)).toBeNull();
+
+      const empty = await clientFor(owner.id).rpc(
+        'chat_message_delete',
+        deleteArgs([], ctx.channelId),
+      );
+      expect(empty.error?.message).toBe('select between 1 and 100 messages');
     });
   });
 });
