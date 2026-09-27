@@ -9,6 +9,7 @@ export const ChatMessageSchema = z.object({
   mentions: z.unknown().nullable(),
   attachment_asset_ids: z.array(z.string().uuid()).nullable(),
   shared_post_ids: z.array(z.string().uuid()).nullable(),
+  shared_brief_ids: z.array(z.string().uuid()).nullable(),
   reply_to_message_id: z.string().nullable(),
   attachment_meta: z.unknown().nullable(),
   agora_event_id: z.string().nullable(),

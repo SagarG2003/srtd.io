@@ -11,6 +11,7 @@ export * from './zod/assets';
 export * from './zod/audit_log';
 export * from './zod/briefs';
 export * from './zod/chat_channels';
+export * from './zod/chat_message_marks';
 export * from './zod/chat_messages';
 export * from './zod/cockpit_access_log';
 export * from './zod/cockpit_procedure_allowlist';

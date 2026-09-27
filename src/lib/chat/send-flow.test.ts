@@ -21,6 +21,7 @@ function row(over: Partial<ChatMessageRow> = {}): ChatMessageRow {
     mentions: null,
     attachment_asset_ids: null,
     shared_post_ids: null,
+    shared_brief_ids: null,
     reply_to_message_id: null,
     attachment_meta: null,
     agora_event_id: null,

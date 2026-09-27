@@ -2160,6 +2160,57 @@ export type Database = {
           },
         ]
       }
+      chat_message_marks: {
+        Row: {
+          channel_id: string
+          mark_type: string
+          marked_at: string
+          marked_by: string | null
+          message_id: string
+          priority: number | null
+          resolved_at: string | null
+          resolved_by: string | null
+          workspace_id: string
+        }
+        Insert: {
+          channel_id: string
+          mark_type: string
+          marked_at?: string
+          marked_by?: string | null
+          message_id: string
+          priority?: number | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          workspace_id: string
+        }
+        Update: {
+          channel_id?: string
+          mark_type?: string
+          marked_at?: string
+          marked_by?: string | null
+          message_id?: string
+          priority?: number | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chat_message_marks_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "chat_channels"
+            referencedColumns: ["channel_id"]
+          },
+          {
+            foreignKeyName: "chat_message_marks_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       chat_messages: {
         Row: {
           agora_event_id: string | null
@@ -2174,6 +2225,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2190,6 +2242,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2206,6 +2259,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2240,6 +2294,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2256,6 +2311,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2272,6 +2328,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2291,6 +2348,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2307,6 +2365,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2323,6 +2382,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2342,6 +2402,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2358,6 +2419,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2374,6 +2436,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2393,6 +2456,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2409,6 +2473,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2425,6 +2490,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2444,6 +2510,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2460,6 +2527,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2476,6 +2544,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2495,6 +2564,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2511,6 +2581,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2527,6 +2598,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2546,6 +2618,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2562,6 +2635,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2578,6 +2652,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2597,6 +2672,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2613,6 +2689,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2629,6 +2706,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2648,6 +2726,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2664,6 +2743,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2680,6 +2760,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2699,6 +2780,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2715,6 +2797,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2731,6 +2814,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2750,6 +2834,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2766,6 +2851,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2782,6 +2868,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2801,6 +2888,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2817,6 +2905,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2833,6 +2922,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2852,6 +2942,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2868,6 +2959,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2884,6 +2976,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2903,6 +2996,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2919,6 +3013,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2935,6 +3030,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -2954,6 +3050,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -2970,6 +3067,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -2986,6 +3084,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3005,6 +3104,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3021,6 +3121,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3037,6 +3138,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3056,6 +3158,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3072,6 +3175,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3088,6 +3192,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3107,6 +3212,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3123,6 +3229,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3139,6 +3246,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3158,6 +3266,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3174,6 +3283,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3190,6 +3300,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3209,6 +3320,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3225,6 +3337,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3241,6 +3354,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3260,6 +3374,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3276,6 +3391,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3292,6 +3408,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3311,6 +3428,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3327,6 +3445,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3343,6 +3462,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3362,6 +3482,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3378,6 +3499,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3394,6 +3516,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3413,6 +3536,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3429,6 +3553,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3445,6 +3570,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3464,6 +3590,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3480,6 +3607,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3496,6 +3624,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3515,6 +3644,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3531,6 +3661,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3547,6 +3678,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3566,6 +3698,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3582,6 +3715,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3598,6 +3732,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3617,6 +3752,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3633,6 +3769,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3649,6 +3786,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3668,6 +3806,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3684,6 +3823,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3700,6 +3840,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3719,6 +3860,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3735,6 +3877,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3751,6 +3894,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3770,6 +3914,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3786,6 +3931,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3802,6 +3948,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3821,6 +3968,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3837,6 +3985,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3853,6 +4002,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -3872,6 +4022,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
@@ -3888,6 +4039,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id: string
         }
@@ -3904,6 +4056,7 @@ export type Database = {
           mentions?: Json | null
           reply_to_message_id?: string | null
           sender_user_id?: string | null
+          shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
           workspace_id?: string
         }
@@ -7509,6 +7662,28 @@ export type Database = {
         Args: { p_channel_id: string; p_user_id: string }
         Returns: boolean
       }
+      chat_mark_resolve: {
+        Args: { p_channel_id: string; p_message_id: string; p_trace_id: string }
+        Returns: undefined
+      }
+      chat_mark_set: {
+        Args: {
+          p_channel_id: string
+          p_mark_type: string
+          p_message_id: string
+          p_priority: number
+          p_trace_id: string
+        }
+        Returns: undefined
+      }
+      chat_message_delete: {
+        Args: {
+          p_channel_id: string
+          p_message_ids: string[]
+          p_trace_id: string
+        }
+        Returns: undefined
+      }
       chat_message_send: {
         Args: {
           p_attachment_asset_ids?: string[]
@@ -7518,6 +7693,7 @@ export type Database = {
           p_id: string
           p_mentions?: Json
           p_reply_to_message_id?: string
+          p_shared_brief_ids?: string[]
           p_shared_post_ids?: string[]
           p_trace_id: string
         }
@@ -7534,6 +7710,7 @@ export type Database = {
           mentions: Json | null
           reply_to_message_id: string | null
           sender_user_id: string | null
+          shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
           workspace_id: string
         }
