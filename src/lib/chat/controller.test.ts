@@ -3,6 +3,7 @@ import type { AgoraChat } from 'agora-chat';
 import {
   backoffDelayMs,
   BACKOFF_CAP_MS,
+  RECONNECT_GRACE_MS,
   runChatConnection,
   type RunChatConnectionParams,
 } from '@/lib/chat/controller';
@@ -349,17 +350,20 @@ describe('runChatConnection retry loop', () => {
     expect(h.createConnection).toHaveBeenCalledTimes(2);
   });
 
-  it('reports reconnecting on SDK reconnect/offline events and connected again on onConnected', async () => {
+  it('reports reconnecting on SDK reconnect/offline events only after the 1.5s grace (no longer immediate), and connected again on onConnected', async () => {
     const h = harness(() => Promise.resolve(token));
     runChatConnection(h.params);
     await flush();
 
     const handler = h.latest().handler();
     handler?.onReconnecting?.();
+    expect(h.setStatus).toHaveBeenLastCalledWith('connected');
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS);
     expect(h.setStatus).toHaveBeenLastCalledWith('reconnecting');
     handler?.onConnected?.();
     expect(h.setStatus).toHaveBeenLastCalledWith('connected');
     handler?.onOffline?.();
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS);
     expect(h.setStatus).toHaveBeenLastCalledWith('reconnecting');
     handler?.onOnline?.();
     await flush();
@@ -460,5 +464,125 @@ describe('runChatConnection tokens', () => {
     expect(h.createConnection).toHaveBeenCalledTimes(2);
     expect(h.conns[0]?.close).toHaveBeenCalledOnce();
     expect(h.setStatus).toHaveBeenLastCalledWith('connected');
+  });
+});
+
+describe('runChatConnection silent resume', () => {
+  const NOW = Date.parse('2026-06-13T10:00:00.000Z');
+  // Valid for 24h from NOW.
+  const fresh: Extract<ChatTokenResult, { ok: true }> = {
+    ...token,
+    expires_at: new Date(NOW + 24 * 60 * 60_000).toISOString(),
+  };
+
+  beforeEach(() => {
+    vi.setSystemTime(NOW);
+  });
+
+  /** Connect, then simulate a background drop the SDK reports as offline. */
+  async function connectedThenOffline(
+    fetchToken: () => Promise<ChatTokenResult>,
+    build: () => FakeConnection = fakeConnection,
+  ): Promise<Harness> {
+    const h = harness(fetchToken, build);
+    runChatConnection(h.params);
+    await flush();
+    expect(h.setStatus).toHaveBeenLastCalledWith('connected');
+    h.latest().handler()?.onOffline?.();
+    return h;
+  }
+
+  it('a wake that reconnects within the grace never emits reconnecting', async () => {
+    const h = await connectedThenOffline(() => Promise.resolve(fresh));
+    h.wake();
+    await flush();
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS * 2);
+    expect(h.statuses()).toEqual(['connecting', 'connected', 'connected']);
+  });
+
+  it('a wake still not live past the grace emits reconnecting', async () => {
+    let opens = 0;
+    const h = await connectedThenOffline(
+      () => Promise.resolve(fresh),
+      () => {
+        const conn = fakeConnection();
+        opens += 1;
+        // Second open hangs: the socket is not back yet.
+        if (opens === 2) conn.open = vi.fn(() => new Promise(() => {}));
+        return conn;
+      },
+    );
+    h.wake();
+    await flush();
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS - 1);
+    expect(h.statuses()).not.toContain('reconnecting');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.setStatus).toHaveBeenLastCalledWith('reconnecting');
+  });
+
+  it('reuses the cached token on wake instead of minting a new one', async () => {
+    const fetchToken = vi.fn(() => Promise.resolve(fresh));
+    const h = await connectedThenOffline(fetchToken);
+    h.wake();
+    await flush();
+    expect(fetchToken).toHaveBeenCalledTimes(1);
+    expect(h.createConnection).toHaveBeenCalledTimes(2);
+    expect(h.latest().open).toHaveBeenCalledWith({ user: 'u_abc', accessToken: 'agora-token' });
+    expect(h.setStatus).toHaveBeenLastCalledWith('connected');
+  });
+
+  it('refetches when the cached token expires within 5 minutes', async () => {
+    const fetchToken = vi
+      .fn<() => Promise<ChatTokenResult>>()
+      .mockResolvedValueOnce({ ...fresh, expires_at: new Date(NOW + 10 * 60_000).toISOString() })
+      .mockResolvedValue({ ...fresh, token: 'second-token' });
+    const h = await connectedThenOffline(fetchToken);
+    // 6 minutes later: 4 minutes left, inside the 5 minute margin.
+    vi.setSystemTime(NOW + 6 * 60_000);
+    h.wake();
+    await flush();
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+    expect(h.latest().open).toHaveBeenCalledWith({ user: 'u_abc', accessToken: 'second-token' });
+  });
+
+  it('drops the cached token after an auth failure on open', async () => {
+    const fetchToken = vi
+      .fn<() => Promise<ChatTokenResult>>()
+      .mockResolvedValueOnce(fresh)
+      .mockResolvedValue({ ...fresh, token: 'second-token' });
+    let opens = 0;
+    const h = await connectedThenOffline(fetchToken, () => {
+      const conn = fakeConnection();
+      opens += 1;
+      if (opens === 2) conn.open = vi.fn().mockRejectedValue({ type: 2, message: 'auth failed' });
+      return conn;
+    });
+    h.wake();
+    await flush();
+    // The rejected open used the cache; the retry must mint fresh.
+    expect(fetchToken).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    await flush();
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+    expect(h.latest().open).toHaveBeenCalledWith({ user: 'u_abc', accessToken: 'second-token' });
+    expect(h.setStatus).toHaveBeenLastCalledWith('connected');
+  });
+
+  it('drops the cached token when the SDK reports it expired', async () => {
+    const fetchToken = vi.fn(() => Promise.resolve(fresh));
+    const h = harness(fetchToken);
+    runChatConnection(h.params);
+    await flush();
+    h.latest().handler()?.onTokenExpired?.();
+    await flush();
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears the grace timer on teardown', async () => {
+    const h = await connectedThenOffline(() => Promise.resolve(fresh));
+    const before = h.statuses().length;
+    h.signout();
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS * 2);
+    expect(h.statuses().slice(before)).toEqual(['unavailable']);
   });
 });

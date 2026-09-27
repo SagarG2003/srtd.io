@@ -6,7 +6,20 @@ vi.mock('agora-chat', () => ({
   default: { connection: vi.fn(), message: { create: vi.fn() } },
 }));
 
+import websdk from 'agora-chat';
+import { createAgoraConnection } from '@/lib/chat/connection';
 import { connectionKey } from '@/lib/chat/use-chat-client';
+
+describe('createAgoraConnection', () => {
+  it('lets the SDK auto-reconnect up to 10 times before surfacing a disconnect', () => {
+    createAgoraConnection('org#app');
+    expect(websdk.connection).toHaveBeenCalledWith({
+      appKey: 'org#app',
+      delivery: true,
+      autoReconnectNumMax: 10,
+    });
+  });
+});
 
 describe('connectionKey', () => {
   const base = { url: 'https://chat-token.example', userId: 'u1', workspaceId: 'w1' };
