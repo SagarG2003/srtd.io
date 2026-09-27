@@ -23,6 +23,7 @@ function row(over: Partial<ChatMessageRow> = {}): ChatMessageRow {
     shared_post_ids: null,
     shared_brief_ids: null,
     reply_to_message_id: null,
+    forwarded_from_message_id: null,
     attachment_meta: null,
     agora_event_id: null,
     created_at: '2026-09-22T10:00:00.123456+00:00',

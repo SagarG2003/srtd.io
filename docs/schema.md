@@ -296,6 +296,8 @@ chat_messages carries shared_post_ids, reply_to_message_id and attachment_meta (
 
 Marks: chat_message_marks, one per message, types commitment/decision (frozen: no unmark, no delete) and pending (resolvable by any member, optional priority 1 or 2). Delete: chat_message_delete soft-deletes the caller's own messages only, never marked ones. shared_brief_ids alongside shared_post_ids.
 
+Forward: forwarded_from_message_id, same workspace only, source must be readable by the sender. Clear for me: chat_channel_clears(channel_id, user_id, cleared_at); the chat_messages read policy hides rows at or before the caller's cleared_at; other members unaffected.
+
 Applied to live 2026-09-22 and recorded in 20260922200000_chat_postgres_record.sql (idempotent). chat_messages is partitioned monthly.
 
 ### chat_channels

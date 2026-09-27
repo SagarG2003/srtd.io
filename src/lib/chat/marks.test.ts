@@ -68,6 +68,7 @@ function row(id: string, created: string): ChatMessageRow {
     shared_post_ids: null,
     shared_brief_ids: null,
     reply_to_message_id: null,
+    forwarded_from_message_id: null,
     attachment_meta: null,
     agora_event_id: null,
     created_at: created,
