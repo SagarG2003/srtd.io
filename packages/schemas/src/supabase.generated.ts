@@ -2116,6 +2116,42 @@ export type Database = {
           },
         ]
       }
+      chat_channel_clears: {
+        Row: {
+          channel_id: string
+          cleared_at: string
+          user_id: string
+          workspace_id: string
+        }
+        Insert: {
+          channel_id: string
+          cleared_at?: string
+          user_id: string
+          workspace_id: string
+        }
+        Update: {
+          channel_id?: string
+          cleared_at?: string
+          user_id?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chat_channel_clears_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "chat_channels"
+            referencedColumns: ["channel_id"]
+          },
+          {
+            foreignKeyName: "chat_channel_clears_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       chat_channels: {
         Row: {
           agora_group_id: string | null
@@ -2221,6 +2257,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2238,6 +2275,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2255,6 +2293,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2290,6 +2329,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2307,6 +2347,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2324,6 +2365,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2344,6 +2386,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2361,6 +2404,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2378,6 +2422,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2398,6 +2443,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2415,6 +2461,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2432,6 +2479,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2452,6 +2500,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2469,6 +2518,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2486,6 +2536,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2506,6 +2557,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2523,6 +2575,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2540,6 +2593,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2560,6 +2614,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2577,6 +2632,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2594,6 +2650,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2614,6 +2671,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2631,6 +2689,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2648,6 +2707,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2668,6 +2728,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2685,6 +2746,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2702,6 +2764,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2722,6 +2785,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2739,6 +2803,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2756,6 +2821,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2776,6 +2842,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2793,6 +2860,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2810,6 +2878,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2830,6 +2899,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2847,6 +2917,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2864,6 +2935,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2884,6 +2956,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2901,6 +2974,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2918,6 +2992,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2938,6 +3013,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -2955,6 +3031,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2972,6 +3049,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -2992,6 +3070,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3009,6 +3088,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3026,6 +3106,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3046,6 +3127,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3063,6 +3145,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3080,6 +3163,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3100,6 +3184,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3117,6 +3202,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3134,6 +3220,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3154,6 +3241,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3171,6 +3259,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3188,6 +3277,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3208,6 +3298,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3225,6 +3316,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3242,6 +3334,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3262,6 +3355,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3279,6 +3373,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3296,6 +3391,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3316,6 +3412,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3333,6 +3430,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3350,6 +3448,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3370,6 +3469,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3387,6 +3487,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3404,6 +3505,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3424,6 +3526,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3441,6 +3544,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3458,6 +3562,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3478,6 +3583,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3495,6 +3601,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3512,6 +3619,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3532,6 +3640,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3549,6 +3658,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3566,6 +3676,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3586,6 +3697,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3603,6 +3715,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3620,6 +3733,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3640,6 +3754,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3657,6 +3772,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3674,6 +3790,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3694,6 +3811,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3711,6 +3829,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3728,6 +3847,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3748,6 +3868,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3765,6 +3886,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3782,6 +3904,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3802,6 +3925,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3819,6 +3943,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3836,6 +3961,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3856,6 +3982,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3873,6 +4000,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3890,6 +4018,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3910,6 +4039,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3927,6 +4057,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3944,6 +4075,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3964,6 +4096,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -3981,6 +4114,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -3998,6 +4132,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -4018,6 +4153,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null
@@ -4035,6 +4171,7 @@ export type Database = {
           created_at: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -4052,6 +4189,7 @@ export type Database = {
           created_at?: string
           deleted_at?: string | null
           edited_at?: string | null
+          forwarded_from_message_id?: string | null
           id?: string
           mentions?: Json | null
           reply_to_message_id?: string | null
@@ -7650,6 +7788,10 @@ export type Database = {
         Args: { p_payload: Json; p_trace_id: string; p_workspace_id: string }
         Returns: string
       }
+      chat_channel_clear: {
+        Args: { p_channel_id: string; p_trace_id: string }
+        Returns: undefined
+      }
       chat_channel_mark_synced: {
         Args: {
           p_agora_group_id: string
@@ -7661,6 +7803,10 @@ export type Database = {
       chat_channel_member: {
         Args: { p_channel_id: string; p_user_id: string }
         Returns: boolean
+      }
+      chat_cleared_at: {
+        Args: { p_channel_id: string; p_user_id: string }
+        Returns: string
       }
       chat_mark_resolve: {
         Args: { p_channel_id: string; p_message_id: string; p_trace_id: string }
@@ -7690,6 +7836,7 @@ export type Database = {
           p_attachment_meta?: Json
           p_body?: string
           p_channel_id: string
+          p_forwarded_from_message_id?: string
           p_id: string
           p_mentions?: Json
           p_reply_to_message_id?: string
@@ -7706,6 +7853,7 @@ export type Database = {
           created_at: string
           deleted_at: string | null
           edited_at: string | null
+          forwarded_from_message_id: string | null
           id: string
           mentions: Json | null
           reply_to_message_id: string | null

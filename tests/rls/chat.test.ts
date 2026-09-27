@@ -34,6 +34,14 @@
 //  11. chat_message_delete soft-deletes the caller's own messages only and
 //      never a marked one.
 //
+// Forward, clear-for-me (20260927200000_chat_forward_and_clear.sql):
+//
+//  12. chat_message_send with p_forwarded_from_message_id raises when the
+//      source is unreadable by the sender or lives in another workspace, and
+//      stores the source id when it is readable.
+//  13. chat_channel_clear hides the caller's rows at or before cleared_at;
+//      later rows stay visible and other members are unaffected.
+//
 // Seeding goes through the service role (the privileged path), following the
 // rationale in packages/test-utils/rls.ts.
 
@@ -76,6 +84,7 @@ type CursorArgs = Database['public']['Functions']['chat_read_cursor_set']['Args'
 type MarkSetArgs = Database['public']['Functions']['chat_mark_set']['Args'];
 type MarkResolveArgs = Database['public']['Functions']['chat_mark_resolve']['Args'];
 type DeleteArgs = Database['public']['Functions']['chat_message_delete']['Args'];
+type ClearArgs = Database['public']['Functions']['chat_channel_clear']['Args'];
 
 // Proc arguments are built here (not inline at the .rpc() call) so each call
 // carries a fresh trace id the way the app's callRpc() wrapper does.
@@ -116,6 +125,10 @@ function deleteArgs(messageIds: string[], channelId: string): DeleteArgs {
   return { p_message_ids: messageIds, p_channel_id: channelId, p_trace_id: generateTraceId() };
 }
 
+function clearArgs(channelId: string): ClearArgs {
+  return { p_channel_id: channelId, p_trace_id: generateTraceId() };
+}
+
 /** Build chat_message_send args; `body` null omits p_body (attachments-only sends). */
 function sendArgs(
   channelId: string,
@@ -126,6 +139,7 @@ function sendArgs(
     sharedPosts?: string[];
     sharedBriefs?: string[];
     replyTo?: string;
+    forwardedFrom?: string;
   } = {},
 ): SendArgs {
   const args: SendArgs = {
@@ -138,6 +152,7 @@ function sendArgs(
   if (extra.sharedPosts) args.p_shared_post_ids = extra.sharedPosts;
   if (extra.sharedBriefs) args.p_shared_brief_ids = extra.sharedBriefs;
   if (extra.replyTo) args.p_reply_to_message_id = extra.replyTo;
+  if (extra.forwardedFrom) args.p_forwarded_from_message_id = extra.forwardedFrom;
   return args;
 }
 
@@ -1185,6 +1200,84 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
         deleteArgs([], ctx.channelId),
       );
       expect(empty.error?.message).toBe('select between 1 and 100 messages');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 12. chat_message_send forward
+  // -------------------------------------------------------------------------
+
+  describe('chat_message_send forward', () => {
+    it('raises when the sender cannot read the source', async () => {
+      // userC is in the owner/userC DM (seeded by the unread-counts block) but
+      // not in the owner/userB DM that holds the source.
+      const [lo, hi] = owner.id < userC.id ? [owner.id, userC.id] : [userC.id, owner.id];
+      const ownerCDm = `dm__${wsA.id}__${lo}__${hi}`;
+      const args = sendArgs(ownerCDm, 'fwd', { forwardedFrom: dmMessageId });
+      const res = await clientFor(userC.id).rpc('chat_message_send', args);
+      expect(res.error?.message).toBe('forward source not accessible');
+      expect(await countWhere(adminGeneric, 'chat_messages', [['id', args.p_id]])).toBe(0);
+    });
+
+    it('raises when the source is in another workspace', async () => {
+      // owner joins the other workspace and reads a DM there, so only the
+      // workspace check can reject the forward.
+      await seedMember(adminGeneric, wsOther, owner, 'agency');
+      const otherDm = await seedDmChannel(adminGeneric, wsOther.id, outsider, owner);
+      const source = await seedMessage(adminGeneric, otherDm, wsOther.id, outsider.id);
+      expect(await visibleRowCount(ownerClient, 'chat_messages', [['id', source]])).toBe(1);
+
+      const args = sendArgs(ctx.channelId, 'fwd', { forwardedFrom: source });
+      const res = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(res.error?.message).toBe('forward source not accessible');
+      expect(await countWhere(adminGeneric, 'chat_messages', [['id', args.p_id]])).toBe(0);
+    });
+
+    it('stores forwarded_from_message_id when the source is readable', async () => {
+      const args = sendArgs(ctx.channelId, 'fwd', { forwardedFrom: dmMessageId });
+      const res = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(res.error).toBeNull();
+      expect(res.data?.id).toBe(args.p_id);
+      expect(res.data?.forwarded_from_message_id).toBe(dmMessageId);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 13. chat_channel_clear
+  // -------------------------------------------------------------------------
+
+  describe('chat_channel_clear', () => {
+    it('hides older rows for the caller only; later rows stay visible', async () => {
+      const older = await seedMessage(adminGeneric, dmChannelId, wsA.id, owner.id);
+      const channel: MatchSpec = [['channel_id', dmChannelId]];
+      const ownerBefore = await visibleRowCount(ownerClient, 'chat_messages', channel);
+      expect(ownerBefore).toBeGreaterThanOrEqual(2);
+      expect(await visibleRowCount(bClient, 'chat_messages', channel)).toBe(ownerBefore);
+
+      const clear = await clientFor(userB.id).rpc('chat_channel_clear', clearArgs(dmChannelId));
+      expect(clear.error).toBeNull();
+
+      // The caller sees nothing at or before cleared_at.
+      expect(await visibleRowCount(bClient, 'chat_messages', channel)).toBe(0);
+      expect(await visibleRowCount(bClient, 'chat_messages', [['id', older]])).toBe(0);
+
+      const after = await clientFor(owner.id).rpc(
+        'chat_message_send',
+        sendArgs(dmChannelId, 'after clear'),
+      );
+      expect(after.error).toBeNull();
+      const afterId = after.data?.id ?? '';
+      expect(await visibleRowCount(bClient, 'chat_messages', channel)).toBe(1);
+      expect(await visibleRowCount(bClient, 'chat_messages', [['id', afterId]])).toBe(1);
+
+      // The other participant still sees everything, old and new.
+      expect(await visibleRowCount(ownerClient, 'chat_messages', channel)).toBe(ownerBefore + 1);
+      expect(await visibleRowCount(ownerClient, 'chat_messages', [['id', older]])).toBe(1);
+    });
+
+    it('raises for a non-member', async () => {
+      const res = await clientFor(userC.id).rpc('chat_channel_clear', clearArgs(dmChannelId));
+      expect(res.error?.message).toBe('not a member of this chat');
     });
   });
 });

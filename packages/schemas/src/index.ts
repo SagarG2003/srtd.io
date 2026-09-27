@@ -10,6 +10,7 @@ export * from './zod/asset_versions';
 export * from './zod/assets';
 export * from './zod/audit_log';
 export * from './zod/briefs';
+export * from './zod/chat_channel_clears';
 export * from './zod/chat_channels';
 export * from './zod/chat_message_marks';
 export * from './zod/chat_messages';
