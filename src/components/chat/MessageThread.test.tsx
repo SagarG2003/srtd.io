@@ -10,6 +10,8 @@ vi.mock('agora-chat', () => ({
 
 import { Avatar } from '@/components/ui/Avatar';
 import {
+  BODY_TEXT,
+  BUBBLE_QUOTE_TEXT,
   bubbleClass,
   bubbleStatus,
   bubbleTimeLabel,
@@ -24,6 +26,7 @@ import {
   MessageBubble,
   messageTimeSource,
   OWN_BUBBLE_CONTENT,
+  SwipeReplyIcon,
   THREAD_LIST_CLASS,
   threadListItems,
   threadLightbox,
@@ -942,5 +945,132 @@ describe('image album and viewer', () => {
     const { images, details } = threadLightbox(message, PROFILES, 'UTC');
     expect(images).toEqual([{ assetId: '', name: 'p.png', src: 'blob:p' }]);
     expect(details.sender).toBe('You');
+  });
+});
+
+describe('swipe to reply', () => {
+  const noop = (): void => {};
+  const handlers = {
+    onPointerDown: vi.fn(),
+    onPointerMove: vi.fn(),
+    onPointerUp: vi.fn(),
+    onPointerCancel: vi.fn(),
+  };
+  const press = { handlers, onContextMenu: noop, consumeClick: () => false, onKeyOpen: noop };
+  const img = (n: number) => ({ assetId: `s-${n}`, name: `s${n}.png`, mime: 'image/png' });
+  const KINDS: Record<string, Partial<ThreadMessage>> = {
+    text: {},
+    album: { body: '', attachments: [img(1), img(2)] },
+    file: { body: '', attachments: [{ assetId: 'f', name: 'a.pdf', mime: 'application/pdf' }] },
+    audio: { body: '', attachments: [{ assetId: 'v', name: 'v.webm', mime: 'audio/webm' }] },
+    post: { body: '', sharedPostIds: ['p1'] },
+    brief: { body: '', sharedBriefIds: ['b1'] },
+    forwarded: { forwarded: true },
+    reply: { reply: { id: 'm0', authorUserId: 'peer-1', preview: 'earlier' } },
+  };
+
+  function render(message: ThreadMessage, selecting = false): ReactElement {
+    return MessageBubble({
+      message,
+      profiles: PROFILES,
+      cache,
+      presignEnabled: false,
+      showTicks: true,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      onBadgeClick: noop,
+      press,
+      swipe: {},
+      ...(selecting ? { selection: { role: 'selectable', checked: false, onToggle: noop } } : {}),
+    });
+  }
+  function find(root: ReactNode, key: string): ReactElement<Record<string, unknown>>[] {
+    const out: ReactElement<Record<string, unknown>>[] = [];
+    walk(root, (el) => {
+      if ((el.props as Record<string, unknown>)[key] !== undefined) {
+        out.push(el as ReactElement<Record<string, unknown>>);
+      }
+    });
+    return out;
+  }
+
+  for (const [kind, over] of Object.entries(KINDS)) {
+    for (const mine of [false, true]) {
+      it(`attaches on a ${mine ? 'own' : 'peer'} ${kind} bubble`, () => {
+        const root = render(makeMessage({ ...over, mine }));
+        const [bubble, ...rest] = find(root, 'onPointerDown');
+        expect(rest).toHaveLength(0);
+        expect(bubble?.props['data-bubble']).toBe('');
+        expect(bubble?.props['data-swipe-reply']).toBe('');
+        expect(bubble?.props.onPointerDown).toBe(handlers.onPointerDown);
+        expect(bubble?.props.onPointerMove).toBe(handlers.onPointerMove);
+        expect(String(bubble?.props.className)).toContain('touch-pan-y');
+        let icons = 0;
+        walk(root, (el) => {
+          if (el.type === SwipeReplyIcon) icons += 1;
+        });
+        expect(icons).toBe(1);
+      });
+    }
+  }
+
+  it('the status line under the bubble carries no swipe handlers', () => {
+    const root = render(makeMessage({ mine: true, status: 'read' }));
+    // Only the bubble itself takes pointer handlers; the status line sits outside it.
+    expect(find(root, 'onPointerDown')).toHaveLength(1);
+    expect(find(root, 'data-swipe-reply')).toHaveLength(1);
+  });
+
+  it('day pills and time labels are never swipeable', () => {
+    for (const root of [DayPill({ label: 'Today' }), TimeLabel({ label: '18:45' })]) {
+      expect(find(root, 'onPointerDown')).toHaveLength(0);
+      expect(find(root, 'data-swipe-reply')).toHaveLength(0);
+    }
+  });
+
+  it('is off while selecting', () => {
+    const root = render(makeMessage({}), true);
+    const [bubble] = find(root, 'data-bubble');
+    expect(bubble?.props['data-swipe-reply']).toBeUndefined();
+    expect(String(bubble?.props.className)).not.toContain('touch-pan-y');
+    let icons = 0;
+    walk(root, (el) => {
+      if (el.type === SwipeReplyIcon) icons += 1;
+    });
+    expect(icons).toBe(0);
+  });
+
+  it('the icon is a 32px token circle with a 1.7 stroke, accent only when armed', () => {
+    const icon = SwipeReplyIcon({});
+    const cls = String((icon.props as { className?: string }).className);
+    expect(cls).toContain('h-8 w-8');
+    expect(cls).toContain('bg-panel-3');
+    expect(cls).toContain('data-[armed]:bg-accent data-[armed]:text-accent-fg');
+    expect(cls).toContain('scale-[.6]');
+    expect(cls).toContain('opacity-0');
+    expect(cls).toContain('duration-[120ms]');
+    expect(cls).toContain('motion-reduce:transition-none');
+    const [svg] = find(icon, 'strokeWidth');
+    expect(svg?.props.strokeWidth).toBe(1.7);
+    expect(svg?.props.stroke).toBe('currentColor');
+  });
+});
+
+describe('bubble text sizes', () => {
+  it('body text is 17px on a 22px line, quote text 14px on 18px', () => {
+    expect(BODY_TEXT).toContain('text-[17px]');
+    expect(BODY_TEXT).toContain('leading-[22px]');
+    expect(BUBBLE_QUOTE_TEXT).toBe('[&_.text-xs]:text-[14px] [&_.text-xs]:leading-[18px]');
+    const cls = bubbleClass({
+      mine: false,
+      tail: false,
+      sending: false,
+      failed: false,
+      checked: false,
+      voiceOnly: false,
+    });
+    expect(cls).toContain('px-3 py-2');
   });
 });

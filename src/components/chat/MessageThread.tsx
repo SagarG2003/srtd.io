@@ -7,6 +7,7 @@ import {
   useState,
   type KeyboardEvent,
   type MouseEvent,
+  type PointerEvent,
   type Ref,
   type ReactElement,
 } from 'react';
@@ -27,7 +28,7 @@ import {
   IconTrash,
   IconUsers,
 } from '@/components/ui/icons';
-import { useLongPress, type LongPressHandlers } from '@/components/ui';
+import { useLongPress } from '@/components/ui';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
@@ -36,6 +37,12 @@ import { breaksRun, isTimeGap, replyPreview, type ThreadMessage } from '@/lib/ch
 import { classifyAttachment, splitAlbum, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
 import { formatMessageTime } from '@/lib/chat/time-format';
+import {
+  createSwipeReplyController,
+  SWIPE_SPRING_MS,
+  type SwipeFrame,
+  type SwipeReplyController,
+} from '@/lib/chat/swipe-reply';
 import type { PresignCache } from '@/lib/asset-presign';
 import { roleLabel } from '@/components/pages/settings/members-data';
 import { Composer, type ComposerSend } from '@/components/chat/Composer';
@@ -147,6 +154,50 @@ interface MessageThreadProps {
 
 /** Devices that get the hover ⋯ control (a mouse or trackpad, not touch). */
 export const HOVER_POINTER_QUERY = '(hover: hover) and (pointer: fine)';
+
+/** Users who asked for less motion: the swipe resets without a spring. */
+export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
+
+/** Pointer handlers on a bubble: the long-press and swipe-to-reply controllers, composed. */
+export interface BubblePointerHandlers {
+  onPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
+  onPointerMove: (event: PointerEvent<HTMLDivElement>) => void;
+  onPointerUp: () => void;
+  onPointerCancel: () => void;
+}
+
+/**
+ * The swipe-to-reply icon: sits behind the bubble's resting left edge and is
+ * revealed as the bubble slides right. 32px circle, panel-3 idle, accent when
+ * armed (data-armed). Scale and opacity are painted per frame by MessageRow;
+ * at rest the classes hold it at scale 0.6, opacity 0. No other motion.
+ */
+export function SwipeReplyIcon(props: {
+  iconRef?: Ref<HTMLSpanElement> | undefined;
+}): ReactElement {
+  return (
+    <span
+      ref={props.iconRef}
+      aria-hidden="true"
+      data-swipe-icon=""
+      className="pointer-events-none absolute inset-y-0 left-0 my-auto flex h-8 w-8 scale-[.6] items-center justify-center rounded-full bg-panel-3 text-fg-2 opacity-0 transition-[transform,opacity] duration-[120ms] motion-reduce:transition-none data-[armed]:bg-accent data-[armed]:text-accent-fg"
+    >
+      <svg
+        width={18}
+        height={18}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.7}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M9 7L4 12l5 5" />
+        <path d="M4 12h11a5 5 0 0 1 5 5v1" />
+      </svg>
+    </span>
+  );
+}
 
 /**
  * Whether a keydown on a focused bubble (or channel row) opens its action menu:
@@ -448,8 +499,11 @@ export const OWN_BUBBLE_CONTENT = cn(
   '[&_.text-fg-3]:text-accent-fg [&_.text-fg-3]:opacity-80',
 );
 
-/** Message body text at 15px; the ink comes from the bubble (fg or accent-fg). */
-const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-[1.4]';
+/** Message body text at 17px / 22px; the ink comes from the bubble (fg or accent-fg). */
+export const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[17px] leading-[22px]';
+
+/** The in-bubble quote's author and preview at 14px / 18px (the composer draft is unchanged). */
+export const BUBBLE_QUOTE_TEXT = '[&_.text-xs]:text-[14px] [&_.text-xs]:leading-[18px]';
 
 /**
  * One message row in the thread. Own messages (`message.mine`) right-align on
@@ -489,8 +543,10 @@ export function MessageBubble(props: {
   /** Tap on an album tile: open the thread's image viewer at that index. */
   onOpenImage?: (index: number) => void;
   bubbleRef?: Ref<HTMLDivElement>;
+  /** Swipe right to reply (touch and pen); off while selecting. */
+  swipe?: { iconRef?: Ref<HTMLSpanElement> };
   press?: {
-    handlers: LongPressHandlers;
+    handlers: BubblePointerHandlers;
     onContextMenu: (event: MouseEvent) => void;
     consumeClick: () => boolean;
     /** Keyboard open (Enter / Space / Shift+F10), anchored to the bubble. */
@@ -526,6 +582,7 @@ export function MessageBubble(props: {
   const distinctEmojis = message.reactions.map((r) => r.emoji).join('');
   const status = bubbleStatus(message, { showTicks, tail });
   const onMore = selection === undefined ? press?.onMore : undefined;
+  const swipe = selection === undefined ? props.swipe : undefined;
   return (
     <li
       data-msg-id={message.id}
@@ -544,11 +601,13 @@ export function MessageBubble(props: {
       {selection?.role === 'locked' ? <SelectLock /> : null}
       {showMeta ? <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" /> : null}
       {gutter ? <span className="w-[26px] shrink-0" aria-hidden="true" /> : null}
-      <div className={cn('flex min-w-0 max-w-[76%] flex-col gap-1', mine && 'items-end')}>
+      <div className={cn('relative flex min-w-0 max-w-[76%] flex-col gap-1', mine && 'items-end')}>
         {showMeta ? <span className="text-sm font-medium text-fg">{name}</span> : null}
+        {swipe !== undefined ? <SwipeReplyIcon iconRef={swipe.iconRef} /> : null}
         <div
           ref={bubbleRef}
           data-bubble=""
+          data-swipe-reply={swipe !== undefined ? '' : undefined}
           role="group"
           tabIndex={0}
           aria-label={`${mine ? 'Your message' : `Message from ${name}`}, ${bubbleTimeLabel(message, timeZone)}`}
@@ -571,15 +630,20 @@ export function MessageBubble(props: {
               e.stopPropagation();
             }
           }}
-          className={bubbleClass({
-            mine,
-            tail,
-            sending,
-            failed,
-            checked: selection?.checked === true,
-            voiceOnly,
-            album,
-          })}
+          className={cn(
+            bubbleClass({
+              mine,
+              tail,
+              sending,
+              failed,
+              checked: selection?.checked === true,
+              voiceOnly,
+              album,
+            }),
+            // The browser keeps vertical pans (the list scrolls); a horizontal
+            // move is left to the swipe controller.
+            swipe !== undefined && 'touch-pan-y touch-pinch-zoom',
+          )}
         >
           <div className={album ? cn(albumInset, 'empty:hidden') : 'contents'}>
             <MarkBadge
@@ -600,7 +664,7 @@ export function MessageBubble(props: {
                 }
                 preview={reply.preview}
                 onJump={() => props.onJumpToMessage?.(reply.id)}
-                className={album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1'}
+                className={cn(BUBBLE_QUOTE_TEXT, album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1')}
               />
             ) : null}
             {textOnly ? (
@@ -799,9 +863,10 @@ export function threadListItems(
 }
 
 /**
- * Thin wrapper that owns the long-press / right-click wiring for one bubble and
- * keeps MessageBubble pure. The bubble's rect is captured on open so the floating
- * action menu can anchor to it.
+ * Thin wrapper that owns the long-press / right-click and swipe-to-reply wiring
+ * for one bubble and keeps MessageBubble pure. The bubble's rect is captured on
+ * open so the floating action menu can anchor to it. Swipe frames are painted
+ * straight onto the bubble and icon (translateX, scale, opacity), no re-render.
  */
 function MessageRow(props: {
   message: ThreadMessage;
@@ -822,16 +887,52 @@ function MessageRow(props: {
   selection?: RowSelection;
   /** Hover pointer device: render the ⋯ control. */
   hoverMenu: boolean;
+  /** prefers-reduced-motion: the swipe resets without a spring. */
+  reducedMotion: boolean;
+  /** Swiped past the threshold: the same reply path as the menu's Reply. */
+  onSwipeReply: (message: ThreadMessage) => void;
   onOpenImage: (message: ThreadMessage, index: number) => void;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
+  const iconRef = useRef<HTMLSpanElement>(null);
   const selecting = props.selection !== undefined;
+  const latest = useRef(props);
+  latest.current = props;
   const bubbleRect = (): DOMRect | null => bubbleRef.current?.getBoundingClientRect() ?? null;
+  const swipeRef = useRef<SwipeReplyController | null>(null);
   // Mouse holds never open the menu (right-click and ⋯ do); touch is unchanged.
+  // A completed long-press ends any pending swipe for that touch.
   const { handlers, consumeClickSuppression, cancel, clearClickSuppression } = useLongPress(
-    () => open(bubbleRect()),
+    () => {
+      swipeRef.current?.cancel();
+      open(bubbleRect());
+    },
     { ignoreMouse: true },
   );
+  if (swipeRef.current === null) {
+    swipeRef.current = createSwipeReplyController({
+      onReply: () => latest.current.onSwipeReply(latest.current.message),
+      onFrame: (frame) => paintSwipe(bubbleRef.current, iconRef.current, frame),
+      onStart: (pointerId) => {
+        // A swipe never opens the menu: stop the hold timer (8px < its 10px).
+        cancel();
+        if (pointerId === undefined) return;
+        try {
+          bubbleRef.current?.setPointerCapture(pointerId);
+        } catch {
+          // The pointer is already gone; the gesture ends on its own.
+        }
+      },
+      enabled: () => latest.current.selection === undefined,
+      reducedMotion: () => latest.current.reducedMotion,
+    });
+  }
+  const swipe = swipeRef.current;
+  useEffect(() => {
+    return () => {
+      swipe.dispose();
+    };
+  }, [swipe]);
   function open(anchor: DOMRect | null): void {
     if (selecting) return;
     // The menu's backdrop takes the trailing pointerup, so no click to swallow.
@@ -841,7 +942,26 @@ function MessageRow(props: {
   const onContextMenu = (e: MouseEvent): void => {
     e.preventDefault();
     cancel();
+    if (swipe.swiping()) return;
     open(bubbleRect());
+  };
+  const pointer: BubblePointerHandlers = {
+    onPointerDown: (e) => {
+      handlers.onPointerDown(e);
+      swipe.handlers.onPointerDown(e);
+    },
+    onPointerMove: (e) => {
+      handlers.onPointerMove(e);
+      swipe.handlers.onPointerMove(e);
+    },
+    onPointerUp: () => {
+      handlers.onPointerUp();
+      swipe.handlers.onPointerUp();
+    },
+    onPointerCancel: () => {
+      handlers.onPointerCancel();
+      swipe.handlers.onPointerCancel();
+    },
   };
   const onChangePriority = props.onChangePriority;
   return (
@@ -857,10 +977,16 @@ function MessageRow(props: {
       afterLabel={props.afterLabel}
       timeZone={props.timeZone}
       bubbleRef={bubbleRef}
+      swipe={{ iconRef }}
       press={{
-        handlers,
+        handlers: pointer,
         onContextMenu,
-        consumeClick: consumeClickSuppression,
+        consumeClick: () => {
+          // Read both so neither flag lingers into the next tap.
+          const held = consumeClickSuppression();
+          const swiped = swipe.consumeClickSuppression();
+          return held || swiped;
+        },
         onKeyOpen: () => open(bubbleRect()),
         ...(props.hoverMenu ? { onMore: (anchor: DOMRect) => open(anchor) } : {}),
       }}
@@ -875,6 +1001,28 @@ function MessageRow(props: {
       onBadgeClick={() => props.onOpen(props.message, bubbleRect())}
     />
   );
+}
+
+/**
+ * Paint one swipe frame: the bubble moves on X only (translateX), the icon
+ * scales 0.6 to 1 and fades in toward the threshold and fills when armed. At
+ * rest the inline styles clear and the classes take over again.
+ */
+function paintSwipe(
+  bubble: HTMLDivElement | null,
+  icon: HTMLSpanElement | null,
+  frame: SwipeFrame,
+): void {
+  const moved = frame.offset > 0;
+  if (bubble !== null) {
+    bubble.style.transition = frame.animate ? `transform ${SWIPE_SPRING_MS}ms ease-out` : '';
+    bubble.style.transform = moved ? `translateX(${frame.offset}px)` : '';
+  }
+  if (icon !== null) {
+    icon.style.opacity = moved ? String(frame.progress) : '';
+    icon.style.transform = moved ? `scale(${0.6 + 0.4 * frame.progress})` : '';
+    icon.toggleAttribute('data-armed', frame.armed);
+  }
 }
 
 function ThreadBody(
@@ -917,6 +1065,7 @@ function ThreadBody(
   // The thread's one image viewer: which message's album, at which image.
   const [viewer, setViewer] = useState<{ messageId: string; index: number } | null>(null);
   const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
+  const reducedMotion = useMediaQuery(REDUCED_MOTION_QUERY);
   const toast = useToast();
   const listRef = useRef<HTMLUListElement>(null);
   // Tracks whether we have already snapped a freshly opened conversation to the
@@ -1086,6 +1235,8 @@ function ThreadBody(
               onOpen={(m, rect) => setMenu({ message: m, rect })}
               onOpenImage={(m, index) => setViewer({ messageId: m.id, index })}
               hoverMenu={hoverMenu}
+              reducedMotion={reducedMotion}
+              onSwipeReply={props.onReply}
               onJumpToMessage={scrollToMessage}
               mark={props.marks.get(row.message.id)}
               {...(props.onChangePriority !== undefined
