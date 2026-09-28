@@ -1,20 +1,21 @@
-// The DM Contact sheet: the peer's photo, name and role line, then Media, Files,
-// Links and Marks tabs. Media and Files share ONE attachments read per page
+// The DM Contact page, full screen over the app: the peer's photo, name and
+// role line, then Media, Files, Links and Marks tabs. Media and Files share ONE attachments read per page
 // (split client-side); Links is one read per page; Marks is the pin board list
 // MarksSheet renders. A tab's first page loads the first time it is shown and
 // shows its loading state until that page resolves (first paint is final), then
 // "Load more" reads the next keyset page while a page comes back full. Presigns
 // go through the thread's PresignCache and sender names through the profiles
-// map, so there is no per-row read. No motion beyond the Sheet's own transition;
+// map, so there is no per-row read. The page opens and closes without motion;
 // colours are tokens only, so light and dark match.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { ReactElement, ReactNode } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { Sheet } from '@/components/ui/Sheet';
-import { IconFile, IconImage, IconLink, IconPin } from '@/components/ui/icons';
+import { IconButton } from '@/components/ui/IconButton';
+import { IconChevronLeft, IconFile, IconImage, IconLink, IconPin } from '@/components/ui/icons';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useAttachmentUrl } from '@/components/chat/MessageAttachments';
 import { MarksList, type MarksListProps } from '@/components/chat/MarksSheet';
@@ -338,7 +339,7 @@ export function FeedBody<T>(props: {
 }
 
 /** The sheet's tree for a given state. Hook-free so tests walk it directly. */
-export function ContactSheetView(props: ContactSheetViewProps): ReactElement {
+export function ContactSheetView(props: ContactSheetViewProps): ReactElement | null {
   const split = splitMediaFiles(props.attachments?.items ?? []);
   const feedProps = (kind: 'attachments' | 'links') => ({
     onLoadMore: () => props.onLoadMore(kind),
@@ -424,34 +425,49 @@ export function ContactSheetView(props: ContactSheetViewProps): ReactElement {
       );
   }
 
+  if (!props.open) return null;
   return (
-    <Sheet open={props.open} onClose={props.onClose} title="Contact info">
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-col items-center gap-1 text-center">
-          <ContactPhoto name={props.title} avatarUrl={props.avatarUrl} />
-          <span className="mt-2 max-w-full truncate text-lg font-semibold text-fg">
-            {props.title}
-          </span>
-          {props.roleLine !== null ? (
-            <span data-role-line="" className="max-w-full truncate text-sm text-fg-2">
-              {props.roleLine}
-            </span>
-          ) : null}
-        </div>
-        <div className="flex flex-wrap gap-2" role="tablist">
-          {CONTACT_TABS.map((option) => (
-            <Chip
-              key={option.key}
-              label={option.label}
-              size="tap"
-              selected={props.tab === option.key}
-              onClick={() => props.onTab(option.key)}
-            />
-          ))}
-        </div>
-        <div data-contact-tab={props.tab}>{body}</div>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Contact info"
+      data-contact-page=""
+      className="fixed inset-0 z-50 flex flex-col bg-bg"
+    >
+      <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-2 md:px-4">
+        <IconButton label="Close contact info" onClick={props.onClose}>
+          <IconChevronLeft size={20} />
+        </IconButton>
+        <h2 className="truncate text-[15px] font-semibold text-fg">Contact info</h2>
       </div>
-    </Sheet>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-4 py-6">
+          <div className="flex flex-col items-center gap-1 text-center">
+            <ContactPhoto name={props.title} avatarUrl={props.avatarUrl} />
+            <span className="mt-2 max-w-full truncate text-lg font-semibold text-fg">
+              {props.title}
+            </span>
+            {props.roleLine !== null ? (
+              <span data-role-line="" className="max-w-full truncate text-sm text-fg-2">
+                {props.roleLine}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-2" role="tablist">
+            {CONTACT_TABS.map((option) => (
+              <Chip
+                key={option.key}
+                label={option.label}
+                size="tap"
+                selected={props.tab === option.key}
+                onClick={() => props.onTab(option.key)}
+              />
+            ))}
+          </div>
+          <div data-contact-tab={props.tab}>{body}</div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -504,7 +520,18 @@ export function ContactSheet(props: ContactSheetProps): ReactElement {
   const images = splitMediaFiles(attachments.feed?.items ?? []).images;
   const current = viewer !== null ? images[Math.min(viewer, images.length - 1)] : undefined;
 
-  return (
+  // Escape closes the page, unless the lightbox is open on top (it owns Escape).
+  const { open, onClose } = props;
+  useEffect(() => {
+    if (!open || viewer !== null) return;
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [open, viewer, onClose]);
+
+  return createPortal(
     <>
       <ContactSheetView
         open={props.open}
@@ -540,6 +567,7 @@ export function ContactSheet(props: ContactSheetProps): ReactElement {
           onClose={() => setViewer(null)}
         />
       ) : null}
-    </>
+    </>,
+    document.body,
   );
 }

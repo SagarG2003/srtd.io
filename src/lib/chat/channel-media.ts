@@ -88,14 +88,20 @@ export function toAttachmentItems(rows: readonly AttachmentRow[]): ChannelAttach
   );
 }
 
-/** Media tab gets image/* only; everything else (video, audio, legacy, docs) is a file. */
+/**
+ * Media tab gets image/* only; Files gets everything else (video, legacy, docs)
+ * except audio/*, which the thread renders as voice notes and neither tab lists.
+ */
 export function splitMediaFiles(items: readonly ChannelAttachmentItem[]): {
   images: ChannelAttachmentItem[];
   files: ChannelAttachmentItem[];
 } {
   const images: ChannelAttachmentItem[] = [];
   const files: ChannelAttachmentItem[] = [];
-  for (const item of items) (item.mime.startsWith('image/') ? images : files).push(item);
+  for (const item of items) {
+    if (item.mime.startsWith('audio/')) continue;
+    (item.mime.startsWith('image/') ? images : files).push(item);
+  }
   return { images, files };
 }
 
