@@ -1,7 +1,8 @@
 // The always-on chat live layer. Mounted once at the shell (inside the Agora
-// ChatProvider, the toast provider, and the router), it seeds the pure chat
-// store from the registry roster plus Postgres (chat_unread_counts for badges
-// and ordering, one bounded scan for the preview lines), then keeps it live off
+// ChatProvider, the toast provider, and the router), it owns the chat roster and
+// seeds the pure chat store from it plus Postgres (clears, chat_unread_counts
+// for badges and ordering, one bounded scan for the preview lines), all read in
+// parallel and applied in one update, then keeps it live off
 // the controller's global incoming-message fan-out. Every live message is
 // verified against its chat_messages row before it counts (the shared verifier
 // logs a missing row once, for store and thread). Unread counts are re-read
@@ -25,6 +26,7 @@ import {
 import type { ReactElement, ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { AgoraChat } from 'agora-chat';
+import type { Result } from '@srtdio/rpc';
 import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { useSession } from '@/lib/session-context';
@@ -36,14 +38,33 @@ import { useChat } from '@/lib/chat/chat-context';
 import { mapLiveTextMessage } from '@/lib/chat/thread';
 import { liveVerifierFor } from '@/lib/chat/live-verify';
 import { subscribeGlobalMessages } from '@/lib/chat/controller';
-import { loadConversationPreviews, loadUnreadCounts } from '@/lib/chat/history';
+import {
+  loadConversationPreviews,
+  loadUnreadCounts,
+  type ConversationPreview,
+  type UnreadCount,
+} from '@/lib/chat/history';
 import { createDebouncer, UNREAD_REFRESH_DEBOUNCE_MS } from '@/lib/chat/read-cursor';
 import * as store from '@/lib/chat/chat-store';
-import type { ChannelOutbox, ChatStoreState, Outbox } from '@/lib/chat/chat-store';
+import type {
+  ChannelClear,
+  ChannelOutbox,
+  ChatLoadStatus,
+  ChatStoreState,
+  Outbox,
+} from '@/lib/chat/chat-store';
 
 /** The store plus the actions the chat UI uses to keep it in step. */
 export interface ChatStoreContextValue {
   state: ChatStoreState;
+  /** The list's load status for the current workspace; rows render only when 'ready'. */
+  loadStatus: ChatLoadStatus;
+  /** The current workspace's channels; empty unless loadStatus is 'ready'. */
+  roster: readonly ChannelSummary[];
+  /** Re-run the first load after an error (Retry). */
+  retryLoad: () => void;
+  /** Re-read the roster after a mutation; resolves to it, or null when the read failed. */
+  reloadRoster: () => Promise<readonly ChannelSummary[] | null>;
   /** Sum of unread across every channel; the Chat-tab badge reads this. */
   totalUnread: number;
   /** Mark the viewed channel (its incoming messages stay read), or clear it. */
@@ -71,6 +92,9 @@ export interface ChatStoreContextValue {
 
 const ChatStoreContext = createContext<ChatStoreContextValue | null>(null);
 
+/** Stable empty roster while the list is not ready. */
+const EMPTY_ROSTER: readonly ChannelSummary[] = [];
+
 /** Bound on the live-message ids remembered for dedupe. */
 const SEEN_IDS_LIMIT = 500;
 
@@ -93,6 +117,49 @@ export function rememberSeen(seen: Set<string>, id: string): boolean {
   return false;
 }
 
+/** The four reads the chat list's first paint waits on. */
+export interface ChatListReaders {
+  roster: () => Promise<Result<ChannelSummary[]>>;
+  clears: () => Promise<Result<ChannelClear[]>>;
+  previews: () => Promise<Result<ConversationPreview[]>>;
+  counts: () => Promise<Result<UnreadCount[]>>;
+}
+
+/**
+ * Run the four list reads in parallel and resolve to the one store transition
+ * that applies them all ('ready'), or to 'error' when any of them failed.
+ */
+export async function loadChatList(
+  readers: ChatListReaders,
+  scope: string,
+  currentUserId: string,
+): Promise<(prev: ChatStoreState) => ChatStoreState> {
+  const [roster, clears, previews, counts] = await Promise.all([
+    readers.roster(),
+    readers.clears(),
+    readers.previews(),
+    readers.counts(),
+  ]);
+  if (!roster.ok || !clears.ok || !previews.ok || !counts.ok) {
+    logger.error('chat store: initial load failed', {
+      roster: roster.ok ? 'ok' : roster.error.message,
+      clears: clears.ok ? 'ok' : clears.error.message,
+      previews: previews.ok ? 'ok' : previews.error.message,
+      counts: counts.ok ? 'ok' : counts.error.message,
+    });
+    return (prev) => store.loadFailed(prev, scope);
+  }
+  return (prev) =>
+    store.loadReady(prev, {
+      scope,
+      roster: roster.data,
+      clears: clears.data,
+      previews: previews.data,
+      counts: counts.data,
+      currentUserId,
+    });
+}
+
 export function ChatStoreProvider({ children }: { children: ReactNode }): ReactElement {
   const { status } = useChat();
   const { session } = useSession();
@@ -102,6 +169,9 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   const currentUserId = session?.user.id ?? null;
 
   const [state, setState] = useState<ChatStoreState>(store.initialState);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const scope =
+    workspaceId && currentUserId !== null ? store.loadScope(workspaceId, currentUserId) : null;
 
   // The live handler reads these refs so the global subscription registers once
   // and never goes stale: roster summaries, the active channel, and the ids
@@ -115,6 +185,12 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   useEffect(() => {
     activeRef.current = state.activeConversationId;
   }, [state.activeConversationId]);
+
+  // The live handler resolves channels from the store's roster, so a channel
+  // created after the first load (new DM or group) counts too.
+  useEffect(() => {
+    summariesRef.current = indexSummaries(state.roster);
+  }, [state.roster]);
 
   const setActive = useCallback((channelId: string | null) => {
     setState((prev) => store.setActive(prev, channelId));
@@ -141,76 +217,75 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     setState((prev) => store.clearPendingOpen(prev));
   }, []);
 
+  // Refreshes after the first load; a response for a workspace the store has
+  // moved on from is dropped.
   const refreshUnreadCounts = useCallback(() => {
-    if (workspaceId === null || currentUserId === null) return;
-    const forWorkspace = workspaceId;
-    void loadUnreadCounts(supabase, forWorkspace).then((result) => {
+    if (scope === null || workspaceId === null) return;
+    void loadUnreadCounts(supabase, workspaceId).then((result) => {
       if (!result.ok) {
         logger.warn('chat store: unread counts load failed', { error: result.error.message });
         return;
       }
-      setState((prev) => store.applyUnreadCounts(prev, result.data));
+      setState((prev) =>
+        prev.scope === scope ? store.applyUnreadCounts(prev, result.data) : prev,
+      );
     });
-  }, [workspaceId, currentUserId]);
+  }, [scope, workspaceId]);
 
   const refreshPreviews = useCallback(() => {
-    if (workspaceId === null || currentUserId === null) return;
+    if (scope === null || workspaceId === null || currentUserId === null) return;
     const forUser = currentUserId;
     void loadConversationPreviews(supabase, workspaceId).then((result) => {
       if (!result.ok) {
         logger.warn('chat store: previews load failed', { error: result.error.message });
         return;
       }
-      setState((prev) => store.applyPreviews(prev, result.data, forUser));
+      setState((prev) =>
+        prev.scope === scope ? store.applyPreviews(prev, result.data, forUser) : prev,
+      );
     });
-  }, [workspaceId, currentUserId]);
+  }, [scope, workspaceId, currentUserId]);
 
-  // Seed the store on workspace/user switch: the roster (registry), then the
-  // unread counts and the preview lines from Postgres. Independent of the Agora
-  // connection: the list and badges work while chat is still connecting.
+  // Seed the store on workspace/user switch (and on Retry): the roster, clears,
+  // previews and unread counts are read in parallel and applied in one update,
+  // so the list's first paint is its final state. Any failure is the error
+  // state. Independent of the Agora connection: the list and badges work while
+  // chat is still connecting.
   useEffect(() => {
-    if (!workspaceId || currentUserId === null) return;
+    if (scope === null || !workspaceId || currentUserId === null) return;
     let cancelled = false;
     seenRef.current = new Set();
     outboxRef.current = {};
-    void (async (): Promise<void> => {
-      const rosterRes = await listChannelSummaries(supabase, { workspaceId, currentUserId });
-      if (cancelled) return;
-      if (!rosterRes.ok) {
-        logger.error('chat store: roster load failed', { error: rosterRes.error.message });
-        return;
-      }
-      const roster = rosterRes.data;
-      summariesRef.current = indexSummaries(roster);
-      setState(store.mergeInitial(roster));
-      const [counts, previews, clears] = await Promise.all([
-        loadUnreadCounts(supabase, workspaceId),
-        loadConversationPreviews(supabase, workspaceId),
-        listChannelClears(supabase, { workspaceId }),
-      ]);
-      if (cancelled) return;
-      if (!counts.ok) {
-        logger.warn('chat store: unread counts load failed', { error: counts.error.message });
-      }
-      if (!previews.ok) {
-        logger.warn('chat store: previews load failed', { error: previews.error.message });
-      }
-      if (!clears.ok) {
-        logger.warn('chat store: clears load failed', { error: clears.error.message });
-      }
-      setState((prev) => {
-        // Clears first, so the unread overlay already knows what was deleted.
-        const withClears = clears.ok ? store.applyClears(prev, clears.data) : prev;
-        const withPreviews = previews.ok
-          ? store.applyPreviews(withClears, previews.data, currentUserId)
-          : withClears;
-        return counts.ok ? store.applyUnreadCounts(withPreviews, counts.data) : withPreviews;
-      });
-    })();
+    setState((prev) => store.beginLoad(prev, scope));
+    void loadChatList(
+      {
+        roster: () => listChannelSummaries(supabase, { workspaceId, currentUserId }),
+        clears: () => listChannelClears(supabase, { workspaceId }),
+        previews: () => loadConversationPreviews(supabase, workspaceId),
+        counts: () => loadUnreadCounts(supabase, workspaceId),
+      },
+      scope,
+      currentUserId,
+    ).then((transition) => {
+      if (!cancelled) setState(transition);
+    });
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, currentUserId]);
+  }, [scope, workspaceId, currentUserId, loadAttempt]);
+
+  const retryLoad = useCallback(() => setLoadAttempt((n) => n + 1), []);
+
+  const reloadRoster = useCallback(async (): Promise<readonly ChannelSummary[] | null> => {
+    if (scope === null || !workspaceId || currentUserId === null) return null;
+    const result = await listChannelSummaries(supabase, { workspaceId, currentUserId });
+    if (!result.ok) {
+      logger.error('chat store: roster reload failed', { error: result.error.message });
+      return null;
+    }
+    setState((prev) => (prev.scope === scope ? store.applyRoster(prev, result.data) : prev));
+    return result.data;
+  }, [scope, workspaceId, currentUserId]);
 
   // Every (re)connect re-reads the counts: live messages missed while offline
   // are already in Postgres.
@@ -292,9 +367,15 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
 
   useEffect(() => subscribeGlobalMessages((message) => onIncomingRef.current(message)), []);
 
+  const loadStatus = store.selectLoadStatus(state, scope);
+  const roster = loadStatus === 'ready' ? state.roster : EMPTY_ROSTER;
   const value = useMemo<ChatStoreContextValue>(
     () => ({
       state,
+      loadStatus,
+      roster,
+      retryLoad,
+      reloadRoster,
       totalUnread: store.selectTotalUnread(state),
       setActive,
       markConversationRead,
@@ -307,6 +388,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       clearConversation,
     }),
     [
+      loadStatus,
+      roster,
+      retryLoad,
+      reloadRoster,
       outbox,
       clearConversation,
       state,

@@ -5,12 +5,7 @@ import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { useMediaQuery } from '@/lib/use-media-query';
 import { useWorkspace } from '@/lib/workspace-context';
-import {
-  listChannelSummaries,
-  readProfiles,
-  type ChannelSummary,
-  type ChatProfile,
-} from '@/lib/chat-reads';
+import { readProfiles, type ChannelSummary, type ChatProfile } from '@/lib/chat-reads';
 import { targetFromSummary, type ChannelTarget } from '@/lib/chat/thread';
 import { generateTraceId } from '@/lib/trace';
 import { clearChannelRecord } from '@/lib/chat/record';
@@ -55,65 +50,56 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // only when the workspace has none.
   const timeZone = workspaceTimeZone(workspaces.find((w) => w.id === workspaceId)?.timezone);
 
-  const [channels, setChannels] = useState<ChannelSummary[]>([]);
   const [selected, setSelected] = useState<ChannelSummary | null>(null);
   const [profiles, setProfiles] = useState<Map<string, ChatProfile>>(new Map());
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [groupInfoOpen, setGroupInfoOpen] = useState(false);
 
-  // Email deep-link: ?channel={channelId} selects that channel once the list
-  // loads. Read through refs so the initial-load effect keeps its existing deps
-  // (no extra channel refetch); the selection fires once per distinct id and only
-  // 'channel' is stripped, preserving any sibling deep-link param.
+  const {
+    state: chatStore,
+    loadStatus,
+    roster,
+    retryLoad,
+    reloadRoster,
+    setActive,
+    markConversationRead,
+    updateOwnMessage,
+    refreshUnreadCounts,
+    refreshPreviews,
+    clearPendingOpen,
+    outbox,
+    clearConversation,
+  } = useChatStore();
+
+  // Email deep-link: ?channel={channelId} selects that channel once the store's
+  // roster is ready; the selection fires once per distinct id and only 'channel'
+  // is stripped, preserving any sibling deep-link param.
   const [searchParams, setSearchParams] = useSearchParams();
-  const searchParamsRef = useRef(searchParams);
-  searchParamsRef.current = searchParams;
-  const setSearchParamsRef = useRef(setSearchParams);
-  setSearchParamsRef.current = setSearchParams;
   const selectedFromParam = useRef<string | null>(null);
-
-  // Load the channel list (registry + batched display resolution) for the workspace.
   useEffect(() => {
-    let cancelled = false;
-    void listChannelSummaries(supabase, { workspaceId, currentUserId }).then((result) => {
-      if (cancelled) return;
-      setChannels(result.ok ? result.data : []);
-      if (!result.ok) {
-        logger.error('chat: failed to list channels', { error: result.error.message });
-        return;
-      }
-      const channel = searchParamsRef.current.get('channel');
-      if (channel === null || channel === '') return;
-      if (selectedFromParam.current !== channel) {
-        selectedFromParam.current = channel;
-        const found = result.data.find((c) => c.channelId === channel);
-        if (found !== undefined) setSelected(found);
-      }
-      const next = new URLSearchParams(searchParamsRef.current);
-      next.delete('channel');
-      setSearchParamsRef.current(next, { replace: true });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId, currentUserId]);
+    if (loadStatus !== 'ready') return;
+    const channel = searchParams.get('channel');
+    if (channel === null || channel === '') return;
+    if (selectedFromParam.current !== channel) {
+      selectedFromParam.current = channel;
+      const found = roster.find((c) => c.channelId === channel);
+      if (found !== undefined) setSelected(found);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('channel');
+    setSearchParams(next, { replace: true });
+  }, [loadStatus, roster, searchParams, setSearchParams]);
 
-  // Re-read the channel list after a mutation. When channelId is given, the
+  // Re-read the store's roster after a mutation. When channelId is given, the
   // matching (possibly newly created) channel is selected and opened.
   const refreshChannels = useCallback(
     async (channelId: string | null): Promise<void> => {
-      const result = await listChannelSummaries(supabase, { workspaceId, currentUserId });
-      if (!result.ok) {
-        logger.error('chat: failed to refresh channels', { error: result.error.message });
-        return;
-      }
-      setChannels(result.data);
-      if (channelId !== null) {
-        const found = result.data.find((channel) => channel.channelId === channelId);
-        if (found !== undefined) setSelected(found);
-      }
+      const next = await reloadRoster();
+      if (next === null || channelId === null) return;
+      const found = next.find((channel) => channel.channelId === channelId);
+      if (found !== undefined) setSelected(found);
     },
-    [workspaceId, currentUserId],
+    [reloadRoster],
   );
 
   const onDmReady = useCallback(
@@ -138,18 +124,6 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     setSelected(null);
     void refreshChannels(null);
   }, [refreshChannels]);
-
-  const {
-    state: chatStore,
-    setActive,
-    markConversationRead,
-    updateOwnMessage,
-    refreshUnreadCounts,
-    refreshPreviews,
-    clearPendingOpen,
-    outbox,
-    clearConversation,
-  } = useChatStore();
 
   // Delete chats for me: one trace for the action, one proc call per chat in
   // order, stopping at the first failure. Each accepted clear empties the card
@@ -193,15 +167,15 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     return () => setActive(null);
   }, [selectedChannelId, setActive, markConversationRead]);
 
-  // A toast press asks the store to open a channel; consume it once the list is
-  // loaded by selecting that channel, then clear the request.
+  // A toast press asks the store to open a channel; consume it once the roster
+  // is ready by selecting that channel, then clear the request.
   const pendingOpen = chatStore.pendingOpenConversationId;
   useEffect(() => {
-    if (pendingOpen === null || channels.length === 0) return;
-    const found = channels.find((channel) => channel.channelId === pendingOpen);
+    if (pendingOpen === null || loadStatus !== 'ready') return;
+    const found = roster.find((channel) => channel.channelId === pendingOpen);
     if (found !== undefined) setSelected(found);
     clearPendingOpen();
-  }, [pendingOpen, channels, clearPendingOpen]);
+  }, [pendingOpen, loadStatus, roster, clearPendingOpen]);
 
   // Keyed on the channel the send was recorded in, which may no longer be open.
   const onOwnMessage = useCallback(
@@ -275,7 +249,9 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       {showList ? (
         <div className="h-full w-full border-border md:w-72 md:border-r">
           <ChannelList
-            channels={channels}
+            channels={roster}
+            status={loadStatus}
+            onRetry={retryLoad}
             selectedChannelId={selected?.channelId ?? null}
             onSelect={setSelected}
             onNewChat={() => setNewChatOpen(true)}
@@ -309,7 +285,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               onSetMark={marks.setMark}
               onResolveMark={marks.resolve}
               onDeleteMessages={thread.deleteMessages}
-              forwardChannels={channels}
+              forwardChannels={roster}
               onForward={thread.forward}
               onEnsureLoaded={thread.ensureLoaded}
               showTicks={selected.channelType === 'dm'}

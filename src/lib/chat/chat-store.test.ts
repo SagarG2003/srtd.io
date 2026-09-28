@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   applyClear,
   applyClears,
+  applyRoster,
+  beginLoad,
+  loadFailed,
+  loadReady,
+  loadScope,
+  selectLoadStatus,
   isChannelHidden,
   outboxDropChannel,
   selectHidden,
@@ -334,5 +340,70 @@ describe('delete chat for me (clears)', () => {
     const outbox: Outbox = { a: [entry], b: [entry] };
     expect(outboxDropChannel(outbox, 'a')).toEqual({ b: [entry] });
     expect(outboxDropChannel(outbox, 'z')).toBe(outbox);
+  });
+});
+
+describe('load lifecycle', () => {
+  const scope = loadScope('w1', ME);
+  const roster = [
+    {
+      channelId: 'a',
+      channelType: 'group' as const,
+      title: 'A',
+      avatarUrl: null,
+      agoraGroupId: 'ag',
+      groupId: 'g',
+      peerUserId: null,
+      createdAt: 't',
+    },
+  ];
+
+  it('starts loading and reads loading for any other scope', () => {
+    expect(selectLoadStatus(initialState(), scope)).toBe('loading');
+    expect(selectLoadStatus(beginLoad(initialState(), scope), scope)).toBe('loading');
+    expect(selectLoadStatus(beginLoad(initialState(), scope), null)).toBe('loading');
+  });
+
+  it('loadReady applies roster, clears, previews and counts in one transition', () => {
+    const ready = loadReady(beginLoad(initialState(), scope), {
+      scope,
+      roster,
+      clears: [{ channelId: 'a', clearedAt: '1970-01-01T00:00:00.050Z' }],
+      previews: [],
+      counts: [{ channelId: 'a', unread: 4, lastMessageAt: '1970-01-01T00:00:00.040Z' }],
+      currentUserId: ME,
+    });
+    expect(selectLoadStatus(ready, scope)).toBe('ready');
+    expect(ready.roster).toBe(roster);
+    expect(selectHidden(ready, 'a')).toBe(true);
+    expect(selectConversation(ready, 'a')?.unread).toBe(0);
+  });
+
+  it('loadFailed drops every row; stale scopes are ignored', () => {
+    const other = beginLoad(initialState(), loadScope('w2', ME));
+    expect(loadFailed(other, scope)).toBe(other);
+    const failed = loadFailed(beginLoad(initialState(), scope), scope);
+    expect(failed.status).toBe('error');
+    expect(failed.roster).toEqual([]);
+  });
+
+  it('beginLoad keeps the viewed channel only for a same-scope retry', () => {
+    const viewing = setActive(beginLoad(initialState(), scope), 'a');
+    expect(beginLoad(viewing, scope).activeConversationId).toBe('a');
+    expect(beginLoad(viewing, loadScope('w2', ME)).activeConversationId).toBeNull();
+  });
+
+  it('applyRoster keeps known summaries and keys new channels empty', () => {
+    const base = applyUnreadCounts(mergeInitial([{ channelId: 'a' }]), [
+      { channelId: 'a', unread: 1, lastMessageAt: '1970-01-01T00:00:00.010Z' },
+    ]);
+    const next = applyRoster(base, [...roster, { ...roster[0]!, channelId: 'b' }]);
+    expect(selectConversation(next, 'a')?.unread).toBe(1);
+    expect(selectConversation(next, 'b')).toEqual({
+      lastMessageText: '',
+      lastMessageTs: 0,
+      unread: 0,
+    });
+    expect(next.roster.map((c) => c.channelId)).toEqual(['a', 'b']);
   });
 });
