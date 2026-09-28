@@ -15,7 +15,7 @@ const PEER2 = '33333333-3333-4333-8333-333333333333';
 // yields the configured result. Mirrors src/lib/assets.test.ts.
 function builder(result: { data: unknown; error: { message: string } | null }) {
   const b: Record<string, unknown> = {};
-  for (const method of ['select', 'eq', 'order', 'in']) {
+  for (const method of ['select', 'eq', 'order', 'in', 'is']) {
     b[method] = () => b;
   }
   b.then = (resolve: (v: unknown) => unknown) => Promise.resolve(result).then(resolve);
@@ -199,6 +199,114 @@ describe('listChannelSummaries', () => {
     const { client } = makeClient({
       chat_channels: { data: null, error: { message: 'boom' } },
     });
+    const result = await listChannelSummaries(client, { workspaceId: 'w1', currentUserId: ME });
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe('listChannelSummaries peer roles', () => {
+  const dmChannels = {
+    data: [
+      {
+        channel_id: 'd1',
+        channel_type: 'dm',
+        entity_id: null,
+        agora_group_id: null,
+        dm_user_a: ME,
+        dm_user_b: PEER1,
+        created_at: 't2',
+      },
+      {
+        channel_id: 'd2',
+        channel_type: 'dm',
+        entity_id: null,
+        agora_group_id: null,
+        dm_user_a: PEER2,
+        dm_user_b: ME,
+        created_at: 't1',
+      },
+      {
+        channel_id: 'g1',
+        channel_type: 'group',
+        entity_id: 'grp1',
+        agora_group_id: 'ag1',
+        dm_user_a: null,
+        dm_user_b: null,
+        created_at: 't0',
+      },
+    ],
+    error: null,
+  };
+
+  // Records every chained call on the workspace_members builder.
+  function recordingClient(members: { data: unknown; error: { message: string } | null }) {
+    const calls: [string, unknown[]][] = [];
+    const tables: Record<string, { data: unknown; error: { message: string } | null }> = {
+      chat_channels: dmChannels,
+      groups: { data: [{ id: 'grp1', name: 'Alpha' }], error: null },
+      users: {
+        data: [
+          { id: PEER1, display_name: 'Ada', avatar_url: null },
+          { id: PEER2, display_name: 'Bay', avatar_url: null },
+        ],
+        error: null,
+      },
+    };
+    const from = vi.fn((table: string) => {
+      if (table !== 'workspace_members') return builder(tables[table] ?? { data: [], error: null });
+      const b: Record<string, unknown> = {};
+      for (const method of ['select', 'eq', 'in', 'is']) {
+        b[method] = (...args: unknown[]) => {
+          calls.push([method, args]);
+          return b;
+        };
+      }
+      b.then = (resolve: (v: unknown) => unknown) => Promise.resolve(members).then(resolve);
+      return b;
+    });
+    return { client: { from } as unknown as Client, from, calls };
+  }
+
+  it('reads active peer roles in one batched workspace_members query', async () => {
+    const { client, from, calls } = recordingClient({
+      data: [{ user_id: PEER1, role: 'client' }],
+      error: null,
+    });
+    await listChannelSummaries(client, { workspaceId: 'w1', currentUserId: ME });
+    expect(from.mock.calls.filter(([t]) => t === 'workspace_members')).toHaveLength(1);
+    expect(calls).toEqual([
+      ['select', ['user_id, role']],
+      ['eq', ['workspace_id', 'w1']],
+      ['eq', ['active', true]],
+      ['is', ['removed_at', null]],
+      ['in', ['user_id', [PEER1, PEER2]]],
+    ]);
+  });
+
+  it('merges role onto DM summaries; null when absent and for groups', async () => {
+    const { client } = recordingClient({
+      data: [{ user_id: PEER1, role: 'agency' }],
+      error: null,
+    });
+    const result = await listChannelSummaries(client, { workspaceId: 'w1', currentUserId: ME });
+    expect(result.ok && result.data.map((c) => [c.channelId, c.role])).toEqual([
+      ['d1', 'agency'],
+      ['d2', null],
+      ['g1', null],
+    ]);
+  });
+
+  it('skips the members read when there are no DM peers', async () => {
+    const { client, from } = makeClient({
+      chat_channels: { data: [dmChannels.data[2]], error: null },
+      groups: { data: [{ id: 'grp1', name: 'Alpha' }], error: null },
+    });
+    await listChannelSummaries(client, { workspaceId: 'w1', currentUserId: ME });
+    expect(from.mock.calls.filter(([t]) => t === 'workspace_members')).toHaveLength(0);
+  });
+
+  it('surfaces a members read failure as a Result error', async () => {
+    const { client } = recordingClient({ data: null, error: { message: 'denied' } });
     const result = await listChannelSummaries(client, { workspaceId: 'w1', currentUserId: ME });
     expect(result.ok).toBe(false);
   });

@@ -36,6 +36,7 @@ import { classifyAttachment, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
 import { formatMessageTime } from '@/lib/chat/time-format';
 import type { PresignCache } from '@/lib/asset-presign';
+import { roleLabel } from '@/components/pages/settings/members-data';
 import { Composer, type ComposerSend } from '@/components/chat/Composer';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
 import { SharedPostCards } from '@/components/chat/PostCard';
@@ -70,8 +71,10 @@ interface MessageThreadProps {
   title: string;
   /** Header avatar src (the DM peer's); absent or null falls back to initials. */
   avatarUrl?: string | null;
-  /** Header second line for a DM (the workspace name); absent shows presence instead. */
+  /** The workspace name, the tail of a DM header's resting second line. */
   subtitle?: string;
+  /** The DM peer's raw workspace role; labelled via roleLabel, null when unknown. */
+  role?: string | null;
   /** Sender display info keyed by Sorted user id; batched read, never per-row. */
   profiles: Map<string, ChatProfile>;
   messages: ThreadMessage[];
@@ -201,6 +204,39 @@ export function lastSeenLabel(lastTimeMs: number | null, nowMs: number, timeZone
   return `last seen ${Math.floor(hours / 24)}d ago at ${formatMessageTime(lastTimeMs, timeZone)}`;
 }
 
+/** A DM header's second line while the peer is typing. */
+export const HEADER_TYPING = 'typing…';
+
+/**
+ * The DM header's second line, in priority order: 'typing…' while the peer
+ * types, 'Online' while present, else "<role label> · <workspace>" (the
+ * workspace alone when the role is unknown). Without a workspace name it falls
+ * back to the role alone, then the last-seen line. Groups keep no second line.
+ */
+export function dmHeaderLine(input: {
+  isGroup: boolean;
+  peerTyping: boolean;
+  presence: { online: boolean; lastTimeMs: number | null; available: boolean } | undefined;
+  role: string | null;
+  workspaceName: string | undefined;
+  timeZone: string;
+  nowMs?: number;
+}): string | null {
+  if (input.isGroup) return null;
+  if (input.peerTyping) return HEADER_TYPING;
+  const presence = input.presence?.available === true ? input.presence : undefined;
+  if (presence?.online === true) return 'Online';
+  const role = input.role !== null ? roleLabel(input.role) : null;
+  if (input.workspaceName !== undefined) {
+    return role !== null ? `${role} · ${input.workspaceName}` : input.workspaceName;
+  }
+  if (role !== null) return role;
+  if (presence !== undefined) {
+    return lastSeenLabel(presence.lastTimeMs, input.nowMs ?? Date.now(), input.timeZone);
+  }
+  return null;
+}
+
 /**
  * Human label for who is typing, capped so the row never grows: one or two known
  * names are spelled out, otherwise a count or a generic phrase. Returns null
@@ -259,6 +295,16 @@ function senderAvatarProps(
 }
 
 /**
+ * The one timestamp a message's time label and aria-label both read: the server
+ * createdAt, or the Agora time only while createdAt is absent (provisional).
+ */
+export function messageTimeSource(
+  message: Pick<ThreadMessage, 'createdAt' | 'time'>,
+): string | number {
+  return message.createdAt !== '' ? message.createdAt : message.time;
+}
+
+/**
  * The footer label for a bubble: the server time on the workspace clock once
  * the message is recorded, 'Sending' while the record write is in flight or
  * retrying (shown as a clock, the label is for screen readers), and 'Not sent'
@@ -267,7 +313,7 @@ function senderAvatarProps(
 export function bubbleTimeLabel(message: ThreadMessage, timeZone: string): string {
   if (message.state === 'sending') return 'Sending';
   if (message.state === 'failed') return 'Not sent';
-  return formatMessageTime(message.createdAt, timeZone);
+  return formatMessageTime(messageTimeSource(message), timeZone);
 }
 
 /** What the line under an own bubble shows; null renders no line. */
@@ -318,9 +364,10 @@ function StatusLine({ status }: { status: BubbleStatus }): ReactElement {
 }
 
 /**
- * The bubble shell: own on the solid accent (the primary Button's fill and ink),
- * peer on panel-2, no border. 18px radius; the 4px tail corner on the sender side
- * only on the last bubble of a run.
+ * The bubble shell: own on the bubble-own fill (the accent in light, a deeper
+ * accent in dark so accent-fg ink clears 4.5:1), peer on panel-2, no border.
+ * 18px radius; the 4px tail corner on the sender side only on the last bubble
+ * of a run.
  */
 export function bubbleClass(state: {
   mine: boolean;
@@ -333,13 +380,29 @@ export function bubbleClass(state: {
   return cn(
     'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-[18px] px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
     state.voiceOnly && 'min-w-[220px]',
-    state.mine ? 'bg-accent text-accent-fg' : 'bg-panel-2 text-fg',
+    state.mine ? 'bg-bubble-own text-accent-fg' : 'bg-panel-2 text-fg',
     state.tail && (state.mine ? 'rounded-br-[4px]' : 'rounded-bl-[4px]'),
     state.sending && 'opacity-70',
     state.failed && 'border border-bad',
     state.checked && 'ring-2 ring-accent ring-offset-2 ring-offset-bg',
   );
 }
+
+/**
+ * Own-bubble inner content (reply quote, file chips, shared cards, voice note)
+ * restyled for the solid fill without touching the shared child components:
+ * ink goes accent-fg (secondary at opacity-80), surfaces a white/16 overlay,
+ * the quote rule and played waveform white/70, icons follow currentColor. White
+ * is accent-fg's value in both themes. Peer bubbles never get this class.
+ */
+export const OWN_BUBBLE_CONTENT = cn(
+  '[&_.bg-panel]:bg-white/[.16] [&_.bg-panel-3]:bg-white/[.16] [&_.border-border]:border-white/[.16]',
+  '[&_button:hover]:bg-white/[.24] [&_a:hover>span]:bg-white/[.24]',
+  '[&_.bg-accent]:bg-white/70 [&_.bg-accent.text-accent-fg]:bg-white/[.16] [&_.bg-fg-3]:bg-white/40',
+  '[&_.text-fg]:text-accent-fg [&_.text-accent]:text-accent-fg',
+  '[&_.text-fg-2]:text-accent-fg [&_.text-fg-2]:opacity-80',
+  '[&_.text-fg-3]:text-accent-fg [&_.text-fg-3]:opacity-80',
+);
 
 /** Message body text at 15px; the ink comes from the bubble (fg or accent-fg). */
 const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-[1.4]';
@@ -367,6 +430,8 @@ export function MessageBubble(props: {
   head: boolean;
   /** Last bubble of its run: tail corner and the Delivered / Read line. */
   tail: boolean;
+  /** Directly under a TimeLabel or DayPill, which carries the gap: no top padding. */
+  afterLabel?: boolean;
   timeZone: string;
   onBadgeClick: () => void;
   onRetry?: (messageId: string) => void;
@@ -417,7 +482,7 @@ export function MessageBubble(props: {
       data-selection={selection?.role}
       className={cn(
         'group flex items-start gap-2 px-4',
-        head ? 'pt-2.5' : 'pt-0.5',
+        head ? (props.afterLabel === true ? 'pt-0' : 'pt-2.5') : 'pt-0.5',
         mine ? 'flex-row-reverse' : 'flex-row',
         hasReactions && 'mb-3',
       )}
@@ -471,38 +536,40 @@ export function MessageBubble(props: {
               : {})}
           />
           {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
-          {reply !== null ? (
-            <ReplyQuoteBox
-              author={
-                reply.authorUserId !== null
-                  ? (profiles.get(reply.authorUserId)?.displayName ?? 'Member')
-                  : 'Member'
-              }
-              preview={reply.preview}
-              onJump={() => props.onJumpToMessage?.(reply.id)}
-              className="mb-1"
-            />
-          ) : null}
-          {textOnly ? (
-            <p className={BODY_TEXT}>{message.body}</p>
-          ) : voiceOnly ? (
-            <MessageAttachments
-              attachments={message.attachments}
-              cache={cache}
-              presignEnabled={presignEnabled}
-            />
-          ) : (
-            <>
-              {message.body.trim() !== '' ? <p className={BODY_TEXT}>{message.body}</p> : null}
+          <div data-bubble-content="" className={cn('contents', mine && OWN_BUBBLE_CONTENT)}>
+            {reply !== null ? (
+              <ReplyQuoteBox
+                author={
+                  reply.authorUserId !== null
+                    ? (profiles.get(reply.authorUserId)?.displayName ?? 'Member')
+                    : 'Member'
+                }
+                preview={reply.preview}
+                onJump={() => props.onJumpToMessage?.(reply.id)}
+                className="mb-1"
+              />
+            ) : null}
+            {textOnly ? (
+              <p className={BODY_TEXT}>{message.body}</p>
+            ) : voiceOnly ? (
               <MessageAttachments
                 attachments={message.attachments}
                 cache={cache}
                 presignEnabled={presignEnabled}
               />
-              <SharedPostCards postIds={message.sharedPostIds} />
-              <SharedBriefCards briefIds={message.sharedBriefIds} />
-            </>
-          )}
+            ) : (
+              <>
+                {message.body.trim() !== '' ? <p className={BODY_TEXT}>{message.body}</p> : null}
+                <MessageAttachments
+                  attachments={message.attachments}
+                  cache={cache}
+                  presignEnabled={presignEnabled}
+                />
+                <SharedPostCards postIds={message.sharedPostIds} />
+                <SharedBriefCards briefIds={message.sharedBriefIds} />
+              </>
+            )}
+          </div>
           {hasReactions ? (
             <button
               type="button"
@@ -514,7 +581,9 @@ export function MessageBubble(props: {
             >
               <span aria-hidden="true">{distinctEmojis}</span>
               {totalReactions > 1 ? (
-                <span className="text-[11px] text-fg-3">{totalReactions}</span>
+                <span className={cn('text-[11px]', mine ? 'text-fg-2' : 'text-fg-3')}>
+                  {totalReactions}
+                </span>
               ) : null}
             </button>
           ) : null}
@@ -595,10 +664,7 @@ export function threadRows(
     const head = afterDay || breaksRun(prev, message);
     const tail = next === undefined || beforeDay || breaksRun(message, next);
     if (afterDay || (prev !== undefined && isTimeGap(prev, message))) {
-      const label = formatMessageTime(
-        message.time > 0 ? message.time : message.createdAt,
-        timeZone,
-      );
+      const label = formatMessageTime(messageTimeSource(message), timeZone);
       if (label !== '') rows.push({ kind: 'time', key: `time-${message.id}`, label });
     }
     rows.push({ kind: 'message', message, head, tail });
@@ -609,10 +675,48 @@ export function threadRows(
 /** The centred run time label: mono, tabular, tertiary. No motion. */
 export function TimeLabel({ label }: { label: string }): ReactElement {
   return (
-    <li className="flex justify-center pt-2.5">
+    <li className="flex justify-center pb-1.5 pt-2.5">
       <span className="font-mono text-[11px] tabular-nums text-fg-3">{label}</span>
     </li>
   );
+}
+
+/**
+ * The message list: a flex column so the leading spacer (mt-auto) takes the
+ * slack above the first message and a short thread pins to the bottom. Never
+ * justify-end on the scroll container; the spacer collapses to 0 on overflow.
+ */
+export const THREAD_LIST_CLASS = 'flex flex-1 flex-col overflow-y-auto py-2';
+
+/**
+ * The list's children in order: the bottom-pin spacer, the older-page row, then
+ * the grouped rows. A message row learns whether it sits directly under a time
+ * label or day pill (afterLabel) so the label carries the gap. Pure.
+ */
+export function threadListItems(
+  rows: readonly ThreadRow[],
+  loadingOlder: boolean,
+  renderMessage: (
+    row: Extract<ThreadRow, { kind: 'message' }>,
+    afterLabel: boolean,
+  ) => ReactElement,
+): ReactElement[] {
+  const items: ReactElement[] = [
+    <li key="thread-spacer" aria-hidden="true" data-thread-spacer="" className="mt-auto" />,
+  ];
+  if (loadingOlder) {
+    items.push(
+      <li key="loading-older" className="px-4 py-2 text-center text-xs text-fg-3">
+        Loading earlier messages
+      </li>,
+    );
+  }
+  rows.forEach((row, i) => {
+    if (row.kind === 'day') items.push(<DayPill key={row.key} label={row.label} />);
+    else if (row.kind === 'time') items.push(<TimeLabel key={row.key} label={row.label} />);
+    else items.push(renderMessage(row, i > 0 && rows[i - 1]?.kind !== 'message'));
+  });
+  return items;
 }
 
 /**
@@ -629,6 +733,7 @@ function MessageRow(props: {
   isGroup: boolean;
   head: boolean;
   tail: boolean;
+  afterLabel: boolean;
   timeZone: string;
   onOpen: (message: ThreadMessage, rect: DOMRect | null) => void;
   onRetry?: (messageId: string) => void;
@@ -669,6 +774,7 @@ function MessageRow(props: {
       isGroup={props.isGroup}
       head={props.head}
       tail={props.tail}
+      afterLabel={props.afterLabel}
       timeZone={props.timeZone}
       bubbleRef={bubbleRef}
       press={{
@@ -869,19 +975,15 @@ function ThreadBody(
             props.onLoadOlder?.();
           }
         }}
-        className="flex-1 overflow-y-auto py-2"
+        className={THREAD_LIST_CLASS}
       >
-        {props.loadingOlder === true ? (
-          <li className="px-4 py-2 text-center text-xs text-fg-3">Loading earlier messages</li>
-        ) : null}
-        {threadRows(props.messages, nowMs, props.timeZone).map((row) => {
-          if (row.kind === 'day') return <DayPill key={row.key} label={row.label} />;
-          if (row.kind === 'time') return <TimeLabel key={row.key} label={row.label} />;
-          const { message } = row;
-          return (
+        {threadListItems(
+          threadRows(props.messages, nowMs, props.timeZone),
+          props.loadingOlder === true,
+          (row, afterLabel) => (
             <MessageRow
-              key={message.id}
-              message={message}
+              key={row.message.id}
+              message={row.message}
               profiles={props.profiles}
               cache={props.cache}
               presignEnabled={props.presignEnabled}
@@ -889,23 +991,24 @@ function ThreadBody(
               isGroup={props.isGroup}
               head={row.head}
               tail={row.tail}
+              afterLabel={afterLabel}
               timeZone={props.timeZone}
               onOpen={(m, rect) => setMenu({ message: m, rect })}
               hoverMenu={hoverMenu}
               onJumpToMessage={scrollToMessage}
-              mark={props.marks.get(message.id)}
+              mark={props.marks.get(row.message.id)}
               {...(props.onChangePriority !== undefined
                 ? { onChangePriority: props.onChangePriority }
                 : {})}
               {...(props.selection !== undefined
                 ? {
-                    selection: rowSelection(message, props.selection),
+                    selection: rowSelection(row.message, props.selection),
                   }
                 : {})}
               {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
             />
-          );
-        })}
+          ),
+        )}
       </ul>
       <MessageActionMenu
         open={menu !== null}
@@ -958,7 +1061,7 @@ function ThreadBody(
 export function DayPill({ label }: { label: string }): ReactElement {
   return (
     <li role="separator" aria-label={label} className="flex justify-center">
-      <span className="self-center my-2 rounded-full border border-border bg-panel-2 px-2.5 py-0.5 text-[11px] font-medium text-fg-3">
+      <span className="self-center mb-1.5 mt-2 rounded-full border border-border bg-panel-2 px-2.5 py-0.5 text-[11px] font-medium text-fg-3">
         {label}
       </span>
     </li>
@@ -1077,6 +1180,14 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       quote: { id: message.id, authorUserId: message.senderUserId, preview },
     });
   };
+  const headerLine = dmHeaderLine({
+    isGroup: props.isGroup === true,
+    peerTyping: props.typingUserIds.length > 0,
+    presence: props.presence,
+    role: props.role ?? null,
+    workspaceName: props.subtitle,
+    timeZone: props.timeZone,
+  });
   return (
     <div className="flex h-full flex-col bg-bg">
       <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-2 md:px-4">
@@ -1108,13 +1219,9 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           <span className="block truncate text-[15px] font-semibold leading-tight text-fg">
             {props.title}
           </span>
-          {props.subtitle !== undefined ? (
-            <span className="truncate text-xs text-fg-3">{props.subtitle}</span>
-          ) : props.presence !== undefined && props.presence.available ? (
-            <span className="truncate text-xs text-fg-3">
-              {props.presence.online
-                ? 'Online'
-                : lastSeenLabel(props.presence.lastTimeMs, Date.now(), props.timeZone)}
+          {headerLine !== null ? (
+            <span data-header-line="" className="truncate text-xs text-fg-3">
+              {headerLine}
             </span>
           ) : null}
         </div>

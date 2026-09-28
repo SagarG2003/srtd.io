@@ -19,6 +19,7 @@ type GroupRow = Database['public']['Tables']['groups']['Row'];
 type GroupMemberRow = Database['public']['Tables']['group_members']['Row'];
 type UserRow = Database['public']['Tables']['users']['Row'];
 type ChannelClearRow = Database['public']['Tables']['chat_channel_clears']['Row'];
+type WorkspaceMemberRow = Database['public']['Tables']['workspace_members']['Row'];
 
 /** A user's display info, the slice the chat UI shows. */
 export interface ChatProfile {
@@ -41,6 +42,12 @@ export interface ChannelSummary {
   groupId: string | null;
   /** The DM peer's Sorted user id (the participant who is not the current user). */
   peerUserId: string | null;
+  /**
+   * The DM peer's workspace_members.role (raw value, labelled at render); null for
+   * groups or when the peer has no active membership row. Optional so summaries
+   * built elsewhere (tests, pickers) need not carry it.
+   */
+  role?: string | null;
   createdAt: string;
 }
 
@@ -63,12 +70,14 @@ export function dmPeerId(
  * unit-tested without a client: group channels take their name from groupsById
  * (keyed by entity_id), DM channels take the peer's name/avatar from usersById.
  * Unknown ids fall back to a neutral label so a missing row never blanks the row.
+ * rolesByUserId carries each DM peer's workspace role; a missing entry is null.
  */
 export function shapeChannelSummaries(
   channels: ChatChannelRow[],
   groupsById: Map<string, GroupRow>,
   usersById: Map<string, UserRow>,
   currentUserId: string,
+  rolesByUserId: Map<string, string> = new Map(),
 ): ChannelSummary[] {
   return channels.map((channel) => {
     if (channel.channel_type === 'group') {
@@ -81,6 +90,7 @@ export function shapeChannelSummaries(
         agoraGroupId: channel.agora_group_id,
         groupId: channel.entity_id,
         peerUserId: null,
+        role: null,
         createdAt: channel.created_at,
       };
     }
@@ -94,6 +104,7 @@ export function shapeChannelSummaries(
       agoraGroupId: channel.agora_group_id,
       groupId: null,
       peerUserId: peerId,
+      role: peerId !== null ? (rolesByUserId.get(peerId) ?? null) : null,
       createdAt: channel.created_at,
     };
   });
@@ -107,8 +118,9 @@ function indexBy<T>(rows: T[], key: (row: T) => string): Map<string, T> {
 
 /**
  * List a workspace's chat channels, newest first, each enriched with display
- * info. Three round-trips total regardless of channel count: the channel
- * registry, then one batched groups read and one batched users read. Last-message
+ * info. Four round-trips total regardless of channel count: the channel
+ * registry, then one batched groups read, one batched users read and one batched
+ * workspace_members read for the DM peers' roles. Last-message
  * preview and unread counts are a later enhancement and are not built here.
  */
 export async function listChannelSummaries(
@@ -134,6 +146,8 @@ export async function listChannelSummaries(
   if (!groupsRes.ok) return groupsRes;
   const usersRes = await readUsers(client, peerIds);
   if (!usersRes.ok) return usersRes;
+  const rolesRes = await readMemberRoles(client, params.workspaceId, peerIds);
+  if (!rolesRes.ok) return rolesRes;
 
   return {
     ok: true,
@@ -142,6 +156,7 @@ export async function listChannelSummaries(
       indexBy(groupsRes.data, (g) => g.id),
       indexBy(usersRes.data, (u) => u.id),
       params.currentUserId,
+      new Map(rolesRes.data.map((m) => [m.user_id, m.role])),
     ),
   };
 }
@@ -218,6 +233,27 @@ async function readUsers(client: Client, ids: string[]): Promise<Result<UserRow[
   const res = await client.from('users').select('id, display_name, avatar_url').in('id', ids);
   if (res.error) return fail(`readProfiles users: ${res.error.message}`);
   return { ok: true, data: (res.data ?? []) as UserRow[] };
+}
+
+/**
+ * One batched read of the peers' active memberships in this workspace (active and
+ * not removed, the Members panel's definition). No embed, no per-row query.
+ */
+async function readMemberRoles(
+  client: Client,
+  workspaceId: string,
+  userIds: string[],
+): Promise<Result<Pick<WorkspaceMemberRow, 'user_id' | 'role'>[]>> {
+  if (userIds.length === 0) return { ok: true, data: [] };
+  const res = await client
+    .from('workspace_members')
+    .select('user_id, role')
+    .eq('workspace_id', workspaceId)
+    .eq('active', true)
+    .is('removed_at', null)
+    .in('user_id', userIds);
+  if (res.error) return fail(`listChannelSummaries members: ${res.error.message}`);
+  return { ok: true, data: (res.data ?? []) as Pick<WorkspaceMemberRow, 'user_id' | 'role'>[] };
 }
 
 function unique(values: (string | null)[]): string[] {

@@ -127,6 +127,19 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     else writeChannelParam(null);
   }, [loadStatus, roster, searchParams, writeChannelParam]);
 
+  // A ?channel= that disappears by any route other than closeChannel (browser
+  // back, external navigation) closes the thread below md so the chrome returns.
+  // Only the present -> absent transition counts, so an open that sets state
+  // before its param lands never reads as a close. Desktop keeps its selection.
+  const channelParam = searchParams.get('channel') || null;
+  const prevChannelParam = useRef(channelParam);
+  useEffect(() => {
+    const prev = prevChannelParam.current;
+    prevChannelParam.current = channelParam;
+    if (prev === null || channelParam !== null || isDesktop) return;
+    if (selectedRef.current !== null) setSelected(null);
+  }, [channelParam, isDesktop]);
+
   // Re-read the store's roster after a mutation. When channelId is given, the
   // matching (possibly newly created) channel is selected and opened.
   const refreshChannels = useCallback(
@@ -302,6 +315,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               title={selected.title}
               avatarUrl={selected.avatarUrl}
               {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
+              {...(!isGroup ? { role: selected.role ?? null } : {})}
               isGroup={isGroup}
               profiles={profiles}
               messages={thread.messages}

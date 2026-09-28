@@ -23,6 +23,9 @@
   --accent-fg: #ffffff;
   --accent-soft: rgba(94, 106, 210, 0.1);
   --accent-line: rgba(94, 106, 210, 0.3);
+  /* Own chat bubble fill. Light matches the accent; dark goes deeper than the
+     accent so accent-fg ink clears 4.5:1 (#5560d0 on #ffffff is 5.3:1). */
+  --bubble-own: #5e6ad2;
   --good: #3e7d54;
   --warn: #b8772b;
   --bad: #c2392b;
@@ -70,6 +73,7 @@
   --accent-fg: #ffffff;
   --accent-soft: rgba(111, 121, 227, 0.16);
   --accent-line: rgba(111, 121, 227, 0.34);
+  --bubble-own: #5560d0;
   --good: #5fb07d;
   --warn: #d59a4a;
   --bad: #e0685a;
