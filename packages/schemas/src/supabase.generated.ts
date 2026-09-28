@@ -8043,6 +8043,7 @@ export type Database = {
         Args: { p_workspace_id: string }
         Returns: boolean
       }
+      is_group_member: { Args: { p_group_id: string }; Returns: boolean }
       member_accept: {
         Args: { p_invite_id: string; p_trace_id: string }
         Returns: string

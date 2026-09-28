@@ -284,13 +284,15 @@ PK id. Fields: workspace_id FK, name ^[A-Za-z0-9 -]{1,40}$, created_by FK, creat
 
 PK (group_id, user_id). Fields: workspace_id FK, joined_at. user_id FK auth.users.id.
 
+Group auto-archives (deleted_at set) when its last member leaves or is removed. No manual group delete.
+
 ### Group + channel procs (A2a)
 
 Six SECURITY DEFINER procs (search_path='', EXECUTE to authenticated only): group_create, group_rename, group_member_add, group_member_remove, group_leave, dm_channel_ensure. group_create also seeds the group chat_channels row; dm_channel_ensure upserts the dm channel. Gating: group_create / dm_channel_ensure require an active workspace member; group_rename / group_member_add / group_member_remove require the group creator or a workspace owner/admin; group_leave is self only.
 
 ## 7. Chat (Postgres record)
 
-Chat record: public.chat_messages is the single source of truth for chat history and the only read path. Every send calls chat_message_send (client-generated uuid_v7 id, server-stamped created_at, idempotent) BEFORE publishing to Agora; the Agora message carries the Sorted id in ext for dedupe. Agora is live delivery only: never read for history, never the record. Agora Free plan, no server callbacks. Access: chat_channel_member(channel_id, uid) gates every chat table; DMs are visible only to the two participants, group channels only to group_members. Reactions in chat_reactions, read position in chat_read_cursors. Membership and rename changes to Agora flow through the chat_sync_events outbox, drained by the chat-agora-sync worker. chat_message_save and chat_webhook_ingest are retired (drop pending).
+Chat record: public.chat_messages is the single source of truth for chat history and the only read path. Every send calls chat_message_send (client-generated uuid_v7 id, server-stamped created_at, idempotent) BEFORE publishing to Agora; the Agora message carries the Sorted id in ext for dedupe. Agora is live delivery only: never read for history, never the record. Agora Free plan, no server callbacks. Access: chat_channel_member(channel_id, uid) gates every chat table; DMs are visible only to the two participants, group channels only to group_members. chat_channels, groups, group_members SELECT = participants/group members only (plan_period channels: all active members). Reactions in chat_reactions, read position in chat_read_cursors. Membership and rename changes to Agora flow through the chat_sync_events outbox, drained by the chat-agora-sync worker. chat_message_save and chat_webhook_ingest are retired (drop pending).
 
 chat_messages carries shared_post_ids, reply_to_message_id and attachment_meta (mime, name, size, duration_ms per asset id); workspace_members.active flips enqueue member_add/member_remove for every group channel the user is in.
 
