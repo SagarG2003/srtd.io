@@ -26,6 +26,7 @@ import {
   type RenameFolderConfig,
   type RenameConfig,
   type UploadConfig,
+  type UploadFetcher,
 } from '@/lib/asset-upload';
 
 /** A File of an arbitrary reported size without allocating the bytes. */
@@ -39,7 +40,7 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status });
 }
 
-const baseConfig = (fetcher: UploadConfig['fetcher'], filename = 'file.png'): UploadConfig => ({
+const baseConfig = (fetcher: UploadFetcher, filename = 'file.png'): UploadConfig => ({
   endpoint: 'https://upload.example.workers.dev',
   token: 'tok',
   workspaceId: 'ws-1',
@@ -623,6 +624,120 @@ describe('deleteFolderRequest', () => {
     expect(out).toEqual({
       ok: false,
       message: "Couldn't delete the folder. Check your connection and retry",
+    });
+  });
+});
+
+/** A minimal XMLHttpRequest double: emits `ticks`, then answers `status`/`body` (or errors). */
+function fakeXhr(opts: {
+  status?: number;
+  body?: unknown;
+  ticks?: [number, number][];
+  transportError?: boolean;
+}) {
+  const request = {
+    method: '',
+    url: '',
+    headers: {} as Record<string, string>,
+    sent: null as unknown,
+    status: 0,
+    responseText: '',
+    upload: { onprogress: null as ((event: ProgressEvent) => void) | null },
+    onload: null as (() => void) | null,
+    onerror: null as (() => void) | null,
+    onabort: null as (() => void) | null,
+    ontimeout: null as (() => void) | null,
+    open(method: string, url: string) {
+      request.method = method;
+      request.url = url;
+    },
+    setRequestHeader(name: string, value: string) {
+      request.headers[name] = value;
+    },
+    send(body: unknown) {
+      request.sent = body;
+      for (const [loaded, total] of opts.ticks ?? []) {
+        request.upload.onprogress?.({ lengthComputable: true, loaded, total } as ProgressEvent);
+      }
+      if (opts.transportError === true) {
+        request.onerror?.();
+        return;
+      }
+      request.status = opts.status ?? 201;
+      request.responseText = opts.body === undefined ? '' : JSON.stringify(opts.body);
+      request.onload?.();
+    },
+  };
+  return request;
+}
+
+function xhrConfig(request: ReturnType<typeof fakeXhr>, onProgress?: (f: number) => void) {
+  return {
+    endpoint: 'https://upload.example.workers.dev',
+    token: 'tok',
+    workspaceId: 'ws-1',
+    filename: 'logo.png',
+    xhr: {
+      traceId: 'trace-1',
+      createRequest: () => request as unknown as XMLHttpRequest,
+      ...(onProgress !== undefined ? { onProgress } : {}),
+    },
+  };
+}
+
+describe('uploadAssetFile over XMLHttpRequest (progress)', () => {
+  it('POSTs the same multipart body and headers, reports progress, and resolves the same shape', async () => {
+    const request = fakeXhr({
+      status: 201,
+      body: { asset: { assetId: 'a-1', versionId: 'v-1', reused: false } },
+      ticks: [
+        [0, 10],
+        [5, 10],
+        [10, 10],
+      ],
+    });
+    const progress: number[] = [];
+    const file = fakeFile('logo.png', 'image/png', 10);
+    const out = await uploadAssetFile(
+      file,
+      xhrConfig(request, (f) => progress.push(f)),
+    );
+
+    expect(out).toEqual({ ok: true, reused: false, assetId: 'a-1', assetVersionId: 'v-1' });
+    expect(progress).toEqual([0, 0.5, 1]);
+    expect(request.method).toBe('POST');
+    expect(request.url).toBe('https://upload.example.workers.dev');
+    expect(request.headers).toEqual({ Authorization: 'Bearer tok', 'X-Trace-Id': 'trace-1' });
+    const form = request.sent as FormData;
+    expect(form.get('workspace_id')).toBe('ws-1');
+    expect((form.get('file') as File).name).toBe('logo.png');
+  });
+
+  it('a reused (200) response is success with reused: true', async () => {
+    const request = fakeXhr({
+      status: 200,
+      body: { asset: { assetId: 'a-1', versionId: 'v-1', reused: true } },
+    });
+    const out = await uploadAssetFile(fakeFile('a.png', 'image/png', 1), xhrConfig(request));
+    expect(out).toEqual({ ok: true, reused: true, assetId: 'a-1', assetVersionId: 'v-1' });
+  });
+
+  it('an error status fails with the mapped worker copy', async () => {
+    const request = fakeXhr({ status: 422, body: { error: { code: 'virus_detected' } } });
+    const out = await uploadAssetFile(fakeFile('a.png', 'image/png', 1), xhrConfig(request));
+    expect(out).toEqual({ ok: false, message: uploadErrorMessage('virus_detected') });
+  });
+
+  it('an error status with no JSON body, or a transport error, fails as network; never throws', async () => {
+    const bare = fakeXhr({ status: 500 });
+    expect(await uploadAssetFile(fakeFile('a.png', 'image/png', 1), xhrConfig(bare))).toEqual({
+      ok: false,
+      message: uploadErrorMessage('network'),
+    });
+    const offline = fakeXhr({ transportError: true });
+    expect(await uploadAssetFile(fakeFile('a.png', 'image/png', 1), xhrConfig(offline))).toEqual({
+      ok: false,
+      message: uploadErrorMessage('network'),
     });
   });
 });

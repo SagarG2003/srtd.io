@@ -31,6 +31,7 @@ import {
   THREAD_EVENT_HANDLER_ID,
   upsertMessage,
   withOutboxBubbles,
+  setMessageAttachments,
   type ChannelTarget,
   type ChatMessageRow,
   type MessageReaction,
@@ -383,6 +384,44 @@ describe('withOutboxBubbles', () => {
       ['s1', 'sending'],
     ]);
     expect(list[1]?.time).toBeGreaterThan(1000);
+  });
+
+  it('renders an instant send at once from its local previews, one tile per file', () => {
+    const file = new File(['abc'], 'a.png', { type: 'image/png' });
+    const tile = (key: string) => ({
+      assetId: '',
+      name: `${key}.png`,
+      mime: 'image/png',
+      size: 3,
+      local: { key, file, previewUrl: `blob:${key}`, progress: 0 },
+    });
+    const [bubble] = withOutboxBubbles(
+      [],
+      [
+        {
+          ...entry('p1', 'sending'),
+          local: { ...entry('p1', 'sending').local, attachments: [tile('a'), tile('b')] },
+        },
+      ],
+      ME,
+    );
+    expect(bubble?.state).toBe('sending');
+    expect(bubble?.attachments.map((a) => a.local?.previewUrl)).toEqual(['blob:a', 'blob:b']);
+    expect(bubble?.filesMissing).toBeUndefined();
+    const moved = setMessageAttachments(bubble ? [bubble] : [], 'p1', [
+      { ...tile('a'), local: { ...tile('a').local, progress: 0.5 } },
+      tile('b'),
+    ]);
+    expect(moved[0]?.attachments.map((a) => a.local?.progress)).toEqual([0.5, 0]);
+  });
+
+  it('marks a restored send with lost files so the bubble offers Remove only', () => {
+    const [bubble] = withOutboxBubbles(
+      [],
+      [{ ...entry('l1', 'failed'), filesMissing: true as const }],
+      ME,
+    );
+    expect(bubble).toMatchObject({ id: 'l1', state: 'failed', filesMissing: true });
   });
 
   it('skips an entry whose row is already loaded, and re-lays a bubble after newer rows', () => {

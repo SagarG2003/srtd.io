@@ -63,6 +63,7 @@ import {
   removeMessages,
   rowToThreadMessage,
   sendText,
+  setMessageAttachments,
   setMessageState,
   subscribeIncoming,
   targetFromSummary,
@@ -73,7 +74,11 @@ import {
   type ThreadMessage,
 } from '@/lib/chat/thread';
 import { sendSignal, type TypingConnection } from '@/lib/chat/typing';
-import type { MessageAttachment, ReplyQuote } from '@/lib/chat/attachments';
+import {
+  revokeLocalPreviews,
+  type MessageAttachment,
+  type ReplyQuote,
+} from '@/lib/chat/attachments';
 import type { ChatConnection, ChatStatus } from '@/lib/chat/types';
 
 export interface UseChatThread {
@@ -120,7 +125,11 @@ export interface UseChatThread {
     messages: readonly ThreadMessage[],
     targets: readonly ChannelSummary[],
   ) => Promise<{ ok: true } | { ok: false; failed: ChannelSummary | null }>;
-  /** Resume a failed send (and its channel's queue) with the SAME message id. */
+  /**
+   * Resume a failed send (and its channel's queue) with the SAME message id. On
+   * a send whose files were lost to a reload (filesMissing) it is the Remove:
+   * the entry and its bubble are dropped.
+   */
   retry: (messageId: string) => void;
   /** Add or remove the current user's reaction: optimistic, recorded, signalled live. */
   toggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void;
@@ -475,19 +484,41 @@ export function useChatThread(params: {
   );
 
   // Background sender updates for the open channel: a retry flips a bubble's
-  // state, a recorded row replaces the optimistic bubble.
+  // state, upload progress refreshes its tiles, a recorded row replaces the
+  // optimistic bubble (keeping the local previews, so the tile never swaps).
+  // A send that records while its channel is not open has no bubble left to
+  // show its previews: their object URLs are released.
   useEffect(
     () =>
       outbox.subscribe((event) => {
-        if (channelRef.current !== event.channelId) return;
+        if (channelRef.current !== event.channelId) {
+          if (event.type === 'recorded') revokeLocalPreviews(event.message.attachments);
+          return;
+        }
         if (event.type === 'recorded') {
           const message = event.message;
           setMessages((prev) => upsertMessage(prev, message));
           return;
         }
+        if (event.type === 'progress') {
+          const { id, attachments } = event;
+          setMessages((prev) => setMessageAttachments(prev, id, attachments));
+          return;
+        }
         setMessages((prev) => setMessageState(prev, event.id, event.state));
       }),
     [outbox],
+  );
+
+  // Recorded bubbles keep their local previews for the session; when the
+  // thread leaves the channel (or unmounts) those bubbles go, and so do their
+  // object URLs. Unrecorded ones stay in the outbox and keep theirs.
+  useEffect(
+    () => () => {
+      const recorded = messagesRef.current.filter((m) => m.state === 'sent');
+      revokeLocalPreviews(recorded.flatMap((m) => m.attachments));
+    },
+    [channelId],
   );
 
   const send = useCallback<UseChatThread['send']>(
@@ -603,6 +634,13 @@ export function useChatThread(params: {
   const retry = useCallback((messageId: string): void => {
     const forChannel = channelRef.current;
     if (forChannel === null) return;
+    const entry = outboxRef.current.entries(forChannel).find((e) => e.id === messageId);
+    if (entry?.filesMissing === true) {
+      outboxRef.current.settle(forChannel, messageId);
+      revokeLocalPreviews(entry.local.attachments);
+      setMessages((prev) => removeMessages(prev, [messageId]));
+      return;
+    }
     outboxRef.current.retry(forChannel, messageId);
   }, []);
 

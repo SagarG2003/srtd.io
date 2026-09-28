@@ -96,6 +96,11 @@ export interface ThreadMessage {
   reactions: MessageReaction[];
   /** True when this message was forwarded from another; absent is the same as false. */
   forwarded?: boolean;
+  /**
+   * An own unrecorded send whose picked files were lost to a reload: it reads
+   * "Photos not sent" and offers Remove only. Absent is the same as false.
+   */
+  filesMissing?: boolean;
 }
 
 /**
@@ -460,6 +465,15 @@ export function setMessageState(
   return messages.map((m) => (m.id === id ? { ...m, state } : m));
 }
 
+/** Replace one message's attachments (upload progress, a returned version id). */
+export function setMessageAttachments(
+  messages: ThreadMessage[],
+  id: string,
+  attachments: readonly MessageAttachment[],
+): ThreadMessage[] {
+  return messages.map((m) => (m.id === id ? { ...m, attachments: [...attachments] } : m));
+}
+
 /**
  * Build the optimistic own bubble appended at tap time. It orders after the
  * newest loaded message (never by the local clock); the server created_at
@@ -498,6 +512,7 @@ export interface UnrecordedSend {
   text: string;
   local: LocalMessageContent;
   state: 'sending' | 'failed';
+  filesMissing?: true;
 }
 
 /**
@@ -524,7 +539,14 @@ export function withOutboxBubbles(
       local: entry.local,
       after: list,
     });
-    list = [...list, { ...bubble, state: entry.state }];
+    list = [
+      ...list,
+      {
+        ...bubble,
+        state: entry.state,
+        ...(entry.filesMissing === true ? { filesMissing: true } : {}),
+      },
+    ];
   }
   return list;
 }
