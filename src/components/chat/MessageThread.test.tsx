@@ -18,6 +18,7 @@ import {
   MessageBubble,
 } from '@/components/chat/MessageThread';
 import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
+import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
 import type { ThreadMessage } from '@/lib/chat/thread';
@@ -84,6 +85,11 @@ function walk(node: ReactNode, visit: (el: ReactElement) => void): void {
   }
   if (!isValidElement(node)) return;
   visit(node);
+  // The shared quote box is hook-free: expand it so its spans are walkable.
+  if (node.type === ReplyQuoteBox) {
+    walk(ReplyQuoteBox(node.props as Parameters<typeof ReplyQuoteBox>[0]), visit);
+    return;
+  }
   walk((node.props as { children?: ReactNode }).children, visit);
 }
 
@@ -276,7 +282,7 @@ describe('MessageBubble forwarded label', () => {
     const label = ForwardedLabel();
     const cls = (label.props as { className: string }).className;
     expect(cls).toContain('text-fg-2');
-    expect(cls).toContain('text-[12px]');
+    expect(cls).toContain('text-xs');
     expect((label.props as { children: unknown[] }).children).toContain('Forwarded');
   });
 
@@ -432,7 +438,7 @@ describe('voice-only bubble', () => {
       if (props.className?.includes('absolute bottom-1.5 right-2.5')) inlineTimes.push('x');
       if (props.className?.includes('mt-1 flex items-center justify-end')) timeRow = true;
     });
-    expect(bubbleClass).toContain('rounded-2xl');
+    expect(bubbleClass).toContain('rounded-[14px]');
     expect(bubbleClass).toContain('min-w-[220px]');
     expect(inlineTimes).toHaveLength(1);
     expect(timeRow).toBe(false);

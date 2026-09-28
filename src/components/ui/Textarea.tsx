@@ -10,9 +10,22 @@ interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {
    * the base classes regardless of class order (cn() is a plain string join).
    */
   autoGrow?: boolean;
+  /**
+   * Opt-in single-line composer mode: 44px tall at rest, grows with the content
+   * up to 120px, then scrolls. Implies autoGrow without its 96px floor.
+   */
+  compact?: boolean;
 }
 
-export function Textarea({ className, autoGrow = false, style, value, ...props }: TextareaProps) {
+export function Textarea({
+  className,
+  autoGrow: autoGrowProp = false,
+  compact = false,
+  style,
+  value,
+  ...props
+}: TextareaProps) {
+  const autoGrow = autoGrowProp || compact;
   const ref = useRef<HTMLTextAreaElement>(null);
 
   const fit = useCallback((): void => {
@@ -39,22 +52,25 @@ export function Textarea({ className, autoGrow = false, style, value, ...props }
   // 16px font-size avoids iOS zoom-on-focus; overflow/resize off means no inner
   // scrollbar and no user drag-resize. No transition: the height change is
   // instant. Colours stay token-driven, so light/dark parity is unaffected.
-  const autoGrowStyle: CSSProperties = autoGrow
-    ? {
-        resize: 'none',
-        overflowY: 'hidden',
-        minHeight: '96px',
-        fontSize: '16px',
-        lineHeight: 1.55,
-      }
-    : {};
+  const autoGrowStyle: CSSProperties = compact
+    ? { resize: 'none', overflowY: 'auto', fontSize: '16px', lineHeight: 1.4 }
+    : autoGrow
+      ? {
+          resize: 'none',
+          overflowY: 'hidden',
+          minHeight: '96px',
+          fontSize: '16px',
+          lineHeight: 1.55,
+        }
+      : {};
 
   return (
     <textarea
       ref={ref}
       value={value}
       className={cn(
-        'w-full px-3 rounded-md border border-border bg-panel-2 text-fg text-sm placeholder:text-fg-3 outline-none focus:border-accent-line focus:ring-2 focus:ring-accent-soft min-h-[74px] py-2.5 h-auto',
+        'w-full px-3 rounded-md border border-border bg-panel-2 text-fg text-sm placeholder:text-fg-3 outline-none focus:border-accent-line focus:ring-2 focus:ring-accent-soft py-2.5 h-auto',
+        compact ? 'min-h-[44px] max-h-[120px]' : 'min-h-[74px]',
         className,
       )}
       style={{ ...autoGrowStyle, ...style }}

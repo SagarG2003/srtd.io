@@ -169,7 +169,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
         {error !== null ? (
           <div
             role="alert"
-            className="mb-3 rounded-md border border-bad px-3 py-2 text-sm text-bad"
+            className="mb-3 rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
           >
             {error}
           </div>
@@ -206,7 +206,10 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
             {members.loading ? (
               <p className="px-1 py-2 text-sm text-fg-3">Loading members</p>
             ) : members.error !== null ? (
-              <div role="alert" className="rounded-md border border-bad px-3 py-2 text-sm text-bad">
+              <div
+                role="alert"
+                className="rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
+              >
                 {members.error}
               </div>
             ) : (

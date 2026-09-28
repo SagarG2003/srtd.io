@@ -13,7 +13,7 @@ export function postRoute(id: string): string {
 
 /** The render branch for one shared post id. */
 export type SharedPostView =
-  | { kind: 'post'; postId: string; title: string; stage: string }
+  | { kind: 'post'; postId: string; title: string; stage: string; platform: string }
   | { kind: 'unavailable'; postId: string };
 
 /** Index a batched post resolve by id for O(1) per-id lookup (no per-id scan). */
@@ -25,7 +25,7 @@ export function indexPostsById(posts: readonly PostCardFields[]): Map<string, Po
 
 /**
  * One view per shared post id, preserving the message's order. An id present in
- * the resolve renders as a card (title + stage); an id the resolve did not return
+ * the resolve renders as a card (title + stage + platform); an id the resolve did not return
  * renders as an "unavailable" card. The viewer's RLS is the security boundary:
  * a post the viewer cannot see simply never appears in `postsById`.
  */
@@ -36,7 +36,7 @@ export function sharedPostViews(
   return ids.map((postId) => {
     const post = postsById.get(postId);
     return post !== undefined
-      ? { kind: 'post', postId, title: post.title, stage: post.stage }
+      ? { kind: 'post', postId, title: post.title, stage: post.stage, platform: post.platform }
       : { kind: 'unavailable', postId };
   });
 }

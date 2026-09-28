@@ -15,16 +15,18 @@ export interface IconProps {
 
 interface SvgProps extends IconProps {
   children: ReactNode;
+  /** Non-square glyphs (the message ticks): the box in viewBox units. Defaults to 24x24. */
+  box?: { width: number; height: number };
 }
 
-function Svg({ className, size = 18, inline = false, children }: SvgProps) {
+function Svg({ className, size = 18, inline = false, box, children }: SvgProps) {
   return (
     <svg
       className={className}
       style={inline ? { display: 'inline-block', verticalAlign: '-0.15em' } : undefined}
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
+      width={box !== undefined ? box.width : size}
+      height={box !== undefined ? box.height : size}
+      viewBox={box !== undefined ? `0 0 ${box.width} ${box.height}` : '0 0 24 24'}
       fill="none"
       stroke="currentColor"
       strokeWidth={1.7}
@@ -590,6 +592,53 @@ export function IconBroadcast(props: IconProps) {
       <circle cx={12} cy={12} r={1.6} fill="currentColor" stroke="none" />
       <path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7" />
       <path d="M6 6a9 9 0 0 0 0 12M18 6a9 9 0 0 1 0 12" />
+    </Svg>
+  );
+}
+
+export function IconPaperclip(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M20 11l-7.8 7.8a4 4 0 0 1-5.7-5.7L13.5 6a2.7 2.7 0 0 1 3.8 3.8L9.8 17.3a1.3 1.3 0 0 1-1.9-1.9L15 8.3" />
+    </Svg>
+  );
+}
+
+export function IconLock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </Svg>
+  );
+}
+
+export function IconUsers(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx={9} cy={8} r={3.2} />
+      <path d="M3 19a6 6 0 0 1 12 0" />
+      <path d="M16 5.2a3.2 3.2 0 0 1 0 5.6" />
+      <path d="M18 13.5a6 6 0 0 1 3 5.5" />
+    </Svg>
+  );
+}
+
+/** Single message tick (recorded), a fixed 16x12 glyph; `size` is ignored. */
+export function IconTickSingle(props: IconProps) {
+  return (
+    <Svg {...props} box={{ width: 16, height: 12 }}>
+      <path d="M2 7l3.5 3.5L14 2" />
+    </Svg>
+  );
+}
+
+/** Double message tick (read), a fixed 20x12 glyph; `size` is ignored. */
+export function IconTickDouble(props: IconProps) {
+  return (
+    <Svg {...props} box={{ width: 20, height: 12 }}>
+      <path d="M2 7l3.5 3.5L11 2" />
+      <path d="M8 7l3.5 3.5L18 2" />
     </Svg>
   );
 }

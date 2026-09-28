@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { messageMenuItems } from '@/components/chat/MessageActionMenu';
+import { QUICK_REACTIONS, messageMenuItems } from '@/components/chat/MessageActionMenu';
 
 function labels(over: Partial<Parameters<typeof messageMenuItems>[0]> = {}): string[] {
   return messageMenuItems({
@@ -40,5 +40,11 @@ describe('messageMenuItems', () => {
     });
     items.find((i) => i.key === 'forward')?.run();
     expect(onForward).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('QUICK_REACTIONS', () => {
+  it('is exactly the approved quick-react set, in order', () => {
+    expect([...QUICK_REACTIONS]).toEqual(['👍', '❤️', '😂', '🆗', '🙏']);
   });
 });

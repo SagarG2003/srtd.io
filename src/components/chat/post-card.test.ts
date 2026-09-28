@@ -32,8 +32,14 @@ describe('sharedPostViews', () => {
     ]);
     const views = sharedPostViews(['p1', 'p2'], byId);
     expect(views).toEqual<SharedPostView[]>([
-      { kind: 'post', postId: 'p1', title: 'Launch teaser', stage: 'review' },
-      { kind: 'post', postId: 'p2', title: 'Recap', stage: 'approved' },
+      {
+        kind: 'post',
+        postId: 'p1',
+        title: 'Launch teaser',
+        stage: 'review',
+        platform: 'instagram',
+      },
+      { kind: 'post', postId: 'p2', title: 'Recap', stage: 'approved', platform: 'instagram' },
     ]);
   });
 

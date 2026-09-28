@@ -12,7 +12,7 @@ import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Sheet } from '@/components/ui/Sheet';
-import { IconCheck } from '@/components/ui/icons';
+import { SelectCheck } from '@/components/ui/SelectCheck';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import type { ChannelSummary } from '@/lib/chat-reads';
@@ -124,17 +124,7 @@ export function ForwardPicker(props: ForwardPickerProps): ReactElement {
                   <span className="min-w-0 flex-1 truncate text-sm font-medium">
                     {channel.title}
                   </span>
-                  <span
-                    aria-hidden="true"
-                    className={cn(
-                      'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
-                      isSelected
-                        ? 'border-accent bg-accent text-accent-fg'
-                        : 'border-border-strong bg-panel',
-                    )}
-                  >
-                    {isSelected ? <IconCheck size={14} /> : null}
-                  </span>
+                  <SelectCheck checked={isSelected} />
                 </button>
               </li>
             );

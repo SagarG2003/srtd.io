@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ReactElement } from 'react';
 import { MarkBadge } from '@/components/chat/MarkBits';
+import { Tag } from '@/components/ui/Tag';
 import type { ChatMark } from '@/lib/chat/marks';
 
 // MarkBadge is hook-free, so its returned element is inspected directly with
@@ -28,9 +29,12 @@ describe('MarkBadge', () => {
     for (const type of ['commitment', 'decision'] as const) {
       const el = render(mark({ type }));
       expect(el.type).toBe('span');
-      expect((el.props as { children: string }).children).toBe(
-        type === 'commitment' ? 'Commitment' : 'Decision',
-      );
+      const tag = (el.props as { children: ReactElement }).children;
+      expect(tag.type).toBe(Tag);
+      expect(tag.props).toMatchObject({
+        label: type === 'commitment' ? 'Commitment' : 'Decision',
+        tone: type === 'commitment' ? 'good' : 'accent',
+      });
     }
   });
 
@@ -66,7 +70,9 @@ describe('MarkBadge', () => {
     for (const [m, label] of cases) {
       const el = render(m);
       expect(el.type).toBe('span');
-      expect((el.props as { children: string }).children).toBe(label);
+      const tag = (el.props as { children: ReactElement }).children;
+      expect(tag.type).toBe(Tag);
+      expect((tag.props as { label: string }).label).toBe(label);
     }
   });
 });

@@ -5,10 +5,19 @@ import { IconUser } from '@/components/ui/icons';
 interface AvatarProps {
   name?: string;
   src?: string;
-  size?: 'sm' | 'md' | 'lg' | 'xl';
+  /** 'row' is the 48px dense chat-list row avatar (text-sm initials). */
+  size?: 'sm' | 'md' | 'lg' | 'xl' | 'row';
+  /** 'online' adds a bottom-right presence dot; absent renders no dot. */
+  presence?: 'online' | undefined;
 }
 
-const PX: Record<NonNullable<AvatarProps['size']>, number> = { sm: 24, md: 26, lg: 32, xl: 48 };
+const PX: Record<NonNullable<AvatarProps['size']>, number> = {
+  sm: 24,
+  md: 26,
+  lg: 32,
+  xl: 48,
+  row: 48,
+};
 
 const PALETTE = ['#5e6ad2', '#3e7d54', '#b8772b', '#c2392b', '#7a5ea8', '#2b8a9e'];
 
@@ -34,7 +43,21 @@ function initialsFor(name: string): string {
 
 const base = 'rounded-full inline-flex items-center justify-center select-none';
 
-export function Avatar({ name, src, size = 'md' }: AvatarProps) {
+export function Avatar({ presence, ...props }: AvatarProps) {
+  if (presence !== 'online') return <AvatarFace {...props} />;
+  return (
+    <span className="relative inline-flex shrink-0">
+      <AvatarFace {...props} />
+      <span
+        data-presence="online"
+        aria-hidden="true"
+        className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-good ring-2 ring-panel"
+      />
+    </span>
+  );
+}
+
+function AvatarFace({ name, src, size = 'md' }: Omit<AvatarProps, 'presence'>) {
   const [errored, setErrored] = useState(false);
   const px = PX[size];
   const style: CSSProperties = { width: px, height: px };
@@ -55,7 +78,7 @@ export function Avatar({ name, src, size = 'md' }: AvatarProps) {
     return (
       <div
         style={{ ...style, backgroundColor: colorFor(name) }}
-        className={cn(base, 'text-white text-xs font-medium')}
+        className={cn(base, 'text-white font-medium', size === 'row' ? 'text-sm' : 'text-xs')}
       >
         {initialsFor(name)}
       </div>

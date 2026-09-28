@@ -3,11 +3,14 @@ import type { KeyboardEvent, MouseEvent, ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { CountBadge } from '@/components/ui/CountBadge';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { Sheet } from '@/components/ui/Sheet';
+import { SelectCheck } from '@/components/ui/SelectCheck';
+import { popoverClass } from '@/components/ui/popover-classes';
 import { SectionHeader } from '@/components/shell/SectionHeader';
 import { ActionRow, useLongPress } from '@/components/ui';
-import { IconChat, IconCheck, IconEllipsis, IconPlus, IconTrash } from '@/components/ui/icons';
+import { IconChat, IconEllipsis, IconPlus, IconTrash, IconUsers } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
@@ -21,7 +24,6 @@ import {
   type ConversationSummary,
 } from '@/lib/chat/chat-store';
 import {
-  DELETE_CHATS_BODY,
   deleteChatFailedMessage,
   deleteChatsTitle,
   type ClearRunResult,
@@ -115,7 +117,7 @@ export function channelListView(props: ChannelListBodyProps): ReactElement {
   const nowMs = props.nowMs ?? 0;
   const timeZone = workspaceTimeZone(props.timeZone);
   return (
-    <ul className="flex flex-col gap-2 px-3 py-3">
+    <ul className="flex flex-col">
       {props.channels.map((channel) => (
         <li key={channel.channelId}>
           <ChannelCard
@@ -143,22 +145,18 @@ export function channelListView(props: ChannelListBodyProps): ReactElement {
 export const SKELETON_ROWS = 6;
 
 /**
- * The loading body: placeholder cards with the real card's box (border, padding,
- * min height) and a 48px avatar disc, so swapping in the list shifts nothing.
- * Reuses the repo's animate-pulse + bg-panel-2 skeleton pattern.
+ * The loading body: placeholder rows with the real row's box (padding, min
+ * height, bottom rule) and a 48px avatar disc, so swapping in the list shifts
+ * nothing. Reuses the repo's animate-pulse + bg-panel-2 skeleton pattern.
  */
 export function channelListSkeleton(): ReactElement {
   return (
-    <ul
-      className="flex flex-col gap-2 px-3 py-3"
-      aria-busy="true"
-      aria-label="Loading conversations"
-    >
+    <ul className="flex flex-col" aria-busy="true" aria-label="Loading conversations">
       {Array.from({ length: SKELETON_ROWS }).map((_, i) => (
         <li key={i}>
           <div
             data-skeleton-row
-            className="flex w-full items-center gap-3 rounded-xl border border-l-[3px] border-border border-l-transparent bg-panel px-3 py-3 min-h-[64px] animate-pulse"
+            className="flex w-full items-center gap-3.5 border-b border-border px-4 py-2.5 min-h-[72px] animate-pulse"
           >
             <div className="h-12 w-12 shrink-0 rounded-full bg-panel-2" />
             <div className="flex min-w-0 flex-1 flex-col gap-2">
@@ -207,12 +205,128 @@ export function rowMenuKey(event: { key: string; shiftKey: boolean }): boolean {
   return event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10');
 }
 
+/** Row state that picks the row tint. */
+export interface ChannelRowState {
+  /** Desktop: this chat is open in the thread pane. */
+  selected: boolean;
+  unread: boolean;
+  /** Select mode is on. */
+  selecting: boolean;
+  /** Select mode: this row is checked. */
+  checked: boolean;
+}
+
 /**
- * A spaced conversation card: avatar, name + time, preview + unread pill. A
- * touch long-press (moving or scrolling cancels it), right-click, Shift+F10, or
- * the hover ⋯ beside the card (pointer devices only) opens the row menu; the
- * trailing click is swallowed so a long-press never also opens the chat. In
- * select mode a leading check circle shows and a tap toggles.
+ * The dense row's container classes: full width, no card, a hairline rule under
+ * each row. Checked and unread rows take the accent tint; the open chat on
+ * desktop takes panel-2. Token classes only, so light and dark stay at parity.
+ */
+export function channelRowClass(state: ChannelRowState): string {
+  return cn(
+    'group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2',
+    state.selecting && state.checked
+      ? 'bg-accent-soft'
+      : state.unread
+        ? 'bg-accent-soft'
+        : state.selected && !state.selecting
+          ? 'bg-panel-2'
+          : undefined,
+  );
+}
+
+/** The row's tap target: avatar, two text lines, full row height. */
+export const CHANNEL_ROW_BUTTON =
+  'flex min-w-0 flex-1 select-none items-center gap-3.5 px-4 min-h-[72px] py-2.5 text-left [-webkit-touch-callout:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent';
+
+/** The 48px row avatar; a group with no picture shows the people glyph, not initials. */
+function channelAvatar(channel: ChannelSummary): ReactElement {
+  if (channel.channelType === 'group' && channel.avatarUrl === null) {
+    return (
+      <span
+        data-group-avatar=""
+        aria-hidden="true"
+        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-panel-3 text-fg-2"
+      >
+        <IconUsers size={20} />
+      </span>
+    );
+  }
+  return (
+    <Avatar
+      name={channel.title}
+      {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
+      size="row"
+    />
+  );
+}
+
+/**
+ * The inside of one dense row: optional select circle, avatar, then name + time
+ * over preview + unread count. Hook-free so the row's states are snapshot tested.
+ */
+export function channelRowBody(props: {
+  channel: ChannelSummary;
+  summary: ConversationSummary | undefined;
+  nowMs: number;
+  timeZone: string;
+  selecting: boolean;
+  checked: boolean;
+}): ReactElement {
+  const { channel, summary } = props;
+  const hasMessage = summary !== undefined && summary.lastMessageTs > 0;
+  const unread = summary?.unread ?? 0;
+  const isUnread = unread > 0;
+  const preview = hasMessage ? previewLine(summary) : 'No messages yet';
+  const time = hasMessage
+    ? formatRelativeTime(summary.lastMessageTs, props.nowMs, props.timeZone)
+    : '';
+  return (
+    <>
+      {props.selecting ? <SelectCheck checked={props.checked} /> : null}
+      {channelAvatar(channel)}
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="flex items-baseline gap-2">
+          <span
+            className={cn(
+              'min-w-0 flex-1 truncate text-[16px] leading-tight text-fg',
+              isUnread ? 'font-semibold' : 'font-medium',
+            )}
+          >
+            {channel.title}
+          </span>
+          {time !== '' ? (
+            <span
+              className={cn(
+                'shrink-0 font-mono text-xs tabular-nums',
+                isUnread ? 'text-accent' : 'text-fg-3',
+              )}
+            >
+              {time}
+            </span>
+          ) : null}
+        </span>
+        <span className="flex items-center gap-2">
+          <span
+            className={cn(
+              'min-w-0 flex-1 truncate text-sm',
+              hasMessage ? 'text-fg-2' : 'text-fg-3',
+            )}
+          >
+            {preview}
+          </span>
+          {isUnread ? <CountBadge count={unread} className="shrink-0" /> : null}
+        </span>
+      </span>
+    </>
+  );
+}
+
+/**
+ * A dense, full-width conversation row. A touch long-press (moving or
+ * scrolling cancels it), right-click, Shift+F10, or the hover ⋯ at the row's
+ * end (pointer devices only) opens the row menu; the trailing click is
+ * swallowed so a long-press never also opens the chat. In select mode a
+ * leading check circle shows and a tap toggles.
  */
 export function ChannelCard(props: {
   channel: ChannelSummary;
@@ -242,15 +356,16 @@ export function ChannelCard(props: {
     () => openMenu(),
     { ignoreMouse: true },
   );
-  const hasMessage = summary !== undefined && summary.lastMessageTs > 0;
-  const unread = summary?.unread ?? 0;
-  const isUnread = unread > 0;
-  const preview = hasMessage ? previewLine(summary) : 'No messages yet';
-  const time = hasMessage
-    ? formatRelativeTime(summary.lastMessageTs, props.nowMs, props.timeZone)
-    : '';
+  const checked = props.checked === true;
   return (
-    <div className="group flex items-center gap-1">
+    <div
+      className={channelRowClass({
+        selected: props.selected,
+        unread: (summary?.unread ?? 0) > 0,
+        selecting,
+        checked,
+      })}
+    >
       <button
         ref={rowRef}
         type="button"
@@ -275,69 +390,17 @@ export function ChannelCard(props: {
           props.onSelect(channel);
         }}
         aria-label={channel.title}
-        {...(selecting ? { 'aria-pressed': props.checked === true } : {})}
-        className={cn(
-          'flex w-full min-w-0 flex-1 select-none items-center gap-3 rounded-xl border border-l-[3px] px-3 py-3 min-h-[64px] text-left transition-colors [-webkit-touch-callout:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-          selecting && props.checked === true
-            ? 'bg-accent-soft border-accent-line border-l-accent'
-            : isUnread
-              ? 'bg-accent-soft border-border border-l-accent'
-              : props.selected && !selecting
-                ? 'bg-panel-2 border-border border-l-transparent'
-                : 'bg-panel border-border border-l-transparent hover:bg-panel-2',
-        )}
+        {...(selecting ? { 'aria-pressed': checked } : {})}
+        className={CHANNEL_ROW_BUTTON}
       >
-        {selecting ? (
-          <span
-            aria-hidden="true"
-            data-select-check={props.checked === true ? 'on' : 'off'}
-            className={cn(
-              'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
-              props.checked === true
-                ? 'border-accent bg-accent text-accent-fg'
-                : 'border-border-strong bg-panel',
-            )}
-          >
-            {props.checked === true ? <IconCheck size={14} /> : null}
-          </span>
-        ) : null}
-        <Avatar
-          name={channel.title}
-          {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
-          size="xl"
-        />
-        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="flex items-baseline gap-2">
-            <span
-              className={cn(
-                'min-w-0 flex-1 truncate text-sm text-fg',
-                isUnread ? 'font-semibold' : 'font-medium',
-              )}
-            >
-              {channel.title}
-            </span>
-            {time !== '' ? (
-              <span className={cn('shrink-0 text-xs', isUnread ? 'text-accent' : 'text-fg-3')}>
-                {time}
-              </span>
-            ) : null}
-          </span>
-          <span className="flex items-center gap-2">
-            <span
-              className={cn(
-                'min-w-0 flex-1 truncate text-xs',
-                hasMessage ? 'text-fg-2' : 'italic text-fg-3',
-              )}
-            >
-              {preview}
-            </span>
-            {isUnread ? (
-              <span className="inline-flex h-5 min-w-[20px] shrink-0 items-center justify-center rounded-full bg-accent px-1.5 text-[11px] font-semibold leading-none text-accent-fg">
-                {unread > 99 ? '99+' : unread}
-              </span>
-            ) : null}
-          </span>
-        </span>
+        {channelRowBody({
+          channel,
+          summary,
+          nowMs: props.nowMs,
+          timeZone: props.timeZone,
+          selecting,
+          checked,
+        })}
       </button>
       {menuEnabled && hoverMenu ? (
         <button
@@ -346,7 +409,7 @@ export function ChannelCard(props: {
           aria-label={`Actions for ${channel.title}`}
           aria-haspopup="menu"
           onClick={(e) => openMenu(e.currentTarget.getBoundingClientRect())}
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-fg-3 opacity-0 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100 group-focus-within:opacity-100"
+          className="mr-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-fg-3 opacity-0 hover:bg-panel-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100 group-focus-within:opacity-100"
         >
           <IconEllipsis size={20} />
         </button>
@@ -389,7 +452,7 @@ export function visibleChannels(
 /** Header in select mode: the checked count and Cancel. */
 function selectHeader(select: ChannelSelectMode): ReactElement {
   return (
-    <div className="px-4 md:px-6 mt-3 flex h-11 items-center gap-2">
+    <div className="flex items-center gap-2 border-b border-border px-4 py-3 md:px-6">
       <span className="min-w-0 flex-1 truncate text-sm font-semibold text-fg">
         {`${select.selectedIds.size} selected`}
       </span>
@@ -438,33 +501,35 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
       {selecting !== undefined ? (
         selectHeader(selecting)
       ) : (
-        <SectionHeader
-          search={{
-            value: props.search,
-            onChange: props.onSearchChange,
-            placeholder: 'Search conversations',
-          }}
-          primaryAction={{
-            node: (
-              <>
-                {select !== undefined && hasChannels ? (
-                  <Button variant="ghost" size="lg" onClick={select.onStart}>
-                    Select
+        <div className="border-b border-border pb-3">
+          <SectionHeader
+            search={{
+              value: props.search,
+              onChange: props.onSearchChange,
+              placeholder: 'Search conversations',
+            }}
+            primaryAction={{
+              node: (
+                <>
+                  {select !== undefined && hasChannels ? (
+                    <Button variant="ghost" size="lg" onClick={select.onStart}>
+                      Select
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="primary"
+                    size="lg"
+                    aria-label="New chat"
+                    className="w-11 px-0"
+                    onClick={props.onNewChat}
+                  >
+                    <IconPlus size={18} />
                   </Button>
-                ) : null}
-                <Button
-                  variant="primary"
-                  size="lg"
-                  aria-label="New chat"
-                  className="w-11 px-0"
-                  onClick={props.onNewChat}
-                >
-                  <IconPlus size={18} />
-                </Button>
-              </>
-            ),
-          }}
-        />
+                </>
+              ),
+            }}
+          />
+        </div>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {props.status === 'loading'
@@ -511,6 +576,7 @@ function ChannelRowMenu(props: {
   const { anchor, onClose } = props;
   const ref = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
+  const [shown, setShown] = useState(false);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -525,8 +591,18 @@ function ChannelRowMenu(props: {
     setCoords({ top, left });
   }, [anchor]);
 
-  // Focus the first item once placed; hand focus back on close if nothing took it.
+  // Enter motion: flip to shown once the menu has been placed.
   const placed = coords !== null;
+  useEffect(() => {
+    if (!placed) {
+      setShown(false);
+      return;
+    }
+    const raf = requestAnimationFrame(() => setShown(true));
+    return () => cancelAnimationFrame(raf);
+  }, [placed]);
+
+  // Focus the first item once placed; hand focus back on close if nothing took it.
   useEffect(() => {
     if (!placed) return;
     const previous = document.activeElement;
@@ -563,7 +639,10 @@ function ChannelRowMenu(props: {
         ref={ref}
         role="menu"
         aria-label="Chat actions"
-        className="fixed z-50 min-w-[200px] whitespace-nowrap rounded-xl border border-border-strong bg-panel p-1 shadow-2xl"
+        className={cn(
+          'fixed z-50 min-w-[200px] origin-top-left whitespace-nowrap',
+          popoverClass(shown),
+        )}
         style={{
           top: coords?.top ?? 0,
           left: coords?.left ?? 0,
@@ -587,34 +666,32 @@ function ChannelRowMenu(props: {
   );
 }
 
-/** The delete-for-me confirm: the same Sheet pattern as delete-selected-messages. */
-function DeleteChatsConfirm(props: {
-  count: number;
-  open: boolean;
+/** Confirm body: the delete is local to the caller and undone by a new message. */
+export const DELETE_CHATS_MESSAGE =
+  'Hidden for you only. It comes back if someone sends a new message.';
+
+/**
+ * The delete-for-me confirm, or null when nothing is pending. Hook-free so the
+ * confirm and cancel wiring are unit tested by calling the dialog's handlers.
+ */
+export function deleteChatsConfirm(props: {
+  channels: readonly ChannelSummary[] | null;
   busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
-}): ReactElement {
+}): ReactElement | null {
+  if (props.channels === null) return null;
   return (
-    <Sheet
-      open={props.open}
-      onClose={() => {
-        if (!props.busy) props.onCancel();
-      }}
-      title={deleteChatsTitle(props.count)}
-      footer={
-        <div className="ml-auto flex gap-2">
-          <Button variant="ghost" size="lg" disabled={props.busy} onClick={props.onCancel}>
-            Cancel
-          </Button>
-          <Button variant="danger" size="lg" disabled={props.busy} onClick={props.onConfirm}>
-            {props.busy ? 'Deleting' : 'Delete'}
-          </Button>
-        </div>
-      }
-    >
-      <p className="text-sm text-fg-2">{DELETE_CHATS_BODY}</p>
-    </Sheet>
+    <ConfirmDialog
+      title={deleteChatsTitle(props.channels.length)}
+      message={DELETE_CHATS_MESSAGE}
+      confirmLabel="Delete"
+      busyLabel="Deleting"
+      destructive
+      busy={props.busy}
+      onCancel={props.onCancel}
+      onConfirm={props.onConfirm}
+    />
   );
 }
 
@@ -703,13 +780,12 @@ export function ChannelList(props: ChannelListProps): ReactElement {
               if (menu !== null) setConfirm([menu.channel]);
             }}
           />
-          <DeleteChatsConfirm
-            open={confirm !== null}
-            count={confirm?.length ?? 0}
-            busy={busy}
-            onCancel={() => setConfirm(null)}
-            onConfirm={() => void runDelete(confirm ?? [])}
-          />
+          {deleteChatsConfirm({
+            channels: confirm,
+            busy,
+            onCancel: () => setConfirm(null),
+            onConfirm: () => void runDelete(confirm ?? []),
+          })}
         </>
       ) : null}
     </>

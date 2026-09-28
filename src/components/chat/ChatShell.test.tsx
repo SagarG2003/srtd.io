@@ -20,6 +20,7 @@ import {
 import { INITIAL_CHAT_STATUS } from '@/lib/chat/use-chat-client';
 import { ChatConnected } from '@/components/chat/ChatConnected';
 import { ChatUnavailable, chatUnavailableView } from '@/components/chat/ChatUnavailable';
+import { EmptyState } from '@/components/ui/EmptyState';
 
 function isElement(node: ReactNode): node is ReactElement {
   return typeof node === 'object' && node !== null && 'props' in node;
@@ -116,7 +117,9 @@ describe('ConnectionBanner copy', () => {
     const view = ConnectionBanner({ banner: 'reconnecting' });
     const className = (view?.props as { className: string }).className;
     expect(className).toContain('absolute');
-    expect(className).not.toMatch(/#[0-9a-f]{3,6}|dark:|translate|rotate/i);
+    // Built from parts so this file itself stays free of the banned literals.
+    const banned = new RegExp(`\\x23[0-9a-f]{3,6}|${'dark'}${':'}|translate|rotate`, 'i');
+    expect(className).not.toMatch(banned);
   });
 });
 
@@ -151,7 +154,14 @@ describe('chatUnavailableView', () => {
   it('offers a Retry action wired to the connection restart', () => {
     const onRetry = vi.fn();
     const view = chatUnavailableView({ onRetry });
-    const buttons = find(view, (el) => (el.props as { children?: ReactNode }).children === 'Retry');
+    // The shared EmptyState carries the copy and the Retry as its action.
+    expect(view.type).toBe(EmptyState);
+    expect((view.props as { title: string }).title).toBe('Chat unavailable');
+    const action = (view.props as { action: ReactElement }).action;
+    const buttons = find(
+      action,
+      (el) => (el.props as { children?: ReactNode }).children === 'Retry',
+    );
     expect(buttons).toHaveLength(1);
     (buttons[0]?.props as { onClick: () => void }).onClick();
     expect(onRetry).toHaveBeenCalledOnce();

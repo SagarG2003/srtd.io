@@ -1,0 +1,62 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ChannelList dense row > checked in select mode: accent tint and the on select circle 1`] = `
+{
+  "classes": [
+    "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors border-accent bg-accent text-accent-fg",
+    "rounded-full inline-flex items-center justify-center select-none text-white font-medium text-sm",
+    "flex min-w-0 flex-1 flex-col gap-1",
+    "flex items-baseline gap-2",
+    "min-w-0 flex-1 truncate text-[16px] leading-tight text-fg font-medium",
+    "shrink-0 font-mono text-xs tabular-nums text-fg-3",
+    "flex items-center gap-2",
+    "min-w-0 flex-1 truncate text-sm text-fg-2",
+  ],
+  "row": "group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2 bg-accent-soft",
+}
+`;
+
+exports[`ChannelList dense row > empty preview: "No messages yet" in tertiary ink, not italic; group glyph avatar 1`] = `
+{
+  "classes": [
+    "flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-panel-3 text-fg-2",
+    "flex min-w-0 flex-1 flex-col gap-1",
+    "flex items-baseline gap-2",
+    "min-w-0 flex-1 truncate text-[16px] leading-tight text-fg font-medium",
+    "flex items-center gap-2",
+    "min-w-0 flex-1 truncate text-sm text-fg-3",
+  ],
+  "row": "group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2",
+}
+`;
+
+exports[`ChannelList dense row > selected (desktop active): panel-2, medium name, no badge 1`] = `
+{
+  "classes": [
+    "rounded-full inline-flex items-center justify-center select-none text-white font-medium text-sm",
+    "flex min-w-0 flex-1 flex-col gap-1",
+    "flex items-baseline gap-2",
+    "min-w-0 flex-1 truncate text-[16px] leading-tight text-fg font-medium",
+    "shrink-0 font-mono text-xs tabular-nums text-fg-3",
+    "flex items-center gap-2",
+    "min-w-0 flex-1 truncate text-sm text-fg-2",
+  ],
+  "row": "group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2 bg-panel-2",
+}
+`;
+
+exports[`ChannelList dense row > unread: accent tint, bold name, accent time, count badge 1`] = `
+{
+  "classes": [
+    "rounded-full inline-flex items-center justify-center select-none text-white font-medium text-sm",
+    "flex min-w-0 flex-1 flex-col gap-1",
+    "flex items-baseline gap-2",
+    "min-w-0 flex-1 truncate text-[16px] leading-tight text-fg font-semibold",
+    "shrink-0 font-mono text-xs tabular-nums text-accent",
+    "flex items-center gap-2",
+    "min-w-0 flex-1 truncate text-sm text-fg-2",
+    "inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold leading-none text-accent-fg shrink-0",
+  ],
+  "row": "group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2 bg-accent-soft",
+}
+`;

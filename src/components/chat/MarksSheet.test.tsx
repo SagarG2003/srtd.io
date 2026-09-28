@@ -74,8 +74,9 @@ describe('MarkSheetRow (Open)', () => {
       expect(actions).toHaveLength(1);
       expect(actions[0]?.props['data-mark-action']).toBe('resolve');
       expect(text(actions[0]?.props.children)).toBe(word);
-      // 44x44 minimum hit area.
-      expect(String(actions[0]?.props.className)).toContain('h-11');
+      // 44x44 minimum hit area: the shared default Button at size lg (h-11).
+      expect(actions[0]?.type).toBe(Button);
+      expect(actions[0]?.props.size).toBe('lg');
       expect(String(actions[0]?.props.className)).toContain('min-w-[44px]');
       expect(text(el)).not.toContain('Resolve');
     }
@@ -122,7 +123,8 @@ describe('MarkSheetRow (History)', () => {
     const [reopen] = findAll(el, byAttr('data-mark-action'));
     expect(reopen?.props['data-mark-action']).toBe('reopen');
     expect(text(reopen?.props.children)).toBe('Reopen');
-    expect(String(reopen?.props.className)).toContain('h-11');
+    expect(reopen?.type).toBe(Button);
+    expect(reopen?.props.size).toBe('lg');
   });
 
   it('Reopen confirm copy per type', () => {

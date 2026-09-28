@@ -98,7 +98,10 @@ export function NewChatSheet(props: NewChatSheetProps): ReactElement {
   const title = mode === 'group' ? 'New group' : mode === 'dm' ? 'New direct message' : 'New chat';
   const errorBanner =
     error !== null ? (
-      <div role="alert" className="mb-3 rounded-md border border-bad px-3 py-2 text-sm text-bad">
+      <div
+        role="alert"
+        className="mb-3 rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
+      >
         {error}
       </div>
     ) : null;
