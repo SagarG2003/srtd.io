@@ -10,13 +10,18 @@ vi.mock('agora-chat', () => ({
 
 import { Avatar } from '@/components/ui/Avatar';
 import {
+  bubbleClass,
+  bubbleStatus,
   bubbleTimeLabel,
   ForwardedLabel,
   isVoiceOnly,
   keyOpensMenu,
   lastSeenLabel,
   MessageBubble,
+  threadRows,
+  type ThreadRow,
 } from '@/components/chat/MessageThread';
+import { IconClock, IconTickDouble, IconTickSingle } from '@/components/ui/icons';
 import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { PresignCache } from '@/lib/asset-presign';
@@ -61,16 +66,24 @@ function makeMessage(over: Partial<ThreadMessage>): ThreadMessage {
 
 function renderBubble(
   message: ThreadMessage,
-  opts?: { isGroup?: boolean; head?: boolean; timeZone?: string; onRetry?: (id: string) => void },
+  opts?: {
+    isGroup?: boolean;
+    head?: boolean;
+    tail?: boolean;
+    showTicks?: boolean;
+    timeZone?: string;
+    onRetry?: (id: string) => void;
+  },
 ): ReactElement {
   return MessageBubble({
     message,
     profiles: PROFILES,
     cache,
     presignEnabled: false,
-    showTicks: false,
+    showTicks: opts?.showTicks ?? false,
     isGroup: opts?.isGroup ?? false,
     head: opts?.head ?? true,
+    tail: opts?.tail ?? true,
     timeZone: opts?.timeZone ?? 'UTC',
     onBadgeClick: () => {},
     ...(opts?.onRetry !== undefined ? { onRetry: opts.onRetry } : {}),
@@ -141,11 +154,36 @@ describe('MessageBubble WhatsApp-style layout', () => {
   });
 });
 
+function hasType(root: ReactElement, type: unknown): boolean {
+  let found = false;
+  walk(root, (el) => {
+    if (el.type === type) found = true;
+  });
+  return found;
+}
+
+/** The StatusLine element under the bubble, expanded so its children are walkable. */
+function statusLine(root: ReactElement): ReactElement | null {
+  let line: ReactElement | null = null;
+  walk(root, (el) => {
+    if (typeof el.type === 'function' && (el.type as { name?: string }).name === 'StatusLine') {
+      line = (el.type as (p: unknown) => ReactElement)(el.props);
+    }
+  });
+  return line;
+}
+
 describe('MessageBubble time and state', () => {
-  it('renders the server created_at on the WORKSPACE clock (two workspaces, two times)', () => {
+  it('shows no time inside the bubble; the label keeps it for screen readers', () => {
     const message = makeMessage({});
-    expect(allText(renderBubble(message, { timeZone: 'Asia/Kolkata' }))).toContain('00:15');
-    expect(allText(renderBubble(message, { timeZone: 'Europe/London' }))).toContain('19:45');
+    const root = renderBubble(message, { timeZone: 'Asia/Kolkata' });
+    expect(allText(root)).not.toContain('00:15');
+    let aria = '';
+    walk(root, (el) => {
+      const props = el.props as Record<string, unknown>;
+      if (props['data-bubble'] !== undefined) aria = String(props['aria-label']);
+    });
+    expect(aria).toContain('00:15');
     expect(bubbleTimeLabel(message, 'UTC')).toBe('18:45');
   });
 
@@ -187,6 +225,155 @@ describe('MessageBubble time and state', () => {
       });
       expect(retry).toBeNull();
     }
+  });
+});
+
+describe('bubble shell', () => {
+  const base = { sending: false, failed: false, checked: false, voiceOnly: false };
+
+  it('own is the solid accent with the primary Button ink, peer is panel-2; no border', () => {
+    const own = bubbleClass({ ...base, mine: true, tail: true });
+    const peer = bubbleClass({ ...base, mine: false, tail: true });
+    expect(own).toContain('bg-accent text-accent-fg');
+    expect(peer).toContain('bg-panel-2 text-fg');
+    for (const cls of [own, peer]) {
+      expect(cls).toContain('rounded-[18px]');
+      expect(cls.split(' ')).not.toContain('border');
+    }
+  });
+
+  it('squares the sender-side corner only on the tail', () => {
+    expect(bubbleClass({ ...base, mine: true, tail: true })).toContain('rounded-br-[4px]');
+    expect(bubbleClass({ ...base, mine: false, tail: true })).toContain('rounded-bl-[4px]');
+    expect(bubbleClass({ ...base, mine: true, tail: false })).not.toContain('rounded-br-[4px]');
+    expect(bubbleClass({ ...base, mine: false, tail: false })).not.toContain('rounded-bl-[4px]');
+  });
+
+  it('caps rows at 76% and spaces rows 2px in a run, 10px between runs', () => {
+    const headRow = renderBubble(makeMessage({}), { head: true });
+    const tucked = renderBubble(makeMessage({}), { head: false });
+    expect(rootClass(headRow)).toContain('pt-2.5');
+    expect(rootClass(tucked)).toContain('pt-0.5');
+    expect(rootClass(headRow)).not.toContain('py-2');
+    let column = '';
+    walk(headRow, (el) => {
+      const cls = (el.props as { className?: string }).className ?? '';
+      if (cls.includes('max-w-')) column = cls;
+    });
+    expect(column).toContain('max-w-[76%]');
+  });
+});
+
+describe('status line', () => {
+  const own = (over: Partial<ThreadMessage>) => makeMessage({ mine: true, ...over });
+
+  it('shows Delivered or Read on the last own DM bubble of a run only', () => {
+    expect(bubbleStatus(own({ status: 'sent' }), { showTicks: true, tail: true })).toBe(
+      'delivered',
+    );
+    expect(bubbleStatus(own({ status: 'read' }), { showTicks: true, tail: true })).toBe('read');
+    expect(bubbleStatus(own({}), { showTicks: true, tail: false })).toBeNull();
+    expect(bubbleStatus(own({}), { showTicks: false, tail: true })).toBeNull();
+    expect(bubbleStatus(makeMessage({}), { showTicks: true, tail: true })).toBeNull();
+  });
+
+  it('renders Delivered with a single tick and Read with a double tick in the accent', () => {
+    const delivered = statusLine(renderBubble(own({ status: 'sent' }), { showTicks: true }));
+    expect(delivered).not.toBeNull();
+    expect(allText(delivered as unknown as ReactElement)).toContain('Delivered');
+    expect(hasType(delivered as unknown as ReactElement, IconTickSingle)).toBe(true);
+    const read = statusLine(renderBubble(own({ status: 'read' }), { showTicks: true }));
+    const readRoot = read as unknown as ReactElement;
+    expect(allText(readRoot)).toContain('Read');
+    let accent = false;
+    walk(readRoot, (el) => {
+      const cls = (el.props as { className?: string }).className ?? '';
+      if (cls.includes('text-accent') && hasType(el, IconTickDouble)) accent = true;
+    });
+    expect(accent).toBe(true);
+  });
+
+  it('draws no ticks and no status on a non-tail own bubble', () => {
+    const root = renderBubble(own({ status: 'read' }), { showTicks: true, tail: false });
+    expect(statusLine(root)).toBeNull();
+    expect(hasType(root, IconTickSingle)).toBe(false);
+    expect(hasType(root, IconTickDouble)).toBe(false);
+  });
+
+  it('sending: a clock with no text label, and the bubble at 70% opacity', () => {
+    const root = renderBubble(own({ state: 'sending' }), { showTicks: true });
+    const line = statusLine(root) as unknown as ReactElement;
+    expect(hasType(line, IconClock)).toBe(true);
+    expect(allText(line)).toBe('');
+    let cls = '';
+    walk(root, (el) => {
+      const props = el.props as Record<string, unknown>;
+      if (props['data-bubble'] !== undefined) cls = String(props.className);
+    });
+    expect(cls).toContain('opacity-70');
+  });
+
+  it('failed: Not sent plus Retry, as before', () => {
+    const root = renderBubble(own({ state: 'failed' }), { showTicks: true, onRetry: vi.fn() });
+    expect(allText(statusLine(root) as unknown as ReactElement)).toContain('Not sent');
+    let retry = false;
+    walk(root, (el) => {
+      if ((el.props as { label?: string }).label === 'Retry sending') retry = true;
+    });
+    expect(retry).toBe(true);
+  });
+});
+
+describe('threadRows', () => {
+  const t = (iso: string) => ({ createdAt: iso, time: Date.parse(iso) });
+  const msgs = [
+    makeMessage({ id: 'a', mine: true, senderUserId: 'me', ...t('2026-09-21T10:00:00Z') }),
+    makeMessage({ id: 'b', mine: true, senderUserId: 'me', ...t('2026-09-21T10:05:00Z') }),
+    makeMessage({ id: 'c', mine: true, senderUserId: 'me', ...t('2026-09-21T10:15:00Z') }),
+    makeMessage({ id: 'd', ...t('2026-09-21T10:16:00Z') }),
+    makeMessage({ id: 'e', ...t('2026-09-22T09:00:00Z') }),
+  ];
+  const rows = threadRows(msgs, Date.parse('2026-09-22T12:00:00Z'), 'UTC');
+  const msg = (id: string) =>
+    rows.find(
+      (r): r is Extract<ThreadRow, { kind: 'message' }> =>
+        r.kind === 'message' && r.message.id === id,
+    );
+
+  it('computes runs: head on the first, tail on the last', () => {
+    expect([msg('a')?.head, msg('a')?.tail]).toEqual([true, false]);
+    expect([msg('b')?.head, msg('b')?.tail]).toEqual([false, true]);
+    // A 10-minute gap breaks the run even from the same sender.
+    expect([msg('c')?.head, msg('c')?.tail]).toEqual([true, true]);
+    expect([msg('d')?.head, msg('d')?.tail]).toEqual([true, true]);
+    // A day pill breaks the run.
+    expect([msg('e')?.head, msg('e')?.tail]).toEqual([true, true]);
+  });
+
+  it('puts a time label after each day pill and after a 10-minute gap only', () => {
+    expect(rows.map((r) => (r.kind === 'message' ? r.message.id : `${r.kind}:${r.label}`))).toEqual(
+      [
+        'day:Yesterday',
+        'time:10:00',
+        'a',
+        'b',
+        'time:10:15',
+        'c',
+        'd',
+        'day:Today',
+        'time:09:00',
+        'e',
+      ],
+    );
+  });
+
+  it('labels on the workspace clock', () => {
+    const kolkata = threadRows(
+      msgs.slice(0, 1),
+      Date.parse('2026-09-22T12:00:00Z'),
+      'Asia/Kolkata',
+    );
+    expect(kolkata.find((r) => r.kind === 'time')).toMatchObject({ label: '15:30' });
   });
 });
 
@@ -255,6 +442,7 @@ describe('MessageBubble reply quote', () => {
       showTicks: false,
       isGroup: false,
       head: true,
+      tail: true,
       timeZone: 'UTC',
       onBadgeClick: () => {},
       onJumpToMessage,
@@ -284,6 +472,9 @@ describe('MessageBubble forwarded label', () => {
     expect(cls).toContain('text-fg-2');
     expect(cls).toContain('text-xs');
     expect((label.props as { children: unknown[] }).children).toContain('Forwarded');
+    // On the solid accent the label takes the bubble's on-accent ink.
+    const own = ForwardedLabel({ mine: true });
+    expect((own.props as { className: string }).className).toContain('text-accent-fg');
   });
 
   it('has no label on a message that was not forwarded', () => {
@@ -330,6 +521,7 @@ describe('MessageBubble keyboard and hover actions', () => {
       showTicks: false,
       isGroup: false,
       head: true,
+      tail: true,
       timeZone: 'UTC',
       onBadgeClick: noop,
       press,
@@ -427,20 +619,20 @@ describe('voice-only bubble', () => {
     ).toBe(false);
   });
 
-  it('uses the text-bubble shell with the time inline, no separate time row', () => {
+  it('uses the text-bubble shell with no time inside, inline or as a row', () => {
     const root = renderBubble(voice);
-    let bubbleClass = '';
-    const inlineTimes: string[] = [];
-    let timeRow = false;
+    let cls = '';
+    let timeInside = false;
     walk(root, (el) => {
       const props = el.props as { className?: string } & Record<string, unknown>;
-      if (props['data-bubble'] !== undefined) bubbleClass = props.className ?? '';
-      if (props.className?.includes('absolute bottom-1.5 right-2.5')) inlineTimes.push('x');
-      if (props.className?.includes('mt-1 flex items-center justify-end')) timeRow = true;
+      if (props['data-bubble'] !== undefined) cls = props.className ?? '';
+      if (props.className?.includes('absolute bottom-1.5 right-2.5')) timeInside = true;
+      if (props.className?.includes('mt-1 flex items-center justify-end')) timeInside = true;
+      if (props.voiceSpacer !== undefined) timeInside = true;
     });
-    expect(bubbleClass).toContain('rounded-[14px]');
-    expect(bubbleClass).toContain('min-w-[220px]');
-    expect(inlineTimes).toHaveLength(1);
-    expect(timeRow).toBe(false);
+    expect(cls).toContain('rounded-[18px]');
+    expect(cls).toContain('min-w-[220px]');
+    expect(timeInside).toBe(false);
+    expect(allText(root)).not.toContain('18:45');
   });
 });
