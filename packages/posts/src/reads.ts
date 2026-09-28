@@ -135,6 +135,29 @@ export async function readPostsByIds(
   return { ok: true, data: (data ?? []) as PostCardFields[] };
 }
 
+/**
+ * Batched resolve of per-workspace post numbers (pasted /p/ links) to ids: one
+ * RLS-scoped IN read over every number in a message, never one per link. A
+ * number the viewer cannot see, or a deleted post, simply does not come back.
+ * Returns [] for no numbers without a round-trip.
+ */
+export async function readPostIdsByNumbers(
+  client: Client,
+  params: { workspaceId: string; numbers: number[] },
+): Promise<Result<Array<Pick<Post, 'id' | 'number'>>>> {
+  if (params.numbers.length === 0) return { ok: true, data: [] };
+
+  const { data, error } = await client
+    .from('posts')
+    .select('id, number')
+    .eq('workspace_id', params.workspaceId)
+    .in('number', params.numbers)
+    .is('deleted_at', null);
+
+  if (error) return { ok: false, error: transportError(error.message) };
+  return { ok: true, data: (data ?? []) as Array<Pick<Post, 'id' | 'number'>> };
+}
+
 function transportError(message: string): DomainError {
   return { code: 'unknown', message };
 }

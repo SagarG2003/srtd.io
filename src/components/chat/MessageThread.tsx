@@ -10,8 +10,17 @@ import {
   type PointerEvent,
   type Ref,
   type ReactElement,
+  type ReactNode,
 } from 'react';
+import { Link } from 'react-router-dom';
 import { isNearBottom } from '@/lib/chat/scroll';
+import {
+  APP_ENTITY_ROUTES,
+  classify,
+  currentOrigin,
+  displayUrl,
+  tokenize,
+} from '@/lib/chat/message-links';
 import { Avatar } from '@/components/ui/Avatar';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { IconButton } from '@/components/ui/IconButton';
@@ -297,9 +306,10 @@ export const HEADER_TYPING = 'typing…';
 
 /**
  * The DM header's second line, in priority order: 'typing…' while the peer
- * types, 'Online' while present, else "<role label> · <workspace>" (the
- * workspace alone when the role is unknown). Without a workspace name it falls
- * back to the role alone, then the last-seen line. Groups keep no second line.
+ * types, else "<role label> · <workspace>" (the workspace alone when the role is
+ * unknown). Online shows as the dot on the header photo, not as text. Without a
+ * workspace name it falls back to the role alone, then (offline only) the
+ * last-seen line. Groups keep no second line.
  */
 export function dmHeaderLine(input: {
   isGroup: boolean;
@@ -313,16 +323,25 @@ export function dmHeaderLine(input: {
   if (input.isGroup) return null;
   if (input.peerTyping) return HEADER_TYPING;
   const presence = input.presence?.available === true ? input.presence : undefined;
-  if (presence?.online === true) return 'Online';
   const role = input.role !== null ? roleLabel(input.role) : null;
   if (input.workspaceName !== undefined) {
     return role !== null ? `${role} · ${input.workspaceName}` : input.workspaceName;
   }
   if (role !== null) return role;
-  if (presence !== undefined) {
+  if (presence !== undefined && !presence.online) {
     return lastSeenLabel(presence.lastTimeMs, input.nowMs ?? Date.now(), input.timeZone);
   }
   return null;
+}
+
+/**
+ * The DM header photo's presence: 'online' draws the 10px good dot (panel ring)
+ * at its bottom-right while the peer is present and presence is known.
+ */
+export function headerAvatarPresence(
+  presence: { online: boolean; available: boolean } | undefined,
+): 'online' | undefined {
+  return presence !== undefined && presence.available && presence.online ? 'online' : undefined;
 }
 
 /**
@@ -499,6 +518,55 @@ export const OWN_BUBBLE_CONTENT = cn(
   '[&_.text-fg-3]:text-accent-fg [&_.text-fg-3]:opacity-80',
 );
 
+/** Link ink per side: accent on a peer bubble, accent-fg on the solid own bubble. */
+export function bodyLinkClass(mine: boolean): string {
+  return cn('underline', mine ? 'text-accent-fg' : 'text-accent');
+}
+
+/**
+ * A message body as text runs and links. External urls open in a new tab and
+ * show without the scheme; links to this app's own post or brief pages are
+ * router links that open in-app. The whole link text is the tap target. Pure:
+ * the origin is read at call time, so the first paint is final.
+ */
+export function renderMessageBody(
+  body: string,
+  mine: boolean,
+  origin: string | null = currentOrigin(),
+): ReactNode[] {
+  const className = bodyLinkClass(mine);
+  return tokenize(body).map((segment, i) => {
+    if (segment.kind === 'text') return segment.text;
+    const target = classify(segment.url, origin, APP_ENTITY_ROUTES);
+    const label = displayUrl(segment.url);
+    return target.kind === 'external' ? (
+      <a
+        key={i}
+        data-msg-link=""
+        href={segment.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={className}
+      >
+        {label}
+      </a>
+    ) : (
+      <Link key={i} data-msg-link="" to={target.path} className={className}>
+        {label}
+      </Link>
+    );
+  });
+}
+
+/** Whether a pointer went down on a link in the body: the link handles the tap. */
+export function isLinkTarget(target: unknown): boolean {
+  return (
+    typeof Element !== 'undefined' &&
+    target instanceof Element &&
+    target.closest('[data-msg-link]') !== null
+  );
+}
+
 /** Message body text at 17px / 22px; the ink comes from the bubble (fg or accent-fg). */
 export const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[17px] leading-[22px]';
 
@@ -668,7 +736,7 @@ export function MessageBubble(props: {
               />
             ) : null}
             {textOnly ? (
-              <p className={BODY_TEXT}>{message.body}</p>
+              <p className={BODY_TEXT}>{renderMessageBody(message.body, mine)}</p>
             ) : voiceOnly ? (
               <MessageAttachments
                 attachments={message.attachments}
@@ -682,7 +750,11 @@ export function MessageBubble(props: {
                   cache={cache}
                   presignEnabled={presignEnabled}
                   album
-                  caption={hasBody ? <p className={BODY_TEXT}>{message.body}</p> : undefined}
+                  caption={
+                    hasBody ? (
+                      <p className={BODY_TEXT}>{renderMessageBody(message.body, mine)}</p>
+                    ) : undefined
+                  }
                   onImageClick={(_attachment, index) => props.onOpenImage?.(index)}
                 />
                 {hasCards ? (
@@ -694,7 +766,9 @@ export function MessageBubble(props: {
               </>
             ) : (
               <>
-                {hasBody ? <p className={BODY_TEXT}>{message.body}</p> : null}
+                {hasBody ? (
+                  <p className={BODY_TEXT}>{renderMessageBody(message.body, mine)}</p>
+                ) : null}
                 <MessageAttachments
                   attachments={message.attachments}
                   cache={cache}
@@ -947,7 +1021,9 @@ function MessageRow(props: {
   };
   const pointer: BubblePointerHandlers = {
     onPointerDown: (e) => {
-      handlers.onPointerDown(e);
+      // A press on a body link never arms the long-press menu; the swipe still
+      // only starts past 8px, so a tap under that is the link's.
+      if (!isLinkTarget(e.target)) handlers.onPointerDown(e);
       swipe.handlers.onPointerDown(e);
     },
     onPointerMove: (e) => {
@@ -1463,11 +1539,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
             name={props.title}
             size="row"
             {...(props.avatarUrl != null ? { src: props.avatarUrl } : {})}
-            presence={
-              props.presence !== undefined && props.presence.available && props.presence.online
-                ? 'online'
-                : undefined
-            }
+            presence={headerAvatarPresence(props.presence)}
           />
         )}
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">

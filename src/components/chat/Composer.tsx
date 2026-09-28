@@ -34,7 +34,13 @@ import {
   type MessageAttachment,
   type ReplyQuote,
 } from '@/lib/chat/attachments';
-import type { PostCardFields } from '@srtdio/posts';
+import type { PostCardFields, Result } from '@srtdio/posts';
+// Deep import: the package index is outside this change; the read lives beside readPostsByIds.
+import { readPostIdsByNumbers } from '../../../packages/posts/src/reads';
+import { readBriefIdsByNumbers } from '@/lib/chat/briefs';
+import { APP_ENTITY_ROUTES, classify, currentOrigin, tokenize } from '@/lib/chat/message-links';
+import { supabase } from '@/lib/supabase';
+import { useWorkspace } from '@/lib/workspace-context';
 
 interface ComposerProps {
   /**
@@ -100,6 +106,91 @@ export function dispatchSend(
     logger.error('chat composer: send threw', { error: String(error) });
     return false;
   }
+}
+
+/** The draft fields pasted post / brief links can add cards to. */
+export interface LinkCardDraft {
+  text: string;
+  sharedPostIds: string[];
+  sharedBriefIds: string[];
+}
+
+/** Batched number-to-id reads for the open workspace (one query per entity type). */
+export interface LinkCardReaders {
+  postIds: (numbers: number[]) => Promise<Result<Array<{ id: string; number: number }>>>;
+  briefIds: (numbers: number[]) => Promise<Result<Array<{ id: string; number: number }>>>;
+}
+
+/** The internal post / brief links in a body that belong to the open workspace. */
+function workspaceLinks(
+  text: string,
+  workspaceKey: string | null,
+  origin: string | null,
+): Array<{ url: string; kind: 'post' | 'brief'; number: number }> {
+  if (workspaceKey === null) return [];
+  const links: Array<{ url: string; kind: 'post' | 'brief'; number: number }> = [];
+  for (const segment of tokenize(text)) {
+    if (segment.kind !== 'url') continue;
+    const target = classify(segment.url, origin, APP_ENTITY_ROUTES);
+    if (target.kind === 'external') continue;
+    if (target.ref.key !== workspaceKey.toUpperCase()) continue;
+    links.push({ url: segment.url, kind: target.kind, number: target.ref.number });
+  }
+  return links;
+}
+
+/** Whether Send must resolve pasted links first (any internal link to this workspace). */
+export function hasLinkCards(
+  text: string,
+  workspaceKey: string | null,
+  origin: string | null,
+): boolean {
+  return workspaceLinks(text, workspaceKey, origin).length > 0;
+}
+
+/**
+ * Turn pasted post and brief links into shared cards at Send: at most one batched
+ * read per entity type over every link's number, then each resolved id joins the
+ * shared ids exactly as the picker adds it (no duplicates). A body of only
+ * resolved links and whitespace sends as cards with an empty body; otherwise the
+ * text stays as typed. A ref with no row under RLS, or a failed read, stays a
+ * plain link with no error.
+ */
+export async function withLinkCards(
+  draft: LinkCardDraft,
+  context: { workspaceKey: string | null; origin: string | null },
+  readers: LinkCardReaders,
+): Promise<LinkCardDraft> {
+  const links = workspaceLinks(draft.text, context.workspaceKey, context.origin);
+  if (links.length === 0) return draft;
+  const numbers = (kind: 'post' | 'brief'): number[] => [
+    ...new Set(links.filter((l) => l.kind === kind).map((l) => l.number)),
+  ];
+  const postNumbers = numbers('post');
+  const briefNumbers = numbers('brief');
+  const [posts, briefs] = await Promise.all([
+    postNumbers.length > 0 ? readers.postIds(postNumbers) : Promise.resolve(null),
+    briefNumbers.length > 0 ? readers.briefIds(briefNumbers) : Promise.resolve(null),
+  ]);
+  const byNumber = (result: typeof posts): Map<number, string> =>
+    new Map(result?.ok === true ? result.data.map((row) => [row.number, row.id]) : []);
+  const postIdOf = byNumber(posts);
+  const briefIdOf = byNumber(briefs);
+
+  const sharedPostIds = [...draft.sharedPostIds];
+  const sharedBriefIds = [...draft.sharedBriefIds];
+  const resolved = new Set<string>();
+  for (const link of links) {
+    const id = (link.kind === 'post' ? postIdOf : briefIdOf).get(link.number);
+    if (id === undefined) continue;
+    resolved.add(link.url);
+    const ids = link.kind === 'post' ? sharedPostIds : sharedBriefIds;
+    if (!ids.includes(id)) ids.push(id);
+  }
+  const onlyLinks = tokenize(draft.text).every((segment) =>
+    segment.kind === 'url' ? resolved.has(segment.url) : segment.text.trim() === '',
+  );
+  return { text: onlyLinks ? '' : draft.text, sharedPostIds, sharedBriefIds };
 }
 
 /**
@@ -211,6 +302,8 @@ export function Composer(props: ComposerProps): ReactElement {
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
+  const [resolvingLinks, setResolvingLinks] = useState(false);
+  const { workspaceId, workspaceKey } = useWorkspace();
   const recorder = useAudioRecorder();
   const toast = useToast();
 
@@ -220,7 +313,7 @@ export function Composer(props: ComposerProps): ReactElement {
 
   const canAttach = props.uploadFile !== undefined && !props.disabled;
   const canSend = composerCanSend({
-    disabled: props.disabled,
+    disabled: props.disabled || resolvingLinks,
     text,
     fileCount: pending.length,
     sharedPostCount: sharedPosts.length,
@@ -289,12 +382,43 @@ export function Composer(props: ComposerProps): ReactElement {
   function submit(event: FormEvent): void {
     event.preventDefault();
     if (!canSend) return;
-    const taken = dispatchSend(props.onSend, {
+    const draft: LinkCardDraft = {
       text,
-      attachments: draftAttachments(pending, props.uploadFile),
       sharedPostIds: sharedPosts.map((post) => post.id),
-      reply: props.reply?.quote ?? null,
       sharedBriefIds: sharedBriefs.map((brief) => brief.id),
+    };
+    const origin = currentOrigin();
+    // Pasted post / brief links resolve here, at Send only (never per keystroke).
+    if (workspaceId === null || !hasLinkCards(text, workspaceKey, origin)) {
+      send(draft);
+      return;
+    }
+    setResolvingLinks(true);
+    void withLinkCards(
+      draft,
+      { workspaceKey, origin },
+      {
+        postIds: (numbers) => readPostIdsByNumbers(supabase, { workspaceId, numbers }),
+        briefIds: (numbers) => readBriefIdsByNumbers(supabase, { workspaceId, numbers }),
+      },
+    )
+      .catch((error: unknown) => {
+        logger.warn('chat composer: link cards failed', { error: String(error) });
+        return draft;
+      })
+      .then((resolved) => {
+        setResolvingLinks(false);
+        send(resolved);
+      });
+  }
+
+  function send(draft: LinkCardDraft): void {
+    const taken = dispatchSend(props.onSend, {
+      text: draft.text,
+      attachments: draftAttachments(pending, props.uploadFile),
+      sharedPostIds: draft.sharedPostIds,
+      reply: props.reply?.quote ?? null,
+      sharedBriefIds: draft.sharedBriefIds,
     });
     if (!taken) {
       // Keep the draft (text + chips + shared posts) so it is not lost.

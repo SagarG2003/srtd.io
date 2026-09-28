@@ -20,6 +20,9 @@ import {
   ForwardedLabel,
   hasAlbum,
   HEADER_TYPING,
+  headerAvatarPresence,
+  isLinkTarget,
+  renderMessageBody,
   isVoiceOnly,
   keyOpensMenu,
   lastSeenLabel,
@@ -38,6 +41,7 @@ import { roleLabel } from '@/components/pages/settings/members-data';
 import { IconClock, IconTickDouble, IconTickSingle } from '@/components/ui/icons';
 import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
+import { Link } from 'react-router-dom';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
 import { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
@@ -727,10 +731,19 @@ describe('dmHeaderLine', () => {
     timeZone: 'UTC',
   };
 
-  it('typing beats online beats the role line', () => {
+  it('online keeps the role line; typing replaces it, then the role line returns', () => {
     const online = { online: true, lastTimeMs: null, available: true };
+    const roleLine = `${roleLabel(base.role)} · ${base.workspaceName}`;
+    expect(dmHeaderLine({ ...base, presence: online })).toBe(roleLine);
     expect(dmHeaderLine({ ...base, peerTyping: true, presence: online })).toBe(HEADER_TYPING);
-    expect(dmHeaderLine({ ...base, presence: online })).toBe('Online');
+    expect(dmHeaderLine({ ...base, presence: online })).toBe(roleLine);
+  });
+
+  it('never shows an "Online" or last-seen text while the peer is online', () => {
+    const online = { online: true, lastTimeMs: null, available: true };
+    expect(
+      dmHeaderLine({ ...base, role: null, workspaceName: undefined, presence: online }),
+    ).toBeNull();
   });
 
   it('rests on "<role label> · <workspace>", labelled through roleLabel', () => {
@@ -1072,5 +1085,92 @@ describe('bubble text sizes', () => {
       voiceOnly: false,
     });
     expect(cls).toContain('px-3 py-2');
+  });
+});
+
+describe('header online dot', () => {
+  it('draws the dot only while the peer is online and presence is known', () => {
+    expect(headerAvatarPresence({ online: true, available: true })).toBe('online');
+    expect(headerAvatarPresence({ online: false, available: true })).toBeUndefined();
+    expect(headerAvatarPresence({ online: true, available: false })).toBeUndefined();
+    expect(headerAvatarPresence(undefined)).toBeUndefined();
+  });
+
+  it('the dot is a 10px good circle with a 2px panel ring at the bottom-right', () => {
+    const dots: string[] = [];
+    walk(Avatar({ name: 'Alice', presence: 'online' }), (el) => {
+      const props = el.props as Record<string, unknown>;
+      if (props['data-presence'] === 'online') dots.push(String(props.className));
+    });
+    expect(dots).toHaveLength(1);
+    for (const token of ['h-2.5', 'w-2.5', 'rounded-full', 'bg-good', 'ring-2', 'ring-panel']) {
+      expect(dots[0]).toContain(token);
+    }
+    expect(dots[0]).toContain('bottom-0');
+    expect(dots[0]).toContain('right-0');
+    let none = 0;
+    walk(Avatar({ name: 'Alice' }), (el) => {
+      if ((el.props as Record<string, unknown>)['data-presence'] !== undefined) none += 1;
+    });
+    expect(none).toBe(0);
+  });
+});
+
+describe('message body links', () => {
+  const ORIGIN = 'https://app.example.test';
+  const links = (nodes: ReactNode): ReactElement<Record<string, unknown>>[] => {
+    const found: ReactElement<Record<string, unknown>>[] = [];
+    walk(nodes, (el) => {
+      if ((el.props as Record<string, unknown>)['data-msg-link'] === '') {
+        found.push(el as ReactElement<Record<string, unknown>>);
+      }
+    });
+    return found;
+  };
+
+  it('renders an external url as a new-tab anchor without the scheme', () => {
+    const nodes = renderMessageBody('see https://example.com/a?b=1.', false, ORIGIN);
+    const [a] = links(nodes);
+    expect(a?.type).toBe('a');
+    expect(a?.props.href).toBe('https://example.com/a?b=1');
+    expect(a?.props.target).toBe('_blank');
+    expect(a?.props.rel).toBe('noopener noreferrer');
+    expect(a?.props.children).toBe('example.com/a?b=1');
+    expect(nodes[0]).toBe('see ');
+    expect(nodes[2]).toBe('.');
+  });
+
+  it('renders internal post and brief links as in-app router links', () => {
+    const nodes = renderMessageBody(`${ORIGIN}/p/gbl-142 and ${ORIGIN}/b/gbl-7`, false, ORIGIN);
+    const found = links(nodes);
+    expect(found.map((el) => el.type)).toEqual([Link, Link]);
+    expect(found.map((el) => el.props.to)).toEqual(['/p/gbl-142', '/b/gbl-7']);
+    expect(found[0]?.props.children).toBe('app.example.test/p/gbl-142');
+  });
+
+  it('colours links per side: accent on a peer bubble, accent-fg on your own', () => {
+    const body = `x https://example.com ${ORIGIN}/p/gbl-1`;
+    for (const el of links(renderMessageBody(body, false, ORIGIN))) {
+      expect(el.props.className).toBe('underline text-accent');
+    }
+    for (const el of links(renderMessageBody(body, true, ORIGIN))) {
+      expect(el.props.className).toBe('underline text-accent-fg');
+    }
+  });
+
+  it('the bubble body renders the link segments', () => {
+    const root = renderBubble(makeMessage({ body: 'go https://example.com now', mine: true }));
+    const found = links(root);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.props.className).toBe('underline text-accent-fg');
+  });
+
+  it('plain text stays a single text run', () => {
+    expect(renderMessageBody('no links here', false, ORIGIN)).toEqual(['no links here']);
+  });
+
+  it('a pointer on a non-element target is not a link tap', () => {
+    expect(isLinkTarget(null)).toBe(false);
+    expect(isLinkTarget({})).toBe(false);
   });
 });

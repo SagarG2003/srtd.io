@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Client } from '@srtdio/rpc';
 import { listPostsForPicker, readPostsByIds } from '@srtdio/posts';
-import { POST_PICKER_COLUMNS } from '../../../packages/posts/src/reads';
+import { POST_PICKER_COLUMNS, readPostIdsByNumbers } from '../../../packages/posts/src/reads';
 
 const WS = 'ws-1';
 
@@ -114,6 +114,39 @@ describe('readPostsByIds', () => {
   it('surfaces a read failure as a Result error, never throwing', async () => {
     const { client } = makeClient({ data: null, error: { message: 'boom' } });
     const result = await readPostsByIds(client, { workspaceId: WS, ids: ['p1'] });
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe('readPostIdsByNumbers', () => {
+  it('resolves every number in ONE workspace-scoped IN read over live posts', async () => {
+    const { client, from, calls } = makeClient({
+      data: [{ id: 'p1', number: 12 }],
+      error: null,
+    });
+    const result = await readPostIdsByNumbers(client, { workspaceId: WS, numbers: [12, 13] });
+    expect(from).toHaveBeenCalledTimes(1);
+    expect(from).toHaveBeenCalledWith('posts');
+    expect(calls).toContainEqual({ method: 'select', args: ['id, number'] });
+    expect(calls).toContainEqual({ method: 'eq', args: ['workspace_id', WS] });
+    const inCalls = calls.filter((c) => c.method === 'in');
+    expect(inCalls).toEqual([{ method: 'in', args: ['number', [12, 13]] }]);
+    expect(calls).toContainEqual({ method: 'is', args: ['deleted_at', null] });
+    expect(result).toEqual({ ok: true, data: [{ id: 'p1', number: 12 }] });
+  });
+
+  it('does not read when there are no numbers', async () => {
+    const { client, from } = makeClient({ data: [], error: null });
+    expect(await readPostIdsByNumbers(client, { workspaceId: WS, numbers: [] })).toEqual({
+      ok: true,
+      data: [],
+    });
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a read failure as a Result error, never throwing', async () => {
+    const { client } = makeClient({ data: null, error: { message: 'boom' } });
+    const result = await readPostIdsByNumbers(client, { workspaceId: WS, numbers: [1] });
     expect(result.ok).toBe(false);
   });
 });
