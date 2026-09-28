@@ -13,11 +13,23 @@ const BADGE_TONE: Record<MarkType, string> = {
   pending: 'border-warn bg-panel-3 text-warn',
 };
 
+const PILL = 'inline-flex h-5 items-center rounded-full border px-2 text-[11px] font-medium';
+
+/** A plain, non-interactive mark pill in the type's tone (pin board rows). */
+export function MarkPill(props: { type: MarkType; label: string }): ReactElement {
+  return (
+    <span data-mark-pill={props.type} className={cn(PILL, 'shrink-0', BADGE_TONE[props.type])}>
+      {props.label}
+    </span>
+  );
+}
+
 /**
- * The mark badge on a bubble. Commitment and decision (and pending once
- * resolved, which shows nothing) are plain labels. An open pending badge is a
- * button that opens the priority chooser; its visible pill is small, and an
- * invisible after-element extends the hit area to at least 44x44.
+ * The mark badge on a bubble. Commitment and decision are plain labels; a
+ * stamped mark of any type is a plain label with its stamp word appended
+ * ("Commitment · Delivered"). An open pending badge is a button that opens the
+ * priority chooser; its visible pill is small, and an invisible after-element
+ * extends the hit area to at least 44x44.
  */
 export function MarkBadge(props: {
   mark: ChatMark | undefined;
@@ -25,10 +37,7 @@ export function MarkBadge(props: {
 }): ReactElement {
   const label = markBadgeLabel(props.mark);
   if (props.mark === undefined || label === '') return <></>;
-  const pill = cn(
-    'inline-flex h-5 items-center rounded-full border px-2 text-[11px] font-medium',
-    BADGE_TONE[props.mark.type],
-  );
+  const pill = cn(PILL, BADGE_TONE[props.mark.type]);
   if (canChangePriority(props.mark) && props.onChangePriority !== undefined) {
     const onChange = props.onChangePriority;
     return (

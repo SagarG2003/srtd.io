@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
   type MouseEvent,
   type Ref,
   type ReactElement,
@@ -16,6 +17,7 @@ import {
   IconChat,
   IconChevronRight,
   IconClock,
+  IconEllipsis,
   IconForward,
   IconRotateCcw,
   IconSettings,
@@ -23,9 +25,10 @@ import {
 import { useLongPress, type LongPressHandlers } from '@/components/ui';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
+import { useMediaQuery } from '@/lib/use-media-query';
 import type { ChannelSummary, ChatProfile } from '@/lib/chat-reads';
 import { replyPreview, type MessageStatus, type ThreadMessage } from '@/lib/chat/thread';
-import type { ReplyQuote } from '@/lib/chat/attachments';
+import { classifyAttachment, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
 import { formatMessageTime } from '@/lib/chat/time-format';
 import type { PresignCache } from '@/lib/asset-presign';
@@ -81,8 +84,12 @@ interface MessageThreadProps {
   markedMessages?: Map<string, ThreadMessage>;
   /** Mark a message, or change an open pending mark's priority (same type). */
   onSetMark?: (messageId: string, type: MarkType, priority: MarkPriority) => Promise<WriteResult>;
-  /** Resolve an open pending mark. */
+  /** Stamp an open mark (Delivered / Closed / Completed). */
   onResolveMark?: (messageId: string) => Promise<WriteResult>;
+  /** Return a stamped mark to open. */
+  onReopenMark?: (messageId: string) => Promise<WriteResult>;
+  /** The caller's user id; the pin board names their own stamps "You". */
+  currentUserId?: string;
   /** Delete own messages for everyone; absent hides "Select". */
   onDeleteMessages?: (
     messageIds: readonly string[],
@@ -114,6 +121,40 @@ interface MessageThreadProps {
     messages: readonly ThreadMessage[],
     targets: ChannelSummary[],
   ) => Promise<ForwardSendResult>;
+}
+
+/** Devices that get the hover ⋯ control (a mouse or trackpad, not touch). */
+export const HOVER_POINTER_QUERY = '(hover: hover) and (pointer: fine)';
+
+/**
+ * Whether a keydown on a focused bubble (or channel row) opens its action menu:
+ * Enter or Space on the element itself, or Shift+F10 / the ContextMenu key. Keys
+ * bubbling up from a control inside (quoted reply, reaction badge) are ignored.
+ */
+export function keyOpensMenu(event: {
+  key: string;
+  shiftKey: boolean;
+  target: unknown;
+  currentTarget: unknown;
+}): boolean {
+  if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) return true;
+  if (event.target !== event.currentTarget) return false;
+  return event.key === 'Enter' || event.key === ' ';
+}
+
+/** A voice note alone (no text, cards or other files): it takes the text-bubble layout. */
+export function isVoiceOnly(
+  message: Pick<ThreadMessage, 'body' | 'attachments' | 'sharedPostIds' | 'sharedBriefIds'>,
+): boolean {
+  const [only] = message.attachments;
+  return (
+    message.attachments.length === 1 &&
+    only !== undefined &&
+    classifyAttachment(only.mime) === 'audio' &&
+    message.body.trim() === '' &&
+    message.sharedPostIds.length === 0 &&
+    message.sharedBriefIds.length === 0
+  );
 }
 
 /** Scroll positions within this many px of the top request the older page. */
@@ -295,6 +336,10 @@ export function MessageBubble(props: {
     handlers: LongPressHandlers;
     onContextMenu: (event: MouseEvent) => void;
     consumeClick: () => boolean;
+    /** Keyboard open (Enter / Space / Shift+F10), anchored to the bubble. */
+    onKeyOpen: () => void;
+    /** Present on hover pointer devices: the ⋯ control, anchored to itself. */
+    onMore?: (anchor: DOMRect) => void;
   };
 }): ReactElement {
   const { message, profiles, cache, presignEnabled, showTicks, isGroup, head, onBadgeClick } =
@@ -309,6 +354,7 @@ export function MessageBubble(props: {
   const failed = message.state === 'failed';
   const sending = message.state === 'sending';
   const selection = props.selection;
+  const voiceOnly = isVoiceOnly(message);
   const textOnly =
     message.body.trim() !== '' &&
     message.attachments.length === 0 &&
@@ -328,13 +374,24 @@ export function MessageBubble(props: {
       {showTicks && mine && !failed && !sending ? <MessageTicks status={message.status} /> : null}
     </>
   );
+  // Text and voice-only bubbles float the time bottom-right over a spacer that
+  // reserves its width on the last line.
+  const spacer = (
+    <span className={cn('inline-block', mine ? 'w-[74px]' : 'w-[52px]')} aria-hidden="true" />
+  );
+  const inlineTime = (
+    <span className="absolute bottom-1.5 right-2.5 inline-flex items-center gap-1 text-[10px] text-fg-3">
+      {time}
+    </span>
+  );
+  const onMore = selection === undefined ? press?.onMore : undefined;
   return (
     <li
       data-msg-id={message.id}
       data-state={message.state}
       data-selection={selection?.role}
       className={cn(
-        'flex items-start gap-2 px-4 py-2',
+        'group flex items-start gap-2 px-4 py-2',
         mine ? 'flex-row-reverse' : 'flex-row',
         hasReactions && 'mb-3',
       )}
@@ -350,8 +407,16 @@ export function MessageBubble(props: {
         <div
           ref={bubbleRef}
           data-bubble=""
+          role="group"
+          tabIndex={0}
+          aria-label={`${mine ? 'Your message' : `Message from ${name}`}, ${bubbleTimeLabel(message, timeZone)}`}
           {...press?.handlers}
           onContextMenu={press?.onContextMenu}
+          onKeyDown={(e: KeyboardEvent<HTMLDivElement>) => {
+            if (selection !== undefined || press === undefined || !keyOpensMenu(e)) return;
+            e.preventDefault();
+            press.onKeyOpen();
+          }}
           onClickCapture={(e) => {
             if (selection !== undefined) {
               e.preventDefault();
@@ -365,7 +430,8 @@ export function MessageBubble(props: {
             }
           }}
           className={cn(
-            'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-2xl border px-3 py-2',
+            'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-2xl border px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+            voiceOnly && 'min-w-[220px]',
             mine
               ? 'rounded-br-sm border-accent-line bg-accent-soft'
               : 'rounded-bl-sm border-border bg-panel-2',
@@ -411,14 +477,19 @@ export function MessageBubble(props: {
             <>
               <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-sm text-fg-2">
                 {message.body}
-                <span
-                  className={cn('inline-block', mine ? 'w-[74px]' : 'w-[52px]')}
-                  aria-hidden="true"
-                />
+                {spacer}
               </p>
-              <span className="absolute bottom-1.5 right-2.5 inline-flex items-center gap-1 text-[10px] text-fg-3">
-                {time}
-              </span>
+              {inlineTime}
+            </>
+          ) : voiceOnly ? (
+            <>
+              <MessageAttachments
+                attachments={message.attachments}
+                cache={cache}
+                presignEnabled={presignEnabled}
+                voiceSpacer={spacer}
+              />
+              {inlineTime}
             </>
           ) : (
             <>
@@ -456,6 +527,18 @@ export function MessageBubble(props: {
           ) : null}
         </div>
       </div>
+      {onMore !== undefined ? (
+        <button
+          type="button"
+          data-more=""
+          aria-label="Message actions"
+          aria-haspopup="menu"
+          onClick={(e) => onMore(e.currentTarget.getBoundingClientRect())}
+          className="flex h-11 w-11 shrink-0 items-center justify-center self-center rounded-full text-fg-3 opacity-0 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100 group-focus-within:opacity-100"
+        >
+          <IconEllipsis size={20} />
+        </button>
+      ) : null}
       {failed && mine ? (
         <IconButton
           label="Retry sending"
@@ -510,15 +593,27 @@ function MessageRow(props: {
   mark: ChatMark | undefined;
   onChangePriority?: (messageId: string) => void;
   selection?: RowSelection;
+  /** Hover pointer device: render the ⋯ control. */
+  hoverMenu: boolean;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const selecting = props.selection !== undefined;
-  const { handlers, consumeClickSuppression } = useLongPress(() => {
-    if (!selecting) props.onOpen(props.message, bubbleRef.current?.getBoundingClientRect() ?? null);
-  });
+  const bubbleRect = (): DOMRect | null => bubbleRef.current?.getBoundingClientRect() ?? null;
+  // Mouse holds never open the menu (right-click and ⋯ do); touch is unchanged.
+  const { handlers, consumeClickSuppression, cancel, clearClickSuppression } = useLongPress(
+    () => open(bubbleRect()),
+    { ignoreMouse: true },
+  );
+  function open(anchor: DOMRect | null): void {
+    if (selecting) return;
+    // The menu's backdrop takes the trailing pointerup, so no click to swallow.
+    clearClickSuppression();
+    props.onOpen(props.message, anchor);
+  }
   const onContextMenu = (e: MouseEvent): void => {
     e.preventDefault();
-    if (!selecting) props.onOpen(props.message, bubbleRef.current?.getBoundingClientRect() ?? null);
+    cancel();
+    open(bubbleRect());
   };
   const onChangePriority = props.onChangePriority;
   return (
@@ -532,7 +627,13 @@ function MessageRow(props: {
       head={props.head}
       timeZone={props.timeZone}
       bubbleRef={bubbleRef}
-      press={{ handlers, onContextMenu, consumeClick: consumeClickSuppression }}
+      press={{
+        handlers,
+        onContextMenu,
+        consumeClick: consumeClickSuppression,
+        onKeyOpen: () => open(bubbleRect()),
+        ...(props.hoverMenu ? { onMore: (anchor: DOMRect) => open(anchor) } : {}),
+      }}
       {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
       {...(props.onJumpToMessage !== undefined ? { onJumpToMessage: props.onJumpToMessage } : {})}
       mark={props.mark}
@@ -540,9 +641,7 @@ function MessageRow(props: {
         ? { onChangePriority: () => onChangePriority(props.message.id) }
         : {})}
       {...(props.selection !== undefined ? { selection: props.selection } : {})}
-      onBadgeClick={() =>
-        props.onOpen(props.message, bubbleRef.current?.getBoundingClientRect() ?? null)
-      }
+      onBadgeClick={() => props.onOpen(props.message, bubbleRect())}
     />
   );
 }
@@ -584,6 +683,7 @@ function ThreadBody(
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
   const [menu, setMenu] = useState<{ message: ThreadMessage; rect: DOMRect | null } | null>(null);
+  const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
   const toast = useToast();
   const listRef = useRef<HTMLUListElement>(null);
   // Tracks whether we have already snapped a freshly opened conversation to the
@@ -740,6 +840,7 @@ function ThreadBody(
             head={isHead(props.messages[i - 1], message)}
             timeZone={props.timeZone}
             onOpen={(m, rect) => setMenu({ message: m, rect })}
+            hoverMenu={hoverMenu}
             onJumpToMessage={scrollToMessage}
             mark={props.marks.get(message.id)}
             {...(props.onChangePriority !== undefined
@@ -1001,19 +1102,23 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           {...(canTranscribe ? { transcribe } : {})}
         />
       )}
-      {props.marks !== undefined && props.onResolveMark !== undefined ? (
+      {props.marks !== undefined &&
+      props.onResolveMark !== undefined &&
+      props.onReopenMark !== undefined ? (
         <MarksSheet
           open={marksOpen}
           onClose={() => setMarksOpen(false)}
           marks={marks}
           messageFor={messageFor}
           profiles={props.profiles}
+          currentUserId={props.currentUserId ?? ''}
           timeZone={props.timeZone}
           onJump={(id) => {
             setMarksOpen(false);
             setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
           }}
           onResolve={props.onResolveMark}
+          onReopen={props.onReopenMark}
         />
       ) : null}
       {onForward !== undefined && forwardChannels !== undefined ? (

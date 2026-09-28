@@ -6,6 +6,7 @@ import {
   clearChannelRecord,
   deleteMessagesRecord,
   removeReactionRecord,
+  reopenMarkRecord,
   resolveMarkRecord,
   setMarkRecord,
   sendMessageRecord,
@@ -278,6 +279,16 @@ describe('mark records', () => {
     const { client, rpc } = voidClient();
     await resolveMarkRecord({ client, channelId: CHANNEL, messageId: 'm1', traceId: 't1' });
     expect(rpc).toHaveBeenCalledWith('chat_mark_resolve', {
+      p_message_id: 'm1',
+      p_channel_id: CHANNEL,
+      p_trace_id: 't1',
+    });
+  });
+
+  it('reopen calls chat_mark_reopen with the explicit trace id', async () => {
+    const { client, rpc } = voidClient();
+    await reopenMarkRecord({ client, channelId: CHANNEL, messageId: 'm1', traceId: 't1' });
+    expect(rpc).toHaveBeenCalledWith('chat_mark_reopen', {
       p_message_id: 'm1',
       p_channel_id: CHANNEL,
       p_trace_id: 't1',

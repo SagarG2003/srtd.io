@@ -7808,6 +7808,10 @@ export type Database = {
         Args: { p_channel_id: string; p_user_id: string }
         Returns: string
       }
+      chat_mark_reopen: {
+        Args: { p_channel_id: string; p_message_id: string; p_trace_id: string }
+        Returns: undefined
+      }
       chat_mark_resolve: {
         Args: { p_channel_id: string; p_message_id: string; p_trace_id: string }
         Returns: undefined

@@ -13,6 +13,8 @@ function mark(over: Partial<ChatMark>): ChatMark {
     priority: null,
     markedAt: 't',
     resolved: false,
+    resolvedBy: null,
+    resolvedAt: null,
     ...over,
   };
 }
@@ -49,11 +51,22 @@ describe('MarkBadge', () => {
     expect(onChangePriority).toHaveBeenCalledOnce();
   });
 
-  it('renders nothing for no mark and for a resolved pending', () => {
-    for (const m of [undefined, mark({ type: 'pending', resolved: true })]) {
+  it('renders nothing for no mark', () => {
+    const el = render(undefined);
+    expect(isValidElement(el)).toBe(true);
+    expect((el.props as { children?: unknown }).children).toBeUndefined();
+  });
+
+  it('a stamped mark renders a plain label with the stamp word, never a button', () => {
+    const cases = [
+      [mark({ type: 'commitment', resolved: true }), 'Commitment · Delivered'],
+      [mark({ type: 'decision', resolved: true }), 'Decision · Closed'],
+      [mark({ type: 'pending', priority: 1, resolved: true }), 'Pending · Completed'],
+    ] as const;
+    for (const [m, label] of cases) {
       const el = render(m);
-      expect(isValidElement(el)).toBe(true);
-      expect((el.props as { children?: unknown }).children).toBeUndefined();
+      expect(el.type).toBe('span');
+      expect((el.props as { children: string }).children).toBe(label);
     }
   });
 });

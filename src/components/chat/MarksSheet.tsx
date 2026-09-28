@@ -1,9 +1,12 @@
 // Marks surfaces for the open thread: the count strip under the header, the
-// three-tab sheet it opens, and the pending priority chooser. Rows come from the
-// channel's mark rows (one read per open) plus the marked messages; a body-less
-// message shows its shared post or brief title, resolved in ONE batched read per
-// kind while the sheet is open. Tapping a row closes the sheet and jumps to the
-// message; pending rows carry a 44x44 Resolve. Colours are design tokens only.
+// pin board it opens (Open and History tabs), and the pending priority chooser.
+// Rows come from the channel's mark rows (one read per open) plus the marked
+// messages; a body-less message shows its shared post or brief title, resolved
+// in ONE batched read per kind while the sheet is open. Tapping a row closes the
+// sheet and jumps to the message. Every Open row carries a 44x44 stamp
+// (Delivered / Closed / Completed) and every History row a 44x44 Reopen; both
+// ask first in an inline confirm inside the row (a height change only, no
+// browser dialog). Colours are design tokens only, so light and dark match.
 
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
@@ -11,9 +14,9 @@ import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Sheet } from '@/components/ui/Sheet';
-import { IconCheck, IconPin } from '@/components/ui/icons';
+import { IconCheck, IconPin, IconRotateCcw } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
-import { cn } from '@/lib/cn';
+import { MarkPill } from '@/components/chat/MarkBits';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { readPostsByIds } from '@srtdio/posts';
@@ -24,14 +27,22 @@ import type { WriteResult } from '@/lib/chat/record';
 import type { ThreadMessage } from '@/lib/chat/thread';
 import {
   MARK_TABS,
+  MARK_UPDATE_FAILED,
+  STAMP_WORD,
+  TYPE_LABEL,
+  markBadgeLabel,
+  markConfirmAction,
+  markConfirmCopy,
   markCounts,
   markRowText,
-  marksForTab,
   markStripLabel,
-  priorityLabel,
+  markTabCounts,
+  marksForTab,
+  resolverName,
   type ChatMark,
   type MarkPriority,
   type MarkTab,
+  type MarkTransition,
 } from '@/lib/chat/marks';
 
 /** The count strip; renders nothing when every count is zero. */
@@ -100,6 +111,124 @@ function useCardTitles(open: boolean, messages: readonly ThreadMessage[]): Map<s
   return titles;
 }
 
+/**
+ * Run a confirmed stamp or reopen. The hook has already moved the row and
+ * moves it back on failure; this only adds the toast. Pure so it is tested
+ * with a fake handler and toast.
+ */
+export async function confirmMarkTransition(params: {
+  action: MarkTransition;
+  messageId: string;
+  onResolve: (messageId: string) => Promise<WriteResult>;
+  onReopen: (messageId: string) => Promise<WriteResult>;
+  toast: { show: (toast: { title: string }) => void };
+}): Promise<WriteResult> {
+  const run = params.action === 'resolve' ? params.onResolve : params.onReopen;
+  const result = await run(params.messageId);
+  if (!result.ok) params.toast.show({ title: MARK_UPDATE_FAILED });
+  return result;
+}
+
+/** 44x44 minimum, right-aligned row action (stamp or Reopen). */
+const ROW_ACTION =
+  'flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1 rounded-md border border-border px-3 text-xs font-medium text-fg-2 transition-colors hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50';
+
+/**
+ * One pin board row. Hook-free so the stamp word, confirm copy and History
+ * block are unit-tested by walking the returned tree.
+ */
+export function MarkSheetRow(props: {
+  mark: ChatMark;
+  sender: string;
+  text: string;
+  /** Marked message time (or marked_at) on the workspace clock. */
+  when: string;
+  /** History rows: who stamped it and when. */
+  resolver?: { name: string; when: string };
+  confirming: boolean;
+  busy: boolean;
+  onJump: () => void;
+  onAsk: () => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): ReactElement {
+  const { mark } = props;
+  const action: MarkTransition = mark.resolved ? 'reopen' : 'resolve';
+  const pill = mark.resolved ? TYPE_LABEL[mark.type] : markBadgeLabel(mark);
+  return (
+    <li
+      data-mark-row={mark.messageId}
+      className="flex flex-col border-b border-border py-1 last:border-b-0"
+    >
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={props.onJump}
+          className="flex min-h-[44px] min-w-0 flex-1 flex-col gap-1 rounded-md px-2 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <span className="flex min-w-0 items-center gap-2 text-xs text-fg-3">
+            <MarkPill type={mark.type} label={pill} />
+            <span className="truncate font-medium text-fg">{props.sender}</span>
+            <span className="ml-auto shrink-0">{props.when}</span>
+          </span>
+          <span className="line-clamp-2 [overflow-wrap:anywhere] text-sm text-fg-2">
+            {props.text}
+          </span>
+        </button>
+        {props.resolver !== undefined ? (
+          <div data-mark-history="" className="flex shrink-0 flex-col items-end gap-1 text-right">
+            <span className="text-xs font-semibold text-fg">{STAMP_WORD[mark.type]}</span>
+            <span className="text-[11px] text-fg-3">
+              {`${props.resolver.name} · ${props.resolver.when}`}
+            </span>
+            <button
+              type="button"
+              data-mark-action="reopen"
+              aria-expanded={props.confirming}
+              disabled={props.busy}
+              onClick={props.onAsk}
+              className={ROW_ACTION}
+            >
+              <IconRotateCcw size={14} />
+              <span>Reopen</span>
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            data-mark-action="resolve"
+            aria-expanded={props.confirming}
+            disabled={props.busy}
+            onClick={props.onAsk}
+            className={ROW_ACTION}
+          >
+            <IconCheck size={14} />
+            <span>{STAMP_WORD[mark.type]}</span>
+          </button>
+        )}
+      </div>
+      {props.confirming ? (
+        <div
+          role="group"
+          aria-label={markConfirmCopy(mark.type, action)}
+          data-mark-confirm={action}
+          className="mx-2 mb-1 flex flex-wrap items-center gap-2 rounded-md border border-border bg-panel-2 px-3 py-2"
+        >
+          <span className="min-w-0 flex-1 text-sm text-fg">
+            {markConfirmCopy(mark.type, action)}
+          </span>
+          <Button variant="ghost" size="lg" disabled={props.busy} onClick={props.onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" size="lg" disabled={props.busy} onClick={props.onConfirm}>
+            {markConfirmAction(mark.type, action)}
+          </Button>
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
 export function MarksSheet(props: {
   open: boolean;
   onClose: () => void;
@@ -107,42 +236,49 @@ export function MarksSheet(props: {
   /** The marked message, from the loaded thread or the marks read. */
   messageFor: (messageId: string) => ThreadMessage | undefined;
   profiles: Map<string, ChatProfile>;
+  currentUserId: string;
   timeZone: string;
   onJump: (messageId: string) => void;
   onResolve: (messageId: string) => Promise<WriteResult>;
+  onReopen: (messageId: string) => Promise<WriteResult>;
 }): ReactElement {
-  const [tab, setTab] = useState<MarkTab>('commitment');
-  const [resolving, setResolving] = useState<string | null>(null);
+  const [tab, setTab] = useState<MarkTab>('open');
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const toast = useToast();
-  const { messageFor } = props;
+  const { messageFor, profiles } = props;
+
+  // A closed sheet or a tab switch drops any half-asked confirm.
+  useEffect(() => setConfirming(null), [props.open, tab]);
 
   const rows = useMemo(
     () => marksForTab(props.marks.values(), tab, (m) => messageTime(m, messageFor(m.messageId))),
     [props.marks, tab, messageFor],
   );
-  const openMessages = useMemo(() => {
+  const markedMessages = useMemo(() => {
     const list: ThreadMessage[] = [];
     for (const mark of props.marks.values()) {
-      if (mark.resolved) continue;
       const message = messageFor(mark.messageId);
       if (message !== undefined) list.push(message);
     }
     return list;
   }, [props.marks, messageFor]);
-  const titles = useCardTitles(props.open, openMessages);
-  const counts = markCounts(props.marks.values());
-  const tabCount: Record<MarkTab, number> = {
-    commitment: counts.commitments,
-    decision: counts.decisions,
-    pending: counts.pending,
-  };
+  const titles = useCardTitles(props.open, markedMessages);
+  const tabCount = markTabCounts(props.marks.values());
+  const displayNameOf = (userId: string): string | undefined => profiles.get(userId)?.displayName;
 
-  async function resolve(messageId: string): Promise<void> {
-    if (resolving !== null) return;
-    setResolving(messageId);
-    const result = await props.onResolve(messageId);
-    setResolving(null);
-    if (!result.ok) toast.show({ title: result.message });
+  async function confirm(mark: ChatMark): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setConfirming(null);
+    await confirmMarkTransition({
+      action: mark.resolved ? 'reopen' : 'resolve',
+      messageId: mark.messageId,
+      onResolve: props.onResolve,
+      onReopen: props.onReopen,
+      toast,
+    });
+    setBusy(false);
   }
 
   return (
@@ -163,7 +299,9 @@ export function MarksSheet(props: {
           <EmptyState
             icon={<IconPin size={22} />}
             title="Nothing here"
-            description="No messages carry this mark."
+            description={
+              tab === 'open' ? 'No open marks in this chat.' : 'Nothing has been stamped yet.'
+            }
           />
         ) : (
           <ul className="flex max-h-[55vh] flex-col overflow-y-auto">
@@ -175,48 +313,37 @@ export function MarksSheet(props: {
                   : message.mine
                     ? 'You'
                     : ((message.senderUserId !== null
-                        ? props.profiles.get(message.senderUserId)?.displayName
+                        ? displayNameOf(message.senderUserId)
                         : undefined) ?? 'Member');
               const when =
                 message !== undefined && message.createdAt !== ''
                   ? formatMessageTime(message.createdAt, props.timeZone)
                   : formatMessageTime(mark.markedAt, props.timeZone);
               return (
-                <li key={mark.messageId} className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => props.onJump(mark.messageId)}
-                    className="flex min-h-[44px] min-w-0 flex-1 flex-col rounded-md px-2 py-2 text-left transition-colors hover:bg-panel-2"
-                  >
-                    <span className="flex items-center gap-2 text-xs text-fg-3">
-                      <span className="truncate font-medium text-fg">{sender}</span>
-                      {mark.type === 'pending' && mark.priority !== null ? (
-                        <span className="rounded-full border border-warn px-1.5 text-[10px] text-warn">
-                          {priorityLabel(mark.priority)}
-                        </span>
-                      ) : null}
-                      <span className="ml-auto shrink-0">{when}</span>
-                    </span>
-                    <span className="line-clamp-2 [overflow-wrap:anywhere] text-sm text-fg-2">
-                      {markRowText(message, titles.get(mark.messageId))}
-                    </span>
-                  </button>
-                  {mark.type === 'pending' ? (
-                    <button
-                      type="button"
-                      aria-label="Resolve"
-                      disabled={resolving !== null}
-                      onClick={() => void resolve(mark.messageId)}
-                      className={cn(
-                        'flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-fg-2 transition-colors hover:bg-panel-2',
-                        resolving === mark.messageId && 'opacity-50',
-                      )}
-                    >
-                      <IconCheck size={14} />
-                      <span>Resolve</span>
-                    </button>
-                  ) : null}
-                </li>
+                <MarkSheetRow
+                  key={mark.messageId}
+                  mark={mark}
+                  sender={sender}
+                  text={markRowText(message, titles.get(mark.messageId))}
+                  when={when}
+                  {...(mark.resolved
+                    ? {
+                        resolver: {
+                          name: resolverName(mark, props.currentUserId, displayNameOf),
+                          when:
+                            mark.resolvedAt !== null
+                              ? formatMessageTime(mark.resolvedAt, props.timeZone)
+                              : '',
+                        },
+                      }
+                    : {})}
+                  confirming={confirming === mark.messageId}
+                  busy={busy}
+                  onJump={() => props.onJump(mark.messageId)}
+                  onAsk={() => setConfirming(mark.messageId)}
+                  onCancel={() => setConfirming(null)}
+                  onConfirm={() => void confirm(mark)}
+                />
               );
             })}
           </ul>

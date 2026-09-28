@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { MouseEvent, ReactElement } from 'react';
+import type { KeyboardEvent, MouseEvent, ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/Button';
@@ -7,9 +7,10 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Sheet } from '@/components/ui/Sheet';
 import { SectionHeader } from '@/components/shell/SectionHeader';
 import { ActionRow, useLongPress } from '@/components/ui';
-import { IconChat, IconCheck, IconPlus, IconTrash } from '@/components/ui/icons';
+import { IconChat, IconCheck, IconEllipsis, IconPlus, IconTrash } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
+import { useMediaQuery } from '@/lib/use-media-query';
 import { filterChannelsByName } from '@/lib/channel-filter';
 import type { ChannelSummary } from '@/lib/chat-reads';
 import { useChatStore } from '@/components/chat/ChatStoreProvider';
@@ -198,11 +199,20 @@ export function previewLine(summary: ConversationSummary): string {
   return `${prefix}${summary.lastMessageText}`;
 }
 
+/** Devices that get the hover ⋯ control (a mouse or trackpad, not touch). */
+const HOVER_POINTER_QUERY = '(hover: hover) and (pointer: fine)';
+
+/** Shift+F10 or the ContextMenu key opens a focused row's menu (Enter still opens the chat). */
+export function rowMenuKey(event: { key: string; shiftKey: boolean }): boolean {
+  return event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10');
+}
+
 /**
  * A spaced conversation card: avatar, name + time, preview + unread pill. A
- * long-press (moving or scrolling cancels it) or right-click opens the row
- * menu; the trailing click is swallowed so a long-press never also opens the
- * chat. In select mode a leading check circle shows and a tap toggles.
+ * touch long-press (moving or scrolling cancels it), right-click, Shift+F10, or
+ * the hover ⋯ beside the card (pointer devices only) opens the row menu; the
+ * trailing click is swallowed so a long-press never also opens the chat. In
+ * select mode a leading check circle shows and a tap toggles.
  */
 export function ChannelCard(props: {
   channel: ChannelSummary;
@@ -219,11 +229,19 @@ export function ChannelCard(props: {
   const { channel, summary } = props;
   const rowRef = useRef<HTMLButtonElement>(null);
   const selecting = props.onToggle !== undefined;
-  const openMenu = (): void => {
+  const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
+  const menuEnabled = !selecting && props.onLongPress !== undefined;
+  const openMenu = (anchor?: DOMRect): void => {
     if (selecting || props.onLongPress === undefined) return;
-    props.onLongPress(channel, rowRef.current?.getBoundingClientRect() ?? null);
+    // The menu's backdrop takes the trailing pointerup, so no click to swallow.
+    clearClickSuppression();
+    props.onLongPress(channel, anchor ?? rowRef.current?.getBoundingClientRect() ?? null);
   };
-  const { handlers, consumeClickSuppression } = useLongPress(openMenu);
+  // Mouse holds never open the menu (right-click and ⋯ do); touch is unchanged.
+  const { handlers, consumeClickSuppression, cancel, clearClickSuppression } = useLongPress(
+    () => openMenu(),
+    { ignoreMouse: true },
+  );
   const hasMessage = summary !== undefined && summary.lastMessageTs > 0;
   const unread = summary?.unread ?? 0;
   const isUnread = unread > 0;
@@ -232,88 +250,108 @@ export function ChannelCard(props: {
     ? formatRelativeTime(summary.lastMessageTs, props.nowMs, props.timeZone)
     : '';
   return (
-    <button
-      ref={rowRef}
-      type="button"
-      {...(props.onLongPress !== undefined && !selecting ? handlers : {})}
-      onContextMenu={(e: MouseEvent) => {
-        if (props.onLongPress === undefined || selecting) return;
-        e.preventDefault();
-        openMenu();
-      }}
-      onClick={() => {
-        if (consumeClickSuppression()) return;
-        if (selecting) {
-          props.onToggle?.(channel.channelId);
-          return;
-        }
-        props.onSelect(channel);
-      }}
-      aria-label={channel.title}
-      {...(selecting ? { 'aria-pressed': props.checked === true } : {})}
-      className={cn(
-        'flex w-full select-none items-center gap-3 rounded-xl border border-l-[3px] px-3 py-3 min-h-[64px] text-left transition-colors [-webkit-touch-callout:none]',
-        selecting && props.checked === true
-          ? 'bg-accent-soft border-accent-line border-l-accent'
-          : isUnread
-            ? 'bg-accent-soft border-border border-l-accent'
-            : props.selected && !selecting
-              ? 'bg-panel-2 border-border border-l-transparent'
-              : 'bg-panel border-border border-l-transparent hover:bg-panel-2',
-      )}
-    >
-      {selecting ? (
-        <span
-          aria-hidden="true"
-          data-select-check={props.checked === true ? 'on' : 'off'}
-          className={cn(
-            'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
-            props.checked === true
-              ? 'border-accent bg-accent text-accent-fg'
-              : 'border-border-strong bg-panel',
-          )}
+    <div className="group flex items-center gap-1">
+      <button
+        ref={rowRef}
+        type="button"
+        {...(menuEnabled ? handlers : {})}
+        onContextMenu={(e: MouseEvent) => {
+          if (!menuEnabled) return;
+          e.preventDefault();
+          cancel();
+          openMenu();
+        }}
+        onKeyDown={(e: KeyboardEvent<HTMLButtonElement>) => {
+          if (!menuEnabled || !rowMenuKey(e)) return;
+          e.preventDefault();
+          openMenu();
+        }}
+        onClick={() => {
+          if (consumeClickSuppression()) return;
+          if (selecting) {
+            props.onToggle?.(channel.channelId);
+            return;
+          }
+          props.onSelect(channel);
+        }}
+        aria-label={channel.title}
+        {...(selecting ? { 'aria-pressed': props.checked === true } : {})}
+        className={cn(
+          'flex w-full min-w-0 flex-1 select-none items-center gap-3 rounded-xl border border-l-[3px] px-3 py-3 min-h-[64px] text-left transition-colors [-webkit-touch-callout:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+          selecting && props.checked === true
+            ? 'bg-accent-soft border-accent-line border-l-accent'
+            : isUnread
+              ? 'bg-accent-soft border-border border-l-accent'
+              : props.selected && !selecting
+                ? 'bg-panel-2 border-border border-l-transparent'
+                : 'bg-panel border-border border-l-transparent hover:bg-panel-2',
+        )}
+      >
+        {selecting ? (
+          <span
+            aria-hidden="true"
+            data-select-check={props.checked === true ? 'on' : 'off'}
+            className={cn(
+              'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
+              props.checked === true
+                ? 'border-accent bg-accent text-accent-fg'
+                : 'border-border-strong bg-panel',
+            )}
+          >
+            {props.checked === true ? <IconCheck size={14} /> : null}
+          </span>
+        ) : null}
+        <Avatar
+          name={channel.title}
+          {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
+          size="xl"
+        />
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="flex items-baseline gap-2">
+            <span
+              className={cn(
+                'min-w-0 flex-1 truncate text-sm text-fg',
+                isUnread ? 'font-semibold' : 'font-medium',
+              )}
+            >
+              {channel.title}
+            </span>
+            {time !== '' ? (
+              <span className={cn('shrink-0 text-xs', isUnread ? 'text-accent' : 'text-fg-3')}>
+                {time}
+              </span>
+            ) : null}
+          </span>
+          <span className="flex items-center gap-2">
+            <span
+              className={cn(
+                'min-w-0 flex-1 truncate text-xs',
+                hasMessage ? 'text-fg-2' : 'italic text-fg-3',
+              )}
+            >
+              {preview}
+            </span>
+            {isUnread ? (
+              <span className="inline-flex h-5 min-w-[20px] shrink-0 items-center justify-center rounded-full bg-accent px-1.5 text-[11px] font-semibold leading-none text-accent-fg">
+                {unread > 99 ? '99+' : unread}
+              </span>
+            ) : null}
+          </span>
+        </span>
+      </button>
+      {menuEnabled && hoverMenu ? (
+        <button
+          type="button"
+          data-more=""
+          aria-label={`Actions for ${channel.title}`}
+          aria-haspopup="menu"
+          onClick={(e) => openMenu(e.currentTarget.getBoundingClientRect())}
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-fg-3 opacity-0 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100 group-focus-within:opacity-100"
         >
-          {props.checked === true ? <IconCheck size={14} /> : null}
-        </span>
+          <IconEllipsis size={20} />
+        </button>
       ) : null}
-      <Avatar
-        name={channel.title}
-        {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
-        size="xl"
-      />
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex items-baseline gap-2">
-          <span
-            className={cn(
-              'min-w-0 flex-1 truncate text-sm text-fg',
-              isUnread ? 'font-semibold' : 'font-medium',
-            )}
-          >
-            {channel.title}
-          </span>
-          {time !== '' ? (
-            <span className={cn('shrink-0 text-xs', isUnread ? 'text-accent' : 'text-fg-3')}>
-              {time}
-            </span>
-          ) : null}
-        </span>
-        <span className="flex items-center gap-2">
-          <span
-            className={cn(
-              'min-w-0 flex-1 truncate text-xs',
-              hasMessage ? 'text-fg-2' : 'italic text-fg-3',
-            )}
-          >
-            {preview}
-          </span>
-          {isUnread ? (
-            <span className="inline-flex h-5 min-w-[20px] shrink-0 items-center justify-center rounded-full bg-accent px-1.5 text-[11px] font-semibold leading-none text-accent-fg">
-              {unread > 99 ? '99+' : unread}
-            </span>
-          ) : null}
-        </span>
-      </span>
-    </button>
+    </div>
   );
 }
 
@@ -487,9 +525,24 @@ function ChannelRowMenu(props: {
     setCoords({ top, left });
   }, [anchor]);
 
+  // Focus the first item once placed; hand focus back on close if nothing took it.
+  const placed = coords !== null;
+  useEffect(() => {
+    if (!placed) return;
+    const previous = document.activeElement;
+    ref.current?.querySelector('button')?.focus({ preventScroll: true });
+    return () => {
+      const current = document.activeElement;
+      const idle = current === null || current === document.body;
+      if (idle && previous instanceof HTMLElement && previous.isConnected) {
+        previous.focus({ preventScroll: true });
+      }
+    };
+  }, [placed]);
+
   useEffect(() => {
     if (anchor === null) return;
-    function onKeyDown(event: KeyboardEvent): void {
+    function onKeyDown(event: globalThis.KeyboardEvent): void {
       if (event.key === 'Escape') onClose();
     }
     document.addEventListener('keydown', onKeyDown);

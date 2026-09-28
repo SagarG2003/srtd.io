@@ -29,8 +29,10 @@
 //
 //   9. chat_message_send accepts a shared-briefs-only message.
 //  10. chat_mark_set / chat_mark_resolve: commitment and decision marks are
-//      frozen, pending priority can change until resolved, resolve works once,
-//      non-members cannot mark, and chat_message_marks SELECT is channel-gated.
+//      frozen against re-marking, pending priority can change until resolved,
+//      resolve works once, non-members cannot mark, and chat_message_marks
+//      SELECT is channel-gated. Since 20260928090548 every type is resolvable
+//      (see chat-marks-resolve-reopen.test.ts).
 //  11. chat_message_delete soft-deletes the caller's own messages only and
 //      never a marked one.
 //
@@ -969,13 +971,6 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
         expect(again.error?.message).toBe('mark is frozen');
       }
       expect((await markRow(id))?.mark_type).toBe('commitment');
-
-      // Not pending, so it cannot be resolved either.
-      const resolve = await clientFor(owner.id).rpc(
-        'chat_mark_resolve',
-        markResolveArgs(id, ctx.channelId),
-      );
-      expect(resolve.error?.message).toBe('no open pending mark on this message');
     });
 
     it('a decision mark is frozen', async () => {
@@ -1047,7 +1042,7 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
         'chat_mark_resolve',
         markResolveArgs(id, ctx.channelId),
       );
-      expect(second.error?.message).toBe('no open pending mark on this message');
+      expect(second.error?.message).toBe('no open mark on this message');
 
       const afterResolve = await clientFor(userB.id).rpc(
         'chat_mark_set',

@@ -89,14 +89,38 @@ export function messageMenuItems(
   return items;
 }
 
+/** Whether a keydown while the menu is open closes it. */
+export function menuClosesOnKey(key: string): boolean {
+  return key === 'Escape';
+}
+
+/** Anything that can find the menu's first action row (the menu container). */
+interface MenuRoot {
+  querySelector: (selector: string) => { focus: (options?: FocusOptions) => void } | null;
+}
+
+/**
+ * Move focus to the first action row (Reply) so keyboard users land in the
+ * menu; Tab then walks the rows in display order. preventScroll keeps the
+ * menu's own scroll-to-close listener from firing.
+ */
+export function focusFirstMenuItem(root: MenuRoot | null): boolean {
+  const first = root?.querySelector('[data-menu-items] button') ?? null;
+  if (first === null) return false;
+  first.focus({ preventScroll: true });
+  return true;
+}
+
 interface Coords {
   top: number;
   left: number;
 }
 
 /**
- * Floating, anchored action menu opened by long-press or right-click on a
- * message bubble. Renders into document.body via a portal (mirrors Sheet.tsx)
+ * Floating, anchored action menu opened by long-press (touch), right-click, the
+ * hover ⋯ control (pointer devices) or Enter / Space on a focused bubble. It
+ * focuses the first action row on open and hands focus back to whatever held
+ * it (the bubble or the ⋯ button) on close. Renders into document.body via a portal (mirrors Sheet.tsx)
  * so it escapes the scrolling thread. Position is computed from the pressed
  * bubble's rect in a two-pass layout effect: the container is measured while
  * hidden, then placed above (or below when there is no room) and aligned to the
@@ -139,10 +163,26 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     return () => cancelAnimationFrame(id);
   }, [open]);
 
+  // Coords land after the measuring pass; focus the first row once placed.
+  const placed = coords !== null;
+  useEffect(() => {
+    if (!open || !placed) return;
+    const previous = document.activeElement;
+    focusFirstMenuItem(containerRef.current);
+    return () => {
+      // Only when nothing else took focus (Reply may focus the composer).
+      const current = document.activeElement;
+      const idle = current === null || current === document.body;
+      if (idle && previous instanceof HTMLElement && previous.isConnected) {
+        previous.focus({ preventScroll: true });
+      }
+    };
+  }, [open, placed]);
+
   useEffect(() => {
     if (!open) return;
     function onKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape') onClose();
+      if (menuClosesOnKey(event.key)) onClose();
     }
     document.addEventListener('keydown', onKeyDown);
     window.addEventListener('scroll', onClose, true);
@@ -191,7 +231,12 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
             </button>
           ))}
         </div>
-        <div className="min-w-[200px] rounded-xl border border-border-strong bg-panel p-1 shadow-2xl">
+        <div
+          role="menu"
+          aria-label="Message actions"
+          data-menu-items=""
+          className="min-w-[200px] rounded-xl border border-border-strong bg-panel p-1 shadow-2xl"
+        >
           {messageMenuItems(props).map((item) => (
             <ActionRow
               key={item.key}

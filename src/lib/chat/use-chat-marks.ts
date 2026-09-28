@@ -2,8 +2,10 @@
 // chat_message_marks read on channel open and on every refetch (the thread
 // calls it after each catch-up), plus one IN read of the marked messages so the
 // marks sheet can list rows whose message is older than the loaded history.
-// Writes go through chat_mark_set / chat_mark_resolve with a fresh uuid_v7
-// trace id per tap; only after the record accepts the write is a live Agora
+// Writes go through chat_mark_set / chat_mark_resolve / chat_mark_reopen with a
+// fresh uuid_v7 trace id per tap. A stamp or reopen moves the row between the
+// Open and History tabs at once and moves it back if the record refuses the
+// write. Only after the record accepts a write is a live Agora
 // command sent (ext { sorted_event: 'mark', message_id }), and receivers re-read
 // that one mark row. Counts are derived client-side from the loaded rows.
 
@@ -15,6 +17,7 @@ import { generateTraceId } from '@/lib/trace';
 import { createCmdMessage } from '@/lib/chat/message-factory';
 import { loadMessagesByIds } from '@/lib/chat/history';
 import {
+  applyTransition,
   indexMarks,
   loadChannelMarks,
   loadMarkByMessageId,
@@ -22,9 +25,15 @@ import {
   upsertMark,
   type ChatMark,
   type MarkPriority,
+  type MarkTransition,
   type MarkType,
 } from '@/lib/chat/marks';
-import { resolveMarkRecord, setMarkRecord, type WriteResult } from '@/lib/chat/record';
+import {
+  reopenMarkRecord,
+  resolveMarkRecord,
+  setMarkRecord,
+  type WriteResult,
+} from '@/lib/chat/record';
 import {
   markEventExt,
   rowToThreadMessage,
@@ -43,8 +52,40 @@ export interface UseChatMarks {
   refetch: () => void;
   /** Mark a message, or change an open pending mark's priority (same type). */
   setMark: (messageId: string, type: MarkType, priority: MarkPriority) => Promise<WriteResult>;
-  /** Resolve an open pending mark. */
+  /** Stamp an open mark (Delivered / Closed / Completed). */
   resolve: (messageId: string) => Promise<WriteResult>;
+  /** Return a stamped mark to open. */
+  reopen: (messageId: string) => Promise<WriteResult>;
+}
+
+/**
+ * One stamp or reopen: apply the optimistic mark, write it through the record
+ * with a fresh uuid_v7 trace id (the actor is auth.uid() server-side), and
+ * re-apply the original mark when the record refuses. Framework-free so the
+ * whole round trip is unit-tested against a recording fake client.
+ */
+export async function runMarkTransition(params: {
+  db: Client;
+  mark: ChatMark;
+  action: MarkTransition;
+  /** The caller's user id, for the optimistic resolver only; never sent. */
+  actorId: string;
+  apply: (mark: ChatMark) => void;
+  now?: () => string;
+}): Promise<{ result: WriteResult; traceId: string }> {
+  const { db, mark, action } = params;
+  const nowIso = (params.now ?? (() => new Date().toISOString()))();
+  const traceId = generateTraceId();
+  params.apply(applyTransition(mark, action, params.actorId, nowIso));
+  const write = action === 'resolve' ? resolveMarkRecord : reopenMarkRecord;
+  const result = await write({
+    client: db,
+    channelId: mark.channelId,
+    messageId: mark.messageId,
+    traceId,
+  });
+  if (!result.ok) params.apply(mark);
+  return { result, traceId };
 }
 
 export function useChatMarks(params: {
@@ -59,6 +100,8 @@ export function useChatMarks(params: {
   const db: Client = params.db ?? supabase;
   const [marks, setMarks] = useState<Map<string, ChatMark>>(new Map());
   const [markedMessages, setMarkedMessages] = useState<Map<string, ThreadMessage>>(new Map());
+  const marksRef = useRef(marks);
+  marksRef.current = marks;
   const channelRef = useRef(channelId);
   channelRef.current = channelId;
   const clientRef = useRef(client);
@@ -98,7 +141,7 @@ export function useChatMarks(params: {
       }
       setMarks(indexMarks(result.data));
       await loadMarkedMessages(
-        result.data.filter((m) => !m.resolved).map((m) => m.messageId),
+        result.data.map((m) => m.messageId),
         forChannel,
       );
     },
@@ -134,7 +177,7 @@ export function useChatMarks(params: {
       if (!result.data.found || result.data.mark.channelId !== forChannel) return;
       const mark = result.data.mark;
       setMarks((prev) => upsertMark(prev, mark));
-      if (!mark.resolved) await loadMarkedMessages([messageId], forChannel);
+      await loadMarkedMessages([messageId], forChannel);
     },
     [db, loadMarkedMessages],
   );
@@ -190,6 +233,8 @@ export function useChatMarks(params: {
             priority: type === 'pending' ? priority : null,
             markedAt: existing?.markedAt ?? new Date().toISOString(),
             resolved: false,
+            resolvedBy: null,
+            resolvedAt: null,
           });
         });
       }
@@ -200,39 +245,48 @@ export function useChatMarks(params: {
     [db, signal, refreshOne],
   );
 
-  const resolve = useCallback<UseChatMarks['resolve']>(
-    async (messageId) => {
+  const transition = useCallback(
+    async (messageId: string, action: MarkTransition): Promise<WriteResult> => {
       const forChannel = channelRef.current;
-      if (forChannel === null) return { ok: false, message: 'No chat is open.' };
-      const traceId = generateTraceId();
-      const result = await resolveMarkRecord({
-        client: db,
-        channelId: forChannel,
-        messageId,
-        traceId,
+      const mark = marksRef.current.get(messageId);
+      if (forChannel === null || mark === undefined || mark.channelId !== forChannel) {
+        return { ok: false, message: 'Mark not loaded.' };
+      }
+      const { result, traceId } = await runMarkTransition({
+        db,
+        mark,
+        action,
+        actorId: currentUserId,
+        apply: (next) => {
+          if (channelRef.current === forChannel) setMarks((prev) => upsertMark(prev, next));
+        },
       });
       if (!result.ok) {
-        logger.warn('chat: mark resolve failed', {
+        logger.warn(`chat: mark ${action} failed`, {
           trace_id: traceId,
           message_id: messageId,
           error: result.message,
         });
         return result;
       }
-      if (channelRef.current === forChannel) {
-        setMarks((prev) => {
-          const existing = prev.get(messageId);
-          return existing === undefined ? prev : upsertMark(prev, { ...existing, resolved: true });
-        });
-      }
       signal(messageId, traceId);
+      void refreshOne(messageId);
       return result;
     },
-    [db, signal],
+    [db, currentUserId, signal, refreshOne],
+  );
+
+  const resolve = useCallback<UseChatMarks['resolve']>(
+    (messageId) => transition(messageId, 'resolve'),
+    [transition],
+  );
+  const reopen = useCallback<UseChatMarks['reopen']>(
+    (messageId) => transition(messageId, 'reopen'),
+    [transition],
   );
 
   return useMemo(
-    () => ({ marks, markedMessages, refetch, setMark, resolve }),
-    [marks, markedMessages, refetch, setMark, resolve],
+    () => ({ marks, markedMessages, refetch, setMark, resolve, reopen }),
+    [marks, markedMessages, refetch, setMark, resolve, reopen],
   );
 }

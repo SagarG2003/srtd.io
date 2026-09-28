@@ -9,6 +9,8 @@ export const MOVE_CANCEL_PX = 10;
 interface PointerSample {
   clientX: number;
   clientY: number;
+  /** 'mouse' | 'touch' | 'pen'; absent reads as touch. */
+  pointerType?: string;
 }
 
 export interface LongPressHandlers {
@@ -26,6 +28,20 @@ export interface LongPressController {
    * click is the tail of a long-press and should be ignored, then resets.
    */
   consumeClickSuppression: () => boolean;
+  /**
+   * Call from the target's contextmenu handler: the menu opens from there, so
+   * a still-running hold timer must not fire and reopen it (macOS fires
+   * contextmenu on mousedown).
+   */
+  cancel: () => void;
+  /**
+   * Call once the long-press opened an overlay (menu with a backdrop): the
+   * trailing pointerup lands on the overlay, so the click this flag guards
+   * never reaches the target and the next real click must not be swallowed.
+   */
+  clearClickSuppression: () => void;
+  /** The pointerType of the last pointerdown ('' before any). */
+  lastPointerType: () => string;
   /** Clear any pending timer and listeners. */
   dispose: () => void;
 }
@@ -34,6 +50,11 @@ export interface LongPressOptions {
   onLongPress: () => void;
   thresholdMs?: number;
   moveTolerancePx?: number;
+  /**
+   * Mouse presses never start the timer (the pointer has right-click and a
+   * hover control instead). Touch and pen behave exactly as without it.
+   */
+  ignoreMouse?: boolean;
 }
 
 /**
@@ -46,11 +67,13 @@ export function createLongPressController({
   onLongPress,
   thresholdMs = LONG_PRESS_MS,
   moveTolerancePx = MOVE_CANCEL_PX,
+  ignoreMouse = false,
 }: LongPressOptions): LongPressController {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let startX = 0;
   let startY = 0;
   let suppressClick = false;
+  let pointerType = '';
 
   function clearTimer(): void {
     if (timer !== null) {
@@ -72,6 +95,8 @@ export function createLongPressController({
 
   function onPointerDown(event: PointerSample): void {
     cancel();
+    pointerType = event.pointerType ?? '';
+    if (ignoreMouse && pointerType === 'mouse') return;
     startX = event.clientX;
     startY = event.clientY;
     timer = setTimeout(() => {
@@ -109,6 +134,13 @@ export function createLongPressController({
       suppressClick = false;
       return value;
     },
+    cancel,
+    clearClickSuppression(): void {
+      suppressClick = false;
+    },
+    lastPointerType(): string {
+      return pointerType;
+    },
     dispose(): void {
       cancel();
       suppressClick = false;
@@ -119,6 +151,8 @@ export function createLongPressController({
 export interface UseLongPressResult {
   handlers: LongPressHandlers;
   consumeClickSuppression: () => boolean;
+  cancel: () => void;
+  clearClickSuppression: () => void;
 }
 
 /**
@@ -129,7 +163,7 @@ export interface UseLongPressResult {
  */
 export function useLongPress(
   onLongPress: () => void,
-  options?: { thresholdMs?: number; moveTolerancePx?: number },
+  options?: { thresholdMs?: number; moveTolerancePx?: number; ignoreMouse?: boolean },
 ): UseLongPressResult {
   const onLongPressRef = useRef(onLongPress);
   onLongPressRef.current = onLongPress;
@@ -152,5 +186,7 @@ export function useLongPress(
   return {
     handlers: controller.handlers,
     consumeClickSuppression: controller.consumeClickSuppression,
+    cancel: controller.cancel,
+    clearClickSuppression: controller.clearClickSuppression,
   };
 }
