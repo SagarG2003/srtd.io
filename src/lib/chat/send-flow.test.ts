@@ -1,11 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  createOutboxSender,
+  FAILED_AFTER_MS,
   LIVE_PUBLISH_TIMEOUT_MS,
   runSend,
   type SendFlowDeps,
   type SendInput,
+  type SendOutcome,
 } from '@/lib/chat/send-flow';
-import type { ChatMessageRow } from '@/lib/chat/thread';
+import {
+  readPersistedOutbox,
+  writePersistedOutbox,
+  type Outbox,
+  type OutboxEntry,
+  type OutboxEvent,
+  type OutboxStorage,
+} from '@/lib/chat/chat-store';
+import { rowToThreadMessage, type ChatMessageRow } from '@/lib/chat/thread';
 
 const ME = '11111111-1111-4111-8111-111111111111';
 const CHANNEL = 'group__ws__g1';
@@ -257,5 +268,213 @@ describe('runSend live publish timeout', () => {
     const outcome = await runSend(d, input());
     expect(outcome.ok && outcome.livePublished).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('createOutboxSender (background send, retries, persistence)', () => {
+  const OTHER = 'group__ws__g2';
+  const SCOPE = { workspaceId: 'ws', userId: ME };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function entry(id: string): OutboxEntry {
+    return {
+      id,
+      text: `body ${id}`,
+      local: { attachments: [], sharedPostIds: [], reply: null },
+      state: 'sending',
+    };
+  }
+
+  type Script = ('ok' | 'fail' | 'pending')[];
+
+  /** A sender whose record attempts follow `script` (then succeed). */
+  function harness(opts: { script?: Script; initial?: Outbox; storage?: OutboxStorage } = {}) {
+    const script = [...(opts.script ?? [])];
+    const calls: { channelId: string; id: string; traceId: string }[] = [];
+    const events: OutboxEvent[] = [];
+    let traceSeq = 0;
+    const sender = createOutboxSender(
+      {
+        deliver: async (channelId, e, traceId, onRecorded) => {
+          calls.push({ channelId, id: e.id, traceId });
+          const step = script.shift() ?? 'ok';
+          if (step === 'pending') return new Promise<SendOutcome>(() => {});
+          if (step === 'fail') return { ok: false, reason: 'timeout', error: 'rpc timed out' };
+          const message = rowToThreadMessage(row({ id: e.id, channel_id: channelId }), ME);
+          onRecorded(message);
+          return { ok: true, message, livePublished: true };
+        },
+        newTraceId: () => `trace-${(traceSeq += 1)}`,
+        onEvent: (event) => events.push(event),
+        onChange: (next) => writePersistedOutbox(opts.storage ?? null, SCOPE, next),
+        onAttemptFailed: () => {},
+        now: () => Date.now(),
+      },
+      opts.initial,
+    );
+    return { sender, calls, events };
+  }
+
+  function memoryStorage(): OutboxStorage {
+    const data = new Map<string, string>();
+    return {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => {
+        data.set(key, value);
+      },
+      removeItem: (key) => {
+        data.delete(key);
+      },
+    };
+  }
+
+  it('enqueue returns before the record resolves; the entry is sending at once', () => {
+    const { sender, calls } = harness({ script: ['pending'] });
+    sender.enqueue(CHANNEL, entry('m1'));
+    expect(sender.entries(CHANNEL)).toEqual([entry('m1')]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('RPC rejects 3 times then resolves: sending throughout, then sent; one id, a new trace each attempt', async () => {
+    vi.useFakeTimers();
+    const { sender, calls, events } = harness({ script: ['fail', 'fail', 'fail', 'ok'] });
+    sender.enqueue(CHANNEL, entry('m1'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(calls).toHaveLength(3);
+    expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(calls).toHaveLength(4);
+    expect(sender.entries(CHANNEL)).toEqual([]);
+    expect(new Set(calls.map((c) => c.id))).toEqual(new Set(['m1']));
+    expect(new Set(calls.map((c) => c.traceId)).size).toBe(4);
+    expect(events.some((e) => e.type === 'state' && e.state === 'failed')).toBe(false);
+    expect(events.at(-1)).toMatchObject({ type: 'recorded', channelId: CHANNEL });
+  });
+
+  it('backs off 2s, 4s, 8s, 16s, 30s, then every 30s', async () => {
+    vi.useFakeTimers();
+    const { sender, calls } = harness({ script: Array<'fail'>(8).fill('fail') });
+    sender.enqueue(CHANNEL, entry('m1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const at: number[] = [];
+    for (const wait of [2_000, 4_000, 8_000, 16_000, 30_000, 30_000]) {
+      await vi.advanceTimersByTimeAsync(wait - 1);
+      at.push(calls.length);
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    expect(at).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(calls).toHaveLength(7);
+  });
+
+  it(`fails only after ${FAILED_AFTER_MS}ms of continuous failure; Retry resumes with the same id`, async () => {
+    vi.useFakeTimers();
+    const { sender, calls, events } = harness({ script: Array<'fail'>(50).fill('fail') });
+    sender.enqueue(CHANNEL, entry('m1'));
+    await vi.advanceTimersByTimeAsync(FAILED_AFTER_MS - 1);
+    expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(sender.entries(CHANNEL)[0]?.state).toBe('failed');
+    expect(events).toContainEqual({ type: 'state', channelId: CHANNEL, id: 'm1', state: 'failed' });
+    const attempts = calls.length;
+    // Stopped: no more attempts on their own.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(calls).toHaveLength(attempts);
+    sender.retry(CHANNEL, 'm1');
+    expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
+    expect(calls).toHaveLength(attempts + 1);
+    expect(calls.at(-1)?.id).toBe('m1');
+    // A double tap while the retry is in flight sends nothing more.
+    sender.retry(CHANNEL, 'm1');
+    expect(calls).toHaveLength(attempts + 1);
+  });
+
+  it('keeps FIFO per channel under retries; other channels are independent', async () => {
+    vi.useFakeTimers();
+    const { sender, calls } = harness({ script: ['fail', 'ok', 'ok', 'fail', 'ok'] });
+    sender.enqueue(CHANNEL, entry('m1'));
+    sender.enqueue(CHANNEL, entry('m2'));
+    sender.enqueue(OTHER, entry('o1'));
+    await vi.advanceTimersByTimeAsync(0);
+    // m1 failed; o1 went ahead in its own channel; m2 waits behind m1.
+    expect(calls.map((c) => c.id)).toEqual(['m1', 'o1']);
+    await vi.advanceTimersByTimeAsync(2_000);
+    // m1 recorded, then m2 attempted (and failed), retried after 2s.
+    expect(calls.map((c) => c.id)).toEqual(['m1', 'o1', 'm1', 'm2']);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(calls.map((c) => c.id)).toEqual(['m1', 'o1', 'm1', 'm2', 'm2']);
+    expect(sender.entries(CHANNEL)).toEqual([]);
+    expect(sender.entries(OTHER)).toEqual([]);
+  });
+
+  it('kick (reconnect / tab visible) retries at once instead of waiting out the backoff', async () => {
+    vi.useFakeTimers();
+    const { sender, calls } = harness({ script: ['fail', 'fail', 'ok'] });
+    sender.enqueue(CHANNEL, entry('m1'));
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(calls).toHaveLength(2);
+    sender.kick();
+    expect(calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sender.entries(CHANNEL)).toEqual([]);
+  });
+
+  it('a row read back by catch-up settles the entry and no duplicate is sent', async () => {
+    vi.useFakeTimers();
+    const { sender, calls } = harness({ script: ['fail'] });
+    sender.enqueue(CHANNEL, entry('m1'));
+    await vi.advanceTimersByTimeAsync(0);
+    sender.settle(CHANNEL, 'm1');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(1);
+    expect(sender.entries(CHANNEL)).toEqual([]);
+  });
+
+  it('reload: persisted, restored for the same workspace and user only, and resumed', async () => {
+    vi.useFakeTimers();
+    const storage = memoryStorage();
+    const first = harness({ script: ['pending'], storage });
+    first.sender.enqueue(CHANNEL, entry('m1'));
+    first.sender.dispose();
+
+    const elsewhere = readPersistedOutbox(storage, { workspaceId: 'other', userId: ME });
+    expect(elsewhere).toEqual({});
+    const reloaded = harness({ initial: readPersistedOutbox(storage, SCOPE), storage });
+    // Same scope: the entry comes back as sending and its send resumes, same id.
+    expect(reloaded.calls.map((c) => c.id)).toEqual(['m1']);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reloaded.sender.entries(CHANNEL)).toEqual([]);
+    expect(readPersistedOutbox(storage, SCOPE)).toEqual({});
+  });
+
+  it('a throwing localStorage never prevents the send', async () => {
+    vi.useFakeTimers();
+    const boom = (): never => {
+      throw new Error('QuotaExceededError');
+    };
+    const { sender, calls } = harness({
+      storage: { getItem: boom, setItem: boom, removeItem: boom },
+    });
+    expect(() => sender.enqueue(CHANNEL, entry('m1'))).not.toThrow();
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sender.entries(CHANNEL)).toEqual([]);
+  });
+
+  it('dispose clears every timer and ignores answers still in flight', async () => {
+    vi.useFakeTimers();
+    const { sender, calls, events } = harness({ script: ['fail'] });
+    sender.enqueue(CHANNEL, entry('m1'));
+    await vi.advanceTimersByTimeAsync(0);
+    sender.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(1);
+    expect(events).toEqual([]);
   });
 });

@@ -15,7 +15,11 @@ import {
   applyPreviews,
   applyUnreadCounts,
   clearPendingOpen,
-  createChannelOutbox,
+  clearPersistedOutbox,
+  OUTBOX_STORAGE_KEY,
+  readPersistedOutbox,
+  writePersistedOutbox,
+  type OutboxStorage,
   initialState,
   outboxPut,
   outboxRemove,
@@ -124,16 +128,110 @@ describe('outbox (per-channel unrecorded sends)', () => {
     expect(Object.keys(box)).toEqual(['a']);
     expect(outboxSetState(box, 'a', 'unknown', 'failed')).toBe(box);
   });
+});
 
-  it('createChannelOutbox mutates one shared holder the thread reads back later', () => {
-    const holder = { current: {} as Outbox };
-    const outbox = createChannelOutbox(holder);
-    outbox.put('a', entry('a1'));
-    outbox.setState('a', 'a1', 'failed');
-    // A different view of the same holder (the thread after a channel switch).
-    expect(createChannelOutbox(holder).entries('a')).toEqual([entry('a1', 'failed')]);
-    outbox.remove('a', 'a1');
-    expect(outbox.entries('a')).toEqual([]);
+describe('outbox persistence (reload)', () => {
+  const entry = (id: string): OutboxEntry => ({
+    id,
+    text: `body ${id}`,
+    local: {
+      attachments: [{ assetId: 'v1', name: 'a.png', mime: 'image/png', size: 3 }],
+      sharedPostIds: ['p1'],
+      sharedBriefIds: [],
+      reply: { id: 'q1', authorUserId: null, preview: 'hi' },
+    },
+    state: 'sending',
+  });
+
+  function memoryStorage(): OutboxStorage & { data: Map<string, string> } {
+    const data = new Map<string, string>();
+    return {
+      data,
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => {
+        data.set(key, value);
+      },
+      removeItem: (key) => {
+        data.delete(key);
+      },
+    };
+  }
+
+  const A = { workspaceId: 'wa', userId: 'u1' };
+
+  it('restores entries for the same workspace and user only, all as sending', () => {
+    const storage = memoryStorage();
+    writePersistedOutbox(storage, A, { c1: [{ ...entry('m1'), state: 'failed' }] });
+    expect([...storage.data.keys()]).toEqual([OUTBOX_STORAGE_KEY]);
+    expect(readPersistedOutbox(storage, A)).toEqual({ c1: [entry('m1')] });
+    expect(readPersistedOutbox(storage, { workspaceId: 'wb', userId: 'u1' })).toEqual({});
+    // Another workspace leaves the blob alone (it resumes on return).
+    expect(storage.data.has(OUTBOX_STORAGE_KEY)).toBe(true);
+  });
+
+  it("never hands one user another user's bodies, and deletes them", () => {
+    const storage = memoryStorage();
+    writePersistedOutbox(storage, A, { c1: [entry('m1')] });
+    expect(readPersistedOutbox(storage, { workspaceId: 'wa', userId: 'u2' })).toEqual({});
+    expect(storage.data.has(OUTBOX_STORAGE_KEY)).toBe(false);
+  });
+
+  it('holds a single scope: writing another workspace replaces the blob', () => {
+    const storage = memoryStorage();
+    writePersistedOutbox(storage, A, { c1: [entry('m1')] });
+    writePersistedOutbox(storage, { workspaceId: 'wb', userId: 'u1' }, { c9: [entry('m9')] });
+    expect(readPersistedOutbox(storage, A)).toEqual({});
+    expect(storage.data.get(OUTBOX_STORAGE_KEY)).not.toContain('m1');
+  });
+
+  it('an emptied outbox removes the key; sign-out clears it', () => {
+    const storage = memoryStorage();
+    writePersistedOutbox(storage, A, { c1: [entry('m1')] });
+    writePersistedOutbox(storage, A, {});
+    expect(storage.data.has(OUTBOX_STORAGE_KEY)).toBe(false);
+    writePersistedOutbox(storage, A, { c1: [entry('m1')] });
+    clearPersistedOutbox(storage);
+    expect(storage.data.has(OUTBOX_STORAGE_KEY)).toBe(false);
+  });
+
+  it('drops malformed entries and survives a corrupt blob', () => {
+    const storage = memoryStorage();
+    storage.setItem(
+      OUTBOX_STORAGE_KEY,
+      JSON.stringify({
+        workspaceId: 'wa',
+        userId: 'u1',
+        outbox: {
+          c1: [
+            { id: 5 },
+            { id: 'm2', text: 'ok', local: { attachments: [], sharedPostIds: [], reply: null } },
+          ],
+        },
+      }),
+    );
+    expect(readPersistedOutbox(storage, A)).toEqual({
+      c1: [
+        {
+          id: 'm2',
+          text: 'ok',
+          local: { attachments: [], sharedPostIds: [], reply: null },
+          state: 'sending',
+        },
+      ],
+    });
+    storage.setItem(OUTBOX_STORAGE_KEY, '{not json');
+    expect(readPersistedOutbox(storage, A)).toEqual({});
+  });
+
+  it('a throwing storage never throws out of read, write or clear', () => {
+    const boom = (): never => {
+      throw new Error('SecurityError');
+    };
+    const storage: OutboxStorage = { getItem: boom, setItem: boom, removeItem: boom };
+    expect(readPersistedOutbox(storage, A)).toEqual({});
+    expect(() => writePersistedOutbox(storage, A, { c1: [entry('m1')] })).not.toThrow();
+    expect(() => clearPersistedOutbox(storage)).not.toThrow();
+    expect(readPersistedOutbox(null, A)).toEqual({});
   });
 });
 

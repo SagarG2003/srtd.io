@@ -5,10 +5,26 @@
 // publish, the rendered message carries the RETURNED row's server created_at,
 // a live publish failure or a publish slower than LIVE_PUBLISH_TIMEOUT_MS never
 // fails the send (the row exists; receivers catch up from Postgres), and a
-// record failure or timeout reports 'failed' so the bubble can offer Retry with
-// the same id.
+// record failure or timeout reports 'failed'.
+//
+// createOutboxSender runs those sends in the background, one channel queue at a
+// time (FIFO per channel: a later message never records before an earlier one).
+// A failed record retries with backoff (2s, 4s, 8s, 16s, then every 30s) using
+// the SAME message id and a fresh trace id per attempt; the bubble stays
+// 'sending' and only turns 'failed' once the head has failed continuously for
+// FAILED_AFTER_MS. kick() (reconnect, tab visible, online) retries at once.
 
 import type { SendRecordResult } from '@/lib/chat/record';
+import {
+  outboxDropChannel,
+  outboxPut,
+  outboxRemove,
+  outboxSetState,
+  selectOutbox,
+  type Outbox,
+  type OutboxEntry,
+  type OutboxEvent,
+} from '@/lib/chat/chat-store';
 import { buildAttachmentMeta, type AttachmentMetaMap } from '@/lib/chat/attachments';
 import {
   rowToThreadMessage,
@@ -132,4 +148,245 @@ export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<Sen
     return { ok: true, message, livePublished: false };
   }
   return { ok: true, message, livePublished: true };
+}
+
+/** The longest wait between two record attempts. */
+export const RETRY_CAP_MS = 30_000;
+/** Waits between record attempts; the last one repeats until FAILED_AFTER_MS. */
+export const RETRY_DELAYS_MS: readonly number[] = [2_000, 4_000, 8_000, 16_000, RETRY_CAP_MS];
+/** Continuous failure after which the queue stops and the bubble reads "Not sent". */
+export const FAILED_AFTER_MS = 120_000;
+
+/** The wait before the next attempt after `failures` consecutive failures (>= 1). */
+export function retryDelayMs(failures: number): number {
+  const index = Math.min(Math.max(failures, 1), RETRY_DELAYS_MS.length) - 1;
+  return RETRY_DELAYS_MS[index] ?? RETRY_CAP_MS;
+}
+
+export interface OutboxSenderDeps {
+  /**
+   * One attempt: record, then publish (runSend). onRecorded fires the moment
+   * the row exists, so the queue moves on without waiting for the publish.
+   */
+  deliver: (
+    channelId: string,
+    entry: OutboxEntry,
+    traceId: string,
+    onRecorded: (message: ThreadMessage) => void,
+  ) => Promise<SendOutcome>;
+  newTraceId: () => string;
+  /** Bubble updates for the open thread. */
+  onEvent: (event: OutboxEvent) => void;
+  /** The whole outbox after every change (persistence). */
+  onChange: (outbox: Outbox) => void;
+  /** One failed attempt, for the log. */
+  onAttemptFailed: (context: Record<string, unknown>) => void;
+  now?: () => number;
+  setTimer?: (fn: () => void, delayMs: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}
+
+export interface OutboxSender {
+  entries: (channelId: string) => readonly OutboxEntry[];
+  enqueue: (channelId: string, entry: OutboxEntry) => void;
+  retry: (channelId: string, id: string) => void;
+  settle: (channelId: string, id: string) => void;
+  dropChannel: (channelId: string) => void;
+  /** Attempt every waiting queue now (reconnect, tab visible, online). */
+  kick: () => void;
+  /** Stop: clear every timer and ignore every answer still in flight. */
+  dispose: () => void;
+}
+
+/** One channel's queue runner. */
+interface Lane {
+  busy: boolean;
+  timer: unknown;
+  failures: number;
+  failingSince: number | null;
+}
+
+/**
+ * The background sender over an outbox (restored entries resume at once).
+ * Nothing here throws; a deliver that rejects counts as a failed attempt.
+ */
+export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {}): OutboxSender {
+  const now = deps.now ?? ((): number => Date.now());
+  const setTimer =
+    deps.setTimer ?? ((fn: () => void, delayMs: number): unknown => setTimeout(fn, delayMs));
+  const clearTimer = deps.clearTimer ?? ((handle: unknown): void => clearTimeout(handle as number));
+  let outbox: Outbox = initial;
+  let disposed = false;
+  const lanes = new Map<string, Lane>();
+
+  const commit = (next: Outbox): void => {
+    if (next === outbox) return;
+    outbox = next;
+    deps.onChange(outbox);
+  };
+
+  const laneFor = (channelId: string): Lane => {
+    const existing = lanes.get(channelId);
+    if (existing !== undefined) return existing;
+    const lane: Lane = { busy: false, timer: null, failures: 0, failingSince: null };
+    lanes.set(channelId, lane);
+    return lane;
+  };
+
+  const stopTimer = (lane: Lane): void => {
+    if (lane.timer !== null) {
+      clearTimer(lane.timer);
+      lane.timer = null;
+    }
+  };
+
+  const setState = (channelId: string, id: string, state: OutboxEntry['state']): void => {
+    commit(outboxSetState(outbox, channelId, id, state));
+    deps.onEvent({ type: 'state', channelId, id, state });
+  };
+
+  /** Failed entries go back to 'sending' with a fresh failure window. */
+  const resume = (channelId: string): void => {
+    const lane = laneFor(channelId);
+    lane.failures = 0;
+    lane.failingSince = null;
+    for (const entry of selectOutbox(outbox, channelId)) {
+      if (entry.state === 'failed') setState(channelId, entry.id, 'sending');
+    }
+    pump(channelId);
+  };
+
+  const isLive = (channelId: string, lane: Lane): boolean =>
+    !disposed && lanes.get(channelId) === lane;
+
+  const onRecorded = (channelId: string, lane: Lane, message: ThreadMessage): void => {
+    lane.busy = false;
+    lane.failures = 0;
+    lane.failingSince = null;
+    if (!isLive(channelId, lane)) return;
+    const held = selectOutbox(outbox, channelId).some((e) => e.id === message.id);
+    commit(outboxRemove(outbox, channelId, message.id));
+    if (held) deps.onEvent({ type: 'recorded', channelId, message });
+    pump(channelId);
+  };
+
+  const onFailed = (
+    channelId: string,
+    lane: Lane,
+    head: OutboxEntry,
+    traceId: string,
+    reason: string,
+    error: string,
+  ): void => {
+    lane.busy = false;
+    if (!isLive(channelId, lane)) return;
+    deps.onAttemptFailed({
+      trace_id: traceId,
+      message_id: head.id,
+      channel_id: channelId,
+      reason,
+      error,
+      failures: lane.failures + 1,
+    });
+    // Settled by a catch-up (or dropped) while this attempt was in flight.
+    if (selectOutbox(outbox, channelId)[0]?.id !== head.id) {
+      lane.failures = 0;
+      lane.failingSince = null;
+      pump(channelId);
+      return;
+    }
+    lane.failures += 1;
+    const at = now();
+    lane.failingSince ??= at;
+    if (at - lane.failingSince >= FAILED_AFTER_MS) {
+      lane.failures = 0;
+      lane.failingSince = null;
+      // FIFO: everything queued behind the head stops with it.
+      for (const entry of selectOutbox(outbox, channelId)) {
+        if (entry.state === 'sending') setState(channelId, entry.id, 'failed');
+      }
+      return;
+    }
+    lane.timer = setTimer(() => {
+      lane.timer = null;
+      pump(channelId);
+    }, retryDelayMs(lane.failures));
+  };
+
+  function pump(channelId: string): void {
+    if (disposed) return;
+    const lane = laneFor(channelId);
+    if (lane.busy || lane.timer !== null) return;
+    const head = selectOutbox(outbox, channelId)[0];
+    if (head === undefined || head.state !== 'sending') return;
+    lane.busy = true;
+    const traceId = deps.newTraceId();
+    let settled = false;
+    const recorded = (message: ThreadMessage): void => {
+      if (settled) return;
+      settled = true;
+      onRecorded(channelId, lane, message);
+    };
+    const failed = (reason: string, error: string): void => {
+      if (settled) return;
+      settled = true;
+      onFailed(channelId, lane, head, traceId, reason, error);
+    };
+    void deps.deliver(channelId, head, traceId, recorded).then(
+      (outcome) => {
+        if (outcome.ok) recorded(outcome.message);
+        else failed(outcome.reason, outcome.error);
+      },
+      (error: unknown) => failed('error', String(error)),
+    );
+  }
+
+  for (const channelId of Object.keys(outbox)) pump(channelId);
+
+  return {
+    entries: (channelId) => selectOutbox(outbox, channelId),
+    enqueue: (channelId, entry) => {
+      if (disposed) return;
+      commit(outboxPut(outbox, channelId, entry));
+      // A new message also resumes a stopped queue, so it never waits behind a
+      // failed one it cannot overtake.
+      resume(channelId);
+    },
+    retry: (channelId, id) => {
+      if (disposed) return;
+      const entry = selectOutbox(outbox, channelId).find((e) => e.id === id);
+      if (entry === undefined || entry.state !== 'failed') return;
+      resume(channelId);
+    },
+    settle: (channelId, id) => {
+      if (disposed) return;
+      const wasHead = selectOutbox(outbox, channelId)[0]?.id === id;
+      commit(outboxRemove(outbox, channelId, id));
+      const lane = lanes.get(channelId);
+      if (!wasHead || lane === undefined) return;
+      stopTimer(lane);
+      lane.failures = 0;
+      lane.failingSince = null;
+      pump(channelId);
+    },
+    dropChannel: (channelId) => {
+      const lane = lanes.get(channelId);
+      if (lane !== undefined) stopTimer(lane);
+      lanes.delete(channelId);
+      commit(outboxDropChannel(outbox, channelId));
+    },
+    kick: () => {
+      if (disposed) return;
+      for (const channelId of Object.keys(outbox)) {
+        const lane = laneFor(channelId);
+        stopTimer(lane);
+        pump(channelId);
+      }
+    },
+    dispose: () => {
+      disposed = true;
+      for (const lane of lanes.values()) stopTimer(lane);
+      lanes.clear();
+    },
+  };
 }

@@ -1,5 +1,4 @@
-// Context wrapper exposing { status, client } to later PRs. A foundation PR:
-// it renders only {children} with no visuals and is not mounted anywhere yet.
+// Context wrapper exposing { status, client, retry }; mounted once at the shell (App.tsx).
 
 import { createContext, useContext } from 'react';
 import type { ReactNode } from 'react';

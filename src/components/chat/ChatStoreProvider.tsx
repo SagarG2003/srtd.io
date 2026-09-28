@@ -7,9 +7,13 @@
 // verified against its chat_messages row before it counts (the shared verifier
 // logs a missing row once, for store and thread). Unread counts are re-read
 // on open, on every reconnect, and 2s after the last incoming live message, so
-// Postgres stays the truth for the badge. The store also holds the per-channel
-// outbox (unrecorded own sends), so a channel switch never drops a failed bubble. A message for a conversation the user
-// is not viewing fires a toast and stays unread; a message for the open
+// Postgres stays the truth for the badge. The provider also owns the
+// per-channel outbox and its background sender (send-flow.ts): sends record and
+// publish here, retry with backoff (and at once on reconnect, tab visible and
+// online), persist to localStorage for this workspace and user so a reload
+// resumes them, and are wiped from storage on sign-out. A channel switch or
+// leaving the chat page never drops a sending or failed bubble. A message for a
+// conversation the user is not viewing fires a toast and stays unread; a message for the open
 // conversation is marked read locally (the thread writes the cursor). All store
 // mutation lives in the pure reducer (chat-store.ts); this file only wires that
 // reducer to Agora, Postgres, React, and the toast surface.
@@ -34,8 +38,19 @@ import { useWorkspace } from '@/lib/workspace-context';
 import { useToast } from '@/components/ui/toast';
 import { Avatar } from '@/components/ui/Avatar';
 import { listChannelClears, listChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
+import { SIGNOUT_EVENT } from '@/lib/events';
+import { generateTraceId } from '@/lib/trace';
 import { useChat } from '@/lib/chat/chat-context';
-import { mapLiveTextMessage } from '@/lib/chat/thread';
+import { createTextMessage } from '@/lib/chat/message-factory';
+import { sendMessageRecord } from '@/lib/chat/record';
+import { createOutboxSender, runSend, type OutboxSender } from '@/lib/chat/send-flow';
+import {
+  mapLiveTextMessage,
+  sendText,
+  targetFromSummary,
+  type ChannelTarget,
+  type ThreadConnection,
+} from '@/lib/chat/thread';
 import { liveVerifierFor } from '@/lib/chat/live-verify';
 import { subscribeGlobalMessages } from '@/lib/chat/controller';
 import {
@@ -51,7 +66,8 @@ import type {
   ChannelOutbox,
   ChatLoadStatus,
   ChatStoreState,
-  Outbox,
+  OutboxEvent,
+  OutboxStorage,
 } from '@/lib/chat/chat-store';
 
 /** The store plus the actions the chat UI uses to keep it in step. */
@@ -81,7 +97,7 @@ export interface ChatStoreContextValue {
   requestOpen: (channelId: string) => void;
   /** Clear the pending-open request once the chat page has acted on it. */
   clearPendingOpen: () => void;
-  /** Unrecorded own sends per channel; survives channel switches. */
+  /** Unrecorded own sends per channel and their background sender; survives channel switches. */
   outbox: ChannelOutbox;
   /**
    * The chat was deleted for the caller (chat_channel_clear accepted): record the
@@ -104,6 +120,25 @@ function indexSummaries(roster: readonly ChannelSummary[]): Map<string, ChannelS
     map.set(summary.channelId, summary);
   }
   return map;
+}
+
+/** localStorage, or null where reading it throws (blocked storage, private mode). */
+function browserStorage(): OutboxStorage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** A channel's Agora target for the live publish; a bad row yields none (the record still holds it). */
+function liveTarget(summary: ChannelSummary | undefined): ChannelTarget | null {
+  if (summary === undefined) return null;
+  try {
+    return targetFromSummary(summary);
+  } catch {
+    return null;
+  }
 }
 
 /** Remember a live message id; true when it was already seen. Bounded FIFO. */
@@ -161,7 +196,7 @@ export async function loadChatList(
 }
 
 export function ChatStoreProvider({ children }: { children: ReactNode }): ReactElement {
-  const { status } = useChat();
+  const { status, client } = useChat();
   const { session } = useSession();
   const { workspaceId } = useWorkspace();
   const toast = useToast();
@@ -179,8 +214,27 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   const summariesRef = useRef<Map<string, ChannelSummary>>(new Map());
   const activeRef = useRef<string | null>(null);
   const seenRef = useRef<Set<string>>(new Set());
-  const outboxRef = useRef<Outbox>({});
-  const outbox = useMemo(() => store.createChannelOutbox(outboxRef), []);
+  const clientRef = useRef(client);
+  clientRef.current = client;
+  const senderRef = useRef<OutboxSender | null>(null);
+  const outboxListenersRef = useRef<Set<(event: OutboxEvent) => void>>(new Set());
+  // Stable facade over the current sender, which is replaced per workspace/user.
+  const outbox = useMemo<ChannelOutbox>(
+    () => ({
+      entries: (channelId) => senderRef.current?.entries(channelId) ?? [],
+      enqueue: (channelId, entry) => senderRef.current?.enqueue(channelId, entry),
+      retry: (channelId, id) => senderRef.current?.retry(channelId, id),
+      settle: (channelId, id) => senderRef.current?.settle(channelId, id),
+      subscribe: (listener) => {
+        const listeners = outboxListenersRef.current;
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+    }),
+    [],
+  );
 
   useEffect(() => {
     activeRef.current = state.activeConversationId;
@@ -205,7 +259,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   }, []);
 
   const clearConversation = useCallback((channelId: string, clearedAtMs: number) => {
-    outboxRef.current = store.outboxDropChannel(outboxRef.current, channelId);
+    senderRef.current?.dropChannel(channelId);
     setState((prev) => store.applyClear(prev, channelId, clearedAtMs));
   }, []);
 
@@ -255,7 +309,6 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     if (scope === null || !workspaceId || currentUserId === null) return;
     let cancelled = false;
     seenRef.current = new Set();
-    outboxRef.current = {};
     setState((prev) => store.beginLoad(prev, scope));
     void loadChatList(
       {
@@ -287,13 +340,100 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     return result.data;
   }, [scope, workspaceId, currentUserId]);
 
-  // Every (re)connect re-reads the counts: live messages missed while offline
-  // are already in Postgres.
+  // One background sender per workspace and user, seeded from this scope's
+  // persisted outbox. Teardown (workspace switch, sign-out, unmount) clears its
+  // timers and ignores every answer still in flight; sign-out also wipes the
+  // persisted bodies.
+  useEffect(() => {
+    if (!workspaceId || currentUserId === null) return;
+    const scopeKey = { workspaceId, userId: currentUserId };
+    const storage = browserStorage();
+    const sender = createOutboxSender(
+      {
+        deliver: (channelId, entry, traceId, onRecorded) => {
+          const connection = clientRef.current;
+          const target = liveTarget(summariesRef.current.get(channelId));
+          return runSend(
+            {
+              recordMessage: (input) => sendMessageRecord({ client: supabase, ...input }),
+              publishLive:
+                connection !== null && target !== null
+                  ? (input) =>
+                      sendText({
+                        connection: connection as ThreadConnection,
+                        target,
+                        text: input.text,
+                        attachments: input.local.attachments,
+                        sharedPostIds: input.local.sharedPostIds,
+                        reply: input.local.reply,
+                        createMessage: createTextMessage,
+                        liveIds: {
+                          sorted_message_id: input.id,
+                          sorted_channel_id: input.channelId,
+                        },
+                      })
+                  : undefined,
+              // The row exists; receivers catch up from Postgres.
+              onLiveWarning: (context) =>
+                logger.warn('chat: live publish did not complete', context),
+              onRecorded,
+            },
+            {
+              id: entry.id,
+              channelId,
+              currentUserId: scopeKey.userId,
+              traceId,
+              text: entry.text,
+              local: entry.local,
+            },
+          );
+        },
+        newTraceId: generateTraceId,
+        onEvent: (event) => {
+          // The row exists: the list card shows 'You: ...', whatever page is open.
+          if (event.type === 'recorded') {
+            const { channelId, message } = event;
+            setState((prev) =>
+              store.updateOwnMessage(prev, { channelId, text: message.body, ts: message.time }),
+            );
+          }
+          for (const listener of outboxListenersRef.current) listener(event);
+        },
+        onChange: (next) => store.writePersistedOutbox(storage, scopeKey, next),
+        onAttemptFailed: (context) => logger.warn('chat: message record attempt failed', context),
+      },
+      store.readPersistedOutbox(storage, scopeKey),
+    );
+    senderRef.current = sender;
+    const kick = (): void => sender.kick();
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'visible') kick();
+    };
+    const onSignout = (): void => {
+      sender.dispose();
+      store.clearPersistedOutbox(storage);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', kick);
+    window.addEventListener(SIGNOUT_EVENT, onSignout);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', kick);
+      window.removeEventListener(SIGNOUT_EVENT, onSignout);
+      sender.dispose();
+      if (senderRef.current === sender) senderRef.current = null;
+    };
+  }, [workspaceId, currentUserId]);
+
+  // Every (re)connect re-reads the counts (live messages missed while offline
+  // are already in Postgres) and retries any queued send at once.
   const previousStatusRef = useRef(status);
   useEffect(() => {
     const previous = previousStatusRef.current;
     previousStatusRef.current = status;
-    if (status === 'connected' && previous !== 'connected') refreshUnreadCounts();
+    if (status !== 'connected' || previous === 'connected') return;
+    refreshUnreadCounts();
+    senderRef.current?.kick();
   }, [status, refreshUnreadCounts]);
 
   // Debounced reconcile after live traffic (2s after the last incoming message).

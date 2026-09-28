@@ -7,11 +7,13 @@
 // function is a pure transition: same input, same output, with no React, no
 // Agora, and no clock. The provider (ChatStoreProvider) wires these to the SDK
 // and React state; keeping the logic here lets the reducer be unit-tested in
-// isolation with no connection.
+// isolation with no connection. The outbox persistence helpers at the end take
+// the storage as a parameter and never throw.
 
 import type { ChannelSummary } from '@/lib/chat-reads';
 import type { ConversationPreview, UnreadCount } from '@/lib/chat/history';
-import type { LocalMessageContent } from '@/lib/chat/thread';
+import type { LocalMessageContent, ThreadMessage } from '@/lib/chat/thread';
+import type { MessageAttachment, ReplyQuote } from '@/lib/chat/attachments';
 
 /** Sender label written before the preview when the current user sent it. */
 export const OWN_PREFIX = 'You';
@@ -405,8 +407,9 @@ export function selectConversation(
 }
 
 /**
- * One own send that has not reached the record yet: in flight ('sending') or
- * failed and waiting on Retry. Kept per channel, outside any open thread, so
+ * One own send that has not reached the record yet: in flight or retrying in
+ * the background ('sending'), or failed after FAILED_AFTER_MS and waiting on
+ * Retry. Kept per channel, outside any open thread, so
  * switching channels neither loses a failed bubble nor its Retry payload.
  */
 export interface OutboxEntry {
@@ -464,26 +467,179 @@ export function selectOutbox(outbox: Outbox, channelId: string): readonly Outbox
   return outbox[channelId] ?? [];
 }
 
-/** The outbox surface the thread drives; the store provider implements it. */
+/** What the outbox tells the open thread: a bubble changed state, or its row landed. */
+export type OutboxEvent =
+  | { type: 'state'; channelId: string; id: string; state: OutboxEntry['state'] }
+  | { type: 'recorded'; channelId: string; message: ThreadMessage };
+
+/**
+ * The outbox surface the thread drives; the store provider implements it over
+ * the background sender (send-flow.ts createOutboxSender).
+ */
 export interface ChannelOutbox {
   entries: (channelId: string) => readonly OutboxEntry[];
-  put: (channelId: string, entry: OutboxEntry) => void;
-  setState: (channelId: string, id: string, state: OutboxEntry['state']) => void;
-  remove: (channelId: string, id: string) => void;
+  /** Queue one send; delivery (record, then publish) runs in the background. */
+  enqueue: (channelId: string, entry: OutboxEntry) => void;
+  /** The Retry tap on a failed bubble: resume the channel's queue, same ids. */
+  retry: (channelId: string, id: string) => void;
+  /** The row was read back from Postgres (catch-up): the send is done. */
+  settle: (channelId: string, id: string) => void;
+  subscribe: (listener: (event: OutboxEvent) => void) => () => void;
 }
 
-/** A ChannelOutbox over a mutable holder (the provider's ref, or a hook-local fallback). */
-export function createChannelOutbox(holder: { current: Outbox }): ChannelOutbox {
+/** The one localStorage key the pending outbox lives under. */
+export const OUTBOX_STORAGE_KEY = 'sorted:chat:outbox:v1';
+
+/** The slice of Web Storage the outbox persistence uses. */
+export interface OutboxStorage {
+  getItem: (key: string) => string | null;
+  setItem: (key: string, value: string) => void;
+  removeItem: (key: string) => void;
+}
+
+/** Whose outbox is persisted: one workspace, one user. */
+export interface OutboxScope {
+  workspaceId: string;
+  userId: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function parseAttachment(value: unknown): MessageAttachment | null {
+  if (!isRecord(value)) return null;
+  const { assetId, name, mime, transcript, size, durationMs } = value;
+  if (typeof assetId !== 'string' || typeof name !== 'string' || typeof mime !== 'string') {
+    return null;
+  }
   return {
-    entries: (channelId) => selectOutbox(holder.current, channelId),
-    put: (channelId, entry) => {
-      holder.current = outboxPut(holder.current, channelId, entry);
-    },
-    setState: (channelId, id, state) => {
-      holder.current = outboxSetState(holder.current, channelId, id, state);
-    },
-    remove: (channelId, id) => {
-      holder.current = outboxRemove(holder.current, channelId, id);
-    },
+    assetId,
+    name,
+    mime,
+    ...(typeof transcript === 'string' ? { transcript } : {}),
+    ...(typeof size === 'number' ? { size } : {}),
+    ...(typeof durationMs === 'number' ? { durationMs } : {}),
   };
+}
+
+function parseReply(value: unknown): ReplyQuote | null | undefined {
+  if (value === null) return null;
+  if (!isRecord(value)) return undefined;
+  const { id, authorUserId, preview } = value;
+  if (typeof id !== 'string' || typeof preview !== 'string') return undefined;
+  if (authorUserId !== null && typeof authorUserId !== 'string') return undefined;
+  return { id, authorUserId, preview };
+}
+
+/** One persisted entry back to an OutboxEntry ('sending'); null when malformed. */
+function parseEntry(value: unknown): OutboxEntry | null {
+  if (!isRecord(value) || !isRecord(value.local)) return null;
+  const { id, text } = value;
+  const { attachments, sharedPostIds, sharedBriefIds, reply } = value.local;
+  if (typeof id !== 'string' || typeof text !== 'string') return null;
+  if (!Array.isArray(attachments) || !isStringArray(sharedPostIds)) return null;
+  if (sharedBriefIds !== undefined && !isStringArray(sharedBriefIds)) return null;
+  const parsedAttachments = attachments.map(parseAttachment);
+  const parsedReply = parseReply(reply);
+  if (parsedReply === undefined) return null;
+  const valid = parsedAttachments.filter((a): a is MessageAttachment => a !== null);
+  if (valid.length !== attachments.length) return null;
+  return {
+    id,
+    text,
+    local: {
+      attachments: valid,
+      sharedPostIds,
+      ...(sharedBriefIds !== undefined ? { sharedBriefIds } : {}),
+      reply: parsedReply,
+    },
+    state: 'sending',
+  };
+}
+
+function readRaw(storage: OutboxStorage): Record<string, unknown> | null {
+  const raw = storage.getItem(OUTBOX_STORAGE_KEY);
+  if (raw === null) return null;
+  const parsed: unknown = JSON.parse(raw);
+  return isRecord(parsed) ? parsed : null;
+}
+
+/**
+ * The persisted outbox for exactly this workspace and user, every entry back
+ * to 'sending'. Another workspace's entries are left in place (they resume
+ * when the user returns to it); another user's are deleted. Never throws:
+ * unreadable storage or a malformed blob is an empty outbox.
+ */
+export function readPersistedOutbox(storage: OutboxStorage | null, scope: OutboxScope): Outbox {
+  if (storage === null) return {};
+  try {
+    const stored = readRaw(storage);
+    if (stored === null) return {};
+    if (stored.userId !== scope.userId) {
+      storage.removeItem(OUTBOX_STORAGE_KEY);
+      return {};
+    }
+    if (stored.workspaceId !== scope.workspaceId || !isRecord(stored.outbox)) return {};
+    const outbox: Record<string, OutboxEntry[]> = {};
+    for (const [channelId, list] of Object.entries(stored.outbox)) {
+      if (!Array.isArray(list)) continue;
+      const entries = list.map(parseEntry).filter((e): e is OutboxEntry => e !== null);
+      if (entries.length > 0) outbox[channelId] = entries;
+    }
+    return outbox;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Persist this scope's pending sends (bodies included) under the one key, so
+ * the blob only ever holds a single workspace and user. An empty outbox
+ * removes the key when it is this scope's. Never throws.
+ */
+export function writePersistedOutbox(
+  storage: OutboxStorage | null,
+  scope: OutboxScope,
+  outbox: Outbox,
+): void {
+  if (storage === null) return;
+  try {
+    const pending = Object.entries(outbox).filter(([, list]) => list.length > 0);
+    if (pending.length === 0) {
+      const stored = readRaw(storage);
+      if (
+        stored === null ||
+        (stored.userId === scope.userId && stored.workspaceId === scope.workspaceId)
+      ) {
+        storage.removeItem(OUTBOX_STORAGE_KEY);
+      }
+      return;
+    }
+    const persisted: Record<string, { id: string; text: string; local: LocalMessageContent }[]> =
+      {};
+    for (const [channelId, list] of pending) {
+      persisted[channelId] = list.map((e) => ({ id: e.id, text: e.text, local: e.local }));
+    }
+    storage.setItem(
+      OUTBOX_STORAGE_KEY,
+      JSON.stringify({ workspaceId: scope.workspaceId, userId: scope.userId, outbox: persisted }),
+    );
+  } catch {
+    // Storage full or blocked: the send carries on from memory.
+  }
+}
+
+/** Sign-out: no message body outlives the session. Never throws. */
+export function clearPersistedOutbox(storage: OutboxStorage | null): void {
+  if (storage === null) return;
+  try {
+    storage.removeItem(OUTBOX_STORAGE_KEY);
+  } catch {
+    // Blocked storage has nothing to clear.
+  }
 }

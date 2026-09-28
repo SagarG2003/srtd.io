@@ -15,6 +15,7 @@ import { IconButton } from '@/components/ui/IconButton';
 import {
   IconChat,
   IconChevronRight,
+  IconClock,
   IconForward,
   IconRotateCcw,
   IconSettings,
@@ -24,11 +25,11 @@ import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import type { ChannelSummary, ChatProfile } from '@/lib/chat-reads';
 import { replyPreview, type MessageStatus, type ThreadMessage } from '@/lib/chat/thread';
-import type { MessageAttachment, ReplyQuote } from '@/lib/chat/attachments';
+import type { ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
 import { formatMessageTime } from '@/lib/chat/time-format';
 import type { PresignCache } from '@/lib/asset-presign';
-import { Composer } from '@/components/chat/Composer';
+import { Composer, type ComposerSend } from '@/components/chat/Composer';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
 import { SharedPostCards } from '@/components/chat/PostCard';
 import { MessageActionMenu } from '@/components/chat/MessageActionMenu';
@@ -73,13 +74,7 @@ interface MessageThreadProps {
   timeZone: string;
   /** False when sending is impossible (no channel selected). */
   canSend: boolean;
-  onSend: (
-    text: string,
-    attachments: MessageAttachment[],
-    sharedPostIds: string[],
-    reply: ReplyQuote | null,
-    sharedBriefIds: string[],
-  ) => Promise<void>;
+  onSend: ComposerSend;
   /** Every mark of the channel keyed by message id (resolved included); absent = no marks UI. */
   marks?: Map<string, ChatMark>;
   /** Marked messages read from the record, for sheet rows beyond loaded history. */
@@ -214,8 +209,9 @@ function senderAvatarProps(
 
 /**
  * The footer label for a bubble: the server time on the workspace clock once
- * the message is recorded, 'Sending' while the record write is in flight, and
- * 'Not sent' when it failed (the Retry control sits beside it).
+ * the message is recorded, 'Sending' while the record write is in flight or
+ * retrying (shown as a clock, the label is for screen readers), and 'Not sent'
+ * once the background retries gave up (the Retry control sits beside it).
  */
 export function bubbleTimeLabel(message: ThreadMessage, timeZone: string): string {
   if (message.state === 'sending') return 'Sending';
@@ -322,7 +318,13 @@ export function MessageBubble(props: {
   const distinctEmojis = message.reactions.map((r) => r.emoji).join('');
   const time = (
     <>
-      <span className={cn(failed && 'text-bad')}>{bubbleTimeLabel(message, timeZone)}</span>
+      {sending ? (
+        <span role="img" aria-label={bubbleTimeLabel(message, timeZone)}>
+          <IconClock size={12} />
+        </span>
+      ) : (
+        <span className={cn(failed && 'text-bad')}>{bubbleTimeLabel(message, timeZone)}</span>
+      )}
       {showTicks && mine && !failed && !sending ? <MessageTicks status={message.status} /> : null}
     </>
   );

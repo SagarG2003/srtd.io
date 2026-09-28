@@ -8,13 +8,16 @@ vi.mock('agora-chat', () => ({
   default: { connection: vi.fn(), message: { create: vi.fn() } },
 }));
 
+import { renderToStaticMarkup } from 'react-dom/server';
 import {
   ChatShell,
   ChatStatusBanner,
   ConnectionBanner,
+  GatedConnectionBanner,
   connectionBannerAction,
   connectionBannerText,
 } from '@/components/chat/ChatShell';
+import { INITIAL_CHAT_STATUS } from '@/lib/chat/use-chat-client';
 import { ChatConnected } from '@/components/chat/ChatConnected';
 import { ChatUnavailable, chatUnavailableView } from '@/components/chat/ChatUnavailable';
 
@@ -56,7 +59,7 @@ describe('ChatShell status dispatch', () => {
     }
   });
 
-  it('keeps ChatConnected mounted under a banner while connecting and reconnecting', () => {
+  it('keeps ChatConnected mounted under the gated banner while connecting and reconnecting', () => {
     for (const status of ['connecting', 'reconnecting'] as const) {
       const view = ChatShell({ status, client: null, workspaceId: 'w', currentUserId: 'u' });
       const connected = find(view, (el) => el.type === ChatConnected);
@@ -64,13 +67,13 @@ describe('ChatShell status dispatch', () => {
       expect((connected[0]?.props as { status: string }).status).toBe(status);
       const banners = find(view, (el) => el.type === ChatStatusBanner);
       expect(banners).toHaveLength(1);
-      expect(connectionBannerText(status)).not.toBe('');
+      expect((banners[0]?.props as { workspaceId: string }).workspaceId).toBe('w');
     }
   });
 
   it('shows no banner once connected', () => {
-    expect(connectionBannerText('connected')).toBe('');
-    expect(ConnectionBanner({ status: 'connected' })).toBeNull();
+    expect(connectionBannerText('none')).toBe('');
+    expect(ConnectionBanner({ banner: 'none' })).toBeNull();
     const view = ChatShell({
       status: 'connected',
       client: null,
@@ -82,29 +85,65 @@ describe('ChatShell status dispatch', () => {
 });
 
 describe('ConnectionBanner copy', () => {
-  it('distinguishes reconnecting live delivery from chat unavailable and a kick', () => {
-    expect(connectionBannerText('reconnecting')).toBe('Reconnecting live delivery');
-    expect(connectionBannerText('unavailable')).toMatch(/^Chat unavailable/);
+  it('says Reconnecting, a paused state, or a kick; never a connecting line', () => {
+    expect(connectionBannerText('reconnecting')).toBe('Reconnecting');
+    expect(connectionBannerText('unavailable')).toBe('Live updates paused. Messages still send.');
     expect(connectionBannerText('kicked')).toBe('Signed in on another device');
     expect(connectionBannerAction('reconnecting')).toBe('');
-    for (const status of ['connecting', 'reconnecting', 'unavailable', 'kicked'] as const) {
-      expect(connectionBannerText(status)).not.toMatch(/\u2014/);
+    expect(connectionBannerAction('unavailable')).toBe('Retry');
+    for (const banner of ['none', 'reconnecting', 'unavailable', 'kicked'] as const) {
+      expect(connectionBannerText(banner)).not.toMatch(/\u2014|Connecting|unavailable/);
     }
   });
 
   it('gives the kicked banner a 44px tap target that reconnects', () => {
     const onRetry = vi.fn();
-    const view = ConnectionBanner({ status: 'kicked', onRetry });
+    const view = ConnectionBanner({ banner: 'kicked', onRetry });
     const buttons = find(view, (el) => el.type === 'button');
     expect(buttons).toHaveLength(1);
     const props = buttons[0]?.props as { onClick: () => void; className: string; children: string };
     expect(props.children).toBe('Reconnect');
     expect(props.className).toContain('min-h-[44px]');
+    expect(props.className).toContain('min-w-[44px]');
     props.onClick();
     expect(onRetry).toHaveBeenCalledOnce();
     expect(
-      find(ConnectionBanner({ status: 'reconnecting', onRetry }), (el) => el.type === 'button'),
+      find(ConnectionBanner({ banner: 'reconnecting', onRetry }), (el) => el.type === 'button'),
     ).toHaveLength(0);
+  });
+
+  it('overlays the surface (absolute, token colours only) so the thread never shifts', () => {
+    const view = ConnectionBanner({ banner: 'reconnecting' });
+    const className = (view?.props as { className: string }).className;
+    expect(className).toContain('absolute');
+    expect(className).not.toMatch(/#[0-9a-f]{3,6}|dark:|translate|rotate/i);
+  });
+});
+
+describe('GatedConnectionBanner first paint', () => {
+  it('a cold mount renders no banner in any down state', () => {
+    for (const status of ['connecting', 'reconnecting', 'unavailable'] as const) {
+      const html = renderToStaticMarkup(
+        <GatedConnectionBanner status={status} resetKey="w" onRetry={() => {}} />,
+      );
+      expect(html).toBe('');
+    }
+  });
+
+  it('the initial connection status is connecting, never unavailable', () => {
+    expect(INITIAL_CHAT_STATUS).toBe('connecting');
+    const html = renderToStaticMarkup(
+      <GatedConnectionBanner status={INITIAL_CHAT_STATUS} resetKey="w" onRetry={() => {}} />,
+    );
+    expect(html).not.toContain('Chat unavailable');
+    expect(html).toBe('');
+  });
+
+  it('a kick is a real event and shows on first paint', () => {
+    const html = renderToStaticMarkup(
+      <GatedConnectionBanner status="kicked" resetKey="w" onRetry={() => {}} />,
+    );
+    expect(html).toContain('Signed in on another device');
   });
 });
 
