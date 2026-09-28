@@ -119,6 +119,9 @@ The approval unit. stage is the only workflow state. No publish_status.
 | platform | text | linkedin / x / instagram / facebook / threads |
 | format | text | text / single_image / carousel / video / link |
 | stage | text | draft / review / approved / parked / rejected, default draft |
+| stage_entered_at | timestamptz | not null with a default, reset by stage_transition on every stage change |
+| approved_by | uuid | nullable, FK auth.users.id, SET NULL. Set to the actor on entering approved, cleared on leaving it |
+| approved_at | timestamptz | nullable. Set on entering approved, cleared on leaving it |
 | target_date | timestamptz | nullable, indicative only, no engine in MVP |
 | origin | text | manual / brief, default manual |
 | brief_id | uuid | nullable, FK briefs.id, SET NULL |
