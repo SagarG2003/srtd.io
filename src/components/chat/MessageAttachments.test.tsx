@@ -1,7 +1,14 @@
+import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { PresignCache, type PresignDeps } from '@/lib/asset-presign';
-import { MessageAttachments, attachmentView } from '@/components/chat/MessageAttachments';
+import {
+  AlbumGrid,
+  MessageAttachments,
+  albumGridClass,
+  albumTiles,
+  attachmentView,
+} from '@/components/chat/MessageAttachments';
 import type { MessageAttachment } from '@/lib/chat/attachments';
 
 // Realistic asset_versions.id fixtures: the render layer must presign the VERSION
@@ -225,5 +232,113 @@ describe('instant send tile (local preview + upload progress)', () => {
     expect(html).toContain('src="blob:preview"');
     expect(html).not.toContain('brightness-75');
     expect(html).not.toContain('progressbar');
+  });
+});
+
+describe('album grid', () => {
+  const img = (n: number): MessageAttachment => ({
+    assetId: `${n}1111111-1111-4111-8111-111111111111`,
+    name: `photo-${n}.png`,
+    mime: 'image/png',
+  });
+  const images = (count: number): MessageAttachment[] =>
+    Array.from({ length: count }, (_, i) => img(i + 1));
+
+  it('maps the image count to the tile layout', () => {
+    expect(albumGridClass(1)).toBe('grid grid-cols-1');
+    expect(albumTiles(1)).toEqual([{ index: 0, className: 'aspect-[4/3] max-h-[320px]', more: 0 }]);
+    expect(albumGridClass(2)).toBe('grid grid-cols-2');
+    expect(albumTiles(2).map((t) => t.className)).toEqual(['aspect-square', 'aspect-square']);
+    expect(albumTiles(3).map((t) => t.className)).toEqual([
+      'col-span-2 aspect-[2/1]',
+      'aspect-square',
+      'aspect-square',
+    ]);
+    expect(albumTiles(4).map((t) => t.more)).toEqual([0, 0, 0, 0]);
+    const six = albumTiles(6);
+    expect(six).toHaveLength(4);
+    expect(six.every((t) => t.className === 'aspect-square')).toBe(true);
+    expect(six[3]).toEqual({ index: 3, className: 'aspect-square', more: 2 });
+  });
+
+  function grid(count: number, onOpen = vi.fn()) {
+    const { cache } = spiedCache();
+    const el = AlbumGrid({ images: images(count), cache, presignEnabled: true, onOpen });
+    const tiles = (el.props as { children: ReactElement[] }).children;
+    return { el, tiles, onOpen };
+  }
+
+  it('labels every tile "Open photo i of n" and passes its index on tap', () => {
+    const { tiles, onOpen } = grid(3);
+    expect(tiles.map((t) => (t.props as { 'aria-label': string })['aria-label'])).toEqual([
+      'Open photo 1 of 3',
+      'Open photo 2 of 3',
+      'Open photo 3 of 3',
+    ]);
+    for (const tile of tiles) expect(tile.type).toBe('button');
+    (tiles[1]?.props as { onClick: () => void }).onClick();
+    expect(onOpen).toHaveBeenCalledWith(1);
+  });
+
+  it('shows "+2" on the fourth tile of six, which opens at index 3', () => {
+    const { cache } = spiedCache();
+    const html = renderToStaticMarkup(
+      <AlbumGrid images={images(6)} cache={cache} presignEnabled onOpen={() => {}} />,
+    );
+    expect(html).toContain('+2');
+    expect(html).toContain('bg-black/50');
+    expect(html).toContain('text-[22px] font-semibold text-white');
+    expect(html).toContain('gap-[2px]');
+    expect(html).toContain('rounded-[15px]');
+    expect(html.match(/<button/g)).toHaveLength(4);
+    const { tiles, onOpen } = grid(6);
+    (tiles[3]?.props as { onClick: () => void }).onClick();
+    expect(onOpen).toHaveBeenCalledWith(3);
+  });
+
+  it('first paint is the final grid: pending tiles are bg-panel-3 boxes sized by the grid', () => {
+    const { cache } = spiedCache();
+    const html = renderToStaticMarkup(
+      <AlbumGrid images={images(2)} cache={cache} presignEnabled onOpen={() => {}} />,
+    );
+    expect(html).toContain('bg-panel-3');
+    expect(html).toContain('aspect-square');
+    expect(html).not.toContain('<img');
+  });
+
+  it('album mode keeps non-image chips below the album, with the caption under it', () => {
+    const { cache } = spiedCache();
+    const html = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[img(1), FILE, img(2)]}
+        cache={cache}
+        presignEnabled
+        album
+        caption={<p>Caption here</p>}
+        onImageClick={() => {}}
+      />,
+    );
+    expect(html).toContain('data-album="2"');
+    expect(html).toContain('Open photo 2 of 2');
+    expect(html).toContain('brief.pdf');
+    expect(html.indexOf('data-album')).toBeLessThan(html.indexOf('Caption here'));
+    expect(html.indexOf('Caption here')).toBeLessThan(html.indexOf('brief.pdf'));
+  });
+
+  it('keeps the upload state on an album tile (dimmed with the bar)', () => {
+    const { cache } = spiedCache();
+    const file = new File(['abc'], 'photo.png', { type: 'image/png' });
+    const uploading: MessageAttachment = {
+      assetId: '',
+      name: 'photo.png',
+      mime: 'image/png',
+      local: { key: 'local-9', file, previewUrl: 'blob:preview', progress: 0.5 },
+    };
+    const html = renderToStaticMarkup(
+      <AlbumGrid images={[uploading]} cache={cache} presignEnabled onOpen={() => {}} />,
+    );
+    expect(html).toContain('src="blob:preview"');
+    expect(html).toContain('brightness-75');
+    expect(html).toContain('role="progressbar"');
   });
 });

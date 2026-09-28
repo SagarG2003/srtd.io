@@ -33,13 +33,18 @@ import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
 import type { ChannelSummary, ChatProfile } from '@/lib/chat-reads';
 import { breaksRun, isTimeGap, replyPreview, type ThreadMessage } from '@/lib/chat/thread';
-import { classifyAttachment, type ReplyQuote } from '@/lib/chat/attachments';
+import { classifyAttachment, splitAlbum, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
 import { formatMessageTime } from '@/lib/chat/time-format';
 import type { PresignCache } from '@/lib/asset-presign';
 import { roleLabel } from '@/components/pages/settings/members-data';
 import { Composer, type ComposerSend } from '@/components/chat/Composer';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
+import {
+  ImageLightbox,
+  type LightboxDetails,
+  type LightboxImage,
+} from '@/components/ui/ImageLightbox';
 import { SharedPostCards } from '@/components/chat/PostCard';
 import { MessageActionMenu } from '@/components/chat/MessageActionMenu';
 import { SharedBriefCards } from '@/components/chat/BriefCard';
@@ -172,6 +177,34 @@ export function isVoiceOnly(
     message.sharedPostIds.length === 0 &&
     message.sharedBriefIds.length === 0
   );
+}
+
+/** The message carries at least one image: its bubble renders the album layout. */
+export function hasAlbum(message: Pick<ThreadMessage, 'attachments'>): boolean {
+  return message.attachments.some((a) => classifyAttachment(a.mime) === 'image');
+}
+
+/**
+ * What the thread's one image viewer shows for a message: its album images (a
+ * local preview stands in for an own instant send still uploading), plus the
+ * bottom bar's sender and HH:mm on the workspace clock. Pure.
+ */
+export function threadLightbox(
+  message: ThreadMessage,
+  profiles: Map<string, ChatProfile>,
+  timeZone: string,
+): { images: LightboxImage[]; details: LightboxDetails } {
+  const images = splitAlbum(message.attachments).images.map((a) => {
+    const src = a.local?.previewUrl;
+    return { assetId: a.assetId, name: a.name, ...(src != null ? { src } : {}) };
+  });
+  return {
+    images,
+    details: {
+      sender: senderName(message, profiles),
+      time: formatMessageTime(messageTimeSource(message), timeZone),
+    },
+  };
 }
 
 /** Scroll positions within this many px of the top request the older page. */
@@ -384,9 +417,12 @@ export function bubbleClass(state: {
   failed: boolean;
   checked: boolean;
   voiceOnly: boolean;
+  /** Image album: 3px padding around the album, at least 240px wide. */
+  album?: boolean;
 }): string {
   return cn(
-    'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-[18px] px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
+    'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-[18px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
+    state.album === true ? 'min-w-[240px] p-[3px]' : 'px-3 py-2',
     state.voiceOnly && 'min-w-[220px]',
     state.mine ? 'bg-bubble-own text-accent-fg' : 'bg-panel-2 text-fg',
     state.tail && (state.mine ? 'rounded-br-[4px]' : 'rounded-bl-[4px]'),
@@ -450,6 +486,8 @@ export function MessageBubble(props: {
   onChangePriority?: () => void;
   /** Present while selection mode is on. */
   selection?: RowSelection;
+  /** Tap on an album tile: open the thread's image viewer at that index. */
+  onOpenImage?: (index: number) => void;
   bubbleRef?: Ref<HTMLDivElement>;
   press?: {
     handlers: LongPressHandlers;
@@ -474,6 +512,11 @@ export function MessageBubble(props: {
   const sending = message.state === 'sending';
   const selection = props.selection;
   const voiceOnly = isVoiceOnly(message);
+  const album = hasAlbum(message);
+  // Album bubbles pad 3px around the album; the rest keeps the text inset.
+  const albumInset = 'px-[9px] pt-[5px]';
+  const hasBody = message.body.trim() !== '';
+  const hasCards = message.sharedPostIds.length > 0 || message.sharedBriefIds.length > 0;
   const textOnly =
     message.body.trim() !== '' &&
     message.attachments.length === 0 &&
@@ -535,15 +578,18 @@ export function MessageBubble(props: {
             failed,
             checked: selection?.checked === true,
             voiceOnly,
+            album,
           })}
         >
-          <MarkBadge
-            mark={props.mark}
-            {...(props.onChangePriority !== undefined && selection === undefined
-              ? { onChangePriority: props.onChangePriority }
-              : {})}
-          />
-          {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
+          <div className={album ? cn(albumInset, 'empty:hidden') : 'contents'}>
+            <MarkBadge
+              mark={props.mark}
+              {...(props.onChangePriority !== undefined && selection === undefined
+                ? { onChangePriority: props.onChangePriority }
+                : {})}
+            />
+            {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
+          </div>
           <div data-bubble-content="" className={cn('contents', mine && OWN_BUBBLE_CONTENT)}>
             {reply !== null ? (
               <ReplyQuoteBox
@@ -554,7 +600,7 @@ export function MessageBubble(props: {
                 }
                 preview={reply.preview}
                 onJump={() => props.onJumpToMessage?.(reply.id)}
-                className="mb-1"
+                className={album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1'}
               />
             ) : null}
             {textOnly ? (
@@ -565,9 +611,26 @@ export function MessageBubble(props: {
                 cache={cache}
                 presignEnabled={presignEnabled}
               />
+            ) : album ? (
+              <>
+                <MessageAttachments
+                  attachments={message.attachments}
+                  cache={cache}
+                  presignEnabled={presignEnabled}
+                  album
+                  caption={hasBody ? <p className={BODY_TEXT}>{message.body}</p> : undefined}
+                  onImageClick={(_attachment, index) => props.onOpenImage?.(index)}
+                />
+                {hasCards ? (
+                  <div className="flex flex-col px-[9px] pb-[5px]">
+                    <SharedPostCards postIds={message.sharedPostIds} />
+                    <SharedBriefCards briefIds={message.sharedBriefIds} />
+                  </div>
+                ) : null}
+              </>
             ) : (
               <>
-                {message.body.trim() !== '' ? <p className={BODY_TEXT}>{message.body}</p> : null}
+                {hasBody ? <p className={BODY_TEXT}>{message.body}</p> : null}
                 <MessageAttachments
                   attachments={message.attachments}
                   cache={cache}
@@ -759,6 +822,7 @@ function MessageRow(props: {
   selection?: RowSelection;
   /** Hover pointer device: render the ⋯ control. */
   hoverMenu: boolean;
+  onOpenImage: (message: ThreadMessage, index: number) => void;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const selecting = props.selection !== undefined;
@@ -807,6 +871,7 @@ function MessageRow(props: {
         ? { onChangePriority: () => onChangePriority(props.message.id) }
         : {})}
       {...(props.selection !== undefined ? { selection: props.selection } : {})}
+      onOpenImage={(index) => props.onOpenImage(props.message, index)}
       onBadgeClick={() => props.onOpen(props.message, bubbleRect())}
     />
   );
@@ -849,6 +914,8 @@ function ThreadBody(
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
   const [menu, setMenu] = useState<{ message: ThreadMessage; rect: DOMRect | null } | null>(null);
+  // The thread's one image viewer: which message's album, at which image.
+  const [viewer, setViewer] = useState<{ messageId: string; index: number } | null>(null);
   const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
   const toast = useToast();
   const listRef = useRef<HTMLUListElement>(null);
@@ -911,6 +978,7 @@ function ThreadBody(
     atBottomRef.current = true;
     anchorHeightRef.current = null;
     newestIdRef.current = null;
+    setViewer(null);
   }, [props.title]);
   // Keep the latest message in view: instant pre-paint snap on first load (no
   // top-flash), then a smooth follow for own sends or when already at bottom.
@@ -966,6 +1034,12 @@ function ThreadBody(
     );
   }
   const nowMs = Date.now();
+  const viewerMessage =
+    viewer !== null ? props.messages.find((m) => m.id === viewer.messageId) : undefined;
+  const viewerData =
+    viewerMessage !== undefined
+      ? threadLightbox(viewerMessage, props.profiles, props.timeZone)
+      : null;
   return (
     <>
       <ul
@@ -1010,6 +1084,7 @@ function ThreadBody(
               afterLabel={afterLabel}
               timeZone={props.timeZone}
               onOpen={(m, rect) => setMenu({ message: m, rect })}
+              onOpenImage={(m, index) => setViewer({ messageId: m.id, index })}
               hoverMenu={hoverMenu}
               onJumpToMessage={scrollToMessage}
               mark={props.marks.get(row.message.id)}
@@ -1069,6 +1144,19 @@ function ThreadBody(
           }
         }}
       />
+      {viewer !== null && viewerData !== null && viewerData.images.length > 0 ? (
+        <ImageLightbox
+          images={viewerData.images}
+          index={Math.min(viewer.index, viewerData.images.length - 1)}
+          cache={props.cache}
+          presignEnabled={props.presignEnabled}
+          details={viewerData.details}
+          onIndexChange={(index) =>
+            setViewer((prev) => (prev !== null ? { ...prev, index } : prev))
+          }
+          onClose={() => setViewer(null)}
+        />
+      ) : null}
     </>
   );
 }

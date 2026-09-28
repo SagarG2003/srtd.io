@@ -9,15 +9,25 @@
 // swaps to the presigned URL. While its upload runs the image is dimmed with a
 // thin progress bar along the bottom; the bar's width is the only thing that
 // animates, and the tile keeps its size when the upload completes.
+//
+// Chat groups a message's images into one album (AlbumGrid): the grid is sized
+// from the image COUNT alone, so first paint is final and a presigned image
+// arriving never shifts layout. Every tile is a real button that opens the
+// lightbox at its index; non-image attachments render below the album as before.
 
 import { useEffect, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
-import { IconFile } from '@/components/ui/icons';
+import { IconFile, IconImage } from '@/components/ui/icons';
 import { VoiceNote } from '@/components/chat/VoiceNote';
 import { fileExtension } from '@/lib/assets';
 import { cn } from '@/lib/cn';
 import type { PresignCache } from '@/lib/asset-presign';
-import { classifyAttachment, uploadProgress, type MessageAttachment } from '@/lib/chat/attachments';
+import {
+  classifyAttachment,
+  splitAlbum,
+  uploadProgress,
+  type MessageAttachment,
+} from '@/lib/chat/attachments';
 
 /** The file chip's Open link, styled as the shared ghost sm Button (it navigates, so it stays a link). */
 const OPEN_BUTTON =
@@ -188,7 +198,7 @@ function AttachmentItem({
   attachment: MessageAttachment;
   cache: PresignCache;
   presignEnabled: boolean;
-  onImageClick?: ((attachment: MessageAttachment) => void) | undefined;
+  onImageClick?: (() => void) | undefined;
   voiceSpacer?: ReactNode;
 }): ReactElement {
   // The render layer presigns the attachment's VERSION id (assetId carries the
@@ -217,7 +227,7 @@ function AttachmentItem({
         <button
           type="button"
           aria-label="Open image"
-          onClick={() => onImageClick(attachment)}
+          onClick={onImageClick}
           className="cursor-zoom-in"
         >
           {image}
@@ -257,18 +267,185 @@ function AttachmentItem({
   }
 }
 
+/** One album tile: the image it shows, its grid classes, and the "+N" overflow count. */
+export interface AlbumTile {
+  index: number;
+  className: string;
+  /** Images beyond the fourth, shown as "+N" on the fourth tile; 0 shows none. */
+  more: number;
+}
+
+/** The album grid's column template by count: one column for a single image, else two. */
+export function albumGridClass(count: number): string {
+  return count === 1 ? 'grid grid-cols-1' : 'grid grid-cols-2';
+}
+
+/**
+ * Tile layout by image count, derived from the count alone so the grid never
+ * waits on an image load. 1: one full-width tile (4:3 box, capped at 320px, the
+ * image object-cover inside it). 2: two squares. 3: a 2:1 wide tile over two
+ * squares. 4 or more: a 2x2 of squares, the fourth carrying "+N" (N = count - 4)
+ * when there are more. Pure.
+ */
+export function albumTiles(count: number): AlbumTile[] {
+  if (count <= 0) return [];
+  if (count === 1) return [{ index: 0, className: 'aspect-[4/3] max-h-[320px]', more: 0 }];
+  if (count === 2) {
+    return [0, 1].map((index) => ({ index, className: 'aspect-square', more: 0 }));
+  }
+  if (count === 3) {
+    return [
+      { index: 0, className: 'col-span-2 aspect-[2/1]', more: 0 },
+      { index: 1, className: 'aspect-square', more: 0 },
+      { index: 2, className: 'aspect-square', more: 0 },
+    ];
+  }
+  return [0, 1, 2, 3].map((index) => ({
+    index,
+    className: 'aspect-square',
+    more: index === 3 ? count - 4 : 0,
+  }));
+}
+
+/** The tile button's accessible name: "Open photo i of n" (1-based). Pure. */
+export function albumTileLabel(index: number, count: number): string {
+  return `Open photo ${index + 1} of ${count}`;
+}
+
+/**
+ * The image inside one album tile. It fills the tile absolutely (object-cover),
+ * so the tile's size comes from the grid, never from the image. Until the
+ * presigned image arrives the tile's own bg-panel-3 shows; an own instant send
+ * shows its local preview, dimmed with the upload bar while it uploads. A failed
+ * or disabled presign keeps the tile with a centred image glyph (the lightbox
+ * owns the retry).
+ */
+function AlbumTileImage({
+  attachment,
+  cache,
+  presignEnabled,
+}: {
+  attachment: MessageAttachment;
+  cache: PresignCache;
+  presignEnabled: boolean;
+}): ReactElement | null {
+  const hasPreview = attachment.local?.previewUrl != null;
+  const { url, failed } = useAttachmentUrl(
+    attachment.assetId,
+    cache,
+    presignEnabled && !hasPreview,
+  );
+  const view = attachmentView({ attachment, presignEnabled, url, failed });
+  const src = view.kind === 'image' || view.kind === 'image-local' ? view.src : null;
+  const progress =
+    view.kind === 'image-local'
+      ? view.progress
+      : view.kind === 'file'
+        ? (view.progress ?? null)
+        : null;
+  return (
+    <>
+      {src !== null ? (
+        <img
+          src={src}
+          alt={attachment.name}
+          draggable={false}
+          className={cn(
+            'absolute inset-0 h-full w-full object-cover',
+            progress !== null && 'brightness-75',
+          )}
+        />
+      ) : view.kind === 'file' && progress === null ? (
+        <span className="absolute inset-0 flex items-center justify-center text-fg-3">
+          <IconImage size={22} />
+        </span>
+      ) : null}
+      {progress !== null ? <UploadBar progress={progress} /> : null}
+    </>
+  );
+}
+
+/**
+ * The album: every image of one message in a count-sized grid, tiles 2px apart,
+ * 15px outer corners (the 18px bubble minus its 3px padding). Hook-free (the
+ * per-tile presign lives in AlbumTileImage) so tests can call it directly. Each
+ * tile is a real button; tapping opens the viewer at that index, and the "+N"
+ * tile opens at index 3. The overlay is white on black/50, theme-independent.
+ */
+export function AlbumGrid({
+  images,
+  cache,
+  presignEnabled,
+  onOpen,
+}: {
+  images: readonly MessageAttachment[];
+  cache: PresignCache;
+  presignEnabled: boolean;
+  onOpen: (index: number) => void;
+}): ReactElement {
+  const count = images.length;
+  return (
+    <div
+      data-album={count}
+      className={cn(
+        albumGridClass(count),
+        'w-[320px] max-w-full gap-[2px] overflow-hidden rounded-[15px]',
+      )}
+    >
+      {albumTiles(count).map((tile) => {
+        const attachment = images[tile.index] as MessageAttachment;
+        return (
+          <button
+            key={attachment.local?.key ?? `${attachment.assetId}-${tile.index}`}
+            type="button"
+            aria-label={albumTileLabel(tile.index, count)}
+            onClick={() => onOpen(tile.index)}
+            className={cn(
+              'relative block w-full cursor-zoom-in overflow-hidden bg-panel-3 [-webkit-touch-callout:none]',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent',
+              tile.className,
+            )}
+          >
+            <AlbumTileImage attachment={attachment} cache={cache} presignEnabled={presignEnabled} />
+            {tile.more > 0 ? (
+              <span
+                aria-hidden="true"
+                className="absolute inset-0 flex items-center justify-center bg-black/50 text-[22px] font-semibold text-white"
+              >
+                +{tile.more}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function MessageAttachments({
   attachments,
   cache,
   presignEnabled,
   onImageClick,
   voiceSpacer,
+  album,
+  caption,
 }: {
   attachments: readonly MessageAttachment[];
   cache: PresignCache;
   presignEnabled: boolean;
-  /** Optional: tap an image attachment to open it (comments). Chat omits it. */
-  onImageClick?: ((attachment: MessageAttachment) => void) | undefined;
+  /**
+   * Optional: tap an image to open it. `index` is the image's position in the
+   * album (album mode) or in the attachment list (comments, which ignores it).
+   */
+  onImageClick?: ((attachment: MessageAttachment, index: number) => void) | undefined;
+  /**
+   * Chat: group the images into one album (AlbumGrid) with the rest below. The
+   * caller turns it on only when the message carries at least one image.
+   */
+  album?: boolean;
+  /** Album mode: the caption (message text), rendered right under the album. */
+  caption?: ReactNode;
   /**
    * Chat voice-only bubbles: the inline time spacer a voice note ends with, and
    * the list sits flush in the bubble (no top margin, full width).
@@ -276,6 +453,38 @@ export function MessageAttachments({
   voiceSpacer?: ReactNode;
 }): ReactElement | null {
   if (attachments.length === 0) return null;
+  if (album === true) {
+    const { images, others } = splitAlbum(attachments);
+    if (images.length > 0) {
+      const hasBelow = caption != null || others.length > 0;
+      return (
+        <div data-album-block="" className="flex flex-col">
+          <AlbumGrid
+            images={images}
+            cache={cache}
+            presignEnabled={presignEnabled}
+            onOpen={(index) => {
+              const attachment = images[index];
+              if (attachment !== undefined) onImageClick?.(attachment, index);
+            }}
+          />
+          {hasBelow ? (
+            <div className="flex flex-col items-start gap-1.5 px-[9px] pb-[5px] pt-1.5">
+              {caption}
+              {others.map((attachment, index) => (
+                <AttachmentItem
+                  key={attachment.local?.key ?? `${attachment.assetId}-${index}`}
+                  attachment={attachment}
+                  cache={cache}
+                  presignEnabled={presignEnabled}
+                />
+              ))}
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+  }
   return (
     <div
       className={cn(
@@ -289,7 +498,9 @@ export function MessageAttachments({
           attachment={attachment}
           cache={cache}
           presignEnabled={presignEnabled}
-          onImageClick={onImageClick}
+          onImageClick={
+            onImageClick !== undefined ? () => onImageClick(attachment, index) : undefined
+          }
           {...(voiceSpacer !== undefined ? { voiceSpacer } : {})}
         />
       ))}

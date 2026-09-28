@@ -15,6 +15,7 @@ import {
   awaitsUpload,
   uploadProgress,
   withoutLocal,
+  splitAlbum,
   buildAttachmentMeta,
   parseAttachmentMeta,
   uploadChatAttachment,
@@ -480,3 +481,24 @@ function fakeXhr(
   };
   return request as unknown as XMLHttpRequest & { headers: Record<string, string> };
 }
+
+describe('splitAlbum', () => {
+  const img = (id: string): MessageAttachment => ({
+    assetId: id,
+    name: `${id}.png`,
+    mime: 'image/png',
+  });
+  const pdf: MessageAttachment = { assetId: 'f', name: 'brief.pdf', mime: 'application/pdf' };
+  const voice: MessageAttachment = { assetId: 'v', name: 'note.webm', mime: 'audio/webm' };
+
+  it('puts every image into the album in send order and keeps the rest below', () => {
+    expect(splitAlbum([img('a'), pdf, img('b'), voice])).toEqual({
+      images: [img('a'), img('b')],
+      others: [pdf, voice],
+    });
+  });
+
+  it('returns an empty album when there are no images', () => {
+    expect(splitAlbum([pdf])).toEqual({ images: [], others: [pdf] });
+  });
+});

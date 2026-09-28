@@ -1,9 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canPage,
+  clampPan,
+  clampZoom,
   createScrollLock,
+  DISMISS_DISTANCE,
+  dismissOpacity,
   dominantAxisSwipe,
+  doubleTapTarget,
+  downloadLink,
+  dragAxis,
   lightboxCounter,
+  shouldDismiss,
   wrapIndex,
+  zoomAt,
+  ZOOM_RESET,
   type LockableBody,
 } from '@/components/ui/ImageLightbox';
 
@@ -104,5 +115,99 @@ describe('createScrollLock', () => {
     expect(body.style.overflow).toBe('visible');
     expect(body.style.touchAction).toBe('auto');
     expect(body.style.paddingRight).toBe('3px');
+  });
+});
+
+describe('zoom helpers', () => {
+  const rect = { left: 0, top: 0, width: 400, height: 800 };
+
+  it('clamps pinch scale to 1..4', () => {
+    expect(clampZoom(0.4)).toBe(1);
+    expect(clampZoom(2.2)).toBe(2.2);
+    expect(clampZoom(9)).toBe(4);
+  });
+
+  it('double-tap toggles 1x <-> 2.5x', () => {
+    expect(doubleTapTarget(1)).toBe(2.5);
+    expect(doubleTapTarget(2.5)).toBe(1);
+    expect(doubleTapTarget(3.7)).toBe(1);
+  });
+
+  it('zooms at the focal point and resets fully at 1x', () => {
+    // Centre tap: no pan needed.
+    expect(zoomAt(ZOOM_RESET, 2.5, 200, 400, rect)).toEqual({ scale: 2.5, x: 0, y: 0 });
+    // Zooming back to 1x drops the pan.
+    expect(zoomAt({ scale: 2.5, x: 40, y: -30 }, 1, 10, 10, rect)).toEqual(ZOOM_RESET);
+    // Never beyond 4x.
+    expect(zoomAt(ZOOM_RESET, 12, 200, 400, rect).scale).toBe(4);
+  });
+
+  it('bounds the pan to the scaled pane', () => {
+    expect(clampPan(2, 999, -999, rect)).toEqual({ scale: 2, x: 200, y: -400 });
+    expect(clampPan(1, 50, 50, rect)).toEqual({ scale: 1, x: 0, y: 0 });
+  });
+});
+
+describe('gesture axes', () => {
+  it('paging is disabled while zoomed and for a single image', () => {
+    expect(canPage(3, 1)).toBe(true);
+    expect(canPage(3, 1.5)).toBe(false);
+    expect(canPage(1, 1)).toBe(false);
+  });
+
+  it('a downward vertical drag is a dismiss (Y); a sideways one pages (X)', () => {
+    expect(dragAxis(2, 3)).toBeNull();
+    expect(dragAxis(4, 40)).toBe('y');
+    expect(dragAxis(40, 4)).toBe('x');
+    // Upward is never a dismiss.
+    expect(dragAxis(4, -40)).toBe('x');
+  });
+
+  it('dismisses past 120px or on a fast flick, otherwise springs back', () => {
+    expect(DISMISS_DISTANCE).toBe(120);
+    expect(shouldDismiss(120, 0)).toBe(true);
+    expect(shouldDismiss(119, 0.1)).toBe(false);
+    expect(shouldDismiss(40, 0.9)).toBe(true);
+    expect(shouldDismiss(0, 2)).toBe(false);
+  });
+
+  it('fades the backdrop as the drag grows', () => {
+    expect(dismissOpacity(0)).toBe(1);
+    expect(dismissOpacity(200)).toBeCloseTo(0.6);
+    expect(dismissOpacity(10_000)).toBeCloseTo(0.2);
+  });
+});
+
+describe('downloadLink', () => {
+  it('links the presigned GET url with the file name', () => {
+    expect(
+      downloadLink({
+        url: 'https://signed/a.png',
+        name: 'a.png',
+        presignEnabled: true,
+        local: false,
+      }),
+    ).toEqual({ href: 'https://signed/a.png', download: 'a.png' });
+  });
+
+  it('is disabled (null) while the presign is pending or presign is disabled', () => {
+    expect(
+      downloadLink({ url: null, name: 'a.png', presignEnabled: true, local: false }),
+    ).toBeNull();
+    expect(
+      downloadLink({
+        url: 'https://signed/a.png',
+        name: 'a.png',
+        presignEnabled: false,
+        local: false,
+      }),
+    ).toBeNull();
+  });
+
+  it('downloads a local preview without presigning, and names a blank file', () => {
+    expect(downloadLink({ url: 'blob:x', name: ' ', presignEnabled: false, local: true })).toEqual({
+      href: 'blob:x',
+      download: 'image',
+    });
   });
 });

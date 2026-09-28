@@ -445,3 +445,20 @@ export async function uploadChatAttachment(
   }
   return { ok: true, reused: outcome.reused, versionId };
 }
+
+/**
+ * A message's attachments split for the album render: every image (in send
+ * order) goes into one album, everything else (voice notes, file chips) renders
+ * below it as before. Pure.
+ */
+export function splitAlbum(attachments: readonly MessageAttachment[]): {
+  images: MessageAttachment[];
+  others: MessageAttachment[];
+} {
+  const images: MessageAttachment[] = [];
+  const others: MessageAttachment[] = [];
+  for (const attachment of attachments) {
+    (classifyAttachment(attachment.mime) === 'image' ? images : others).push(attachment);
+  }
+  return { images, others };
+}
