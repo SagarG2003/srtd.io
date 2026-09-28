@@ -499,8 +499,11 @@ export const OWN_BUBBLE_CONTENT = cn(
   '[&_.text-fg-3]:text-accent-fg [&_.text-fg-3]:opacity-80',
 );
 
-/** Message body text at 15px; the ink comes from the bubble (fg or accent-fg). */
-const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-[1.4]';
+/** Message body text at 17px / 22px; the ink comes from the bubble (fg or accent-fg). */
+export const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[17px] leading-[22px]';
+
+/** The in-bubble quote's author and preview at 14px / 18px (the composer draft is unchanged). */
+export const BUBBLE_QUOTE_TEXT = '[&_.text-xs]:text-[14px] [&_.text-xs]:leading-[18px]';
 
 /**
  * One message row in the thread. Own messages (`message.mine`) right-align on
@@ -661,7 +664,7 @@ export function MessageBubble(props: {
                 }
                 preview={reply.preview}
                 onJump={() => props.onJumpToMessage?.(reply.id)}
-                className={album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1'}
+                className={cn(BUBBLE_QUOTE_TEXT, album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1')}
               />
             ) : null}
             {textOnly ? (

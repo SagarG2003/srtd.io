@@ -10,6 +10,8 @@ vi.mock('agora-chat', () => ({
 
 import { Avatar } from '@/components/ui/Avatar';
 import {
+  BODY_TEXT,
+  BUBBLE_QUOTE_TEXT,
   bubbleClass,
   bubbleStatus,
   bubbleTimeLabel,
@@ -1053,5 +1055,22 @@ describe('swipe to reply', () => {
     const [svg] = find(icon, 'strokeWidth');
     expect(svg?.props.strokeWidth).toBe(1.7);
     expect(svg?.props.stroke).toBe('currentColor');
+  });
+});
+
+describe('bubble text sizes', () => {
+  it('body text is 17px on a 22px line, quote text 14px on 18px', () => {
+    expect(BODY_TEXT).toContain('text-[17px]');
+    expect(BODY_TEXT).toContain('leading-[22px]');
+    expect(BUBBLE_QUOTE_TEXT).toBe('[&_.text-xs]:text-[14px] [&_.text-xs]:leading-[18px]');
+    const cls = bubbleClass({
+      mine: false,
+      tail: false,
+      sending: false,
+      failed: false,
+      checked: false,
+      voiceOnly: false,
+    });
+    expect(cls).toContain('px-3 py-2');
   });
 });
