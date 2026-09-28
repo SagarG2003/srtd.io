@@ -1,6 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// AppLayout's import graph reaches the chat SDK; mock it so the pure chrome
+// helpers import cleanly in node (mirrors MessageThread.test.tsx).
+vi.mock('agora-chat', () => ({
+  default: { connection: vi.fn(), message: { create: vi.fn() } },
+}));
+
+import { isThreadRoute, shellChrome } from '@/components/shell/AppLayout';
 
 // AppLayout pulls in router + workspace + profile + chat/inbox/toast providers and
 // renders under a DOM-less vitest node environment, so mounting it cleanly is
@@ -12,16 +20,53 @@ import { describe, expect, it } from 'vitest';
 // here.
 const source = readFileSync(fileURLToPath(new URL('./AppLayout.tsx', import.meta.url)), 'utf8');
 
-function mainClassName(src: string): string {
-  const match = src.match(/<main className="([^"]*)"/);
-  if (match === null) throw new Error('AppLayout has no <main className="...">');
-  return match[1] ?? '';
-}
-
 describe('AppLayout page-content scroll container', () => {
   it('locks scrolling to the vertical axis on the <main> element', () => {
-    const className = mainClassName(source);
-    expect(className).toContain('overflow-y-auto');
-    expect(className).toContain('overflow-x-hidden');
+    expect(source).toContain('<main className={chrome.mainClassName}>');
+    for (const threadOpen of [false, true]) {
+      const className = shellChrome(threadOpen).mainClassName;
+      expect(className).toContain('overflow-y-auto');
+      expect(className).toContain('overflow-x-hidden');
+    }
+  });
+});
+
+// Below md is the mobile width; md and up must stay exactly as before. The class
+// strings are what the browser applies at each width, so asserting them covers
+// both widths without a DOM.
+describe('AppLayout chat thread chrome', () => {
+  const at = (url: string) => {
+    const parsed = new URL(url, 'http://x');
+    return shellChrome(isThreadRoute(parsed.pathname, parsed.searchParams));
+  };
+
+  it('/chat?channel=x hides the Topbar and BottomTabs at mobile width', () => {
+    const chrome = at('/chat?channel=x');
+    expect(chrome.topbarClassName.split(' ')).toContain('hidden');
+    expect(chrome.showBottomTabs).toBe(false);
+    expect(chrome.mainClassName).not.toContain('pb-[calc(56px');
+  });
+
+  it('/chat?channel=x keeps the Topbar at md and up', () => {
+    expect(at('/chat?channel=x').topbarClassName.split(' ')).toContain('md:contents');
+  });
+
+  it('/chat without the param shows the chrome', () => {
+    for (const url of ['/chat', '/chat?channel=', '/chat?w=abc']) {
+      const chrome = at(url);
+      expect(chrome.topbarClassName).toBe('contents');
+      expect(chrome.showBottomTabs).toBe(true);
+      expect(chrome.mainClassName).toContain('pb-[calc(56px+env(safe-area-inset-bottom))]');
+      expect(chrome.mainClassName).toContain('md:pb-0');
+    }
+  });
+
+  it('a channel param off /chat never hides the chrome', () => {
+    expect(at('/pipeline?channel=x').showBottomTabs).toBe(true);
+  });
+
+  it('renders the Topbar wrapper and BottomTabs from the chrome, no effect or state', () => {
+    expect(source).toContain('<div className={chrome.topbarClassName}>');
+    expect(source).toContain('{chrome.showBottomTabs ? <BottomTabs /> : null}');
   });
 });

@@ -733,3 +733,30 @@ export function sendText(params: {
   });
   return params.connection.send(message);
 }
+
+/** A gap this long (or longer) between neighbours starts a new run and shows a time label. */
+export const RUN_GAP_MS = 10 * 60 * 1000;
+
+/** True when `next` is 10 minutes or more after `prev`; unusable times (0) never count. */
+export function isTimeGap(
+  prev: Pick<ThreadMessage, 'time'>,
+  next: Pick<ThreadMessage, 'time'>,
+): boolean {
+  if (!(prev.time > 0) || !(next.time > 0)) return false;
+  return next.time - prev.time >= RUN_GAP_MS;
+}
+
+/**
+ * Whether `next` starts a new run after `prev`: a switch between own and peer, a
+ * different peer sender, or a gap of 10 minutes or more. A day change also breaks
+ * a run; the caller knows the day pills and applies that separately.
+ */
+export function breaksRun(
+  prev: Pick<ThreadMessage, 'mine' | 'senderUserId' | 'time'> | undefined,
+  next: Pick<ThreadMessage, 'mine' | 'senderUserId' | 'time'>,
+): boolean {
+  if (prev === undefined) return true;
+  if (prev.mine !== next.mine) return true;
+  if (!prev.mine && prev.senderUserId !== next.senderUserId) return true;
+  return isTimeGap(prev, next);
+}

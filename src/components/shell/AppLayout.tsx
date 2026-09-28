@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Outlet, useSearchParams } from 'react-router-dom';
+import { Outlet, useLocation, useSearchParams } from 'react-router-dom';
 import { Sidebar } from '@/components/shell/Sidebar';
 import { BottomTabs } from '@/components/shell/BottomTabs';
 import { Topbar } from '@/components/shell/Topbar';
@@ -15,6 +15,34 @@ import { OnboardingProfileForm } from '@/components/onboarding/OnboardingProfile
 import { useWorkspace } from '@/lib/workspace-context';
 import { useCurrentProfile } from '@/lib/use-current-profile';
 import { logger } from '@/lib/logger';
+import { cn } from '@/lib/cn';
+
+/** True on /chat with an open thread (?channel=<id>); mobile then drops the shell chrome. */
+export function isThreadRoute(pathname: string, search: URLSearchParams): boolean {
+  const channel = search.get('channel');
+  return pathname === '/chat' && channel !== null && channel !== '';
+}
+
+/**
+ * Shell chrome classes for a render. Inside a chat thread, below md, the Topbar
+ * is hidden, BottomTabs are not rendered and main drops its tab-bar padding;
+ * md and up is unchanged (BottomTabs are md:hidden anyway). Derived from the URL
+ * in the same render, so the first paint is already correct.
+ */
+export function shellChrome(threadOpen: boolean): {
+  topbarClassName: string;
+  showBottomTabs: boolean;
+  mainClassName: string;
+} {
+  return {
+    topbarClassName: threadOpen ? 'hidden md:contents' : 'contents',
+    showBottomTabs: !threadOpen,
+    mainClassName: cn(
+      'flex-1 overflow-y-auto overflow-x-hidden',
+      threadOpen ? 'pb-0' : 'pb-[calc(56px+env(safe-area-inset-bottom))] md:pb-0',
+    ),
+  };
+}
 
 export function AppLayout() {
   const { workspaceName, workspaces, loading, workspaceId, setActiveWorkspaceId } = useWorkspace();
@@ -25,6 +53,8 @@ export function AppLayout() {
     refetch: refetchProfile,
   } = useCurrentProfile();
   const [searchParams, setSearchParams] = useSearchParams();
+  const { pathname } = useLocation();
+  const chrome = shellChrome(isThreadRoute(pathname, searchParams));
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [avatarOpen, setAvatarOpen] = useState(false);
 
@@ -123,18 +153,18 @@ export function AppLayout() {
           <div className="flex h-full">
             <Sidebar workspaceName={workspaceName} />
             <div className="flex flex-1 min-w-0 flex-col h-full">
-              <Topbar
-                workspaceName={workspaceName}
-                {...(profile !== null ? { currentUserName: profile.display_name } : {})}
-                currentUserAvatarUrl={profile?.avatar_url ?? null}
-                onOpenPalette={() => setPaletteOpen(true)}
-                onOpenAvatar={() => setAvatarOpen(true)}
-              />
-              <main className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(56px+env(safe-area-inset-bottom))] md:pb-0">
-                {switchPending ? null : <Outlet />}
-              </main>
+              <div className={chrome.topbarClassName}>
+                <Topbar
+                  workspaceName={workspaceName}
+                  {...(profile !== null ? { currentUserName: profile.display_name } : {})}
+                  currentUserAvatarUrl={profile?.avatar_url ?? null}
+                  onOpenPalette={() => setPaletteOpen(true)}
+                  onOpenAvatar={() => setAvatarOpen(true)}
+                />
+              </div>
+              <main className={chrome.mainClassName}>{switchPending ? null : <Outlet />}</main>
             </div>
-            <BottomTabs />
+            {chrome.showBottomTabs ? <BottomTabs /> : null}
             <ToastViewport />
             <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
             <AvatarMenu open={avatarOpen} onClose={() => setAvatarOpen(false)} />

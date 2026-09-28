@@ -31,7 +31,7 @@ import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
 import type { ChannelSummary, ChatProfile } from '@/lib/chat-reads';
-import { replyPreview, type MessageStatus, type ThreadMessage } from '@/lib/chat/thread';
+import { breaksRun, isTimeGap, replyPreview, type ThreadMessage } from '@/lib/chat/thread';
 import { classifyAttachment, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
 import { formatMessageTime } from '@/lib/chat/time-format';
@@ -68,6 +68,10 @@ import type { WriteResult } from '@/lib/chat/record';
 
 interface MessageThreadProps {
   title: string;
+  /** Header avatar src (the DM peer's); absent or null falls back to initials. */
+  avatarUrl?: string | null;
+  /** Header second line for a DM (the workspace name); absent shows presence instead. */
+  subtitle?: string;
   /** Sender display info keyed by Sorted user id; batched read, never per-row. */
   profiles: Map<string, ChatProfile>;
   messages: ThreadMessage[];
@@ -266,54 +270,89 @@ export function bubbleTimeLabel(message: ThreadMessage, timeZone: string): strin
   return formatMessageTime(message.createdAt, timeZone);
 }
 
+/** What the line under an own bubble shows; null renders no line. */
+export type BubbleStatus = 'sending' | 'failed' | 'delivered' | 'read';
+
 /**
- * WhatsApp-style seen ticks for an own DM message. Single tick = recorded,
- * double tick in the accent token = read by the peer. Token-class colour only,
- * so light and dark stay at parity; no animation.
+ * The status line under a bubble: a clock while sending and 'Not sent' once
+ * failed (any bubble in the run), else Delivered / Read for own DM messages on
+ * the LAST bubble of a run only.
  */
-function MessageTicks({ status }: { status: MessageStatus }): ReactElement {
-  const color = status === 'read' ? 'text-accent' : 'text-fg-3';
+export function bubbleStatus(
+  message: Pick<ThreadMessage, 'mine' | 'state' | 'status'>,
+  opts: { showTicks: boolean; tail: boolean },
+): BubbleStatus | null {
+  if (message.state === 'sending') return 'sending';
+  if (message.state === 'failed') return 'failed';
+  if (!message.mine || !opts.showTicks || !opts.tail) return null;
+  return message.status === 'read' ? 'read' : 'delivered';
+}
+
+/**
+ * The line itself, right-aligned under own bubbles. Token colours only (Read in
+ * the accent), so light and dark stay at parity; no animation.
+ */
+function StatusLine({ status }: { status: BubbleStatus }): ReactElement {
   return (
-    <span className={cn('inline-flex items-center', color)} aria-hidden="true">
-      {status === 'sent' ? <IconTickSingle /> : <IconTickDouble />}
+    <span data-status={status} className="flex items-center gap-1 text-[11px] text-fg-3">
+      {status === 'sending' ? (
+        <span role="img" aria-label="Sending">
+          <IconClock size={12} />
+        </span>
+      ) : null}
+      {status === 'failed' ? <span className="text-bad">Not sent</span> : null}
+      {status === 'delivered' ? (
+        <>
+          <span>Delivered</span>
+          <IconTickSingle />
+        </>
+      ) : null}
+      {status === 'read' ? (
+        <span className="inline-flex items-center gap-1 text-accent">
+          <span>Read</span>
+          <IconTickDouble />
+        </span>
+      ) : null}
     </span>
   );
 }
 
-/** The bubble shell: peer on the panel, own on the accent tint, tail corner squared. */
+/**
+ * The bubble shell: own on the solid accent (the primary Button's fill and ink),
+ * peer on panel-2, no border. 18px radius; the 4px tail corner on the sender side
+ * only on the last bubble of a run.
+ */
 export function bubbleClass(state: {
   mine: boolean;
+  tail: boolean;
   sending: boolean;
   failed: boolean;
   checked: boolean;
   voiceOnly: boolean;
 }): string {
   return cn(
-    'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-[14px] border px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+    'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-[18px] px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
     state.voiceOnly && 'min-w-[220px]',
-    state.mine
-      ? 'rounded-br-[4px] border-accent-line bg-accent-soft'
-      : 'rounded-bl-[4px] border-border bg-panel',
+    state.mine ? 'bg-accent text-accent-fg' : 'bg-panel-2 text-fg',
+    state.tail && (state.mine ? 'rounded-br-[4px]' : 'rounded-bl-[4px]'),
     state.sending && 'opacity-70',
-    state.failed && 'border-bad',
-    state.checked && 'ring-2 ring-accent',
+    state.failed && 'border border-bad',
+    state.checked && 'ring-2 ring-accent ring-offset-2 ring-offset-bg',
   );
 }
 
-/** Message body text: primary ink at 15px. */
-const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-[1.4] text-fg';
-
-/** Bubble time: mono, tabular, tertiary. */
-const TIME_TEXT = 'font-mono text-[11px] tabular-nums text-fg-3';
+/** Message body text at 15px; the ink comes from the bubble (fg or accent-fg). */
+const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-[1.4]';
 
 /**
- * One message row in the WhatsApp-style thread. Own messages (`message.mine`)
- * right-align with an accent-tinted bubble, no avatar and no sender name. Peer
- * messages left-align; in a group the run head carries the avatar + sender name
- * above the bubble, while tucked replies reserve an aligned gutter. The footer
- * (server time on the workspace clock, or the sending / not-sent state, and
- * own-DM ticks) sits inside the bubble; a failed own send offers a 44px Retry
- * beside the bubble; reactions hang as one small badge over the tail edge.
+ * One message row in the thread. Own messages (`message.mine`) right-align on
+ * the solid accent, no avatar and no sender name. Peer messages left-align; in a
+ * group the run head carries the avatar + sender name above the bubble, while
+ * tucked replies reserve an aligned gutter. No time inside the bubble: the time
+ * label sits above a run (ThreadBody) and the status line (sending clock, Not
+ * sent, or Delivered / Read on the run's last own DM bubble) sits under it. A
+ * failed own send offers a 44px Retry beside the bubble; reactions hang as one
+ * small badge over the tail edge. Rows in a run sit 2px apart, runs 10px.
  * Pure and hook-free: long-press wiring is owned by the MessageRow wrapper and
  * passed in via `press`, so the unit test can call this directly. All colours
  * are design tokens, so light and dark stay at parity.
@@ -326,6 +365,8 @@ export function MessageBubble(props: {
   showTicks: boolean;
   isGroup: boolean;
   head: boolean;
+  /** Last bubble of its run: tail corner and the Delivered / Read line. */
+  tail: boolean;
   timeZone: string;
   onBadgeClick: () => void;
   onRetry?: (messageId: string) => void;
@@ -347,8 +388,8 @@ export function MessageBubble(props: {
     onMore?: (anchor: DOMRect) => void;
   };
 }): ReactElement {
-  const { message, profiles, cache, presignEnabled, showTicks, isGroup, head, onBadgeClick } =
-    props;
+  const { message, profiles, cache, presignEnabled, showTicks, isGroup, head, tail } = props;
+  const { onBadgeClick } = props;
   const { bubbleRef, press, timeZone } = props;
   const mine = message.mine;
   const reply = message.reply;
@@ -367,28 +408,7 @@ export function MessageBubble(props: {
     message.sharedBriefIds.length === 0;
   const totalReactions = message.reactions.reduce((sum, r) => sum + r.count, 0);
   const distinctEmojis = message.reactions.map((r) => r.emoji).join('');
-  const time = (
-    <>
-      {sending ? (
-        <span role="img" aria-label={bubbleTimeLabel(message, timeZone)}>
-          <IconClock size={12} />
-        </span>
-      ) : (
-        <span className={cn(failed && 'text-bad')}>{bubbleTimeLabel(message, timeZone)}</span>
-      )}
-      {showTicks && mine && !failed && !sending ? <MessageTicks status={message.status} /> : null}
-    </>
-  );
-  // Text and voice-only bubbles float the time bottom-right over a spacer that
-  // reserves its width on the last line.
-  const spacer = (
-    <span className={cn('inline-block', mine ? 'w-[76px]' : 'w-[48px]')} aria-hidden="true" />
-  );
-  const inlineTime = (
-    <span className={cn('absolute bottom-1.5 right-2.5 inline-flex items-center gap-1', TIME_TEXT)}>
-      {time}
-    </span>
-  );
+  const status = bubbleStatus(message, { showTicks, tail });
   const onMore = selection === undefined ? press?.onMore : undefined;
   return (
     <li
@@ -396,7 +416,8 @@ export function MessageBubble(props: {
       data-state={message.state}
       data-selection={selection?.role}
       className={cn(
-        'group flex items-start gap-2 px-4 py-2',
+        'group flex items-start gap-2 px-4',
+        head ? 'pt-2.5' : 'pt-0.5',
         mine ? 'flex-row-reverse' : 'flex-row',
         hasReactions && 'mb-3',
       )}
@@ -407,7 +428,7 @@ export function MessageBubble(props: {
       {selection?.role === 'locked' ? <SelectLock /> : null}
       {showMeta ? <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" /> : null}
       {gutter ? <span className="w-[26px] shrink-0" aria-hidden="true" /> : null}
-      <div className={cn('flex min-w-0 max-w-[75%] flex-col gap-1', mine && 'items-end')}>
+      <div className={cn('flex min-w-0 max-w-[76%] flex-col gap-1', mine && 'items-end')}>
         {showMeta ? <span className="text-sm font-medium text-fg">{name}</span> : null}
         <div
           ref={bubbleRef}
@@ -436,6 +457,7 @@ export function MessageBubble(props: {
           }}
           className={bubbleClass({
             mine,
+            tail,
             sending,
             failed,
             checked: selection?.checked === true,
@@ -448,7 +470,7 @@ export function MessageBubble(props: {
               ? { onChangePriority: props.onChangePriority }
               : {})}
           />
-          {message.forwarded === true ? <ForwardedLabel /> : null}
+          {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
           {reply !== null ? (
             <ReplyQuoteBox
               author={
@@ -462,23 +484,13 @@ export function MessageBubble(props: {
             />
           ) : null}
           {textOnly ? (
-            <>
-              <p className={BODY_TEXT}>
-                {message.body}
-                {spacer}
-              </p>
-              {inlineTime}
-            </>
+            <p className={BODY_TEXT}>{message.body}</p>
           ) : voiceOnly ? (
-            <>
-              <MessageAttachments
-                attachments={message.attachments}
-                cache={cache}
-                presignEnabled={presignEnabled}
-                voiceSpacer={spacer}
-              />
-              {inlineTime}
-            </>
+            <MessageAttachments
+              attachments={message.attachments}
+              cache={cache}
+              presignEnabled={presignEnabled}
+            />
           ) : (
             <>
               {message.body.trim() !== '' ? <p className={BODY_TEXT}>{message.body}</p> : null}
@@ -489,9 +501,6 @@ export function MessageBubble(props: {
               />
               <SharedPostCards postIds={message.sharedPostIds} />
               <SharedBriefCards briefIds={message.sharedBriefIds} />
-              <div className={cn('mt-1 flex items-center justify-end gap-1', TIME_TEXT)}>
-                {time}
-              </div>
             </>
           )}
           {hasReactions ? (
@@ -510,6 +519,7 @@ export function MessageBubble(props: {
             </button>
           ) : null}
         </div>
+        {status !== null ? <StatusLine status={status} /> : null}
       </div>
       {onMore !== undefined ? (
         <button
@@ -537,21 +547,72 @@ export function MessageBubble(props: {
 }
 
 /** The small "Forwarded" line above a forwarded message's body (own and incoming). */
-export function ForwardedLabel(): ReactElement {
+export function ForwardedLabel(props: { mine?: boolean } = {}): ReactElement {
   return (
-    <span data-forwarded="" className="mb-1 flex items-center gap-1 text-xs leading-none text-fg-2">
+    <span
+      data-forwarded=""
+      className={cn(
+        'mb-1 flex items-center gap-1 text-xs leading-none',
+        props.mine === true ? 'text-accent-fg' : 'text-fg-2',
+      )}
+    >
       <IconForward size={12} />
       {FORWARDED_LABEL}
     </span>
   );
 }
 
-/** First in a run, a switch between own/peer, or a different peer sender starts a head. */
-function isHead(prev: ThreadMessage | undefined, m: ThreadMessage): boolean {
-  if (prev === undefined) return true;
-  if (prev.mine !== m.mine) return true;
-  if (!prev.mine && !m.mine && prev.senderUserId !== m.senderUserId) return true;
-  return false;
+/** One rendered row of the thread list, grouped once before the first paint. */
+export type ThreadRow =
+  | { kind: 'day'; key: string; label: string }
+  | { kind: 'time'; key: string; label: string }
+  | { kind: 'message'; message: ThreadMessage; head: boolean; tail: boolean };
+
+/**
+ * The thread's render list: day pills, then runs. A run is consecutive messages
+ * from one sender with no day pill and no 10-minute gap between neighbours; its
+ * first message is the head, its last the tail. A centred time label (workspace
+ * clock) goes above a run that starts a new day or follows a 10-minute gap.
+ * Pure, so the list is grouped in one pass and never re-groups after painting.
+ */
+export function threadRows(
+  messages: readonly ThreadMessage[],
+  nowMs: number,
+  timeZone: string,
+): ThreadRow[] {
+  const items = withDaySeparators(messages, nowMs, timeZone);
+  const rows: ThreadRow[] = [];
+  items.forEach((item, k) => {
+    if (item.kind === 'day') {
+      rows.push(item);
+      return;
+    }
+    const { message, index } = item;
+    const prev = messages[index - 1];
+    const next = messages[index + 1];
+    const afterDay = items[k - 1]?.kind === 'day';
+    const beforeDay = items[k + 1]?.kind === 'day';
+    const head = afterDay || breaksRun(prev, message);
+    const tail = next === undefined || beforeDay || breaksRun(message, next);
+    if (afterDay || (prev !== undefined && isTimeGap(prev, message))) {
+      const label = formatMessageTime(
+        message.time > 0 ? message.time : message.createdAt,
+        timeZone,
+      );
+      if (label !== '') rows.push({ kind: 'time', key: `time-${message.id}`, label });
+    }
+    rows.push({ kind: 'message', message, head, tail });
+  });
+  return rows;
+}
+
+/** The centred run time label: mono, tabular, tertiary. No motion. */
+export function TimeLabel({ label }: { label: string }): ReactElement {
+  return (
+    <li className="flex justify-center pt-2.5">
+      <span className="font-mono text-[11px] tabular-nums text-fg-3">{label}</span>
+    </li>
+  );
 }
 
 /**
@@ -567,6 +628,7 @@ function MessageRow(props: {
   showTicks: boolean;
   isGroup: boolean;
   head: boolean;
+  tail: boolean;
   timeZone: string;
   onOpen: (message: ThreadMessage, rect: DOMRect | null) => void;
   onRetry?: (messageId: string) => void;
@@ -606,6 +668,7 @@ function MessageRow(props: {
       showTicks={props.showTicks}
       isGroup={props.isGroup}
       head={props.head}
+      tail={props.tail}
       timeZone={props.timeZone}
       bubbleRef={bubbleRef}
       press={{
@@ -811,9 +874,10 @@ function ThreadBody(
         {props.loadingOlder === true ? (
           <li className="px-4 py-2 text-center text-xs text-fg-3">Loading earlier messages</li>
         ) : null}
-        {withDaySeparators(props.messages, nowMs, props.timeZone).map((item) => {
-          if (item.kind === 'day') return <DayPill key={item.key} label={item.label} />;
-          const { message, index: i } = item;
+        {threadRows(props.messages, nowMs, props.timeZone).map((row) => {
+          if (row.kind === 'day') return <DayPill key={row.key} label={row.label} />;
+          if (row.kind === 'time') return <TimeLabel key={row.key} label={row.label} />;
+          const { message } = row;
           return (
             <MessageRow
               key={message.id}
@@ -823,7 +887,8 @@ function ThreadBody(
               presignEnabled={props.presignEnabled}
               showTicks={props.showTicks}
               isGroup={props.isGroup}
-              head={isHead(props.messages[i - 1], message)}
+              head={row.head}
+              tail={row.tail}
               timeZone={props.timeZone}
               onOpen={(m, rect) => setMenu({ message: m, rect })}
               hoverMenu={hoverMenu}
@@ -1030,7 +1095,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         ) : (
           <Avatar
             name={props.title}
-            size="md"
+            size="row"
+            {...(props.avatarUrl != null ? { src: props.avatarUrl } : {})}
             presence={
               props.presence !== undefined && props.presence.available && props.presence.online
                 ? 'online'
@@ -1042,7 +1108,9 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           <span className="block truncate text-[15px] font-semibold leading-tight text-fg">
             {props.title}
           </span>
-          {props.presence !== undefined && props.presence.available ? (
+          {props.subtitle !== undefined ? (
+            <span className="truncate text-xs text-fg-3">{props.subtitle}</span>
+          ) : props.presence !== undefined && props.presence.available ? (
             <span className="truncate text-xs text-fg-3">
               {props.presence.online
                 ? 'Online'

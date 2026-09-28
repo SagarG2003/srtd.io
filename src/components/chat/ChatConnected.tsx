@@ -50,7 +50,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const { workspaces } = useWorkspace();
   // The workspace civil clock every timestamp renders on; the browser's own zone
   // only when the workspace has none.
-  const timeZone = workspaceTimeZone(workspaces.find((w) => w.id === workspaceId)?.timezone);
+  const workspace = workspaces.find((w) => w.id === workspaceId);
+  const timeZone = workspaceTimeZone(workspace?.timezone);
 
   const [selected, setSelected] = useState<ChannelSummary | null>(null);
   const [profiles, setProfiles] = useState<Map<string, ChatProfile>>(new Map());
@@ -73,24 +74,58 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     clearConversation,
   } = useChatStore();
 
-  // Email deep-link: ?channel={channelId} selects that channel once the store's
-  // roster is ready; the selection fires once per distinct id and only 'channel'
-  // is stripped, preserving any sibling deep-link param.
+  // The open thread lives in ?channel={channelId} (replace, never push), so the
+  // shell hides the mobile chrome in the same render the thread opens. Opening
+  // and closing set the state and the param in one batch; only 'channel' is
+  // touched, preserving any sibling deep-link param.
   const [searchParams, setSearchParams] = useSearchParams();
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const writeChannelParam = useCallback(
+    (channelId: string | null) => {
+      setSearchParams(
+        (prev) => {
+          if ((prev.get('channel') ?? null) === channelId) return prev;
+          const next = new URLSearchParams(prev);
+          if (channelId === null) next.delete('channel');
+          else next.set('channel', channelId);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+  const openChannel = useCallback(
+    (channel: ChannelSummary) => {
+      setSelected(channel);
+      writeChannelParam(channel.channelId);
+    },
+    [writeChannelParam],
+  );
+  const closeChannel = useCallback(() => {
+    setSelected(null);
+    writeChannelParam(null);
+  }, [writeChannelParam]);
+
+  // Email deep-link: ?channel={channelId} selects that channel once the store's
+  // roster is ready, once per distinct id. The param stays while the thread is
+  // open; an id not in the roster is stripped so the chrome comes back.
   const selectedFromParam = useRef<string | null>(null);
   useEffect(() => {
     if (loadStatus !== 'ready') return;
     const channel = searchParams.get('channel');
-    if (channel === null || channel === '') return;
-    if (selectedFromParam.current !== channel) {
-      selectedFromParam.current = channel;
-      const found = roster.find((c) => c.channelId === channel);
-      if (found !== undefined) setSelected(found);
+    if (channel === null || channel === '') {
+      selectedFromParam.current = null;
+      return;
     }
-    const next = new URLSearchParams(searchParams);
-    next.delete('channel');
-    setSearchParams(next, { replace: true });
-  }, [loadStatus, roster, searchParams, setSearchParams]);
+    if (selectedFromParam.current === channel) return;
+    selectedFromParam.current = channel;
+    if (selectedRef.current?.channelId === channel) return;
+    const found = roster.find((c) => c.channelId === channel);
+    if (found !== undefined) setSelected(found);
+    else writeChannelParam(null);
+  }, [loadStatus, roster, searchParams, writeChannelParam]);
 
   // Re-read the store's roster after a mutation. When channelId is given, the
   // matching (possibly newly created) channel is selected and opened.
@@ -99,9 +134,9 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       const next = await reloadRoster();
       if (next === null || channelId === null) return;
       const found = next.find((channel) => channel.channelId === channelId);
-      if (found !== undefined) setSelected(found);
+      if (found !== undefined) openChannel(found);
     },
-    [reloadRoster],
+    [reloadRoster, openChannel],
   );
 
   const onDmReady = useCallback(
@@ -123,15 +158,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
 
   const onGroupLeft = useCallback(() => {
     setGroupInfoOpen(false);
-    setSelected(null);
+    closeChannel();
     void refreshChannels(null);
-  }, [refreshChannels]);
+  }, [refreshChannels, closeChannel]);
 
   // Delete chats for me: one trace for the action, one proc call per chat in
   // order, stopping at the first failure. Each accepted clear empties the card
   // and drops its unrecorded sends at once; an open thread goes back to the list.
-  const selectedRef = useRef(selected);
-  selectedRef.current = selected;
   const onDeleteChats = useCallback(
     async (list: ChannelSummary[]): Promise<ClearRunResult<ChannelSummary>> => {
       const traceId = generateTraceId();
@@ -140,7 +173,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
         clear: (channelId) => clearChannelRecord({ client: supabase, channelId, traceId }),
         onCleared: (channel) => {
           clearConversation(channel.channelId, Date.now());
-          if (selectedRef.current?.channelId === channel.channelId) setSelected(null);
+          if (selectedRef.current?.channelId === channel.channelId) closeChannel();
         },
       });
       if (!result.ok) {
@@ -152,7 +185,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       }
       return result;
     },
-    [clearConversation],
+    [clearConversation, closeChannel],
   );
 
   // Keep the live store's active conversation in step with the open channel:
@@ -175,9 +208,9 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   useEffect(() => {
     if (pendingOpen === null || loadStatus !== 'ready') return;
     const found = roster.find((channel) => channel.channelId === pendingOpen);
-    if (found !== undefined) setSelected(found);
+    if (found !== undefined) openChannel(found);
     clearPendingOpen();
-  }, [pendingOpen, loadStatus, roster, clearPendingOpen]);
+  }, [pendingOpen, loadStatus, roster, clearPendingOpen, openChannel]);
 
   // Keyed on the channel the send was recorded in, which may no longer be open.
   const onOwnMessage = useCallback(
@@ -239,7 +272,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     };
   }, [thread.messages, selected, profiles]);
 
-  const onBack = useCallback(() => setSelected(null), []);
+  const onBack = closeChannel;
 
   const showList = isDesktop || selected === null;
   const showThread = isDesktop || selected !== null;
@@ -255,7 +288,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
             status={loadStatus}
             onRetry={retryLoad}
             selectedChannelId={selected?.channelId ?? null}
-            onSelect={setSelected}
+            onSelect={openChannel}
             onNewChat={() => setNewChatOpen(true)}
             timeZone={timeZone}
             onDeleteChats={onDeleteChats}
@@ -267,6 +300,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
           {selected !== null ? (
             <MessageThread
               title={selected.title}
+              avatarUrl={selected.avatarUrl}
+              {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
               isGroup={isGroup}
               profiles={profiles}
               messages={thread.messages}

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AgoraChat } from 'agora-chat';
 import {
   appendMessage,
+  breaksRun,
+  isTimeGap,
   applyReactionOp,
   compareMessages,
   deleteEventExt,
@@ -781,5 +783,37 @@ describe('forwarded messages', () => {
         sorted_channel_id: CHANNEL,
       },
     });
+  });
+});
+
+describe('breaksRun / isTimeGap', () => {
+  const at = (min: number) => Date.UTC(2026, 8, 22, 10, min);
+  const own = (min: number) => ({ mine: true, senderUserId: 'me', time: at(min) });
+  const peer = (min: number, id = 'p1') => ({ mine: false, senderUserId: id, time: at(min) });
+
+  it('starts a run at the first message', () => {
+    expect(breaksRun(undefined, own(0))).toBe(true);
+  });
+
+  it('keeps one sender under 10 minutes in one run', () => {
+    expect(breaksRun(own(0), own(9))).toBe(false);
+    expect(breaksRun(peer(0), peer(5))).toBe(false);
+  });
+
+  it('breaks on a sender switch or a different peer', () => {
+    expect(breaksRun(own(0), peer(1))).toBe(true);
+    expect(breaksRun(peer(0), own(1))).toBe(true);
+    expect(breaksRun(peer(0, 'p1'), peer(1, 'p2'))).toBe(true);
+  });
+
+  it('breaks on a gap of exactly 10 minutes or more', () => {
+    expect(isTimeGap(own(0), own(10))).toBe(true);
+    expect(breaksRun(own(0), own(10))).toBe(true);
+    expect(isTimeGap(own(0), own(9))).toBe(false);
+  });
+
+  it('never counts an unusable time as a gap', () => {
+    expect(isTimeGap({ time: 0 }, own(30))).toBe(false);
+    expect(isTimeGap(own(0), { time: 0 })).toBe(false);
   });
 });
