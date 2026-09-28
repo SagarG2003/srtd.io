@@ -57,6 +57,59 @@ function parseEnv(envOutput: string): AuthTestEnv {
 
 let startedHere = false;
 
+/** The CLI's registry override (viper INTERNAL_IMAGE_REGISTRY, SUPABASE_ env prefix). */
+const REGISTRY_ENV = 'SUPABASE_INTERNAL_IMAGE_REGISTRY';
+
+/** Fallback registry when the default (public.ecr.aws) refuses anonymous pulls. */
+const FALLBACK_REGISTRY = 'docker.io';
+
+/** The CLI's stderr from a failed execFileSync, or '' when there is none. */
+function stderrOf(error: unknown): string {
+  const stderr = (error as { stderr?: unknown } | null)?.stderr;
+  return typeof stderr === 'string' ? stderr : '';
+}
+
+/**
+ * public.ecr.aws caps anonymous pulls per source IP, and GitHub-hosted runners
+ * share IPs, so a start can fail with "toomanyrequests: Data limit exceeded"
+ * before any test runs. Same check as tests/rls/setup.ts.
+ */
+function isPullRateLimited(stderr: string): boolean {
+  return /toomanyrequests|data limit exceeded|rate limit/i.test(stderr);
+}
+
+function stopQuietly(): void {
+  try {
+    supabase(['stop', '--no-backup']);
+  } catch {
+    // Best effort: nothing to stop, or already gone.
+  }
+}
+
+function pause(ms: number): void {
+  // Synchronous pause, matching this file's blocking execFileSync style.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// One self-healing retry around `supabase start`, mirroring tests/rls/setup.ts:
+// stop (best effort), pause so docker-proxy releases the port, start again. When
+// the first start failed because the registry refused the pull, the retry pulls
+// the same images from Docker Hub (set on process.env so every later CLI call in
+// this process agrees on the registry).
+function startWithRetry(): void {
+  try {
+    supabase(['start', '-x', EXCLUDE]);
+    return;
+  } catch (error) {
+    stopQuietly();
+    if (isPullRateLimited(stderrOf(error)) && process.env[REGISTRY_ENV] === undefined) {
+      process.env[REGISTRY_ENV] = FALLBACK_REGISTRY;
+    }
+    pause(3000);
+    supabase(['start', '-x', EXCLUDE]);
+  }
+}
+
 // Raise the built-in email send rate limit before the stack boots. The CLI
 // default is intentionally tiny (a couple per hour) to discourage prod use; the
 // signup and password-reset flows each send one, so we lift the ceiling to keep
@@ -82,7 +135,7 @@ export async function setup(): Promise<void> {
   relaxEmailRateLimit();
 
   if (!isRunning()) {
-    supabase(['start', '-x', EXCLUDE]);
+    startWithRetry();
     startedHere = true;
   }
 
