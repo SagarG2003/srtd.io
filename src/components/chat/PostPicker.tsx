@@ -20,9 +20,11 @@ import { Sheet } from '@/components/ui/Sheet';
 import { Tag, isTagDot } from '@/components/ui/Tag';
 import { IconBriefs, IconCheck, IconPipeline, IconSearch } from '@/components/ui/icons';
 import { stageLabel } from '@/components/pages/pipeline/stage-meta';
+import { fetchMemberRole } from '@/lib/assets';
 import { cn } from '@/lib/cn';
 import { formatEntityRef } from '@/lib/entityRef';
 import { formatLabel } from '@/lib/post-detail-presentation';
+import { useSession } from '@/lib/session-context';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { listPostsForPicker, type PostCardFields } from '@srtdio/posts';
@@ -41,9 +43,9 @@ import {
 import { formatShortDate, formatShortDateOnly, workspaceTimeZone } from '@/lib/chat/time-format';
 import {
   DEFAULT_POST_FILTER,
-  POST_FILTERS,
   filterStage,
   isPostSelected,
+  visiblePostFilters,
   type PostFilter,
 } from '@/components/chat/post-picker';
 
@@ -87,6 +89,12 @@ export function PostPicker(props: PostPickerProps): ReactElement {
   const [posts, setPosts] = useState<PostPickerRow[]>([]);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { session } = useSession();
+  const userId = session?.user.id ?? null;
+  // The viewer's role, read once per open (the workspace context does not carry
+  // it) and held for the sheet's lifetime; null until it lands, which hides the
+  // Drafts chip rather than flashing it.
+  const [role, setRole] = useState<string | null>(null);
 
   // The read the current tab/filter/search asks for. The list renders only once
   // the result for exactly this key has landed, so the first paint is final (no
@@ -103,6 +111,18 @@ export function PostPicker(props: PostPickerProps): ReactElement {
       setQuery('');
     }
   }, [props.open]);
+
+  useEffect(() => {
+    if (!props.open || workspaceId === null || userId === null) return;
+    let cancelled = false;
+    setRole(null);
+    void fetchMemberRole(supabase, workspaceId, userId).then((next) => {
+      if (!cancelled) setRole(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.open, workspaceId, userId]);
 
   // One RLS-scoped read per (workspace, filter, search) change; never per row.
   useEffect(() => {
@@ -185,7 +205,7 @@ export function PostPicker(props: PostPickerProps): ReactElement {
         {tab === 'posts' ? (
           <>
             <div className="flex flex-wrap gap-2">
-              {POST_FILTERS.map((option) => (
+              {visiblePostFilters(role).map((option) => (
                 <Chip
                   key={option.key}
                   label={option.label}

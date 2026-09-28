@@ -1,7 +1,7 @@
 // Renders the posts shared into one message as cards. The whole message's ids
 // resolve in ONE batched RLS read (readPostsByIds, IN-clause over every id), per
 // viewer, so the viewer's RLS gates visibility: a post they cannot see comes back
-// absent and renders as an "unavailable" card, no content leaks. The resolve is
+// absent and renders as a neutral "not visible" card, no content leaks. The resolve is
 // keyed on the message's ids, so a re-render never re-reads. No thumbnail is
 // presigned: the existing posts read surfaces no cover image (a post's first
 // image lives in asset_attachments and building that join is out of scope), so
@@ -17,6 +17,8 @@ import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { readPostsByIds, type PostCardFields } from '@srtdio/posts';
 import {
+  NOT_VISIBLE_BODY,
+  NOT_VISIBLE_TITLE,
   indexPostsById,
   postRoute,
   sharedPostViews,
@@ -31,8 +33,8 @@ function stageLabel(stage: string): string {
 /**
  * Resolve one message's shared post ids once via the batched RLS read. While the
  * read is in flight the views are empty (a calm placeholder renders); after it
- * settles each id is a card or an "unavailable" card. Never throws: a failed read
- * resolves to no posts, so every id falls back to "unavailable".
+ * settles each id is a card or a "not visible" card. Never throws: a failed read
+ * resolves to no posts, so every id falls back to "not visible".
  */
 function useSharedPosts(postIds: string[]): { views: SharedPostView[]; loading: boolean } {
   const { workspaceId } = useWorkspace();
@@ -85,20 +87,14 @@ export function SharedPostCards({ postIds }: { postIds: string[] }): ReactElemen
 }
 
 /** The shared card box: one tappable row, thumb + title over meta. */
-export const SHARED_CARD =
-  'flex w-[240px] items-center gap-2.5 rounded-lg border border-border bg-panel px-2.5 py-2 min-h-[44px]';
+const SHARED_CARD_BOX =
+  'flex w-[240px] items-center gap-2.5 rounded-lg border border-border px-2.5 py-2 min-h-[44px]';
+export const SHARED_CARD = `${SHARED_CARD_BOX} bg-panel`;
 
 function PostCardItem({ view }: { view: SharedPostView }): ReactElement {
   const navigate = useNavigate();
-  if (view.kind === 'unavailable') {
-    return (
-      <div className={`${SHARED_CARD} text-fg-3`}>
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-3">
-          <IconPipeline size={18} />
-        </span>
-        <span className="text-sm font-medium">Post unavailable</span>
-      </div>
-    );
+  if (view.kind === 'not_visible') {
+    return <NotVisibleCard />;
   }
   return (
     <button
@@ -123,5 +119,20 @@ function PostCardItem({ view }: { view: SharedPostView }): ReactElement {
         </span>
       </span>
     </button>
+  );
+}
+
+/**
+ * The reader's RLS hid this post (e.g. a client receiving a draft). Same box as a
+ * visible card, but no thumbnail and no link; never probes why it is hidden.
+ */
+export function NotVisibleCard(): ReactElement {
+  return (
+    <div className={`${SHARED_CARD_BOX} bg-panel-2 text-fg-2`}>
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="truncate text-sm font-medium">{NOT_VISIBLE_TITLE}</span>
+        <span className="truncate text-xs">{NOT_VISIBLE_BODY}</span>
+      </span>
+    </div>
   );
 }

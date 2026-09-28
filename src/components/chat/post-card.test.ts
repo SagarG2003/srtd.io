@@ -43,17 +43,17 @@ describe('sharedPostViews', () => {
     ]);
   });
 
-  it('renders an "unavailable" card for an id the batched resolve did not return', () => {
-    // p2 is denied by the viewer's RLS (or deleted): it is absent from the map.
+  it('maps an id the batched resolve did not return to the not-visible view', () => {
+    // p2 is hidden by the viewer's RLS (e.g. a client and a draft): absent from the map.
     const byId = indexPostsById([post('p1', { title: 'Visible' })]);
     const views = sharedPostViews(['p1', 'p2'], byId);
     expect(views[0]).toMatchObject({ kind: 'post', postId: 'p1' });
-    expect(views[1]).toEqual({ kind: 'unavailable', postId: 'p2' });
+    expect(views[1]).toEqual({ kind: 'not_visible', postId: 'p2' });
   });
 
-  it('renders only unavailable cards when the resolve returned nothing', () => {
+  it('maps every id to not-visible when the resolve returned nothing', () => {
     const views = sharedPostViews(['p1', 'p2'], new Map());
-    expect(views.every((v) => v.kind === 'unavailable')).toBe(true);
+    expect(views.every((v) => v.kind === 'not_visible')).toBe(true);
     expect(views).toHaveLength(2);
   });
 });
