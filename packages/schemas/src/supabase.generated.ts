@@ -7834,6 +7834,38 @@ export type Database = {
         }
         Returns: undefined
       }
+      chat_message_edit: {
+        Args: {
+          p_body: string
+          p_channel_id: string
+          p_message_id: string
+          p_trace_id: string
+        }
+        Returns: {
+          agora_event_id: string | null
+          attachment_asset_ids: string[] | null
+          attachment_meta: Json | null
+          body: string | null
+          channel_id: string
+          created_at: string
+          deleted_at: string | null
+          edited_at: string | null
+          forwarded_from_message_id: string | null
+          id: string
+          mentions: Json | null
+          reply_to_message_id: string | null
+          sender_user_id: string | null
+          shared_brief_ids: string[] | null
+          shared_post_ids: string[] | null
+          workspace_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "chat_messages"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       chat_message_send: {
         Args: {
           p_attachment_asset_ids?: string[]
