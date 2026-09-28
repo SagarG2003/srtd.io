@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import type { PostCardFields } from '@srtdio/posts';
 import {
-  DEFAULT_POST_FILTER,
-  POST_FILTERS,
-  filterStage,
+  buildPickerSections,
+  cursorAfter,
+  hasMoreResults,
   isPostSelected,
+  matchesLabel,
+  olderApprovedFooter,
+  parsePickerQuery,
+  recentApprovedSince,
+  searchExcludeStage,
+  shownOfLabel,
   togglePost,
-  visiblePostFilters,
 } from '@/components/chat/post-picker';
-import { isAgencySide } from '@/components/pages/pcs/roles';
+import { isAgencySide, isClient } from '@/components/pages/pcs/roles';
 import { WorkspaceMemberSchema } from '@srtdio/schemas';
 
 function post(id: string, over: Partial<PostCardFields> = {}): PostCardFields {
@@ -22,49 +27,111 @@ function post(id: string, over: Partial<PostCardFields> = {}): PostCardFields {
   };
 }
 
-describe('post filter chips', () => {
-  it('offers Drafts / Review / Approved / All posts in order and defaults to Review', () => {
-    expect(POST_FILTERS.map((f) => f.key)).toEqual(['draft', 'review', 'approved', 'all']);
-    expect(POST_FILTERS.map((f) => f.label)).toEqual(['Drafts', 'Review', 'Approved', 'All posts']);
-    expect(DEFAULT_POST_FILTER).toBe('review');
+// Roles are resolved through the permission helper, never hardcoded here.
+const roles: string[] = WorkspaceMemberSchema.shape.role.options;
+const agency = roles.find((r) => isAgencySide(r)) ?? null;
+const nonAgency = roles.find((r) => !isAgencySide(r)) ?? null;
+// Built from its char code: chat files carry no literal hash sign.
+const HASH = String.fromCharCode(35);
+
+describe('parsePickerQuery', () => {
+  it('reads bare digits as a post number and keeps the text match', () => {
+    expect(parsePickerQuery('14', 'GBL')).toEqual({ text: '14', number: 14 });
   });
 
-  it('maps a chip to its stage filter; All posts passes no stage (RLS bounds it)', () => {
-    expect(filterStage('draft')).toBe('draft');
-    expect(filterStage('review')).toBe('review');
-    expect(filterStage('approved')).toBe('approved');
-    expect(filterStage('all')).toBeUndefined();
+  it('strips this workspace key prefix, any case', () => {
+    expect(parsePickerQuery('GBL-14', 'GBL')).toEqual({ text: 'GBL-14', number: 14 });
+    expect(parsePickerQuery(' gbl-14 ', 'GBL')).toEqual({ text: 'gbl-14', number: 14 });
+  });
+
+  it('strips a leading hash sign', () => {
+    expect(parsePickerQuery(`${HASH}14`, 'GBL')).toEqual({ text: `${HASH}14`, number: 14 });
+  });
+
+  it('treats words as text only', () => {
+    expect(parsePickerQuery('holi', 'GBL')).toEqual({ text: 'holi', number: null });
+  });
+
+  it('does not strip another workspace key', () => {
+    expect(parsePickerQuery('ABC-14', 'GBL')).toEqual({ text: 'ABC-14', number: null });
+  });
+
+  it('is null for blank input, and never yields number 0', () => {
+    expect(parsePickerQuery('   ', 'GBL')).toBeNull();
+    expect(parsePickerQuery('0', 'GBL')?.number).toBeNull();
+    expect(parsePickerQuery('99999999999', null)?.number).toBeNull();
   });
 });
 
-describe('visiblePostFilters', () => {
-  // Roles are resolved through the permission helper, never hardcoded here: pick
-  // one the helper says can see drafts and one it says cannot.
-  const roles: string[] = WorkspaceMemberSchema.shape.role.options;
-  const canSee = roles.find((r) => isAgencySide(r));
-  const cannotSee = roles.find((r) => !isAgencySide(r));
+describe('buildPickerSections', () => {
+  const rows = { review: ['r'], approved: ['a'], drafts: ['d'] };
 
-  it('shows Drafts first for a role the permission helper lets see drafts', () => {
-    expect(canSee).toBeDefined();
-    expect(visiblePostFilters(canSee ?? null).map((f) => f.key)).toEqual([
-      'draft',
-      'review',
-      'approved',
-      'all',
+  it('orders waiting, approved (30 days), drafts for an agency-side viewer', () => {
+    const sections = buildPickerSections({ role: agency, ...rows });
+    expect(sections.map((s) => s.key)).toEqual(['review', 'approved', 'draft']);
+    expect(sections.map((s) => s.label)).toEqual([
+      'Waiting on client',
+      'Approved in the last 30 days',
+      'Drafts',
     ]);
   });
 
-  it('hides Drafts for a role the helper excludes, and while the role is unknown', () => {
-    expect(cannotSee).toBeDefined();
-    for (const role of [cannotSee ?? null, null]) {
-      expect(visiblePostFilters(role).map((f) => f.key)).toEqual(['review', 'approved', 'all']);
-    }
+  it('says "Waiting on you" and has no Drafts for the client', () => {
+    const client = roles.find((r) => isClient(r)) ?? null;
+    const sections = buildPickerSections({ role: client, ...rows });
+    expect(sections.map((s) => s.key)).toEqual(['review', 'approved']);
+    expect(sections[0]?.label).toBe('Waiting on you');
   });
 
-  it('never hides the default filter', () => {
-    for (const role of [...roles, null]) {
-      expect(visiblePostFilters(role).some((f) => f.key === DEFAULT_POST_FILTER)).toBe(true);
-    }
+  it('drops empty sections', () => {
+    const sections = buildPickerSections({ role: agency, review: [], approved: ['a'], drafts: [] });
+    expect(sections.map((s) => s.key)).toEqual(['approved']);
+  });
+});
+
+describe('search stage rule', () => {
+  it('excludes drafts only for a non-agency viewer or an unknown role', () => {
+    expect(searchExcludeStage(agency)).toBeUndefined();
+    expect(searchExcludeStage(nonAgency)).toBe('draft');
+    expect(searchExcludeStage(null)).toBe('draft');
+  });
+});
+
+describe('labels', () => {
+  it('footer omits at 0 and pluralises', () => {
+    expect(olderApprovedFooter(0)).toBeNull();
+    expect(olderApprovedFooter(1)).toBe(
+      '1 older approved post · type a word or number to find one',
+    );
+    expect(olderApprovedFooter(212)).toBe(
+      '212 older approved posts · type a word or number to find one',
+    );
+  });
+
+  it('matches and paging text', () => {
+    expect(matchesLabel(1)).toBe('1 match');
+    expect(matchesLabel(120)).toBe('120 matches');
+    expect(shownOfLabel(50, 120)).toBe('50 of 120');
+    expect(hasMoreResults(50, 120)).toBe(true);
+    expect(hasMoreResults(120, 120)).toBe(false);
+  });
+
+  it('recent window is 30 days back', () => {
+    expect(recentApprovedSince(new Date('2026-09-28T00:00:00.000Z'))).toBe(
+      '2026-08-29T00:00:00.000Z',
+    );
+  });
+});
+
+describe('cursorAfter', () => {
+  it('is the (created_at, id) of the last row, or null for none', () => {
+    expect(
+      cursorAfter([
+        { id: 'a', created_at: '2026-09-02T00:00:00Z' },
+        { id: 'b', created_at: '2026-09-01T00:00:00Z' },
+      ]),
+    ).toEqual({ createdAt: '2026-09-01T00:00:00Z', id: 'b' });
+    expect(cursorAfter([])).toBeNull();
   });
 });
 

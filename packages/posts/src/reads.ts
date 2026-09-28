@@ -112,6 +112,149 @@ export async function listPostsForPicker(
   return { ok: true, data: (data ?? []) as PostPickerRow[] };
 }
 
+/** A picker page row: the picker fields plus created_at (the keyset cursor key). */
+export type PostPickerPageRow = PostPickerRow & Pick<Post, 'created_at'>;
+
+export const POST_PICKER_PAGE_COLUMNS = `${POST_PICKER_COLUMNS}, created_at`;
+
+/** Keyset cursor for picker paging: the (created_at, id) of the last row shown. */
+export interface PostPickerCursor {
+  createdAt: string;
+  id: string;
+}
+
+export interface PostPickerFilter {
+  /** Workspace to scope to; RLS confines reads to the caller's workspaces. */
+  workspaceId: string;
+  /** Exact stage filter. */
+  stage?: Stage;
+  /** Stage to leave out (drafts for a non-agency viewer's search). */
+  excludeStage?: Stage;
+  /** Keep rows whose stage_entered_at is at or after this ISO instant. */
+  enteredSince?: string;
+  /** Keep rows whose stage_entered_at is strictly before this ISO instant. */
+  enteredBefore?: string;
+  /** Search text: title ILIKE OR caption ILIKE (LIKE metacharacters escaped). */
+  text?: string;
+  /** Exact posts.number match, OR'd with the text match. */
+  number?: number;
+}
+
+export interface ListPostsForPickerPageInput extends PostPickerFilter {
+  /** Return rows strictly after this cursor in (created_at desc, id desc) order. */
+  cursor?: PostPickerCursor;
+  /** Page size. Defaults to {@link POSTS_PAGE_SIZE}, capped at {@link POSTS_PAGE_SIZE_MAX}. */
+  limit?: number;
+  /** Also return count:'exact' for the filter (same request). */
+  withCount?: boolean;
+}
+
+export interface PostPickerPage {
+  rows: PostPickerPageRow[];
+  /** Exact match count when requested, else null. */
+  count: number | null;
+}
+
+/** Quote a PostgREST filter value so commas, dots and parens stay literal. */
+function quoteFilterValue(value: string): string {
+  return `"${value.replace(/[\\"]/g, (match) => `\\${match}`)}"`;
+}
+
+/**
+ * The PostgREST or() expression for a picker search: title ILIKE OR caption ILIKE
+ * on the escaped term, plus number = N when the term names a post number. Null
+ * when there is nothing to match.
+ */
+export function pickerSearchOr(
+  text: string | undefined,
+  number: number | undefined,
+): string | null {
+  const parts: string[] = [];
+  const term = text?.trim() ?? '';
+  if (term !== '') {
+    const pattern = quoteFilterValue(`%${escapeLike(term)}%`);
+    parts.push(`title.ilike.${pattern}`, `caption.ilike.${pattern}`);
+  }
+  if (number !== undefined) parts.push(`number.eq.${number}`);
+  return parts.length === 0 ? null : parts.join(',');
+}
+
+/** The PostgREST or() expression for "after this cursor" in (created_at desc, id desc). */
+export function pickerCursorOr(cursor: PostPickerCursor): string {
+  const at = quoteFilterValue(cursor.createdAt);
+  return `created_at.lt.${at},and(created_at.eq.${at},id.lt.${quoteFilterValue(cursor.id)})`;
+}
+
+// Applies the shared picker filters to a posts select. Generic over the builder
+// so the page read and the head-only count read share one filter shape.
+interface PickerFilterable<T> {
+  eq(column: string, value: unknown): T;
+  neq(column: string, value: unknown): T;
+  is(column: string, value: null): T;
+  gte(column: string, value: string): T;
+  lt(column: string, value: string): T;
+  or(filters: string): T;
+}
+
+function applyPickerFilter<T extends PickerFilterable<T>>(query: T, input: PostPickerFilter): T {
+  let q = query.eq('workspace_id', input.workspaceId).is('deleted_at', null);
+  if (input.stage !== undefined) q = q.eq('stage', input.stage);
+  if (input.excludeStage !== undefined) q = q.neq('stage', input.excludeStage);
+  if (input.enteredSince !== undefined) q = q.gte('stage_entered_at', input.enteredSince);
+  if (input.enteredBefore !== undefined) q = q.lt('stage_entered_at', input.enteredBefore);
+  const search = pickerSearchOr(input.text, input.number);
+  if (search !== null) q = q.or(search);
+  return q;
+}
+
+/**
+ * One keyset page for the chat post picker: RLS-scoped, soft-deleted rows out,
+ * ordered created_at desc, id desc. A cursor returns the rows strictly after it.
+ * With `withCount`, the same request carries count:'exact' for the filter (the
+ * cursor is excluded from the count only when no cursor is passed, so callers
+ * ask for it on the first page).
+ */
+export async function listPostsForPickerPage(
+  client: Client,
+  input: ListPostsForPickerPageInput,
+): Promise<Result<PostPickerPage>> {
+  const limit = Math.min(input.limit ?? POSTS_PAGE_SIZE, POSTS_PAGE_SIZE_MAX);
+  let query = applyPickerFilter(
+    client
+      .from('posts')
+      .select(POST_PICKER_PAGE_COLUMNS, input.withCount === true ? { count: 'exact' } : {}),
+    input,
+  );
+  if (input.cursor !== undefined) query = query.or(pickerCursorOr(input.cursor));
+
+  const { data, error, count } = await query
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(limit);
+
+  if (error) return { ok: false, error: transportError(error.message) };
+  return {
+    ok: true,
+    data: {
+      rows: (data ?? []) as PostPickerPageRow[],
+      count: input.withCount === true ? (count ?? 0) : null,
+    },
+  };
+}
+
+/** Count-only picker read (head:true, count:'exact'): no rows transferred. */
+export async function countPostsForPicker(
+  client: Client,
+  input: PostPickerFilter,
+): Promise<Result<number>> {
+  const { error, count } = await applyPickerFilter(
+    client.from('posts').select('id', { count: 'exact', head: true }),
+    input,
+  );
+  if (error) return { ok: false, error: transportError(error.message) };
+  return { ok: true, data: count ?? 0 };
+}
+
 /**
  * Batched resolve of shared posts for the chat post card: one RLS-scoped IN read
  * over every id in a message, never one read per id. A post the viewer cannot
