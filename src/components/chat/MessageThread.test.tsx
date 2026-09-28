@@ -34,6 +34,7 @@ import {
   threadListItems,
   threadLightbox,
   threadRows,
+  ThreadHeaderIdentity,
   TimeLabel,
   type ThreadRow,
 } from '@/components/chat/MessageThread';
@@ -1172,5 +1173,43 @@ describe('message body links', () => {
   it('a pointer on a non-element target is not a link tap', () => {
     expect(isLinkTarget(null)).toBe(false);
     expect(isLinkTarget({})).toBe(false);
+  });
+});
+
+describe('ThreadHeaderIdentity', () => {
+  const base = {
+    title: 'Alice Doe',
+    avatarUrl: null,
+    presence: undefined,
+    headerLine: 'Client · Acme',
+  };
+  function buttons(root: ReactElement): ReactElement<Record<string, unknown>>[] {
+    const out: ReactElement<Record<string, unknown>>[] = [];
+    walk(root, (el) => {
+      if (el.type === 'button') out.push(el as ReactElement<Record<string, unknown>>);
+    });
+    return out;
+  }
+
+  it('a DM header is one 44px button spanning photo and name that opens the sheet', () => {
+    const onOpenContact = vi.fn();
+    const root = ThreadHeaderIdentity({ ...base, isGroup: false, onOpenContact });
+    const [button] = buttons(root);
+    expect(root.type).toBe('button');
+    expect(String(button?.props.className)).toContain('min-h-[44px]');
+    expect(hasAvatar(root)).toBe(true);
+    expect(allText(root)).toContain('Alice Doe');
+    (button?.props.onClick as () => void)();
+    expect(onOpenContact).toHaveBeenCalledTimes(1);
+  });
+
+  it('a group header stays a plain block with no contact button', () => {
+    const root = ThreadHeaderIdentity({ ...base, isGroup: true, onOpenContact: vi.fn() });
+    expect(buttons(root)).toEqual([]);
+    expect(allText(root)).toContain('Alice Doe');
+  });
+
+  it('a DM without the handler renders no button', () => {
+    expect(buttons(ThreadHeaderIdentity({ ...base, isGroup: false }))).toEqual([]);
   });
 });

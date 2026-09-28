@@ -251,9 +251,10 @@ export function MarkSheetRow(props: {
   );
 }
 
-export function MarksSheet(props: {
+/** What the pin board list needs: the marks, their messages, and the row actions. */
+export interface MarksListProps {
+  /** The surface showing the list is open: gates the title read and resets confirms. */
   open: boolean;
-  onClose: () => void;
   marks: Map<string, ChatMark>;
   /** The marked message, from the loaded thread or the marks read. */
   messageFor: (messageId: string) => ThreadMessage | undefined;
@@ -263,7 +264,13 @@ export function MarksSheet(props: {
   onJump: (messageId: string) => void;
   onResolve: (messageId: string) => Promise<WriteResult>;
   onReopen: (messageId: string) => Promise<WriteResult>;
-}): ReactElement {
+}
+
+/**
+ * The pin board body (Open and History tabs, rows, stamp and reopen confirms),
+ * shared by MarksSheet and the DM Contact sheet's Marks tab.
+ */
+export function MarksList(props: MarksListProps): ReactElement {
   const [tab, setTab] = useState<MarkTab>('open');
   const [confirming, setConfirming] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -304,73 +311,80 @@ export function MarksSheet(props: {
   }
 
   return (
-    <Sheet open={props.open} onClose={props.onClose} title="Marked messages">
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap gap-2" role="tablist">
-          {MARK_TABS.map((option) => (
-            <Chip
-              key={option.key}
-              label={`${option.label} (${tabCount[option.key]})`}
-              size="tap"
-              selected={tab === option.key}
-              onClick={() => setTab(option.key)}
-            />
-          ))}
-        </div>
-        {rows.length === 0 ? (
-          <EmptyState
-            icon={<IconPin size={22} />}
-            title="Nothing here"
-            description={
-              tab === 'open' ? 'No open marks in this chat.' : 'Nothing has been stamped yet.'
-            }
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap gap-2" role="tablist">
+        {MARK_TABS.map((option) => (
+          <Chip
+            key={option.key}
+            label={`${option.label} (${tabCount[option.key]})`}
+            size="tap"
+            selected={tab === option.key}
+            onClick={() => setTab(option.key)}
           />
-        ) : (
-          <ul className="flex max-h-[55vh] flex-col overflow-y-auto">
-            {rows.map((mark) => {
-              const message = messageFor(mark.messageId);
-              const sender =
-                message === undefined
-                  ? 'Member'
-                  : message.mine
-                    ? 'You'
-                    : ((message.senderUserId !== null
-                        ? displayNameOf(message.senderUserId)
-                        : undefined) ?? 'Member');
-              const when =
-                message !== undefined && message.createdAt !== ''
-                  ? formatMessageTime(message.createdAt, props.timeZone)
-                  : formatMessageTime(mark.markedAt, props.timeZone);
-              return (
-                <MarkSheetRow
-                  key={mark.messageId}
-                  mark={mark}
-                  sender={sender}
-                  text={markRowText(message, titles.get(mark.messageId))}
-                  when={when}
-                  {...(mark.resolved
-                    ? {
-                        resolver: {
-                          name: resolverName(mark, props.currentUserId, displayNameOf),
-                          when:
-                            mark.resolvedAt !== null
-                              ? formatMessageTime(mark.resolvedAt, props.timeZone)
-                              : '',
-                        },
-                      }
-                    : {})}
-                  confirming={confirming === mark.messageId}
-                  busy={busy}
-                  onJump={() => props.onJump(mark.messageId)}
-                  onAsk={() => setConfirming(mark.messageId)}
-                  onCancel={() => setConfirming(null)}
-                  onConfirm={() => void confirm(mark)}
-                />
-              );
-            })}
-          </ul>
-        )}
+        ))}
       </div>
+      {rows.length === 0 ? (
+        <EmptyState
+          icon={<IconPin size={22} />}
+          title="Nothing here"
+          description={
+            tab === 'open' ? 'No open marks in this chat.' : 'Nothing has been stamped yet.'
+          }
+        />
+      ) : (
+        <ul className="flex max-h-[55vh] flex-col overflow-y-auto">
+          {rows.map((mark) => {
+            const message = messageFor(mark.messageId);
+            const sender =
+              message === undefined
+                ? 'Member'
+                : message.mine
+                  ? 'You'
+                  : ((message.senderUserId !== null
+                      ? displayNameOf(message.senderUserId)
+                      : undefined) ?? 'Member');
+            const when =
+              message !== undefined && message.createdAt !== ''
+                ? formatMessageTime(message.createdAt, props.timeZone)
+                : formatMessageTime(mark.markedAt, props.timeZone);
+            return (
+              <MarkSheetRow
+                key={mark.messageId}
+                mark={mark}
+                sender={sender}
+                text={markRowText(message, titles.get(mark.messageId))}
+                when={when}
+                {...(mark.resolved
+                  ? {
+                      resolver: {
+                        name: resolverName(mark, props.currentUserId, displayNameOf),
+                        when:
+                          mark.resolvedAt !== null
+                            ? formatMessageTime(mark.resolvedAt, props.timeZone)
+                            : '',
+                      },
+                    }
+                  : {})}
+                confirming={confirming === mark.messageId}
+                busy={busy}
+                onJump={() => props.onJump(mark.messageId)}
+                onAsk={() => setConfirming(mark.messageId)}
+                onCancel={() => setConfirming(null)}
+                onConfirm={() => void confirm(mark)}
+              />
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export function MarksSheet(props: MarksListProps & { onClose: () => void }): ReactElement {
+  const { onClose, ...list } = props;
+  return (
+    <Sheet open={props.open} onClose={onClose} title="Marked messages">
+      <MarksList {...list} />
     </Sheet>
   );
 }

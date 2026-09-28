@@ -313,6 +313,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
           {selected !== null ? (
             <MessageThread
               title={selected.title}
+              channelId={selected.channelId}
               avatarUrl={selected.avatarUrl}
               {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
               {...(!isGroup ? { role: selected.role ?? null } : {})}

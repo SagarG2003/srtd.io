@@ -1,7 +1,13 @@
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { Button } from '@/components/ui/Button';
-import { confirmMarkTransition, MarkSheetRow } from '@/components/chat/MarksSheet';
+import { Sheet } from '@/components/ui/Sheet';
+import {
+  confirmMarkTransition,
+  MarkSheetRow,
+  MarksList,
+  MarksSheet,
+} from '@/components/chat/MarksSheet';
 import type { ChatMark } from '@/lib/chat/marks';
 
 // MarkSheetRow is hook-free, so its returned tree is walked directly with no
@@ -158,5 +164,29 @@ describe('confirmMarkTransition', () => {
     await confirmMarkTransition({ action: 'reopen', messageId: 'm2', onResolve, onReopen, toast });
     expect(onReopen).toHaveBeenCalledWith('m2');
     expect(toast.show).not.toHaveBeenCalled();
+  });
+});
+
+describe('MarksSheet', () => {
+  it('wraps the shared MarksList in the Sheet, passing every list prop through', () => {
+    const onJump = vi.fn();
+    const onClose = vi.fn();
+    const listProps = {
+      open: true,
+      marks: new Map([['m1', mark()]]),
+      messageFor: () => undefined,
+      profiles: new Map(),
+      currentUserId: 'me',
+      timeZone: 'UTC',
+      onJump,
+      onResolve: vi.fn(),
+      onReopen: vi.fn(),
+    };
+    const tree = MarksSheet({ ...listProps, onClose });
+    expect(tree.type).toBe(Sheet);
+    expect(tree.props.title).toBe('Marked messages');
+    expect(tree.props.onClose).toBe(onClose);
+    const list = findAll(tree, (el) => el.type === MarksList)[0];
+    expect(list?.props).toEqual(listProps);
   });
 });
