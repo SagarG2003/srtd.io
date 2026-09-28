@@ -13,7 +13,12 @@ import { cn } from '@/lib/cn';
 import { filterChannelsByName } from '@/lib/channel-filter';
 import type { ChannelSummary } from '@/lib/chat-reads';
 import { useChatStore } from '@/components/chat/ChatStoreProvider';
-import { selectConversation, selectHidden, type ConversationSummary } from '@/lib/chat/chat-store';
+import {
+  selectConversation,
+  selectHidden,
+  type ChatLoadStatus,
+  type ConversationSummary,
+} from '@/lib/chat/chat-store';
 import {
   DELETE_CHATS_BODY,
   deleteChatFailedMessage,
@@ -42,7 +47,14 @@ export interface ChannelSelectMode {
 }
 
 interface ChannelListProps {
-  channels: ChannelSummary[];
+  channels: readonly ChannelSummary[];
+  /**
+   * The store's load status. Rows (and the empty state) render only when
+   * 'ready'; 'loading' shows skeleton rows and 'error' the Retry state.
+   */
+  status: ChatLoadStatus;
+  /** Re-run the failed load (the error state's Retry). */
+  onRetry: () => void;
   selectedChannelId: string | null;
   onSelect: (channel: ChannelSummary) => void;
   /** Opens the New chat sheet (header "+" and empty-state action). */
@@ -56,7 +68,7 @@ interface ChannelListProps {
   onDeleteChats?: (channels: ChannelSummary[]) => Promise<ClearRunResult<ChannelSummary>>;
 }
 
-interface ChannelListBodyProps extends ChannelListProps {
+interface ChannelListBodyProps extends Omit<ChannelListProps, 'status' | 'onRetry'> {
   /** Whether any conversations exist before the search filter is applied. */
   hasChannels: boolean;
   /** Read-only store summaries; absent in pure tests (every card reads empty). */
@@ -123,6 +135,55 @@ export function channelListView(props: ChannelListBodyProps): ReactElement {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Skeleton rows shown while the list loads; enough to fill a phone screen. */
+export const SKELETON_ROWS = 6;
+
+/**
+ * The loading body: placeholder cards with the real card's box (border, padding,
+ * min height) and a 48px avatar disc, so swapping in the list shifts nothing.
+ * Reuses the repo's animate-pulse + bg-panel-2 skeleton pattern.
+ */
+export function channelListSkeleton(): ReactElement {
+  return (
+    <ul
+      className="flex flex-col gap-2 px-3 py-3"
+      aria-busy="true"
+      aria-label="Loading conversations"
+    >
+      {Array.from({ length: SKELETON_ROWS }).map((_, i) => (
+        <li key={i}>
+          <div
+            data-skeleton-row
+            className="flex w-full items-center gap-3 rounded-xl border border-l-[3px] border-border border-l-transparent bg-panel px-3 py-3 min-h-[64px] animate-pulse"
+          >
+            <div className="h-12 w-12 shrink-0 rounded-full bg-panel-2" />
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <div className="h-3.5 w-1/2 rounded bg-panel-2" />
+              <div className="h-3 w-3/4 rounded bg-panel-2" />
+            </div>
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The error body: the load failed, so no partial list; Retry re-runs it. */
+export function channelListError(onRetry: () => void): ReactElement {
+  return (
+    <EmptyState
+      icon={<IconChat size={24} />}
+      title="Couldn't load conversations"
+      description="Check your connection and try again."
+      action={
+        <Button size="lg" variant="primary" className="min-w-[44px]" onClick={onRetry}>
+          Retry
+        </Button>
+      }
+    />
   );
 }
 
@@ -321,16 +382,18 @@ function selectBar(select: ChannelSelectMode): ReactElement {
 
 /**
  * The full channel list pane: the shared SectionHeader (controlled name search +
- * accent "+" New chat, no sort, no chips) above the filtered body. Pure (no
+ * accent "+" New chat, no sort, no chips) above the body. While loading the body
+ * is skeleton rows and on error a Retry state; Select, rows and the empty state
+ * appear only once the store is ready, already hidden-filtered and sorted. Pure (no
  * hooks) so the search wiring and the single-header guarantee are unit tested by
  * walking the returned tree; ChannelList owns the search state.
  */
 export function channelListContent(props: ChannelListContentProps): ReactElement {
   const summaryFor: SummaryLookup = props.summaryFor ?? (() => undefined);
   const isHidden: HiddenLookup = props.isHidden ?? (() => false);
-  const filtered = visibleChannels(props.channels, summaryFor, isHidden, props.search);
-  const hasChannels = props.channels.some((c) => !isHidden(c.channelId));
-  const select = props.select;
+  const ready = props.status === 'ready';
+  const hasChannels = ready && props.channels.some((c) => !isHidden(c.channelId));
+  const select = ready ? props.select : undefined;
   const selecting = select?.active === true ? select : undefined;
   return (
     <div className="flex h-full flex-col">
@@ -366,22 +429,31 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
         />
       )}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {channelListView({
-          channels: filtered,
-          hasChannels: hasChannels || props.search.trim() !== '',
-          selectedChannelId: props.selectedChannelId,
-          onSelect: props.onSelect,
-          onNewChat: props.onNewChat,
-          summaryFor,
-          ...(selecting !== undefined
-            ? { selecting: { selectedIds: selecting.selectedIds, onToggle: selecting.onToggle } }
-            : {}),
-          ...(props.onLongPress !== undefined && selecting === undefined
-            ? { onLongPress: props.onLongPress }
-            : {}),
-          ...(props.nowMs !== undefined ? { nowMs: props.nowMs } : {}),
-          ...(props.timeZone !== undefined ? { timeZone: props.timeZone } : {}),
-        })}
+        {props.status === 'loading'
+          ? channelListSkeleton()
+          : props.status === 'error'
+            ? channelListError(props.onRetry)
+            : channelListView({
+                channels: visibleChannels(props.channels, summaryFor, isHidden, props.search),
+                hasChannels: hasChannels || props.search.trim() !== '',
+                selectedChannelId: props.selectedChannelId,
+                onSelect: props.onSelect,
+                onNewChat: props.onNewChat,
+                summaryFor,
+                ...(selecting !== undefined
+                  ? {
+                      selecting: {
+                        selectedIds: selecting.selectedIds,
+                        onToggle: selecting.onToggle,
+                      },
+                    }
+                  : {}),
+                ...(props.onLongPress !== undefined && selecting === undefined
+                  ? { onLongPress: props.onLongPress }
+                  : {}),
+                ...(props.nowMs !== undefined ? { nowMs: props.nowMs } : {}),
+                ...(props.timeZone !== undefined ? { timeZone: props.timeZone } : {}),
+              })}
       </div>
       {selecting !== undefined ? selectBar(selecting) : null}
     </div>

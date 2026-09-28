@@ -9,6 +9,7 @@
 // and React state; keeping the logic here lets the reducer be unit-tested in
 // isolation with no connection.
 
+import type { ChannelSummary } from '@/lib/chat-reads';
 import type { ConversationPreview, UnreadCount } from '@/lib/chat/history';
 import type { LocalMessageContent } from '@/lib/chat/thread';
 
@@ -30,8 +31,20 @@ export interface ConversationSummary {
   unread: number;
 }
 
+/**
+ * Where the chat list's first load stands. 'ready' only once the roster, clears,
+ * previews and unread counts have all resolved and been applied together, so
+ * the first painted list is already hidden-filtered and recency-sorted.
+ */
+export type ChatLoadStatus = 'loading' | 'ready' | 'error';
+
 /** Full store state. `conversations` is keyed by our channel_id. */
 export interface ChatStoreState {
+  /** The workspace + user the loaded data belongs to; null before any load. */
+  scope: string | null;
+  status: ChatLoadStatus;
+  /** The workspace's channels (registry + display info); the list renders these. */
+  roster: readonly ChannelSummary[];
   conversations: Record<string, ConversationSummary>;
   /** The channel the user is viewing; its incoming messages stay read. */
   activeConversationId: string | null;
@@ -75,6 +88,9 @@ export interface OwnMessage {
 /** Empty store: no conversations, nothing active, nothing pending. */
 export function initialState(): ChatStoreState {
   return {
+    scope: null,
+    status: 'loading',
+    roster: [],
     conversations: {},
     activeConversationId: null,
     pendingOpenConversationId: null,
@@ -119,12 +135,84 @@ export function mergeInitial(roster: readonly RosterEntry[]): ChatStoreState {
   for (const entry of roster) {
     conversations[entry.channelId] = emptySummary();
   }
+  return { ...initialState(), conversations };
+}
+
+/** The key a load is tied to; a response for another scope is stale. */
+export function loadScope(workspaceId: string, currentUserId: string): string {
+  return `${workspaceId}:${currentUserId}`;
+}
+
+/**
+ * The load status for the given scope. Data loaded for another workspace or
+ * user reads as 'loading', so a switch never paints the previous rows.
+ */
+export function selectLoadStatus(state: ChatStoreState, scope: string | null): ChatLoadStatus {
+  return scope !== null && state.scope === scope ? state.status : 'loading';
+}
+
+/**
+ * Start a (re)load for a scope: drop every previous row, preview, count and
+ * clear. The viewed and pending-open channels are kept for a same-scope retry.
+ */
+export function beginLoad(state: ChatStoreState, scope: string): ChatStoreState {
+  const sameScope = state.scope === scope;
   return {
-    conversations,
-    activeConversationId: null,
-    pendingOpenConversationId: null,
-    clears: {},
+    ...initialState(),
+    scope,
+    activeConversationId: sameScope ? state.activeConversationId : null,
+    pendingOpenConversationId: sameScope ? state.pendingOpenConversationId : null,
   };
+}
+
+/** Everything the first paint needs, resolved together. */
+export interface InitialLoad {
+  scope: string;
+  roster: readonly ChannelSummary[];
+  clears: readonly ChannelClear[];
+  previews: readonly ConversationPreview[];
+  counts: readonly UnreadCount[];
+  currentUserId: string;
+}
+
+/**
+ * Apply a finished load in one transition: roster, then clears (so the unread
+ * overlay knows what was deleted), previews and unread counts, then 'ready'.
+ * A load for a scope the store has moved on from is ignored.
+ */
+export function loadReady(state: ChatStoreState, load: InitialLoad): ChatStoreState {
+  if (state.scope !== load.scope) return state;
+  const seeded: ChatStoreState = {
+    ...mergeInitial(load.roster),
+    scope: load.scope,
+    roster: load.roster,
+    activeConversationId: state.activeConversationId,
+    pendingOpenConversationId: state.pendingOpenConversationId,
+  };
+  const withClears = applyClears(seeded, load.clears);
+  const withPreviews = applyPreviews(withClears, load.previews, load.currentUserId);
+  return { ...applyUnreadCounts(withPreviews, load.counts), status: 'ready' };
+}
+
+/** A load for this scope failed: show the error state, never a partial list. */
+export function loadFailed(state: ChatStoreState, scope: string): ChatStoreState {
+  if (state.scope !== scope) return state;
+  return { ...state, status: 'error', roster: [], conversations: {}, clears: {} };
+}
+
+/**
+ * Replace the roster after a mutation (new DM or group, rename, leave). Known
+ * channels keep their summary; a new one is keyed empty so it still lists.
+ */
+export function applyRoster(
+  state: ChatStoreState,
+  roster: readonly ChannelSummary[],
+): ChatStoreState {
+  const conversations: Record<string, ConversationSummary> = {};
+  for (const entry of roster) {
+    conversations[entry.channelId] = state.conversations[entry.channelId] ?? emptySummary();
+  }
+  return { ...state, roster, conversations };
 }
 
 /**

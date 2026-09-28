@@ -90,6 +90,8 @@ function content(over: {
   return channelListContent({
     channels: over.channels,
     selectedChannelId: null,
+    status: 'ready',
+    onRetry: () => {},
     onSelect: () => {},
     onNewChat: over.onNewChat ?? (() => {}),
     search: over.search ?? '',
@@ -204,6 +206,8 @@ describe('hidden chats (deleted for me)', () => {
     const tree = channelListContent({
       channels,
       selectedChannelId: null,
+      status: 'ready',
+      onRetry: () => {},
       onSelect: () => {},
       onNewChat: () => {},
       search: '',
@@ -216,6 +220,8 @@ describe('hidden chats (deleted for me)', () => {
     const allHidden = channelListContent({
       channels,
       selectedChannelId: null,
+      status: 'ready',
+      onRetry: () => {},
       onSelect: () => {},
       onNewChat: () => {},
       search: '',
@@ -248,6 +254,8 @@ describe('select mode', () => {
     return channelListContent({
       channels,
       selectedChannelId: null,
+      status: 'ready',
+      onRetry: () => {},
       onSelect: () => {},
       onNewChat: () => {},
       search: '',
@@ -299,6 +307,8 @@ describe('select mode', () => {
     const t = channelListContent({
       channels,
       selectedChannelId: null,
+      status: 'ready',
+      onRetry: () => {},
       onSelect: () => {},
       onNewChat: () => {},
       search: '',
@@ -310,5 +320,71 @@ describe('select mode', () => {
     expect(
       cards.every((c) => (c.props as { onLongPress?: unknown }).onLongPress === undefined),
     ).toBe(true);
+  });
+});
+
+describe('load status', () => {
+  const channels = [summary({ channelId: 'a', title: 'Design team' })];
+
+  function withStatus(status: 'loading' | 'error', onRetry: () => void = () => {}): ReactElement {
+    return channelListContent({
+      channels,
+      status,
+      onRetry,
+      selectedChannelId: null,
+      onSelect: () => {},
+      onNewChat: () => {},
+      search: '',
+      onSearchChange: () => {},
+      select: {
+        active: false,
+        selectedIds: new Set(),
+        onStart: () => {},
+        onCancel: () => {},
+        onToggle: () => {},
+        onDelete: () => {},
+      },
+    });
+  }
+
+  it('loading renders skeleton rows, never the empty state, rows or Select', () => {
+    const tree = withStatus('loading');
+    const skeletons = findAll(
+      tree,
+      (el) => (el.props as Record<string, unknown>)['data-skeleton-row'] !== undefined,
+    );
+    expect(skeletons.length).toBeGreaterThan(0);
+    expect(findAll(tree, (el) => el.type === EmptyState)).toHaveLength(0);
+    expect(findAll(tree, (el) => el.type === ChannelCard)).toHaveLength(0);
+    expect(texts(tree)).not.toContain('Select');
+    expect(texts(tree)).not.toContain('No conversations yet');
+  });
+
+  it('skeleton rows match the real card box and 48px avatar', () => {
+    const [row] = findAll(
+      withStatus('loading'),
+      (el) => (el.props as Record<string, unknown>)['data-skeleton-row'] !== undefined,
+    );
+    const cls = (row!.props as { className: string }).className;
+    for (const token of ['border-l-[3px]', 'px-3', 'py-3', 'min-h-[64px]', 'rounded-xl']) {
+      expect(cls).toContain(token);
+    }
+    const avatar = findAll(row!, (el) =>
+      ((el.props as { className?: string }).className ?? '').includes('rounded-full'),
+    );
+    expect((avatar[0]!.props as { className: string }).className).toContain('h-12 w-12');
+  });
+
+  it('error renders Retry (44px tall) and no rows or Select', () => {
+    const onRetry = vi.fn();
+    const tree = withStatus('error', onRetry);
+    expect(findAll(tree, (el) => el.type === ChannelCard)).toHaveLength(0);
+    expect(texts(tree)).not.toContain('Select');
+    const empty = findAll(tree, (el) => el.type === EmptyState)[0]!;
+    const retry = (empty.props as { action: ReactElement }).action;
+    expect(retry.props).toMatchObject({ size: 'lg', children: 'Retry' });
+    expect((retry.props as { className: string }).className).toContain('min-w-[44px]');
+    (retry.props as { onClick: () => void }).onClick();
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });
