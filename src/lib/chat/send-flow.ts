@@ -13,19 +13,34 @@
 // the SAME message id and a fresh trace id per attempt; the bubble stays
 // 'sending' and only turns 'failed' once the head has failed continuously for
 // FAILED_AFTER_MS. kick() (reconnect, tab visible, online) retries at once.
+//
+// Instant attachment sends: an entry may carry picked files (attachment.local)
+// whose asset id is still ''. Each attempt first uploads those, in order and one
+// at a time, reporting progress as 'progress' events, and stores every returned
+// version id on the entry; only then does it record once with all the ids. An
+// upload failure is a failed attempt (same backoff and FAILED_AFTER_MS), and a
+// retry uploads only the files that still have no version id. An entry restored
+// with its files lost (filesMissing) never runs and does not hold up the queue.
 
 import type { SendRecordResult } from '@/lib/chat/record';
 import {
   outboxDropChannel,
   outboxPut,
   outboxRemove,
+  outboxSetAttachments,
   outboxSetState,
   selectOutbox,
   type Outbox,
   type OutboxEntry,
   type OutboxEvent,
 } from '@/lib/chat/chat-store';
-import { buildAttachmentMeta, type AttachmentMetaMap } from '@/lib/chat/attachments';
+import {
+  awaitsUpload,
+  buildAttachmentMeta,
+  type AttachmentMetaMap,
+  type ChatAttachmentUpload,
+  type MessageAttachment,
+} from '@/lib/chat/attachments';
 import {
   rowToThreadMessage,
   type LocalMessageContent,
@@ -198,6 +213,20 @@ export interface OutboxSender {
   dispose: () => void;
 }
 
+/** The entry a channel's queue runs next: the oldest one that can still be sent. */
+function headOf(entries: readonly OutboxEntry[]): OutboxEntry | undefined {
+  return entries.find((e) => e.filesMissing !== true);
+}
+
+/** Copy of `attachments` with one item replaced. */
+function replaceAt(
+  attachments: readonly MessageAttachment[],
+  index: number,
+  next: MessageAttachment,
+): MessageAttachment[] {
+  return attachments.map((a, i) => (i === index ? next : a));
+}
+
 /** One channel's queue runner. */
 interface Lane {
   busy: boolean;
@@ -245,15 +274,68 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     deps.onEvent({ type: 'state', channelId, id, state });
   };
 
-  /** Failed entries go back to 'sending' with a fresh failure window. */
+  /** Failed entries go back to 'sending' with a fresh failure window (lost files stay failed). */
   const resume = (channelId: string): void => {
     const lane = laneFor(channelId);
     lane.failures = 0;
     lane.failingSince = null;
     for (const entry of selectOutbox(outbox, channelId)) {
-      if (entry.state === 'failed') setState(channelId, entry.id, 'sending');
+      if (entry.state === 'failed' && entry.filesMissing !== true) {
+        setState(channelId, entry.id, 'sending');
+      }
     }
     pump(channelId);
+  };
+
+  /** The entry as the outbox holds it now; undefined once settled or dropped. */
+  const current = (channelId: string, id: string): OutboxEntry | undefined =>
+    selectOutbox(outbox, channelId).find((e) => e.id === id);
+
+  /**
+   * Upload the entry's files that have no version id yet, in order. Progress
+   * ticks update memory only (no persistence write per tick); each finished
+   * upload is committed, so a retry or a reload keeps its version id. Resolves
+   * to the entry ready to record, null when it left the outbox (or the sender
+   * stopped) mid-way, or the first failure.
+   */
+  const uploadPending = async (
+    channelId: string,
+    lane: Lane,
+    id: string,
+  ): Promise<{ ok: true; entry: OutboxEntry | null } | { ok: false; error: string }> => {
+    for (;;) {
+      if (!isLive(channelId, lane)) return { ok: true, entry: null };
+      const entry = current(channelId, id);
+      if (entry === undefined) return { ok: true, entry: null };
+      const attachments = entry.local.attachments;
+      const index = attachments.findIndex(awaitsUpload);
+      if (index === -1) return { ok: true, entry };
+      const target = attachments[index];
+      const local = target?.local;
+      if (target === undefined || local === undefined) return { ok: true, entry };
+      if (local.file === null || local.upload === undefined) {
+        return { ok: false, error: 'attachment file unavailable' };
+      }
+      const publish = (next: MessageAttachment, persist: boolean): void => {
+        const latest = current(channelId, id);
+        if (latest === undefined || !isLive(channelId, lane)) return;
+        const list = replaceAt(latest.local.attachments, index, next);
+        const updated = outboxSetAttachments(outbox, channelId, id, list);
+        if (persist) commit(updated);
+        else outbox = updated;
+        deps.onEvent({ type: 'progress', channelId, id, attachments: list });
+      };
+      let result: ChatAttachmentUpload;
+      try {
+        result = await local.upload(local.file, (fraction) =>
+          publish({ ...target, local: { ...local, progress: fraction } }, false),
+        );
+      } catch (error) {
+        return { ok: false, error: String(error) };
+      }
+      if (!result.ok) return { ok: false, error: result.message };
+      publish({ ...target, assetId: result.versionId, local: { ...local, progress: 1 } }, true);
+    }
   };
 
   const isLive = (channelId: string, lane: Lane): boolean =>
@@ -289,7 +371,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       failures: lane.failures + 1,
     });
     // Settled by a catch-up (or dropped) while this attempt was in flight.
-    if (selectOutbox(outbox, channelId)[0]?.id !== head.id) {
+    if (headOf(selectOutbox(outbox, channelId))?.id !== head.id) {
       lane.failures = 0;
       lane.failingSince = null;
       pump(channelId);
@@ -317,7 +399,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     if (disposed) return;
     const lane = laneFor(channelId);
     if (lane.busy || lane.timer !== null) return;
-    const head = selectOutbox(outbox, channelId)[0];
+    const head = headOf(selectOutbox(outbox, channelId));
     if (head === undefined || head.state !== 'sending') return;
     lane.busy = true;
     const traceId = deps.newTraceId();
@@ -332,13 +414,34 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       settled = true;
       onFailed(channelId, lane, head, traceId, reason, error);
     };
-    void deps.deliver(channelId, head, traceId, recorded).then(
-      (outcome) => {
-        if (outcome.ok) recorded(outcome.message);
-        else failed(outcome.reason, outcome.error);
-      },
-      (error: unknown) => failed('error', String(error)),
-    );
+    const deliver = (entry: OutboxEntry): void => {
+      void deps.deliver(channelId, entry, traceId, recorded).then(
+        (outcome) => {
+          if (outcome.ok) recorded(outcome.message);
+          else failed(outcome.reason, outcome.error);
+        },
+        (error: unknown) => failed('error', String(error)),
+      );
+    };
+    // A text-only (or fully uploaded) entry records in this same tick.
+    if (!head.local.attachments.some(awaitsUpload)) {
+      deliver(head);
+      return;
+    }
+    void uploadPending(channelId, lane, head.id).then((uploaded) => {
+      if (!uploaded.ok) {
+        failed('upload', uploaded.error);
+        return;
+      }
+      if (uploaded.entry !== null) {
+        deliver(uploaded.entry);
+        return;
+      }
+      // Settled, dropped or stopped while uploading: release the lane.
+      settled = true;
+      lane.busy = false;
+      if (isLive(channelId, lane)) pump(channelId);
+    });
   }
 
   for (const channelId of Object.keys(outbox)) pump(channelId);
@@ -360,7 +463,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     },
     settle: (channelId, id) => {
       if (disposed) return;
-      const wasHead = selectOutbox(outbox, channelId)[0]?.id === id;
+      const wasHead = headOf(selectOutbox(outbox, channelId))?.id === id;
       commit(outboxRemove(outbox, channelId, id));
       const lane = lanes.get(channelId);
       if (!wasHead || lane === undefined) return;

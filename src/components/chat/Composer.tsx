@@ -29,8 +29,8 @@ import { precheckFile } from '@/lib/asset-upload';
 import {
   canSendAttachmentMessage,
   precheckImage,
-  toMessageAttachment,
-  type ChatAttachmentUpload,
+  toLocalAttachment,
+  type AttachmentUploader,
   type MessageAttachment,
   type ReplyQuote,
 } from '@/lib/chat/attachments';
@@ -38,13 +38,17 @@ import type { PostCardFields } from '@srtdio/posts';
 
 interface ComposerProps {
   /**
-   * Queues the trimmed text plus any completed attachments and shared posts and
-   * briefs. Synchronous: delivery and its retries run in the background.
+   * Queues the trimmed text plus any picked files (local attachments that upload
+   * in the background) and shared posts and briefs. Synchronous: uploads,
+   * delivery and retries run in the background.
    */
   onSend: ComposerSend;
   disabled: boolean;
-  /** Upload one picked file via the asset pipeline; absent disables attaching. */
-  uploadFile?: ((file: File) => Promise<ChatAttachmentUpload>) | undefined;
+  /**
+   * Upload one file via the asset pipeline (with progress); absent disables
+   * attaching. Picked files carry it to the outbox; voice notes call it here.
+   */
+  uploadFile?: AttachmentUploader | undefined;
   /** Transcribe a recorded voice note; absent sends the audio with no transcript. */
   transcribe?: ((blob: Blob) => Promise<TranscribeResult>) | undefined;
   /** Called on each keystroke so the parent can broadcast a throttled typing signal. */
@@ -55,17 +59,11 @@ interface ComposerProps {
   onCancelReply?: (() => void) | undefined;
 }
 
-type PendingStatus =
-  | { state: 'uploading' }
-  | { state: 'done'; versionId: string }
-  | { state: 'error'; message: string };
-
-/** One picked file and its upload lifecycle, shown as a removable chip. */
-interface Pending {
+/** One accepted picked file, shown as a removable chip until Send. */
+export interface Pending {
   id: string;
   file: File;
   previewUrl: string | null;
-  status: PendingStatus;
 }
 
 let pendingSeq = 0;
@@ -163,25 +161,47 @@ function formatMmSs(s: number): string {
   return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
 }
 
-function completedAttachments(pending: readonly Pending[]): MessageAttachment[] {
-  const out: MessageAttachment[] = [];
-  for (const item of pending) {
-    if (item.status.state === 'done')
-      out.push(toMessageAttachment(item.file, item.status.versionId));
-  }
-  return out;
+/**
+ * The picked files as the send carries them: one local attachment per chip, in
+ * order, holding the File, its preview URL (the bubble tile shows it) and the
+ * uploader. The upload itself runs in the outbox after Send.
+ */
+export function draftAttachments(
+  pending: readonly Pending[],
+  upload: AttachmentUploader | undefined,
+): MessageAttachment[] {
+  return pending.map((item) => toLocalAttachment(item.file, item.previewUrl, upload));
+}
+
+/** Whether Send is enabled: text, a picked file, or a shared post or brief. Never waits on an upload. */
+export function composerCanSend(input: {
+  disabled: boolean;
+  text: string;
+  fileCount: number;
+  sharedPostCount: number;
+  sharedBriefCount: number;
+}): boolean {
+  return (
+    !input.disabled &&
+    canSendAttachmentMessage({
+      text: input.text,
+      attachmentCount: input.fileCount,
+      sharedPostCount: input.sharedPostCount,
+      sharedBriefCount: input.sharedBriefCount,
+      sending: false,
+    })
+  );
 }
 
 /**
  * Composer with text + an extensible attach menu (Photo / File). Files are
- * pre-checked client-side, uploaded through the asset pipeline, and shown as
- * removable chips with progress; an upload failure surfaces inline on its chip
- * and never throws. Send carries the completed attachments plus any text;
- * attachments-only is allowed, empty is blocked, and send is disabled while any
- * upload is in flight. `onSend` only queues the message, so the draft clears
- * and Send re-enables in the same tick (delivery, retries and a final failure
- * surface on the bubble, not here); a throw is unexpected, so it is logged,
- * surfaced as a toast, and the draft is kept.
+ * pre-checked client-side (a rejected one is refused with a toast) and shown as
+ * removable chips; nothing uploads here. Send hands the picked files over as
+ * local attachments: the bubble shows at once from the previews and the outbox
+ * uploads them in the background, with progress on the bubble. Attachments-only
+ * is allowed, empty is blocked. `onSend` only queues the message, so the draft
+ * clears and Send re-enables in the same tick; a throw is unexpected, so it is
+ * logged, surfaced as a toast, and the draft is kept.
  */
 export function Composer(props: ComposerProps): ReactElement {
   const [text, setText] = useState('');
@@ -199,18 +219,13 @@ export function Composer(props: ComposerProps): ReactElement {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const canAttach = props.uploadFile !== undefined && !props.disabled;
-  const uploading = pending.some((item) => item.status.state === 'uploading');
-  const ready = useMemo(() => completedAttachments(pending), [pending]);
-  const canSend =
-    !props.disabled &&
-    canSendAttachmentMessage({
-      text,
-      attachmentCount: ready.length,
-      sharedPostCount: sharedPosts.length,
-      sharedBriefCount: sharedBriefs.length,
-      uploading,
-      sending: false,
-    });
+  const canSend = composerCanSend({
+    disabled: props.disabled,
+    text,
+    fileCount: pending.length,
+    sharedPostCount: sharedPosts.length,
+    sharedBriefCount: sharedBriefs.length,
+  });
 
   const menuItems = useMemo(
     () =>
@@ -222,36 +237,20 @@ export function Composer(props: ComposerProps): ReactElement {
     [],
   );
 
-  async function addFiles(list: FileList | null, imageOnly: boolean): Promise<void> {
-    const upload = props.uploadFile;
-    if (list === null || list.length === 0 || upload === undefined) return;
+  function addFiles(list: FileList | null, imageOnly: boolean): void {
+    if (list === null || list.length === 0 || props.uploadFile === undefined) return;
+    const accepted: Pending[] = [];
     for (const file of Array.from(list)) {
-      const id = `att-${(pendingSeq += 1)}`;
       // The Photo path is image-only; the File path takes the full allowlist.
       const check = imageOnly ? precheckImage(file) : precheckFile(file);
       if (!check.ok) {
-        setPending((prev) => [
-          ...prev,
-          { id, file, previewUrl: null, status: { state: 'error', message: check.message } },
-        ]);
+        toast.show({ title: check.message });
         continue;
       }
       const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null;
-      setPending((prev) => [...prev, { id, file, previewUrl, status: { state: 'uploading' } }]);
-      const outcome = await upload(file);
-      setPending((prev) =>
-        prev.map((item) =>
-          item.id === id
-            ? {
-                ...item,
-                status: outcome.ok
-                  ? { state: 'done', versionId: outcome.versionId }
-                  : { state: 'error', message: outcome.message },
-              }
-            : item,
-        ),
-      );
+      accepted.push({ id: `att-${(pendingSeq += 1)}`, file, previewUrl });
     }
+    if (accepted.length > 0) setPending((prev) => [...prev, ...accepted]);
   }
 
   function removePending(id: string): void {
@@ -292,7 +291,7 @@ export function Composer(props: ComposerProps): ReactElement {
     if (!canSend) return;
     const taken = dispatchSend(props.onSend, {
       text,
-      attachments: ready,
+      attachments: draftAttachments(pending, props.uploadFile),
       sharedPostIds: sharedPosts.map((post) => post.id),
       reply: props.reply?.quote ?? null,
       sharedBriefIds: sharedBriefs.map((brief) => brief.id),
@@ -302,9 +301,7 @@ export function Composer(props: ComposerProps): ReactElement {
       toast.show({ title: 'Could not send the message. Your draft is kept.' });
       return;
     }
-    for (const item of pending) {
-      if (item.previewUrl != null) URL.revokeObjectURL(item.previewUrl);
-    }
+    // The preview URLs now belong to the bubble (revoked when it goes).
     setText('');
     setPending([]);
     setSharedPosts([]);
@@ -368,7 +365,7 @@ export function Composer(props: ComposerProps): ReactElement {
     hasUpload: props.uploadFile !== undefined,
     disabled: props.disabled,
     text,
-    attachmentCount: ready.length,
+    attachmentCount: pending.length,
     sharedPostCount: sharedPosts.length + sharedBriefs.length,
     recording: recorder.recording,
     voiceBusy,
@@ -409,8 +406,7 @@ export function Composer(props: ComposerProps): ReactElement {
                 )
               }
               title={item.file.name}
-              meta={pendingMeta(item)}
-              error={item.status.state === 'error'}
+              meta={fileExtension(item.file.name)}
               onRemove={() => removePending(item.id)}
             />
           ))}
@@ -539,7 +535,7 @@ export function Composer(props: ComposerProps): ReactElement {
         accept={menuItems.find((item) => item.id === 'photo')?.accept}
         className="sr-only"
         onChange={(event) => {
-          void addFiles(event.target.files, true);
+          addFiles(event.target.files, true);
           event.target.value = '';
         }}
       />
@@ -550,7 +546,7 @@ export function Composer(props: ComposerProps): ReactElement {
         accept={menuItems.find((item) => item.id === 'file')?.accept}
         className="sr-only"
         onChange={(event) => {
-          void addFiles(event.target.files, false);
+          addFiles(event.target.files, false);
           event.target.value = '';
         }}
       />
@@ -570,11 +566,4 @@ export function Composer(props: ComposerProps): ReactElement {
 /** Title-case a stage value for its chip meta (stage strings come from the Row). */
 function stageLabel(stage: string): string {
   return stage.charAt(0).toUpperCase() + stage.slice(1);
-}
-
-/** A picked file's meta line: uploading, its error, or its extension. */
-function pendingMeta(item: Pending): string {
-  if (item.status.state === 'uploading') return 'Uploading';
-  if (item.status.state === 'error') return item.status.message;
-  return fileExtension(item.file.name);
 }

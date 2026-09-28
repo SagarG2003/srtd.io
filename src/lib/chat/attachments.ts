@@ -18,6 +18,7 @@ import {
   uploadErrorMessage,
   UPLOAD_ACCEPT,
   type Precheck,
+  type UploadTransport,
 } from '@/lib/asset-upload';
 
 /**
@@ -36,6 +37,86 @@ export interface MessageAttachment {
   size?: number;
   /** Recorded length of a voice note in ms; absent for non-audio attachments. */
   durationMs?: number;
+  /**
+   * Sender-side only: the picked file behind an instant send. Present from the
+   * Send tap; `assetId` stays '' until the background upload returns the version
+   * id. Never on the wire, in attachment_meta, or in localStorage.
+   */
+  local?: LocalAttachmentFile;
+}
+
+/** Upload one file with progress (0..1); never throws (asset-upload Result contract). */
+export type AttachmentUploader = (
+  file: File,
+  onProgress?: (fraction: number) => void,
+) => Promise<ChatAttachmentUpload>;
+
+/** The local half of an attachment sent before its upload finished. */
+export interface LocalAttachmentFile {
+  /** Stable render key for the tile (the asset id arrives later). */
+  key: string;
+  /** The picked file; null once restored from storage (files do not survive a reload). */
+  file: File | null;
+  /** Object URL shown as the tile image for the session; null for non-images. */
+  previewUrl: string | null;
+  /** Upload progress 0..1; 1 once the version id is known. */
+  progress: number;
+  /** Uploads the file; carried in memory with the send (never persisted). */
+  upload?: AttachmentUploader;
+}
+
+let localSeq = 0;
+
+/**
+ * The attachment an instant send carries: the file's name, mime and size, an
+ * empty asset id (filled in by the background upload), and its local preview.
+ */
+export function toLocalAttachment(
+  file: File,
+  previewUrl: string | null,
+  upload: AttachmentUploader | undefined,
+): MessageAttachment {
+  localSeq += 1;
+  return {
+    assetId: '',
+    name: file.name,
+    mime: file.type,
+    size: file.size,
+    local: {
+      key: `local-${localSeq}`,
+      file,
+      previewUrl,
+      progress: 0,
+      ...(upload !== undefined ? { upload } : {}),
+    },
+  };
+}
+
+/** True while an attachment still has to be uploaded before its message can record. */
+export function awaitsUpload(attachment: MessageAttachment): boolean {
+  return attachment.assetId === '' && attachment.local !== undefined;
+}
+
+/** Upload progress to render on a tile; null when there is nothing in flight (plain tile). */
+export function uploadProgress(attachment: MessageAttachment): number | null {
+  if (attachment.local === undefined || attachment.assetId !== '') return null;
+  return Math.min(Math.max(attachment.local.progress, 0), 1);
+}
+
+/** The attachment without its local half: what is persisted and recorded. */
+export function withoutLocal(attachment: MessageAttachment): MessageAttachment {
+  if (attachment.local === undefined) return attachment;
+  const rest = { ...attachment };
+  delete rest.local;
+  return rest;
+}
+
+/** Revoke the object URLs of local previews (entry removed, bubble gone). */
+export function revokeLocalPreviews(attachments: readonly MessageAttachment[]): void {
+  for (const attachment of attachments) {
+    const url = attachment.local?.previewUrl;
+    if (url != null) URL.revokeObjectURL(url);
+  }
 }
 
 /** The picker `accept` for the Photo item: the image subset of the shared allowlist. */
@@ -279,20 +360,18 @@ export function parseAttachments(ext: unknown): MessageAttachment[] {
 }
 
 /**
- * Whether a compose action may send: text, at least one attachment, or at least
- * one shared post, while idle. A shared-posts-only send is allowed; a send with
- * none of the three is blocked. `sharedPostCount` is optional so the PR5 callers
- * that predate post sharing keep their existing two-argument behaviour.
+ * Whether a compose action may send: text, at least one accepted attachment, or
+ * at least one shared post or brief, while idle. Uploads never block: a picked
+ * file uploads in the background after Send. A send with none is blocked.
  */
 export function canSendAttachmentMessage(input: {
   text: string;
   attachmentCount: number;
   sharedPostCount?: number;
   sharedBriefCount?: number;
-  uploading: boolean;
   sending: boolean;
 }): boolean {
-  if (input.uploading || input.sending) return false;
+  if (input.sending) return false;
   return (
     input.text.trim() !== '' ||
     input.attachmentCount > 0 ||
@@ -322,14 +401,12 @@ export function toMessageAttachment(file: File, versionId: string): MessageAttac
   return { assetId: versionId, name: file.name, mime: file.type, size: file.size };
 }
 
-export interface ChatUploadParams {
+export type ChatUploadParams = {
   file: File;
   workspaceId: string;
   token: string;
   endpoint: string;
-  /** Injected so tests pass a mock; the app passes fetchWithTrace. */
-  fetcher: (input: string, init: RequestInit) => Promise<Response>;
-}
+} & UploadTransport;
 
 /**
  * The chat upload result. It carries the asset VERSION id (presign binds to a
@@ -340,48 +417,29 @@ export type ChatAttachmentUpload =
   | { ok: true; reused: boolean; versionId: string }
   | { ok: false; message: string };
 
-/** Read `asset.versionId` from the asset-upload worker JSON body; '' when absent. */
-function uploadedVersionId(body: unknown): string {
-  if (typeof body !== 'object' || body === null) return '';
-  const asset = (body as { asset?: unknown }).asset;
-  if (typeof asset !== 'object' || asset === null) return '';
-  const versionId = (asset as { versionId?: unknown }).versionId;
-  return typeof versionId === 'string' ? versionId : '';
-}
-
 /**
  * Upload one chat attachment through the existing asset-upload pipeline, sending
  * the file under its original name. The POST is `uploadAssetFile` verbatim
- * (multipart {file, workspace_id} + Bearer); asset-upload surfaces only the asset
- * id, but the chat render path presigns an asset VERSION id (asset-read looks up
- * asset_versions.id). We capture `asset.versionId` off the same worker response
- * via a clone (so uploadAssetFile still reads the body) rather than issuing a
- * second request or duplicating the upload.
+ * (multipart {file, workspace_id} + Bearer), over XHR when the caller wants
+ * progress. The chat render path presigns an asset VERSION id (asset-read looks
+ * up asset_versions.id), read off the same worker response; a success without
+ * one fails closed.
  */
 export async function uploadChatAttachment(
   params: ChatUploadParams,
 ): Promise<ChatAttachmentUpload> {
-  let versionId = '';
-  const fetcher: ChatUploadParams['fetcher'] = async (input, init) => {
-    const response = await params.fetcher(input, init);
-    if (response.ok) {
-      try {
-        versionId = uploadedVersionId(await response.clone().json());
-      } catch {
-        versionId = '';
-      }
-    }
-    return response;
-  };
-
-  const outcome = await uploadAssetFile(params.file, {
+  const base = {
     endpoint: params.endpoint,
     token: params.token,
     workspaceId: params.workspaceId,
     filename: params.file.name,
-    fetcher,
-  });
+  };
+  const outcome = await uploadAssetFile(
+    params.file,
+    params.xhr !== undefined ? { ...base, xhr: params.xhr } : { ...base, fetcher: params.fetcher },
+  );
   if (!outcome.ok) return outcome;
+  const versionId = outcome.assetVersionId ?? '';
   if (versionId === '') {
     return { ok: false, message: uploadErrorMessage('network') };
   }

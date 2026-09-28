@@ -225,6 +225,32 @@ describe('MessageBubble time and state', () => {
     expect((root.props as { 'data-state': string })['data-state']).toBe('failed');
   });
 
+  it('a send whose files were lost to a reload reads "Photos not sent" with Remove only', () => {
+    const onRetry = vi.fn();
+    const message = makeMessage({
+      id: 'm-lost',
+      mine: true,
+      state: 'failed',
+      createdAt: '',
+      filesMissing: true,
+    });
+    expect(bubbleTimeLabel(message, 'UTC')).toBe('Photos not sent');
+    expect(bubbleStatus(message, { showTicks: true, tail: true })).toBe('files-missing');
+    const root = renderBubble(message, { onRetry });
+    const labels: string[] = [];
+    let remove: ReactElement | null = null;
+    walk(root, (el) => {
+      const label = (el.props as { label?: string }).label;
+      if (label !== undefined) labels.push(label);
+      if (label === 'Remove message') remove = el;
+    });
+    expect(labels).not.toContain('Retry sending');
+    expect(remove).not.toBeNull();
+    expect(allText(statusLine(root) as unknown as ReactElement)).toContain('Photos not sent');
+    (remove as unknown as { props: { onClick: () => void } }).props.onClick();
+    expect(onRetry).toHaveBeenCalledWith('m-lost');
+  });
+
   it('has no Retry control on a sent bubble or a peer bubble', () => {
     for (const message of [
       makeMessage({ mine: true }),

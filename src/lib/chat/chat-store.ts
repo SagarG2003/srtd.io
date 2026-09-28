@@ -13,7 +13,7 @@
 import type { ChannelSummary } from '@/lib/chat-reads';
 import type { ConversationPreview, UnreadCount } from '@/lib/chat/history';
 import type { LocalMessageContent, ThreadMessage } from '@/lib/chat/thread';
-import type { MessageAttachment, ReplyQuote } from '@/lib/chat/attachments';
+import { withoutLocal, type MessageAttachment, type ReplyQuote } from '@/lib/chat/attachments';
 
 /** Sender label written before the preview when the current user sent it. */
 export const OWN_PREFIX = 'You';
@@ -415,8 +415,17 @@ export function selectConversation(
 export interface OutboxEntry {
   id: string;
   text: string;
+  /**
+   * Attachments with an empty asset id carry their File (attachment.local) and
+   * upload in the background before the record; progress lives here too.
+   */
   local: LocalMessageContent;
   state: 'sending' | 'failed';
+  /**
+   * Restored from storage with files that never finished uploading: the File
+   * did not survive the reload, so it can only be removed ('failed', no Retry).
+   */
+  filesMissing?: true;
 }
 
 /** Unrecorded own sends keyed by our channel_id, oldest first per channel. */
@@ -441,6 +450,21 @@ export function outboxSetState(
   const list = outbox[channelId];
   if (list === undefined || !list.some((e) => e.id === id)) return outbox;
   return { ...outbox, [channelId]: list.map((e) => (e.id === id ? { ...e, state } : e)) };
+}
+
+/** Replace one entry's attachments (upload progress, a returned version id). */
+export function outboxSetAttachments(
+  outbox: Outbox,
+  channelId: string,
+  id: string,
+  attachments: readonly MessageAttachment[],
+): Outbox {
+  const list = outbox[channelId];
+  if (list === undefined || !list.some((e) => e.id === id)) return outbox;
+  return {
+    ...outbox,
+    [channelId]: list.map((e) => (e.id === id ? { ...e, local: { ...e.local, attachments } } : e)),
+  };
 }
 
 /** Drop one entry once its row is recorded; an emptied channel is removed. */
@@ -470,7 +494,13 @@ export function selectOutbox(outbox: Outbox, channelId: string): readonly Outbox
 /** What the outbox tells the open thread: a bubble changed state, or its row landed. */
 export type OutboxEvent =
   | { type: 'state'; channelId: string; id: string; state: OutboxEntry['state'] }
-  | { type: 'recorded'; channelId: string; message: ThreadMessage };
+  | { type: 'recorded'; channelId: string; message: ThreadMessage }
+  | {
+      type: 'progress';
+      channelId: string;
+      id: string;
+      attachments: readonly MessageAttachment[];
+    };
 
 /**
  * The outbox surface the thread drives; the store provider implements it over
@@ -482,7 +512,10 @@ export interface ChannelOutbox {
   enqueue: (channelId: string, entry: OutboxEntry) => void;
   /** The Retry tap on a failed bubble: resume the channel's queue, same ids. */
   retry: (channelId: string, id: string) => void;
-  /** The row was read back from Postgres (catch-up): the send is done. */
+  /**
+   * The row was read back from Postgres (catch-up): the send is done. Also the
+   * Remove on an entry whose files were lost to a reload (it drops the entry).
+   */
   settle: (channelId: string, id: string) => void;
   subscribe: (listener: (event: OutboxEvent) => void) => () => void;
 }
@@ -536,7 +569,11 @@ function parseReply(value: unknown): ReplyQuote | null | undefined {
   return { id, authorUserId, preview };
 }
 
-/** One persisted entry back to an OutboxEntry ('sending'); null when malformed. */
+/**
+ * One persisted entry back to an OutboxEntry; null when malformed. It resumes
+ * 'sending' unless an attachment never got its version id: that File is gone,
+ * so the entry is 'failed' with filesMissing (Remove only).
+ */
 function parseEntry(value: unknown): OutboxEntry | null {
   if (!isRecord(value) || !isRecord(value.local)) return null;
   const { id, text } = value;
@@ -549,6 +586,7 @@ function parseEntry(value: unknown): OutboxEntry | null {
   if (parsedReply === undefined) return null;
   const valid = parsedAttachments.filter((a): a is MessageAttachment => a !== null);
   if (valid.length !== attachments.length) return null;
+  const filesMissing = valid.some((a) => a.assetId === '');
   return {
     id,
     text,
@@ -558,7 +596,8 @@ function parseEntry(value: unknown): OutboxEntry | null {
       ...(sharedBriefIds !== undefined ? { sharedBriefIds } : {}),
       reply: parsedReply,
     },
-    state: 'sending',
+    state: filesMissing ? 'failed' : 'sending',
+    ...(filesMissing ? { filesMissing: true as const } : {}),
   };
 }
 
@@ -571,7 +610,7 @@ function readRaw(storage: OutboxStorage): Record<string, unknown> | null {
 
 /**
  * The persisted outbox for exactly this workspace and user, every entry back
- * to 'sending'. Another workspace's entries are left in place (they resume
+ * to 'sending' (or 'failed' with filesMissing when its upload never finished). Another workspace's entries are left in place (they resume
  * when the user returns to it); another user's are deleted. Never throws:
  * unreadable storage or a malformed blob is an empty outbox.
  */
@@ -623,7 +662,13 @@ export function writePersistedOutbox(
     const persisted: Record<string, { id: string; text: string; local: LocalMessageContent }[]> =
       {};
     for (const [channelId, list] of pending) {
-      persisted[channelId] = list.map((e) => ({ id: e.id, text: e.text, local: e.local }));
+      // A File and its object URL cannot be stored: only the attachment fields
+      // are, so an unfinished upload restores with an empty asset id.
+      persisted[channelId] = list.map((e) => ({
+        id: e.id,
+        text: e.text,
+        local: { ...e.local, attachments: e.local.attachments.map(withoutLocal) },
+      }));
     }
     storage.setItem(
       OUTBOX_STORAGE_KEY,

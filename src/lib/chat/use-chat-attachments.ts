@@ -11,7 +11,11 @@ import { env } from '@/lib/env';
 import { useNewTrace } from '@/lib/trace-context';
 import { useWorkspace } from '@/lib/workspace-context';
 import { PresignCache } from '@/lib/asset-presign';
-import { uploadChatAttachment, type ChatAttachmentUpload } from '@/lib/chat/attachments';
+import {
+  uploadChatAttachment,
+  type AttachmentUploader,
+  type ChatAttachmentUpload,
+} from '@/lib/chat/attachments';
 import { transcribeAudio, type TranscribeResult } from '@/lib/chat/transcribe';
 
 export interface ChatAttachments {
@@ -21,8 +25,11 @@ export interface ChatAttachments {
   presignEnabled: boolean;
   /** One cache for the thread: bounds presign concurrency and caches URLs (no N+1). */
   presignCache: PresignCache;
-  /** Upload one picked file; never throws (asset-upload Result contract). */
-  uploadFile: (file: File) => Promise<ChatAttachmentUpload>;
+  /**
+   * Upload one picked file over XHR, reporting progress (0..1) when asked;
+   * never throws (asset-upload Result contract).
+   */
+  uploadFile: AttachmentUploader;
   /** Transcribe a recorded voice note; never throws (Result contract). */
   transcribe: (blob: Blob) => Promise<TranscribeResult>;
   /** Whether transcription is configured (transcribe endpoint set). */
@@ -49,7 +56,7 @@ export function useChatAttachments(): ChatAttachments {
   );
 
   const uploadFile = useCallback(
-    async (file: File): Promise<ChatAttachmentUpload> => {
+    async (file: File, onProgress?: (fraction: number) => void): Promise<ChatAttachmentUpload> => {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
         return { ok: false, message: 'Upload failed. Check your connection and retry' };
       }
@@ -65,7 +72,7 @@ export function useChatAttachments(): ChatAttachments {
         workspaceId,
         token,
         endpoint: uploadEndpoint,
-        fetcher: (input, init) => fetchWithTrace(input, init, newTrace()),
+        xhr: { traceId: newTrace(), ...(onProgress !== undefined ? { onProgress } : {}) },
       });
     },
     [uploadEndpoint, workspaceId, newTrace],

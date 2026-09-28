@@ -24,6 +24,7 @@ import {
   IconSettings,
   IconTickDouble,
   IconTickSingle,
+  IconTrash,
   IconUsers,
 } from '@/components/ui/icons';
 import { useLongPress, type LongPressHandlers } from '@/components/ui';
@@ -109,7 +110,10 @@ interface MessageThreadProps {
   ) => Promise<{ ok: true } | { ok: false; message: string }>;
   /** Load older pages until a message is present (jump-to). */
   onEnsureLoaded?: (messageId: string) => Promise<FindOlderOutcome>;
-  /** Re-run a failed send with the same message id. */
+  /**
+   * Re-run a failed send with the same message id; on a send whose files were
+   * lost to a reload it is the Remove (the thread drops the entry).
+   */
   onRetry?: (messageId: string) => void;
   /** Present on small screens only; renders a back affordance to the list. */
   onBack?: () => void;
@@ -312,12 +316,15 @@ export function messageTimeSource(
  */
 export function bubbleTimeLabel(message: ThreadMessage, timeZone: string): string {
   if (message.state === 'sending') return 'Sending';
-  if (message.state === 'failed') return 'Not sent';
+  if (message.state === 'failed') return message.filesMissing === true ? FILES_MISSING : 'Not sent';
   return formatMessageTime(messageTimeSource(message), timeZone);
 }
 
+/** The status of a send whose picked files did not survive a reload. */
+export const FILES_MISSING = 'Photos not sent';
+
 /** What the line under an own bubble shows; null renders no line. */
-export type BubbleStatus = 'sending' | 'failed' | 'delivered' | 'read';
+export type BubbleStatus = 'sending' | 'failed' | 'files-missing' | 'delivered' | 'read';
 
 /**
  * The status line under a bubble: a clock while sending and 'Not sent' once
@@ -325,11 +332,11 @@ export type BubbleStatus = 'sending' | 'failed' | 'delivered' | 'read';
  * the LAST bubble of a run only.
  */
 export function bubbleStatus(
-  message: Pick<ThreadMessage, 'mine' | 'state' | 'status'>,
+  message: Pick<ThreadMessage, 'mine' | 'state' | 'status' | 'filesMissing'>,
   opts: { showTicks: boolean; tail: boolean },
 ): BubbleStatus | null {
   if (message.state === 'sending') return 'sending';
-  if (message.state === 'failed') return 'failed';
+  if (message.state === 'failed') return message.filesMissing === true ? 'files-missing' : 'failed';
   if (!message.mine || !opts.showTicks || !opts.tail) return null;
   return message.status === 'read' ? 'read' : 'delivered';
 }
@@ -347,6 +354,7 @@ function StatusLine({ status }: { status: BubbleStatus }): ReactElement {
         </span>
       ) : null}
       {status === 'failed' ? <span className="text-bad">Not sent</span> : null}
+      {status === 'files-missing' ? <span className="text-bad">{FILES_MISSING}</span> : null}
       {status === 'delivered' ? (
         <>
           <span>Delivered</span>
@@ -602,7 +610,15 @@ export function MessageBubble(props: {
           <IconEllipsis size={20} />
         </button>
       ) : null}
-      {failed && mine ? (
+      {failed && mine && message.filesMissing === true ? (
+        <IconButton
+          label="Remove message"
+          className="shrink-0 self-center text-bad hover:bg-bad-soft hover:text-bad"
+          onClick={() => props.onRetry?.(message.id)}
+        >
+          <IconTrash size={18} />
+        </IconButton>
+      ) : failed && mine ? (
         <IconButton
           label="Retry sending"
           className="shrink-0 self-center text-bad hover:bg-bad-soft hover:text-bad"

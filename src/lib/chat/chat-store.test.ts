@@ -159,6 +159,71 @@ describe('outbox persistence (reload)', () => {
 
   const A = { workspaceId: 'wa', userId: 'u1' };
 
+  it('drops the File on write; an unfinished upload restores failed with Remove only (filesMissing)', () => {
+    const storage = memoryStorage();
+    const file = new File(['abc'], 'p.png', { type: 'image/png' });
+    const local = { key: 'local-1', file, previewUrl: 'blob:p', progress: 0.4 };
+    const uploaded = { key: 'local-2', file, previewUrl: 'blob:q', progress: 1 };
+    const pending: OutboxEntry = {
+      id: 'm1',
+      text: '',
+      local: {
+        attachments: [
+          { assetId: 'v9', name: 'q.png', mime: 'image/png', size: 3, local: uploaded },
+          { assetId: '', name: 'p.png', mime: 'image/png', size: 3, local },
+        ],
+        sharedPostIds: [],
+        reply: null,
+      },
+      state: 'sending',
+    };
+    const done: OutboxEntry = {
+      id: 'm2',
+      text: 'hi',
+      local: {
+        attachments: [
+          { assetId: 'v1', name: 'a.png', mime: 'image/png', size: 3, local: uploaded },
+        ],
+        sharedPostIds: [],
+        reply: null,
+      },
+      state: 'sending',
+    };
+    writePersistedOutbox(storage, A, { c1: [pending, done] });
+    const raw = storage.data.get(OUTBOX_STORAGE_KEY) ?? '';
+    expect(raw).not.toContain('blob:');
+    expect(raw).not.toContain('"local-');
+    expect(readPersistedOutbox(storage, A)).toEqual({
+      c1: [
+        {
+          id: 'm1',
+          text: '',
+          local: {
+            attachments: [
+              { assetId: 'v9', name: 'q.png', mime: 'image/png', size: 3 },
+              { assetId: '', name: 'p.png', mime: 'image/png', size: 3 },
+            ],
+            sharedPostIds: [],
+            reply: null,
+          },
+          state: 'failed',
+          filesMissing: true,
+        },
+        // Every file already has its version id: it can still record, so it resumes.
+        {
+          id: 'm2',
+          text: 'hi',
+          local: {
+            attachments: [{ assetId: 'v1', name: 'a.png', mime: 'image/png', size: 3 }],
+            sharedPostIds: [],
+            reply: null,
+          },
+          state: 'sending',
+        },
+      ],
+    });
+  });
+
   it('restores entries for the same workspace and user only, all as sending', () => {
     const storage = memoryStorage();
     writePersistedOutbox(storage, A, { c1: [{ ...entry('m1'), state: 'failed' }] });

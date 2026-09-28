@@ -293,13 +293,13 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
   /** A sender whose record attempts follow `script` (then succeed). */
   function harness(opts: { script?: Script; initial?: Outbox; storage?: OutboxStorage } = {}) {
     const script = [...(opts.script ?? [])];
-    const calls: { channelId: string; id: string; traceId: string }[] = [];
+    const calls: { channelId: string; id: string; traceId: string; entry: OutboxEntry }[] = [];
     const events: OutboxEvent[] = [];
     let traceSeq = 0;
     const sender = createOutboxSender(
       {
         deliver: async (channelId, e, traceId, onRecorded) => {
-          calls.push({ channelId, id: e.id, traceId });
+          calls.push({ channelId, id: e.id, traceId, entry: e });
           const step = script.shift() ?? 'ok';
           if (step === 'pending') return new Promise<SendOutcome>(() => {});
           if (step === 'fail') return { ok: false, reason: 'timeout', error: 'rpc timed out' };
@@ -476,5 +476,174 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(calls).toHaveLength(1);
     expect(events).toEqual([]);
+  });
+
+  describe('instant attachment sends (upload in the outbox, then record once)', () => {
+    type Step = 'ok' | 'fail' | 'pending';
+
+    /** An uploader following `steps` per call (then ok), reporting 50% then done. */
+    function uploader(steps: Step[] = []) {
+      const queue = [...steps];
+      const files: string[] = [];
+      let seq = 0;
+      const upload = vi.fn(async (file: File, onProgress?: (f: number) => void) => {
+        files.push(file.name);
+        const step = queue.shift() ?? 'ok';
+        if (step === 'pending') return new Promise<never>(() => {});
+        onProgress?.(0.5);
+        if (step === 'fail') return { ok: false as const, message: 'Upload failed' };
+        seq += 1;
+        return { ok: true as const, reused: false, versionId: `ver-${file.name}-${seq}` };
+      });
+      return { upload, files };
+    }
+
+    function withFiles(id: string, names: string[], upload: ReturnType<typeof uploader>['upload']) {
+      const base = entry(id);
+      return {
+        ...base,
+        local: {
+          ...base.local,
+          attachments: names.map((name, i) => ({
+            assetId: '',
+            name,
+            mime: 'image/png',
+            size: 3,
+            local: {
+              key: `local-${id}-${i}`,
+              file: new File(['abc'], name, { type: 'image/png' }),
+              previewUrl: `blob:${name}`,
+              progress: 0,
+              upload,
+            },
+          })),
+        },
+      };
+    }
+
+    it('uploads each file in order, then records ONCE with the version ids; the bubble shows at once', async () => {
+      const { upload, files } = uploader();
+      const { sender, calls, events } = harness();
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png', 'b.png'], upload));
+      // Queued synchronously: the entry (and so the bubble) exists before any upload settles.
+      expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
+      expect(calls).toHaveLength(0);
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      expect(files).toEqual(['a.png', 'b.png']);
+      const recorded = calls[0]?.entry.local.attachments ?? [];
+      expect(recorded.map((a) => a.assetId)).toEqual(['ver-a.png-1', 'ver-b.png-2']);
+      // The local previews ride along to the recorded bubble (no swap to a presigned url).
+      expect(recorded.map((a) => a.local?.previewUrl)).toEqual(['blob:a.png', 'blob:b.png']);
+      expect(recorded.map((a) => a.local?.progress)).toEqual([1, 1]);
+      expect(sender.entries(CHANNEL)).toEqual([]);
+      expect(events.at(-1)).toMatchObject({ type: 'recorded', channelId: CHANNEL });
+    });
+
+    it('progress callbacks update the outbox entry and reach the thread as progress events', async () => {
+      const { upload } = uploader(['ok', 'pending']);
+      const { sender, calls, events } = harness();
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png', 'b.png'], upload));
+      await vi.waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
+      const progress = events.filter((e) => e.type === 'progress');
+      expect(
+        progress.map((e) =>
+          e.type === 'progress' ? e.attachments.map((a) => a.local?.progress) : [],
+        ),
+      ).toEqual([
+        [0.5, 0],
+        [1, 0],
+      ]);
+      const held = sender.entries(CHANNEL)[0]?.local.attachments ?? [];
+      expect(held.map((a) => a.assetId)).toEqual(['ver-a.png-1', '']);
+      expect(held.map((a) => a.local?.progress)).toEqual([1, 0]);
+      expect(calls).toHaveLength(0);
+    });
+
+    it('an upload failure backs off like a record failure; the retry uploads only the files with no version id', async () => {
+      vi.useFakeTimers();
+      const { upload, files } = uploader(['ok', 'fail']);
+      const { sender, calls } = harness();
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png', 'b.png'], upload));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(files).toEqual(['a.png', 'b.png']);
+      expect(calls).toHaveLength(0);
+      expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(files).toEqual(['a.png', 'b.png', 'b.png']);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.id).toBe('m1');
+      expect(calls[0]?.entry.local.attachments.map((a) => a.assetId)).toEqual([
+        'ver-a.png-1',
+        'ver-b.png-2',
+      ]);
+    });
+
+    it(`turns failed after ${FAILED_AFTER_MS}ms of failing uploads; Retry re-uploads only what is missing, same id`, async () => {
+      vi.useFakeTimers();
+      const { upload, files } = uploader(['ok', ...Array<Step>(40).fill('fail')]);
+      const { sender, calls, events } = harness();
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png', 'b.png'], upload));
+      await vi.advanceTimersByTimeAsync(FAILED_AFTER_MS - 1);
+      expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(sender.entries(CHANNEL)[0]?.state).toBe('failed');
+      expect(events).toContainEqual({
+        type: 'state',
+        channelId: CHANNEL,
+        id: 'm1',
+        state: 'failed',
+      });
+      expect(files.filter((f) => f === 'a.png')).toHaveLength(1);
+      upload.mockImplementation(async (file: File) => {
+        files.push(file.name);
+        return { ok: true as const, reused: false, versionId: 'ver-b-final' };
+      });
+      sender.retry(CHANNEL, 'm1');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(files.filter((f) => f === 'a.png')).toHaveLength(1);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.id).toBe('m1');
+      expect(calls[0]?.entry.local.attachments.map((a) => a.assetId)).toEqual([
+        'ver-a.png-1',
+        'ver-b-final',
+      ]);
+    });
+
+    it('a settle while uploading records nothing and frees the queue', async () => {
+      let finish: (() => void) | undefined;
+      const upload = vi.fn(
+        () =>
+          new Promise<{ ok: true; reused: boolean; versionId: string }>((resolve) => {
+            finish = () => resolve({ ok: true, reused: false, versionId: 'v' });
+          }),
+      );
+      const { sender, calls } = harness();
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png'], upload));
+      sender.enqueue(CHANNEL, entry('m2'));
+      sender.settle(CHANNEL, 'm1');
+      finish?.();
+      await vi.waitFor(() => expect(calls.map((c) => c.id)).toEqual(['m2']));
+    });
+
+    it('a restored entry whose files were lost stays failed, never runs, and does not hold up the queue', async () => {
+      const lost: OutboxEntry = {
+        ...entry('m1'),
+        local: {
+          ...entry('m1').local,
+          attachments: [{ assetId: '', name: 'a.png', mime: 'image/png', size: 3 }],
+        },
+        state: 'failed',
+        filesMissing: true,
+      };
+      const { sender, calls } = harness({ initial: { [CHANNEL]: [lost, entry('m2')] } });
+      await vi.waitFor(() => expect(calls.map((c) => c.id)).toEqual(['m2']));
+      sender.retry(CHANNEL, 'm1');
+      sender.enqueue(CHANNEL, entry('m3'));
+      await vi.waitFor(() => expect(calls.map((c) => c.id)).toEqual(['m2', 'm3']));
+      expect(sender.entries(CHANNEL)).toEqual([lost]);
+      // Remove (settle) drops it.
+      sender.settle(CHANNEL, 'm1');
+      expect(sender.entries(CHANNEL)).toEqual([]);
+    });
   });
 });

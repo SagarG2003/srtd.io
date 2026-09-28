@@ -11,6 +11,10 @@ import {
   parseSharedPostIds,
   precheckImage,
   toMessageAttachment,
+  toLocalAttachment,
+  awaitsUpload,
+  uploadProgress,
+  withoutLocal,
   buildAttachmentMeta,
   parseAttachmentMeta,
   uploadChatAttachment,
@@ -291,21 +295,17 @@ describe('canSendAttachmentMessage', () => {
       canSendAttachmentMessage({
         text: '   ',
         attachmentCount: 0,
-        uploading: false,
         sending: false,
       }),
     ).toBe(false);
   });
 
   it('allows attachments-only, text-only, and shared-posts-only', () => {
-    expect(
-      canSendAttachmentMessage({ text: '', attachmentCount: 1, uploading: false, sending: false }),
-    ).toBe(true);
+    expect(canSendAttachmentMessage({ text: '', attachmentCount: 1, sending: false })).toBe(true);
     expect(
       canSendAttachmentMessage({
         text: 'hi',
         attachmentCount: 0,
-        uploading: false,
         sending: false,
       }),
     ).toBe(true);
@@ -315,7 +315,6 @@ describe('canSendAttachmentMessage', () => {
         text: '   ',
         attachmentCount: 0,
         sharedPostCount: 1,
-        uploading: false,
         sending: false,
       }),
     ).toBe(true);
@@ -327,19 +326,15 @@ describe('canSendAttachmentMessage', () => {
         text: '',
         attachmentCount: 0,
         sharedPostCount: 0,
-        uploading: false,
         sending: false,
       }),
     ).toBe(false);
   });
 
-  it('blocks while an upload is in flight or a send is settling', () => {
-    expect(
-      canSendAttachmentMessage({ text: 'hi', attachmentCount: 1, uploading: true, sending: false }),
-    ).toBe(false);
-    expect(
-      canSendAttachmentMessage({ text: 'hi', attachmentCount: 1, uploading: false, sending: true }),
-    ).toBe(false);
+  it('never blocks on an upload (files upload after Send); blocks only while a send is settling', () => {
+    // A picked file with no text is sendable at once: the upload runs in the outbox.
+    expect(canSendAttachmentMessage({ text: '', attachmentCount: 1, sending: false })).toBe(true);
+    expect(canSendAttachmentMessage({ text: 'hi', attachmentCount: 1, sending: true })).toBe(false);
   });
 });
 
@@ -385,3 +380,103 @@ describe('buildAttachmentMeta / parseAttachmentMeta', () => {
     expect(parseAttachmentMeta(null, ['v1'])).toEqual([{ assetId: 'v1', name: '', mime: '' }]);
   });
 });
+
+describe('local attachment (instant send)', () => {
+  const file = new File(['abc'], 'photo.png', { type: 'image/png' });
+  const upload = vi.fn();
+
+  it('carries the File, its preview, mime, name, size and progress 0, with no asset id yet', () => {
+    const a = toLocalAttachment(file, 'blob:preview-1', upload);
+    expect(a).toMatchObject({
+      assetId: '',
+      name: 'photo.png',
+      mime: 'image/png',
+      size: 3,
+      local: { file, previewUrl: 'blob:preview-1', progress: 0, upload },
+    });
+    expect(a.local?.key).toMatch(/^local-/);
+    expect(toLocalAttachment(file, null, upload).local?.key).not.toBe(a.local?.key);
+    expect(awaitsUpload(a)).toBe(true);
+    expect(uploadProgress(a)).toBe(0);
+  });
+
+  it('is done once the version id lands: no progress to show, nothing to upload', () => {
+    const a = toLocalAttachment(file, 'blob:preview-1', upload);
+    const done: MessageAttachment = { ...a, assetId: VERSION_ID };
+    expect(awaitsUpload(done)).toBe(false);
+    expect(uploadProgress(done)).toBeNull();
+    expect(uploadProgress({ assetId: VERSION_ID, name: 'x.png', mime: 'image/png' })).toBeNull();
+  });
+
+  it('never reaches the wire, attachment_meta or storage', () => {
+    const a: MessageAttachment = {
+      ...toLocalAttachment(file, 'blob:preview-1', upload),
+      assetId: VERSION_ID,
+    };
+    expect(withoutLocal(a)).toEqual({
+      assetId: VERSION_ID,
+      name: 'photo.png',
+      mime: 'image/png',
+      size: 3,
+    });
+    expect(buildAttachmentExt([a]).attachment_meta).toEqual([withoutLocal(a)]);
+    expect(buildAttachmentMeta([a])).toEqual({
+      [VERSION_ID]: { mime: 'image/png', name: 'photo.png', size: 3 },
+    });
+  });
+});
+
+describe('uploadChatAttachment over XHR', () => {
+  it('reads the version id off the XHR response and reports progress', async () => {
+    const progress: number[] = [];
+    const request = fakeXhr(201, { asset: { assetId: ASSET_ID, versionId: VERSION_ID } }, [
+      [1, 4],
+      [4, 4],
+    ]);
+    const outcome = await uploadChatAttachment({
+      file: new File(['x'], 'photo.png', { type: 'image/png' }),
+      workspaceId: 'ws-1',
+      token: 'jwt',
+      endpoint: 'https://upload',
+      xhr: {
+        traceId: 'trace-x',
+        onProgress: (f) => progress.push(f),
+        createRequest: () => request,
+      },
+    });
+    expect(outcome).toEqual({ ok: true, reused: false, versionId: VERSION_ID });
+    expect(progress).toEqual([0.25, 1]);
+    expect(request.headers).toEqual({ Authorization: 'Bearer jwt', 'X-Trace-Id': 'trace-x' });
+  });
+});
+
+/** A minimal XMLHttpRequest double: answers `status`/`body` after emitting `ticks`. */
+function fakeXhr(
+  status: number,
+  body: unknown,
+  ticks: [number, number][] = [],
+): XMLHttpRequest & { headers: Record<string, string> } {
+  const request = {
+    headers: {} as Record<string, string>,
+    status: 0,
+    responseText: '',
+    upload: { onprogress: null as ((event: ProgressEvent) => void) | null },
+    onload: null as (() => void) | null,
+    onerror: null as (() => void) | null,
+    onabort: null as (() => void) | null,
+    ontimeout: null as (() => void) | null,
+    open: vi.fn(),
+    setRequestHeader(name: string, value: string) {
+      request.headers[name] = value;
+    },
+    send() {
+      for (const [loaded, total] of ticks) {
+        request.upload.onprogress?.({ lengthComputable: true, loaded, total } as ProgressEvent);
+      }
+      request.status = status;
+      request.responseText = JSON.stringify(body);
+      request.onload?.();
+    },
+  };
+  return request as unknown as XMLHttpRequest & { headers: Record<string, string> };
+}

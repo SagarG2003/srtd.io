@@ -4,7 +4,13 @@ vi.mock('@/lib/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-import { dispatchSend, isSendKeydown, shouldShowMic } from '@/components/chat/Composer';
+import {
+  composerCanSend,
+  dispatchSend,
+  draftAttachments,
+  isSendKeydown,
+  shouldShowMic,
+} from '@/components/chat/Composer';
 import { createOutboxSender, type SendOutcome } from '@/lib/chat/send-flow';
 import { canSendAttachmentMessage } from '@/lib/chat/attachments';
 
@@ -129,7 +135,6 @@ describe('dispatchSend (Send never waits on the network)', () => {
       canSendAttachmentMessage({
         text: 'next',
         attachmentCount: 0,
-        uploading: false,
         sending: false,
       }),
     ).toBe(true);
@@ -142,5 +147,46 @@ describe('dispatchSend (Send never waits on the network)', () => {
         throw new Error('boom');
       }, draft),
     ).toBe(false);
+  });
+});
+
+describe('instant attachment send (files upload after Send)', () => {
+  const base = { disabled: false, text: '', sharedPostCount: 0, sharedBriefCount: 0 };
+
+  it('enables Send with a picked file and no text; nothing has to upload first', () => {
+    expect(composerCanSend({ ...base, fileCount: 1 })).toBe(true);
+    expect(composerCanSend({ ...base, fileCount: 0 })).toBe(false);
+    expect(composerCanSend({ ...base, text: 'hi', fileCount: 0 })).toBe(true);
+    expect(composerCanSend({ ...base, disabled: true, fileCount: 1 })).toBe(false);
+  });
+
+  it('hands every chip over as a local attachment (File, preview, uploader), in order', () => {
+    const upload = vi.fn();
+    const a = new File(['ab'], 'a.png', { type: 'image/png' });
+    const b = new File(['abcd'], 'b.pdf', { type: 'application/pdf' });
+    const out = draftAttachments(
+      [
+        { id: 'att-1', file: a, previewUrl: 'blob:a' },
+        { id: 'att-2', file: b, previewUrl: null },
+      ],
+      upload,
+    );
+    expect(out).toMatchObject([
+      {
+        assetId: '',
+        name: 'a.png',
+        mime: 'image/png',
+        size: 2,
+        local: { file: a, previewUrl: 'blob:a', progress: 0, upload },
+      },
+      {
+        assetId: '',
+        name: 'b.pdf',
+        mime: 'application/pdf',
+        size: 4,
+        local: { file: b, previewUrl: null, progress: 0, upload },
+      },
+    ]);
+    expect(upload).not.toHaveBeenCalled();
   });
 });

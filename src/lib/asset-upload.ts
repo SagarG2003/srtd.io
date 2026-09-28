@@ -9,6 +9,7 @@
 // drive it with a mock and the app passes fetchWithTrace.
 
 import { ALLOWED_MIME_TYPES, isAllowedMime } from '@srtdio/storage';
+import { TRACE_ID_HEADER } from '@/lib/trace';
 
 // Hard ceiling mirrored from the worker pipeline (MAX_FILE_SIZE_BYTES, 100 MB).
 // The worker rejects strictly greater than this, so the client matches exactly:
@@ -61,7 +62,9 @@ export type UploadOutcome =
   | { ok: true; reused: boolean; assetId: string; assetVersionId?: string }
   | { ok: false; message: string };
 
-export interface UploadConfig {
+export type UploadConfig = UploadConfigBase & UploadTransport;
+
+interface UploadConfigBase {
   endpoint: string;
   token: string;
   workspaceId: string;
@@ -80,13 +83,97 @@ export interface UploadConfig {
   displayName?: string | null;
   /** Destination folder id; sent as folder_id, omitted at the library root (null). */
   folderId?: string | null;
-  /** Injected so tests pass a mock; the app passes fetchWithTrace. */
-  fetcher: (input: string, init: RequestInit) => Promise<Response>;
+}
+
+/**
+ * The XMLHttpRequest transport: the only way to observe upload progress
+ * (fetch exposes no request-body progress). `traceId` rides as X-Trace-Id, as
+ * fetchWithTrace would add it; `createRequest` is injected by tests.
+ */
+export interface XhrTransport {
+  traceId: string;
+  /** Upload progress as a fraction 0..1; only called when the size is computable. */
+  onProgress?: (fraction: number) => void;
+  createRequest?: () => XMLHttpRequest;
+}
+
+/** The fetch-shaped POST: tests pass a mock; the app passes fetchWithTrace. */
+export type UploadFetcher = (input: string, init: RequestInit) => Promise<Response>;
+
+/** How the POST goes out: an injected fetcher (Assets, posts) or XHR (chat, with progress). */
+export type UploadTransport =
+  | { fetcher: UploadFetcher; xhr?: undefined }
+  | { xhr: XhrTransport; fetcher?: undefined };
+
+/** A finished POST as the response parser reads it, whichever transport sent it. */
+interface UploadResponse {
+  ok: boolean;
+  body: unknown;
+}
+
+/** Parse an XHR response body as JSON; null when empty or malformed. */
+function parseXhrBody(text: string): unknown {
+  if (text === '') return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POST the form over XMLHttpRequest with the same headers the fetch path sends
+ * (Bearer + X-Trace-Id). Resolves on any HTTP status; rejects on a transport
+ * failure (network error, abort, timeout), which the caller maps to 'network'.
+ */
+export function xhrPost(
+  endpoint: string,
+  headers: Record<string, string>,
+  body: FormData,
+  transport: XhrTransport,
+): Promise<UploadResponse> {
+  return new Promise((resolve, reject) => {
+    const request = transport.createRequest?.() ?? new XMLHttpRequest();
+    request.open('POST', endpoint);
+    for (const [name, value] of Object.entries(headers)) request.setRequestHeader(name, value);
+    request.setRequestHeader(TRACE_ID_HEADER, transport.traceId);
+    const onProgress = transport.onProgress;
+    if (onProgress !== undefined) {
+      request.upload.onprogress = (event: ProgressEvent) => {
+        if (event.lengthComputable && event.total > 0) {
+          onProgress(Math.min(Math.max(event.loaded / event.total, 0), 1));
+        }
+      };
+    }
+    request.onload = () =>
+      resolve({
+        ok: request.status >= 200 && request.status < 300,
+        body: parseXhrBody(request.responseText),
+      });
+    const fail = (): void => reject(new Error('upload transport failed'));
+    request.onerror = fail;
+    request.onabort = fail;
+    request.ontimeout = fail;
+    request.send(body);
+  });
+}
+
+/** Send the form through whichever transport the config carries. */
+async function postUpload(
+  endpoint: string,
+  headers: Record<string, string>,
+  body: FormData,
+  transport: UploadTransport,
+): Promise<UploadResponse> {
+  if (transport.xhr !== undefined) return xhrPost(endpoint, headers, body, transport.xhr);
+  const response = await transport.fetcher(endpoint, { method: 'POST', headers, body });
+  return { ok: response.ok, body: await readJson(response) };
 }
 
 /**
  * POST one file as multipart {file, workspace_id} (plus an optional display_name
- * and folder_id) with a Bearer token. Never throws: a transport failure or a
+ * and folder_id) with a Bearer token, over the config's transport (XHR when the
+ * caller wants progress). Never throws: a transport failure or a
  * non-OK status becomes { ok: false } with mapped copy. On success returns the
  * asset id and whether the content was deduped (reused).
  */
@@ -101,24 +188,23 @@ export async function uploadAssetFile(file: File, config: UploadConfig): Promise
     form.append('folder_id', config.folderId);
   }
 
-  let response: Response;
+  let response: UploadResponse;
   try {
-    response = await config.fetcher(config.endpoint, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${config.token}` },
-      body: form,
-    });
+    response = await postUpload(
+      config.endpoint,
+      { Authorization: `Bearer ${config.token}` },
+      form,
+      config,
+    );
   } catch {
     return { ok: false, message: uploadErrorMessage('network') };
   }
 
-  const body = await readJson(response);
-
   if (!response.ok) {
-    return { ok: false, message: uploadErrorMessage(errorCode(body)) };
+    return { ok: false, message: uploadErrorMessage(errorCode(response.body)) };
   }
 
-  const asset = assetField(body);
+  const asset = assetField(response.body);
   if (asset === null) {
     return { ok: false, message: uploadErrorMessage('network') };
   }

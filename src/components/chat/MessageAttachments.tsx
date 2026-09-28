@@ -3,6 +3,12 @@
 // without touching the image / file branches. Each attachment presigns through
 // the shared PresignCache, which dedupes in-flight ids and caches URLs, so a
 // thread of attachments never fires N+1 presigns and re-renders never re-presign.
+//
+// An own instant send renders from its local preview (the picked file's object
+// URL) for the whole session, before and after it records, so the tile never
+// swaps to the presigned URL. While its upload runs the image is dimmed with a
+// thin progress bar along the bottom; the bar's width is the only thing that
+// animates, and the tile keeps its size when the upload completes.
 
 import { useEffect, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
@@ -11,7 +17,7 @@ import { VoiceNote } from '@/components/chat/VoiceNote';
 import { fileExtension } from '@/lib/assets';
 import { cn } from '@/lib/cn';
 import type { PresignCache } from '@/lib/asset-presign';
-import { classifyAttachment, type MessageAttachment } from '@/lib/chat/attachments';
+import { classifyAttachment, uploadProgress, type MessageAttachment } from '@/lib/chat/attachments';
 
 /** The file chip's Open link, styled as the shared ghost sm Button (it navigates, so it stays a link). */
 const OPEN_BUTTON =
@@ -56,11 +62,43 @@ export function useAttachmentUrl(
   return { url, failed };
 }
 
-function FileChip({ name, url }: { name: string; url: string | null }): ReactElement {
+/**
+ * The upload bar along a tile's bottom edge: a track and a fill whose width is
+ * the progress (the only animated property). White with opacity sits on the
+ * image or on the own bubble's fill (white is accent-fg in both themes), so it
+ * reads the same in light and dark.
+ */
+function UploadBar({ progress }: { progress: number }): ReactElement {
+  return (
+    <span
+      role="progressbar"
+      aria-label="Uploading"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(progress * 100)}
+      className="absolute inset-x-0 bottom-0 h-[3px] bg-white/35"
+    >
+      <span
+        className="block h-full bg-white transition-[width]"
+        style={{ width: `${progress * 100}%` }}
+      />
+    </span>
+  );
+}
+
+function FileChip({
+  name,
+  url,
+  progress,
+}: {
+  name: string;
+  url: string | null;
+  progress?: number | undefined;
+}): ReactElement {
   const ext = fileExtension(name);
   const label = name.trim() !== '' ? name : 'Attachment';
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-border bg-panel px-2.5 py-2">
+    <div className="relative flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-panel px-2.5 py-2">
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-3 text-fg-3">
         <IconFile size={18} />
       </span>
@@ -81,6 +119,7 @@ function FileChip({ name, url }: { name: string; url: string | null }): ReactEle
           <span className={OPEN_BUTTON}>Open</span>
         </a>
       ) : null}
+      {progress !== undefined ? <UploadBar progress={progress} /> : null}
     </div>
   );
 }
@@ -95,6 +134,8 @@ function FileChip({ name, url }: { name: string; url: string | null }): ReactEle
  */
 export type AttachmentView =
   | { kind: 'image'; src: string; alt: string }
+  /** An own instant send: its local preview, with upload progress until the version id lands. */
+  | { kind: 'image-local'; src: string; alt: string; progress: number | null }
   | { kind: 'image-pending'; alt: string }
   | {
       kind: 'audio';
@@ -103,7 +144,7 @@ export type AttachmentView =
       transcript: string | undefined;
       durationMs: number | undefined;
     }
-  | { kind: 'file'; name: string; url: string | null };
+  | { kind: 'file'; name: string; url: string | null; progress?: number };
 
 export function attachmentView(args: {
   attachment: MessageAttachment;
@@ -112,6 +153,14 @@ export function attachmentView(args: {
   failed: boolean;
 }): AttachmentView {
   const { attachment, presignEnabled, url, failed } = args;
+  const progress = uploadProgress(attachment);
+  const previewUrl = attachment.local?.previewUrl ?? null;
+  if (classifyAttachment(attachment.mime) === 'image' && previewUrl !== null) {
+    return { kind: 'image-local', src: previewUrl, alt: attachment.name, progress };
+  }
+  if (progress !== null) {
+    return { kind: 'file', name: attachment.name, url: null, progress };
+  }
   if (classifyAttachment(attachment.mime) === 'image' && presignEnabled && !failed) {
     return url !== null
       ? { kind: 'image', src: url, alt: attachment.name }
@@ -144,7 +193,13 @@ function AttachmentItem({
 }): ReactElement {
   // The render layer presigns the attachment's VERSION id (assetId carries the
   // asset_versions.id) through the shared cache, which dedupes in-flight ids.
-  const { url, failed } = useAttachmentUrl(attachment.assetId, cache, presignEnabled);
+  // A local preview is the tile for the session: it never presigns.
+  const hasPreview = attachment.local?.previewUrl != null;
+  const { url, failed } = useAttachmentUrl(
+    attachment.assetId,
+    cache,
+    presignEnabled && !hasPreview,
+  );
   const view = attachmentView({ attachment, presignEnabled, url, failed });
 
   switch (view.kind) {
@@ -171,6 +226,20 @@ function AttachmentItem({
         image
       );
     }
+    case 'image-local':
+      return (
+        <div className="relative overflow-hidden rounded-lg border border-border">
+          <img
+            src={view.src}
+            alt={view.alt}
+            className={cn(
+              'block max-h-48 max-w-[260px] object-cover',
+              view.progress !== null && 'brightness-75',
+            )}
+          />
+          {view.progress !== null ? <UploadBar progress={view.progress} /> : null}
+        </div>
+      );
     case 'image-pending':
       return <div className="h-32 w-44 animate-pulse rounded-lg border border-border bg-panel-2" />;
     case 'audio':
@@ -184,7 +253,7 @@ function AttachmentItem({
         />
       );
     case 'file':
-      return <FileChip name={view.name} url={view.url} />;
+      return <FileChip name={view.name} url={view.url} progress={view.progress} />;
   }
 }
 
@@ -216,7 +285,7 @@ export function MessageAttachments({
     >
       {attachments.map((attachment, index) => (
         <AttachmentItem
-          key={`${attachment.assetId}-${index}`}
+          key={attachment.local?.key ?? `${attachment.assetId}-${index}`}
           attachment={attachment}
           cache={cache}
           presignEnabled={presignEnabled}

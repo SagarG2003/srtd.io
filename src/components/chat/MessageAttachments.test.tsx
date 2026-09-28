@@ -1,6 +1,7 @@
+import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { PresignCache, type PresignDeps } from '@/lib/asset-presign';
-import { attachmentView } from '@/components/chat/MessageAttachments';
+import { MessageAttachments, attachmentView } from '@/components/chat/MessageAttachments';
 import type { MessageAttachment } from '@/lib/chat/attachments';
 
 // Realistic asset_versions.id fixtures: the render layer must presign the VERSION
@@ -156,5 +157,73 @@ describe('presign through the shared cache (what the render layer asks of it)', 
 
     expect(fetcher).toHaveBeenCalledOnce();
     expect(presignedVersionId(fetcher.mock.calls[0]?.[1])).toBe(IMG_VERSION);
+  });
+});
+
+describe('instant send tile (local preview + upload progress)', () => {
+  const file = new File(['abc'], 'photo.png', { type: 'image/png' });
+  const local = (progress: number, assetId = ''): MessageAttachment => ({
+    assetId,
+    name: 'photo.png',
+    mime: 'image/png',
+    size: 3,
+    local: { key: 'local-1', file, previewUrl: 'blob:preview', progress },
+  });
+
+  it('renders the local preview with its progress while uploading', () => {
+    expect(
+      attachmentView({ attachment: local(0.4), presignEnabled: true, url: null, failed: false }),
+    ).toEqual({ kind: 'image-local', src: 'blob:preview', alt: 'photo.png', progress: 0.4 });
+  });
+
+  it('keeps the local preview after the version id lands (never swaps to the presigned url)', () => {
+    expect(
+      attachmentView({
+        attachment: local(1, IMG_VERSION),
+        presignEnabled: true,
+        url: 'https://signed/img',
+        failed: false,
+      }),
+    ).toEqual({ kind: 'image-local', src: 'blob:preview', alt: 'photo.png', progress: null });
+  });
+
+  it('a non-image file shows its chip with the bar and no Open link until uploaded', () => {
+    const pdf: MessageAttachment = {
+      assetId: '',
+      name: 'brief.pdf',
+      mime: 'application/pdf',
+      local: { key: 'local-2', file, previewUrl: null, progress: 0.5 },
+    };
+    expect(
+      attachmentView({ attachment: pdf, presignEnabled: true, url: null, failed: false }),
+    ).toEqual({ kind: 'file', name: 'brief.pdf', url: null, progress: 0.5 });
+  });
+
+  function render(attachment: MessageAttachment) {
+    const { cache, fetcher } = spiedCache();
+    const html = renderToStaticMarkup(
+      <MessageAttachments attachments={[attachment]} cache={cache} presignEnabled />,
+    );
+    return { html, fetcher };
+  }
+
+  it('the tile is dimmed with a thin white bar (width = progress) while uploading', () => {
+    const { html, fetcher } = render(local(0.4));
+    expect(html).toContain('src="blob:preview"');
+    expect(html).toContain('brightness-75');
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('h-[3px]');
+    expect(html).toContain('bg-white/35');
+    expect(html).toContain('width:40%');
+    expect(html).toContain('transition-[width]');
+    // The local preview never presigns.
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('is plain once uploaded: same preview, no dim, no bar', () => {
+    const { html } = render(local(1, IMG_VERSION));
+    expect(html).toContain('src="blob:preview"');
+    expect(html).not.toContain('brightness-75');
+    expect(html).not.toContain('progressbar');
   });
 });
