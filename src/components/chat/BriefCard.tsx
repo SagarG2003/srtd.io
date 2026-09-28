@@ -6,7 +6,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Chip } from '@/components/ui/Chip';
+import { Tag } from '@/components/ui/Tag';
+import { SHARED_CARD } from '@/components/chat/PostCard';
 import { IconBriefs } from '@/components/ui/icons';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
@@ -57,7 +58,7 @@ export function SharedBriefCards({ briefIds }: { briefIds: string[] }): ReactEle
         {briefIds.map((id) => (
           <div
             key={id}
-            className="h-16 w-[260px] animate-pulse rounded-lg border border-border bg-panel-2"
+            className="h-[54px] w-[240px] animate-pulse rounded-lg border border-border bg-panel-2"
           />
         ))}
       </div>
@@ -76,7 +77,7 @@ function BriefCardItem({ view }: { view: SharedBriefView }): ReactElement {
   const navigate = useNavigate();
   if (view.kind === 'unavailable') {
     return (
-      <div className="flex w-[260px] items-center gap-2.5 rounded-lg border border-border bg-panel-2 px-3 py-2.5 text-fg-3">
+      <div className={`${SHARED_CARD} text-fg-3`}>
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-3">
           <IconBriefs size={18} />
         </span>
@@ -89,7 +90,7 @@ function BriefCardItem({ view }: { view: SharedBriefView }): ReactElement {
       type="button"
       aria-label={`Open brief ${view.title}`}
       onClick={() => navigate(briefRoute(view.briefId))}
-      className="flex w-[260px] items-center gap-2.5 rounded-lg border border-border bg-panel-2 px-3 py-2.5 min-h-[44px] text-left transition-colors hover:bg-panel-3"
+      className={`${SHARED_CARD} text-left transition-colors hover:bg-panel-2`}
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-3 text-fg-3">
         <IconBriefs size={18} />
@@ -98,8 +99,8 @@ function BriefCardItem({ view }: { view: SharedBriefView }): ReactElement {
         <span className="truncate text-sm font-medium text-fg" title={view.title}>
           {view.title}
         </span>
-        <span className="flex">
-          <Chip label={briefStatusLabel(view.status)} />
+        <span className="flex items-center gap-1.5 text-xs text-fg-3">
+          <Tag label={briefStatusLabel(view.status)} />
         </span>
       </span>
     </button>

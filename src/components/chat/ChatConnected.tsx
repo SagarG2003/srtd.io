@@ -17,6 +17,8 @@ import { useChatTyping } from '@/lib/chat/use-chat-typing';
 import { useChatPresence } from '@/lib/chat/use-chat-presence';
 import { useChatStore } from '@/components/chat/ChatStoreProvider';
 import type { ChatConnection, ChatStatus } from '@/lib/chat/types';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { IconChat } from '@/components/ui/icons';
 import { ChannelList } from '@/components/chat/ChannelList';
 import { MessageThread } from '@/components/chat/MessageThread';
 import { NewChatSheet } from '@/components/chat/NewChatSheet';
@@ -296,8 +298,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
             />
           ) : (
-            <div className="flex h-full items-center justify-center px-6 text-center text-sm text-fg-3">
-              Select a conversation to start messaging.
+            <div className="flex h-full flex-col justify-center bg-bg">
+              <EmptyState icon={<IconChat size={22} />} title="Select a conversation" />
             </div>
           )}
         </div>

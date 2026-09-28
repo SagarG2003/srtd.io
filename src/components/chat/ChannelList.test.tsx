@@ -360,15 +360,17 @@ describe('load status', () => {
     expect(texts(tree)).not.toContain('No conversations yet');
   });
 
-  it('skeleton rows match the real card box and 48px avatar', () => {
+  it('skeleton rows match the real dense row box and 48px avatar', () => {
     const [row] = findAll(
       withStatus('loading'),
       (el) => (el.props as Record<string, unknown>)['data-skeleton-row'] !== undefined,
     );
     const cls = (row!.props as { className: string }).className;
-    for (const token of ['border-l-[3px]', 'px-3', 'py-3', 'min-h-[64px]', 'rounded-xl']) {
+    for (const token of ['px-4', 'py-2.5', 'min-h-[72px]', 'border-b', 'animate-pulse']) {
       expect(cls).toContain(token);
     }
+    expect(cls).not.toContain('border-l-');
+    expect(cls).not.toContain('rounded-xl');
     const avatar = findAll(row!, (el) =>
       ((el.props as { className?: string }).className ?? '').includes('rounded-full'),
     );

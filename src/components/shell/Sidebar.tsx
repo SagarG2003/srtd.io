@@ -6,6 +6,7 @@ import { useChatStore } from '@/components/chat/ChatStoreProvider';
 import { useInboxStore } from '@/components/shell/InboxStoreProvider';
 import { selectTotalUnread } from '@/lib/chat/chat-store';
 import { dispatchSorted } from '@/lib/events';
+import { CountBadge } from '@/components/ui/CountBadge';
 import { cn } from '@/lib/cn';
 
 interface SidebarProps {
@@ -54,14 +55,16 @@ export function Sidebar({ workspaceName }: SidebarProps) {
             <span className="relative">
               <item.Icon size={18} />
               {item.showChatBadge && total > 0 ? (
-                <span className="absolute -right-2 -top-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full border-2 border-panel bg-accent px-1 text-[10px] font-semibold leading-none text-accent-fg">
-                  {total > 99 ? '99+' : total}
-                </span>
+                <CountBadge
+                  count={total}
+                  className="absolute -right-2 -top-1.5 border-2 border-panel"
+                />
               ) : null}
               {item.showActivityBadge && unreadCount > 0 ? (
-                <span className="absolute -right-2 -top-1.5 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full border-2 border-panel bg-accent px-1 text-[10px] font-semibold leading-none text-accent-fg">
-                  {unreadCount > 99 ? '99+' : unreadCount}
-                </span>
+                <CountBadge
+                  count={unreadCount}
+                  className="absolute -right-2 -top-1.5 border-2 border-panel"
+                />
               ) : null}
             </span>
             <span>{item.label}</span>

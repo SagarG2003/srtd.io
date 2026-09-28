@@ -1,6 +1,6 @@
 // Bottom bar for selection mode: the selected count, a 44px Forward (any
-// recorded message), a 44x44 Delete that opens the confirm sheet (own, unmarked
-// messages only; disabled otherwise), and Cancel. The confirm sheet runs
+// recorded message), a 44x44 Delete that opens the confirm dialog (own, unmarked
+// messages only; disabled otherwise), and Cancel. The confirm dialog runs
 // the delete; on failure the proc's message shows as a toast and the selection
 // is kept (the caller only clears it on success). Design tokens only.
 
@@ -8,10 +8,9 @@ import { useState } from 'react';
 import type { ReactElement } from 'react';
 import { Button } from '@/components/ui/Button';
 import { IconButton } from '@/components/ui/IconButton';
-import { Sheet } from '@/components/ui/Sheet';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { IconForward, IconTrash } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
-import { deleteConfirmTitle } from '@/lib/chat/marks';
 
 export function SelectionBar(props: {
   count: number;
@@ -56,27 +55,48 @@ export function SelectionBar(props: {
       <Button variant="ghost" size="lg" onClick={props.onCancel}>
         Cancel
       </Button>
-      <Sheet
-        open={confirming}
-        onClose={() => {
-          if (!busy) setConfirming(false);
-        }}
-        title={deleteConfirmTitle(props.count)}
-        footer={
-          <div className="ml-auto flex gap-2">
-            <Button variant="ghost" size="lg" disabled={busy} onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
-            <Button variant="danger" size="lg" disabled={busy} onClick={() => void confirm()}>
-              {busy ? 'Deleting' : 'Delete'}
-            </Button>
-          </div>
-        }
-      >
-        <p className="text-sm text-fg-2">
-          They will be removed from this chat for everyone. This cannot be undone.
-        </p>
-      </Sheet>
+      {deleteMessagesConfirm({
+        open: confirming,
+        count: props.count,
+        busy,
+        onCancel: () => setConfirming(false),
+        onConfirm: () => void confirm(),
+      })}
     </div>
+  );
+}
+
+/** Confirm title for the selected messages. */
+export function deleteMessagesTitle(count: number): string {
+  return `Delete ${count} ${count === 1 ? 'message' : 'messages'}?`;
+}
+
+/** Confirm body: the delete is for everyone and final. */
+export const DELETE_MESSAGES_MESSAGE =
+  'They will be removed from this chat for everyone. This cannot be undone.';
+
+/**
+ * The delete-selected confirm, or null when closed. Hook-free so the confirm and
+ * cancel wiring are unit tested by calling the dialog's handlers.
+ */
+export function deleteMessagesConfirm(props: {
+  open: boolean;
+  count: number;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): ReactElement | null {
+  if (!props.open) return null;
+  return (
+    <ConfirmDialog
+      title={deleteMessagesTitle(props.count)}
+      message={DELETE_MESSAGES_MESSAGE}
+      confirmLabel="Delete"
+      busyLabel="Deleting"
+      destructive
+      busy={props.busy}
+      onCancel={props.onCancel}
+      onConfirm={props.onConfirm}
+    />
   );
 }

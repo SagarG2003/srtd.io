@@ -12,15 +12,19 @@ import {
 } from 'react';
 import { isNearBottom } from '@/lib/chat/scroll';
 import { Avatar } from '@/components/ui/Avatar';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { IconButton } from '@/components/ui/IconButton';
 import {
   IconChat,
-  IconChevronRight,
+  IconChevronLeft,
   IconClock,
   IconEllipsis,
   IconForward,
   IconRotateCcw,
   IconSettings,
+  IconTickDouble,
+  IconTickSingle,
+  IconUsers,
 } from '@/components/ui/icons';
 import { useLongPress, type LongPressHandlers } from '@/components/ui';
 import { useToast } from '@/components/ui/toast';
@@ -40,6 +44,8 @@ import { SharedBriefCards } from '@/components/chat/BriefCard';
 import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
 import { MarkStrip, MarksSheet, PrioritySheet } from '@/components/chat/MarksSheet';
 import { SelectionBar } from '@/components/chat/SelectionBar';
+import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
+import { withDaySeparators } from '@/components/chat/day-separators';
 import { ForwardPicker, type ForwardSendResult } from '@/components/chat/ForwardPicker';
 import {
   FORWARDED_LABEL,
@@ -261,45 +267,44 @@ export function bubbleTimeLabel(message: ThreadMessage, timeZone: string): strin
 }
 
 /**
- * WhatsApp-style seen ticks for an own DM message. Single check = recorded,
- * double check in the accent token = read by the peer. Inline SVG with
- * token-class colour only, so light and dark stay at parity; no animation.
+ * WhatsApp-style seen ticks for an own DM message. Single tick = recorded,
+ * double tick in the accent token = read by the peer. Token-class colour only,
+ * so light and dark stay at parity; no animation.
  */
 function MessageTicks({ status }: { status: MessageStatus }): ReactElement {
   const color = status === 'read' ? 'text-accent' : 'text-fg-3';
   return (
     <span className={cn('inline-flex items-center', color)} aria-hidden="true">
-      {status === 'sent' ? (
-        <svg
-          width="16"
-          height="12"
-          viewBox="0 0 16 12"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1.7}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M2 7l3.5 3.5L14 2" />
-        </svg>
-      ) : (
-        <svg
-          width="20"
-          height="12"
-          viewBox="0 0 20 12"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1.7}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M2 7l3.5 3.5L11 2" />
-          <path d="M8 7l3.5 3.5L18 2" />
-        </svg>
-      )}
+      {status === 'sent' ? <IconTickSingle /> : <IconTickDouble />}
     </span>
   );
 }
+
+/** The bubble shell: peer on the panel, own on the accent tint, tail corner squared. */
+export function bubbleClass(state: {
+  mine: boolean;
+  sending: boolean;
+  failed: boolean;
+  checked: boolean;
+  voiceOnly: boolean;
+}): string {
+  return cn(
+    'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-[14px] border px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+    state.voiceOnly && 'min-w-[220px]',
+    state.mine
+      ? 'rounded-br-[4px] border-accent-line bg-accent-soft'
+      : 'rounded-bl-[4px] border-border bg-panel',
+    state.sending && 'opacity-70',
+    state.failed && 'border-bad',
+    state.checked && 'ring-2 ring-accent',
+  );
+}
+
+/** Message body text: primary ink at 15px. */
+const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-[1.4] text-fg';
+
+/** Bubble time: mono, tabular, tertiary. */
+const TIME_TEXT = 'font-mono text-[11px] tabular-nums text-fg-3';
 
 /**
  * One message row in the WhatsApp-style thread. Own messages (`message.mine`)
@@ -377,10 +382,10 @@ export function MessageBubble(props: {
   // Text and voice-only bubbles float the time bottom-right over a spacer that
   // reserves its width on the last line.
   const spacer = (
-    <span className={cn('inline-block', mine ? 'w-[74px]' : 'w-[52px]')} aria-hidden="true" />
+    <span className={cn('inline-block', mine ? 'w-[76px]' : 'w-[48px]')} aria-hidden="true" />
   );
   const inlineTime = (
-    <span className="absolute bottom-1.5 right-2.5 inline-flex items-center gap-1 text-[10px] text-fg-3">
+    <span className={cn('absolute bottom-1.5 right-2.5 inline-flex items-center gap-1', TIME_TEXT)}>
       {time}
     </span>
   );
@@ -429,16 +434,13 @@ export function MessageBubble(props: {
               e.stopPropagation();
             }
           }}
-          className={cn(
-            'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-2xl border px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-            voiceOnly && 'min-w-[220px]',
-            mine
-              ? 'rounded-br-sm border-accent-line bg-accent-soft'
-              : 'rounded-bl-sm border-border bg-panel-2',
-            sending && 'opacity-70',
-            failed && 'border-bad',
-            selection?.checked === true && 'ring-2 ring-accent',
-          )}
+          className={bubbleClass({
+            mine,
+            sending,
+            failed,
+            checked: selection?.checked === true,
+            voiceOnly,
+          })}
         >
           <MarkBadge
             mark={props.mark}
@@ -448,34 +450,20 @@ export function MessageBubble(props: {
           />
           {message.forwarded === true ? <ForwardedLabel /> : null}
           {reply !== null ? (
-            <button
-              type="button"
-              aria-label="Go to quoted message"
-              onClick={(e) => {
-                e.stopPropagation();
-                props.onJumpToMessage?.(reply.id);
-              }}
-              className="mb-1 flex min-h-[44px] w-full min-w-0 gap-2 overflow-hidden rounded-md bg-panel-3 text-left"
-            >
-              <span
-                className="w-[3.5px] shrink-0 self-stretch rounded-full bg-accent"
-                aria-hidden="true"
-              />
-              <span className="flex min-w-0 flex-col py-1 pr-2">
-                <span className="line-clamp-1 [overflow-wrap:anywhere] text-xs font-medium text-accent">
-                  {reply.authorUserId !== null
-                    ? (profiles.get(reply.authorUserId)?.displayName ?? 'Member')
-                    : 'Member'}
-                </span>
-                <span className="line-clamp-2 [overflow-wrap:anywhere] text-xs text-fg-2">
-                  {reply.preview}
-                </span>
-              </span>
-            </button>
+            <ReplyQuoteBox
+              author={
+                reply.authorUserId !== null
+                  ? (profiles.get(reply.authorUserId)?.displayName ?? 'Member')
+                  : 'Member'
+              }
+              preview={reply.preview}
+              onJump={() => props.onJumpToMessage?.(reply.id)}
+              className="mb-1"
+            />
           ) : null}
           {textOnly ? (
             <>
-              <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-sm text-fg-2">
+              <p className={BODY_TEXT}>
                 {message.body}
                 {spacer}
               </p>
@@ -493,11 +481,7 @@ export function MessageBubble(props: {
             </>
           ) : (
             <>
-              {message.body.trim() !== '' ? (
-                <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-sm text-fg-2">
-                  {message.body}
-                </p>
-              ) : null}
+              {message.body.trim() !== '' ? <p className={BODY_TEXT}>{message.body}</p> : null}
               <MessageAttachments
                 attachments={message.attachments}
                 cache={cache}
@@ -505,7 +489,7 @@ export function MessageBubble(props: {
               />
               <SharedPostCards postIds={message.sharedPostIds} />
               <SharedBriefCards briefIds={message.sharedBriefIds} />
-              <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-fg-3">
+              <div className={cn('mt-1 flex items-center justify-end gap-1', TIME_TEXT)}>
                 {time}
               </div>
             </>
@@ -515,7 +499,7 @@ export function MessageBubble(props: {
               type="button"
               onClick={onBadgeClick}
               className={cn(
-                'absolute -bottom-2.5 inline-flex items-center gap-0.5 rounded-full border border-border bg-panel px-1.5 py-0.5 text-xs shadow-sm',
+                'absolute -bottom-2.5 inline-flex items-center gap-0.5 rounded-full border border-border bg-panel px-1.5 py-0.5 text-xs',
                 mine ? 'right-2' : 'left-2',
               )}
             >
@@ -555,10 +539,7 @@ export function MessageBubble(props: {
 /** The small "Forwarded" line above a forwarded message's body (own and incoming). */
 export function ForwardedLabel(): ReactElement {
   return (
-    <span
-      data-forwarded=""
-      className="mb-1 flex items-center gap-1 text-[12px] leading-none text-fg-2"
-    >
+    <span data-forwarded="" className="mb-1 flex items-center gap-1 text-xs leading-none text-fg-2">
       <IconForward size={12} />
       {FORWARDED_LABEL}
     </span>
@@ -787,17 +768,19 @@ function ThreadBody(
     flash.classList.add(...ring);
     window.setTimeout(() => flash.classList.remove(...ring), 1200);
   };
-  if (props.loading) {
-    return <div className="flex-1 px-4 py-6 text-sm text-fg-3">Loading messages</div>;
-  }
+  if (props.loading) return threadSkeleton();
   if (props.messages.length === 0) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-fg-3">
-        <IconChat size={22} />
-        <span className="text-sm">No messages yet</span>
+      <div className="flex flex-1 flex-col justify-center">
+        <EmptyState
+          icon={<IconChat size={22} />}
+          title="No messages yet"
+          description="Say hello."
+        />
       </div>
     );
   }
+  const nowMs = Date.now();
   return (
     <>
       <ul
@@ -828,32 +811,36 @@ function ThreadBody(
         {props.loadingOlder === true ? (
           <li className="px-4 py-2 text-center text-xs text-fg-3">Loading earlier messages</li>
         ) : null}
-        {props.messages.map((message, i) => (
-          <MessageRow
-            key={message.id}
-            message={message}
-            profiles={props.profiles}
-            cache={props.cache}
-            presignEnabled={props.presignEnabled}
-            showTicks={props.showTicks}
-            isGroup={props.isGroup}
-            head={isHead(props.messages[i - 1], message)}
-            timeZone={props.timeZone}
-            onOpen={(m, rect) => setMenu({ message: m, rect })}
-            hoverMenu={hoverMenu}
-            onJumpToMessage={scrollToMessage}
-            mark={props.marks.get(message.id)}
-            {...(props.onChangePriority !== undefined
-              ? { onChangePriority: props.onChangePriority }
-              : {})}
-            {...(props.selection !== undefined
-              ? {
-                  selection: rowSelection(message, props.selection),
-                }
-              : {})}
-            {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
-          />
-        ))}
+        {withDaySeparators(props.messages, nowMs, props.timeZone).map((item) => {
+          if (item.kind === 'day') return <DayPill key={item.key} label={item.label} />;
+          const { message, index: i } = item;
+          return (
+            <MessageRow
+              key={message.id}
+              message={message}
+              profiles={props.profiles}
+              cache={props.cache}
+              presignEnabled={props.presignEnabled}
+              showTicks={props.showTicks}
+              isGroup={props.isGroup}
+              head={isHead(props.messages[i - 1], message)}
+              timeZone={props.timeZone}
+              onOpen={(m, rect) => setMenu({ message: m, rect })}
+              hoverMenu={hoverMenu}
+              onJumpToMessage={scrollToMessage}
+              mark={props.marks.get(message.id)}
+              {...(props.onChangePriority !== undefined
+                ? { onChangePriority: props.onChangePriority }
+                : {})}
+              {...(props.selection !== undefined
+                ? {
+                    selection: rowSelection(message, props.selection),
+                  }
+                : {})}
+              {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
+            />
+          );
+        })}
       </ul>
       <MessageActionMenu
         open={menu !== null}
@@ -899,6 +886,43 @@ function ThreadBody(
         }}
       />
     </>
+  );
+}
+
+/** One day pill between messages ("Today", "Yesterday", "D MMM"). No motion. */
+export function DayPill({ label }: { label: string }): ReactElement {
+  return (
+    <li role="separator" aria-label={label} className="flex justify-center">
+      <span className="self-center my-2 rounded-full border border-border bg-panel-2 px-2.5 py-0.5 text-[11px] font-medium text-fg-3">
+        {label}
+      </span>
+    </li>
+  );
+}
+
+/** Placeholder bubble widths for the loading thread, alternating sides. */
+export const THREAD_SKELETON_WIDTHS = ['w-[55%]', 'w-[40%]', 'w-[70%]', 'w-[45%]', 'w-[60%]'];
+
+/** The loading thread: five alternating pulse bubbles, no text, never the empty state. */
+export function threadSkeleton(): ReactElement {
+  return (
+    <ul
+      aria-busy="true"
+      aria-label="Loading messages"
+      className="flex flex-1 flex-col gap-3 overflow-hidden px-4 py-4"
+    >
+      {THREAD_SKELETON_WIDTHS.map((width, i) => (
+        <li
+          key={width}
+          data-skeleton-bubble=""
+          className={cn(
+            'h-10 animate-pulse rounded-[14px] bg-panel-2',
+            width,
+            i % 2 === 1 && 'self-end',
+          )}
+        />
+      ))}
+    </ul>
   );
 }
 
@@ -989,23 +1013,37 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     });
   };
   return (
-    <div className="flex h-full flex-col bg-panel">
-      <div className="flex items-center gap-2 border-b border-border px-2 md:px-4 h-14">
+    <div className="flex h-full flex-col bg-bg">
+      <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-2 md:px-4">
         {props.onBack !== undefined ? (
           <IconButton label="Back to conversations" onClick={props.onBack}>
-            <IconChevronRight size={20} className="rotate-180" />
+            <IconChevronLeft size={20} />
           </IconButton>
         ) : null}
-        <div className={cn('min-w-0 flex-1', props.onBack === undefined && 'px-2')}>
-          <span className="block truncate text-sm font-semibold text-fg">{props.title}</span>
+        {props.isGroup === true ? (
+          <span
+            aria-hidden="true"
+            className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-panel-3 text-fg-2"
+          >
+            <IconUsers size={14} />
+          </span>
+        ) : (
+          <Avatar
+            name={props.title}
+            size="md"
+            presence={
+              props.presence !== undefined && props.presence.available && props.presence.online
+                ? 'online'
+                : undefined
+            }
+          />
+        )}
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="block truncate text-[15px] font-semibold leading-tight text-fg">
+            {props.title}
+          </span>
           {props.presence !== undefined && props.presence.available ? (
-            <span className="flex items-center gap-1.5 text-xs text-fg-3">
-              <span
-                className={cn(
-                  'h-2 w-2 rounded-full',
-                  props.presence.online ? 'bg-good' : 'bg-fg-3',
-                )}
-              />
+            <span className="truncate text-xs text-fg-3">
               {props.presence.online
                 ? 'Online'
                 : lastSeenLabel(props.presence.lastTimeMs, Date.now(), props.timeZone)}

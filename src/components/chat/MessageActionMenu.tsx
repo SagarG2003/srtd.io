@@ -3,11 +3,12 @@ import type { ReactElement, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { ActionRow } from '@/components/ui';
 import { IconCheck, IconCopy, IconForward, IconPin, IconReply } from '@/components/ui/icons';
+import { popoverClass } from '@/components/ui/popover-classes';
 import { markMenuLabel, type MarkType } from '@/lib/chat/marks';
 import { cn } from '@/lib/cn';
 
 /** Quick-react row offered when a message's action menu is opened. */
-const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'] as const;
+export const QUICK_REACTIONS = ['👍', '❤️', '😂', '🆗', '🙏'] as const;
 
 interface MessageActionMenuProps {
   open: boolean;
@@ -202,9 +203,9 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
       <div
         ref={containerRef}
         className={cn(
-          'fixed z-50 flex flex-col gap-2 transition-[opacity,transform] duration-150',
-          mine ? 'items-end' : 'items-start',
-          shown ? 'opacity-100 scale-100' : 'opacity-0 scale-95',
+          'fixed z-50 flex flex-col gap-2 transition-[opacity,transform] duration-fast',
+          mine ? 'items-end origin-bottom-right' : 'items-start origin-bottom-left',
+          shown ? 'scale-100 opacity-100 ease-enter' : 'scale-[0.96] opacity-0 ease-exit',
         )}
         style={{
           top: coords?.top ?? 0,
@@ -235,7 +236,7 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
           role="menu"
           aria-label="Message actions"
           data-menu-items=""
-          className="min-w-[200px] rounded-xl border border-border-strong bg-panel p-1 shadow-2xl"
+          className={cn('min-w-[200px]', popoverClass(true))}
         >
           {messageMenuItems(props).map((item) => (
             <ActionRow

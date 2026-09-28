@@ -13,6 +13,10 @@ import { cn } from '@/lib/cn';
 import type { PresignCache } from '@/lib/asset-presign';
 import { classifyAttachment, type MessageAttachment } from '@/lib/chat/attachments';
 
+/** The file chip's Open link, styled as the shared ghost sm Button (it navigates, so it stays a link). */
+const OPEN_BUTTON =
+  'inline-flex h-8 items-center justify-center rounded-md px-3 text-xs font-medium text-fg-2 transition-colors hover:bg-panel-2';
+
 /** Presign one attachment id once, refreshing shortly before expiry; never throws. */
 export function useAttachmentUrl(
   assetId: string,
@@ -56,27 +60,27 @@ function FileChip({ name, url }: { name: string; url: string | null }): ReactEle
   const ext = fileExtension(name);
   const label = name.trim() !== '' ? name : 'Attachment';
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-border bg-panel-2 px-2.5 py-2">
+    <div className="flex items-center gap-2 rounded-lg border border-border bg-panel px-2.5 py-2">
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-3 text-fg-3">
         <IconFile size={18} />
       </span>
-      <span className="flex min-w-0 flex-col">
+      <span className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-xs font-medium text-fg" title={label}>
           {label}
         </span>
-        {url !== null ? (
-          <a
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[11px] font-medium text-accent hover:underline"
-          >
-            Open
-          </a>
-        ) : (
-          <span className="text-[11px] text-fg-3">{ext !== '' ? ext : 'File'}</span>
-        )}
+        <span className="text-[11px] text-fg-3">{ext !== '' ? ext : 'File'}</span>
       </span>
+      {url !== null ? (
+        // The 32px ghost button sits in a 44px-tall hit wrapper.
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex min-h-[44px] shrink-0 items-center"
+        >
+          <span className={OPEN_BUTTON}>Open</span>
+        </a>
+      ) : null}
     </div>
   );
 }

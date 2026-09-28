@@ -53,7 +53,7 @@ export function ConnectionBanner({
   return (
     <div
       role="status"
-      className="absolute inset-x-0 top-0 z-10 flex min-h-[32px] items-center justify-center gap-2 border-b border-border bg-panel-2 px-4 py-1 text-xs text-fg-2 shadow-sm"
+      className="absolute inset-x-0 top-0 z-10 flex min-h-[36px] items-center justify-center gap-2 border-b border-border bg-panel-2 px-4 py-1.5 text-xs text-fg-2"
     >
       <span
         aria-hidden="true"

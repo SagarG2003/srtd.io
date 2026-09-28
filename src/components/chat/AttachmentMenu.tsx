@@ -4,9 +4,11 @@
 // shared ActionRow (the row MessageActionMenu uses): icon and label left-aligned
 // on one line, a 44px touch target; the panel closes after a selection.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { ActionRow } from '@/components/ui';
+import { popoverClass } from '@/components/ui/popover-classes';
+import { cn } from '@/lib/cn';
 import type { AttachmentMenuItem } from '@/lib/chat/attachment-menu';
 
 interface AttachmentMenuProps {
@@ -17,6 +19,17 @@ interface AttachmentMenuProps {
 
 export function AttachmentMenu({ open, items, onClose }: AttachmentMenuProps): ReactElement | null {
   const ref = useRef<HTMLDivElement>(null);
+  const [shown, setShown] = useState(false);
+
+  // Enter motion: flip to shown the frame after mount (opacity + scale only).
+  useEffect(() => {
+    if (!open) {
+      setShown(false);
+      return;
+    }
+    const raf = requestAnimationFrame(() => setShown(true));
+    return () => cancelAnimationFrame(raf);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -41,7 +54,10 @@ export function AttachmentMenu({ open, items, onClose }: AttachmentMenuProps): R
       ref={ref}
       role="menu"
       aria-label="Add attachment"
-      className="absolute bottom-full left-0 z-10 mb-2 min-w-[220px] whitespace-nowrap rounded-xl border border-border-strong bg-panel p-1 shadow-2xl"
+      className={cn(
+        'absolute bottom-full left-0 z-10 mb-2 min-w-[220px] origin-bottom-left whitespace-nowrap',
+        popoverClass(shown),
+      )}
     >
       {attachmentMenuRows(items, onClose)}
     </div>

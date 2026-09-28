@@ -14,9 +14,10 @@ import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Sheet } from '@/components/ui/Sheet';
-import { IconCheck, IconPin, IconRotateCcw } from '@/components/ui/icons';
+import { IconCheck, IconChevronRight, IconPin, IconRotateCcw } from '@/components/ui/icons';
+import { Tag } from '@/components/ui/Tag';
 import { useToast } from '@/components/ui/toast';
-import { MarkPill } from '@/components/chat/MarkBits';
+import { MARK_TONE } from '@/components/chat/MarkBits';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { readPostsByIds } from '@srtdio/posts';
@@ -30,7 +31,6 @@ import {
   MARK_UPDATE_FAILED,
   STAMP_WORD,
   TYPE_LABEL,
-  markBadgeLabel,
   markConfirmAction,
   markConfirmCopy,
   markCounts,
@@ -38,12 +38,21 @@ import {
   markStripLabel,
   markTabCounts,
   marksForTab,
+  priorityLabel,
   resolverName,
   type ChatMark,
   type MarkPriority,
   type MarkTab,
   type MarkTransition,
 } from '@/lib/chat/marks';
+
+/** Split a strip label so each standalone count renders in primary ink ("P1" stays plain). */
+export function stripLabelParts(label: string): Array<{ text: string; count: boolean }> {
+  return label
+    .split(/(\b\d+\b)/)
+    .filter((part) => part !== '')
+    .map((part) => ({ text: part, count: /^\d+$/.test(part) }));
+}
 
 /** The count strip; renders nothing when every count is zero. */
 export function MarkStrip(props: {
@@ -59,7 +68,18 @@ export function MarkStrip(props: {
       className="flex min-h-[44px] w-full shrink-0 items-center gap-2 border-b border-border bg-panel-2 px-4 text-left text-xs text-fg-2 transition-colors hover:bg-panel-3"
     >
       <IconPin size={14} className="shrink-0 text-fg-3" />
-      <span className="truncate">{label}</span>
+      <span className="min-w-0 flex-1 truncate">
+        {stripLabelParts(label).map((part, i) =>
+          part.count ? (
+            <span key={i} className="font-semibold text-fg">
+              {part.text}
+            </span>
+          ) : (
+            part.text
+          ),
+        )}
+      </span>
+      <IconChevronRight size={16} className="shrink-0 text-fg-3" />
     </button>
   );
 }
@@ -129,9 +149,8 @@ export async function confirmMarkTransition(params: {
   return result;
 }
 
-/** 44x44 minimum, right-aligned row action (stamp or Reopen). */
-const ROW_ACTION =
-  'flex h-11 min-w-[44px] shrink-0 items-center justify-center gap-1 rounded-md border border-border px-3 text-xs font-medium text-fg-2 transition-colors hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50';
+/** 44x44 minimum, right-aligned row action (stamp or Reopen): a default lg Button. */
+const ROW_ACTION = 'min-w-[44px] shrink-0 gap-1 px-3';
 
 /**
  * One pin board row. Hook-free so the stamp word, confirm copy and History
@@ -154,7 +173,7 @@ export function MarkSheetRow(props: {
 }): ReactElement {
   const { mark } = props;
   const action: MarkTransition = mark.resolved ? 'reopen' : 'resolve';
-  const pill = mark.resolved ? TYPE_LABEL[mark.type] : markBadgeLabel(mark);
+  const priority = !mark.resolved && mark.type === 'pending' ? priorityLabel(mark.priority) : '';
   return (
     <li
       data-mark-row={mark.messageId}
@@ -167,7 +186,8 @@ export function MarkSheetRow(props: {
           className="flex min-h-[44px] min-w-0 flex-1 flex-col gap-1 rounded-md px-2 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         >
           <span className="flex min-w-0 items-center gap-2 text-xs text-fg-3">
-            <MarkPill type={mark.type} label={pill} />
+            <Tag label={TYPE_LABEL[mark.type]} tone={MARK_TONE[mark.type]} className="shrink-0" />
+            {priority !== '' ? <Tag label={priority} tone="warn" className="shrink-0" /> : null}
             <span className="truncate font-medium text-fg">{props.sender}</span>
             <span className="ml-auto shrink-0">{props.when}</span>
           </span>
@@ -181,8 +201,9 @@ export function MarkSheetRow(props: {
             <span className="text-[11px] text-fg-3">
               {`${props.resolver.name} · ${props.resolver.when}`}
             </span>
-            <button
+            <Button
               type="button"
+              size="lg"
               data-mark-action="reopen"
               aria-expanded={props.confirming}
               disabled={props.busy}
@@ -191,11 +212,12 @@ export function MarkSheetRow(props: {
             >
               <IconRotateCcw size={14} />
               <span>Reopen</span>
-            </button>
+            </Button>
           </div>
         ) : (
-          <button
+          <Button
             type="button"
+            size="lg"
             data-mark-action="resolve"
             aria-expanded={props.confirming}
             disabled={props.busy}
@@ -204,7 +226,7 @@ export function MarkSheetRow(props: {
           >
             <IconCheck size={14} />
             <span>{STAMP_WORD[mark.type]}</span>
-          </button>
+          </Button>
         )}
       </div>
       {props.confirming ? (

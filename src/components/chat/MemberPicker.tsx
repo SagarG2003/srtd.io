@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react';
 import { Avatar } from '@/components/ui/Avatar';
-import { IconCheck } from '@/components/ui/icons';
+import { SelectCheck } from '@/components/ui/SelectCheck';
 import { cn } from '@/lib/cn';
 import type { MemberOption } from '@/components/chat/member-picker';
 
@@ -25,7 +25,10 @@ export function MemberPicker(props: MemberPickerProps): ReactElement {
   }
   if (props.error !== null) {
     return (
-      <div role="alert" className="rounded-md border border-bad px-3 py-2 text-sm text-bad">
+      <div
+        role="alert"
+        className="rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
+      >
         {props.error}
       </div>
     );
@@ -57,7 +60,7 @@ export function MemberPicker(props: MemberPickerProps): ReactElement {
               <span className="min-w-0 flex-1 truncate text-sm font-medium">
                 {option.displayName}
               </span>
-              {isSelected ? <IconCheck size={18} /> : null}
+              <SelectCheck checked={isSelected} />
             </button>
           </li>
         );

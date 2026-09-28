@@ -10,7 +10,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Chip } from '@/components/ui/Chip';
+import { PlatformMark } from '@/components/ui/PlatformMark';
+import { Tag, isTagDot } from '@/components/ui/Tag';
 import { IconPipeline } from '@/components/ui/icons';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
@@ -68,7 +69,7 @@ export function SharedPostCards({ postIds }: { postIds: string[] }): ReactElemen
         {postIds.map((id) => (
           <div
             key={id}
-            className="h-16 w-[260px] animate-pulse rounded-lg border border-border bg-panel-2"
+            className="h-[54px] w-[240px] animate-pulse rounded-lg border border-border bg-panel-2"
           />
         ))}
       </div>
@@ -83,11 +84,15 @@ export function SharedPostCards({ postIds }: { postIds: string[] }): ReactElemen
   );
 }
 
+/** The shared card box: one tappable row, thumb + title over meta. */
+export const SHARED_CARD =
+  'flex w-[240px] items-center gap-2.5 rounded-lg border border-border bg-panel px-2.5 py-2 min-h-[44px]';
+
 function PostCardItem({ view }: { view: SharedPostView }): ReactElement {
   const navigate = useNavigate();
   if (view.kind === 'unavailable') {
     return (
-      <div className="flex w-[260px] items-center gap-2.5 rounded-lg border border-border bg-panel-2 px-3 py-2.5 text-fg-3">
+      <div className={`${SHARED_CARD} text-fg-3`}>
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-3">
           <IconPipeline size={18} />
         </span>
@@ -100,7 +105,7 @@ function PostCardItem({ view }: { view: SharedPostView }): ReactElement {
       type="button"
       aria-label={`Open post ${view.title}`}
       onClick={() => navigate(postRoute(view.postId))}
-      className="flex w-[260px] items-center gap-2.5 rounded-lg border border-border bg-panel-2 px-3 py-2.5 min-h-[44px] text-left transition-colors hover:bg-panel-3"
+      className={`${SHARED_CARD} text-left transition-colors hover:bg-panel-2`}
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-3 text-fg-3">
         <IconPipeline size={18} />
@@ -109,8 +114,12 @@ function PostCardItem({ view }: { view: SharedPostView }): ReactElement {
         <span className="truncate text-sm font-medium text-fg" title={view.title}>
           {view.title}
         </span>
-        <span className="flex">
-          <Chip label={stageLabel(view.stage)} />
+        <span className="flex items-center gap-1.5 text-xs text-fg-3">
+          <Tag
+            label={stageLabel(view.stage)}
+            {...(isTagDot(view.stage) ? { dot: view.stage } : {})}
+          />
+          <PlatformMark platform={view.platform} />
         </span>
       </span>
     </button>

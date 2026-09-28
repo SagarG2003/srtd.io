@@ -1,8 +1,9 @@
 // The voice-note body that sits inside the normal message bubble shell (same
 // radius, border and own/peer tint as a text bubble, owned by MessageBubble): a
-// hidden <audio> element driven by a ref, a 44x44 round accent play/pause
-// control, a 20-bar decorative waveform with an accent progress fill, and a
-// 12px mono m:ss duration on the right, then the Whisper transcript beneath.
+// hidden <audio> element driven by a ref, a square accent play/pause control
+// (44x44 hit area), a 20-bar decorative waveform whose played bars swap to the
+// accent token, and a mono m:ss duration on the right, then the Whisper
+// transcript beneath.
 // The length shows before play from the stored durationMs (the recorder's
 // value); a finite media duration (loadedmetadata or durationchange) refines
 // it, and a non-finite one (MediaRecorder webm reports Infinity) never replaces
@@ -12,6 +13,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { IconPause, IconPlay } from '@/components/ui/icons';
+import { cn } from '@/lib/cn';
 
 /** Fixed decorative bar heights (percent of the track) for the waveform. */
 const WAVEFORM_BARS = [
@@ -142,6 +144,11 @@ export function createPlaybackRegistry(): {
 /** The app-wide registry: one voice note plays at a time. */
 export const voicePlayback = createPlaybackRegistry();
 
+/** Whether a waveform bar sits inside the played-so-far share (progress 0-100). */
+export function barPlayed(index: number, progress: number): boolean {
+  return progress > 0 && ((index + 0.5) / WAVEFORM_BARS.length) * 100 <= progress;
+}
+
 export function VoiceNote({
   url,
   name,
@@ -206,35 +213,34 @@ export function VoiceNote({
     <div data-voice-note="" className="flex w-full flex-col gap-1.5">
       <div className="flex items-center gap-3">
         <audio ref={audioRef} src={url ?? undefined} preload="metadata" className="hidden" />
+        {/* 44x44 hit area around the 36px square play control (primary button look). */}
         <button
           type="button"
           onClick={toggle}
           disabled={disabled}
           aria-label={playing ? 'Pause voice note' : 'Play voice note'}
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-accent-fg hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:opacity-40"
+          className="group/play -m-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-40"
         >
-          {playing ? <IconPause size={18} /> : <IconPlay size={18} />}
+          <span className="flex h-9 w-9 items-center justify-center rounded-md bg-accent text-accent-fg group-hover/play:bg-accent-hover">
+            {playing ? <IconPause size={18} /> : <IconPlay size={18} />}
+          </span>
         </button>
-        <div className="relative h-6 min-w-[120px] flex-1" aria-hidden="true">
-          <div className="flex h-full w-full items-center gap-0.5">
-            {WAVEFORM_BARS.map((height, index) => (
-              <span
-                key={index}
-                className="flex-1 rounded-sm bg-fg-3/40"
-                style={{ height: `${height}%` }}
-              />
-            ))}
-          </div>
-          {/* Played-so-far fill: a translucent accent overlay whose width tracks
-              progress, so the bars beneath stay aligned. Width-only, no transition. */}
-          <div
-            className="absolute inset-y-0 left-0 rounded-sm bg-accent/30"
-            style={{ width: `${progress}%` }}
-          />
+        <div className="flex h-6 min-w-[120px] flex-1 items-center gap-0.5" aria-hidden="true">
+          {WAVEFORM_BARS.map((height, index) => (
+            <span
+              key={index}
+              data-played={barPlayed(index, progress) ? '' : undefined}
+              className={cn(
+                'flex-1 rounded-sm',
+                barPlayed(index, progress) ? 'bg-accent' : 'bg-fg-3',
+              )}
+              style={{ height: `${height}%` }}
+            />
+          ))}
         </div>
         <span
           data-voice-duration=""
-          className="shrink-0 text-right font-mono text-[12px] tabular-nums text-fg-3"
+          className="shrink-0 text-right font-mono text-xs tabular-nums text-fg-2"
           title={name}
         >
           {label}

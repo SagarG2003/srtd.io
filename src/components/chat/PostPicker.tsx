@@ -208,7 +208,10 @@ function PostPickerList(props: {
   }
   if (props.error !== null) {
     return (
-      <div role="alert" className="rounded-md border border-bad px-3 py-2 text-sm text-bad">
+      <div
+        role="alert"
+        className="rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
+      >
         {props.error}
       </div>
     );
@@ -267,7 +270,10 @@ function BriefPickerList(props: {
   }
   if (props.error !== null) {
     return (
-      <div role="alert" className="rounded-md border border-bad px-3 py-2 text-sm text-bad">
+      <div
+        role="alert"
+        className="rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
+      >
         {props.error}
       </div>
     );
