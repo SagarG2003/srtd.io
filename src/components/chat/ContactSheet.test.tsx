@@ -8,6 +8,7 @@ vi.mock('agora-chat', () => ({
 import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { IconButton } from '@/components/ui/IconButton';
 import {
   appendPage,
   CONTACT_EMPTY,
@@ -103,11 +104,31 @@ function props(over: Partial<ContactSheetViewProps> = {}): ContactSheetViewProps
   };
 }
 
-const view = (p: ContactSheetViewProps): ReactElement => ContactSheetView(p);
+const view = (p: ContactSheetViewProps): ReactElement => ContactSheetView(p) as ReactElement;
 const emptyTitles = (tree: ReactElement): string[] =>
   findAll(tree, (el) => el.type === EmptyState).map((el) => String(el.props.title));
 const loadMore = (tree: ReactElement) =>
   findAll(tree, (el) => el.type === Button && 'data-load-more' in el.props);
+
+describe('ContactSheetView page', () => {
+  it('is a full-screen page, not a sheet', () => {
+    const tree = view(props());
+    expect(tree.props['data-contact-page']).toBe('');
+    expect(String(tree.props.className)).toContain('fixed inset-0');
+  });
+
+  it('renders nothing while closed', () => {
+    expect(ContactSheetView(props({ open: false }))).toBeNull();
+  });
+
+  it('the 44px back button closes the page', () => {
+    const onClose = vi.fn();
+    const [back] = findAll(view(props({ onClose })), (el) => el.type === IconButton);
+    expect(back?.props.label).toBe('Close contact info');
+    (back?.props.onClick as () => void)();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('ContactSheetView tabs', () => {
   it('renders Media, Files, Links, Marks as tap chips; Media selected by default', () => {
@@ -157,6 +178,12 @@ describe('ContactSheetView states', () => {
       files: 'No files yet',
       links: 'No links yet',
     });
+  });
+
+  it('voice notes (audio) appear in neither Media nor Files', () => {
+    const attachments = feed([item({ mime: 'audio/webm', name: 'voice.webm' })]);
+    expect(emptyTitles(view(props({ tab: 'media', attachments })))).toEqual([CONTACT_EMPTY.media]);
+    expect(emptyTitles(view(props({ tab: 'files', attachments })))).toEqual([CONTACT_EMPTY.files]);
   });
 
   it('files only: Media is empty, Files lists them (video counts as a file)', () => {

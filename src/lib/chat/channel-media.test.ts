@@ -137,14 +137,15 @@ describe('toAttachmentItems + splitMediaFiles', () => {
     ]);
   });
 
-  it('a legacy id without meta has mime "" and lists as a file; video is a file', () => {
+  it('a legacy id without meta has mime "" and lists as a file; video is a file; voice notes are dropped', () => {
     const items = toAttachmentItems([
       row({ id: 'm2', attachment_asset_ids: ['legacy'], attachment_meta: null }),
       row({
         id: 'm3',
-        attachment_asset_ids: ['vid', 'img'],
+        attachment_asset_ids: ['vid', 'img', 'voice'],
         attachment_meta: {
           vid: { mime: 'video/mp4', name: 'v.mp4', size: 1 },
+          voice: { mime: 'audio/webm', name: 'voice.webm', size: 1, duration_ms: 3000 },
           img: { mime: 'image/webp', name: 'i.webp', size: 1 },
         },
       }),
