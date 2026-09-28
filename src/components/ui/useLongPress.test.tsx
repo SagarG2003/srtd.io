@@ -65,4 +65,81 @@ describe('createLongPressController', () => {
 
     c.dispose();
   });
+
+  it('ignoreMouse: a mouse press never starts the timer, touch still does', () => {
+    const onLongPress = vi.fn();
+    const c = createLongPressController({ onLongPress, ignoreMouse: true });
+
+    c.handlers.onPointerDown({ ...at(0, 0), pointerType: 'mouse' });
+    expect(c.lastPointerType()).toBe('mouse');
+    vi.advanceTimersByTime(LONG_PRESS_MS * 2);
+    expect(onLongPress).not.toHaveBeenCalled();
+    expect(c.consumeClickSuppression()).toBe(false);
+
+    c.handlers.onPointerDown({ ...at(0, 0), pointerType: 'touch' });
+    expect(c.lastPointerType()).toBe('touch');
+    vi.advanceTimersByTime(LONG_PRESS_MS - 1);
+    expect(onLongPress).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+
+    c.dispose();
+  });
+
+  it('touch behaviour is unchanged with ignoreMouse: 450ms, 10px move cancel, scroll cancel', () => {
+    expect(LONG_PRESS_MS).toBe(450);
+    expect(MOVE_CANCEL_PX).toBe(10);
+    const onLongPress = vi.fn();
+    const c = createLongPressController({ onLongPress, ignoreMouse: true });
+    const touch = (x: number, y: number) => ({ ...at(x, y), pointerType: 'touch' });
+
+    c.handlers.onPointerDown(touch(0, 0));
+    c.handlers.onPointerMove(touch(MOVE_CANCEL_PX, 0));
+    vi.advanceTimersByTime(LONG_PRESS_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    expect(c.consumeClickSuppression()).toBe(true);
+
+    c.handlers.onPointerDown(touch(0, 0));
+    c.handlers.onPointerMove(touch(MOVE_CANCEL_PX + 1, 0));
+    vi.advanceTimersByTime(LONG_PRESS_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+
+    const listeners: Array<() => void> = [];
+    vi.stubGlobal('window', {
+      addEventListener: (_: string, fn: () => void) => listeners.push(fn),
+      removeEventListener: () => {},
+    });
+    c.handlers.onPointerDown(touch(0, 0));
+    listeners.forEach((fn) => fn());
+    vi.advanceTimersByTime(LONG_PRESS_MS);
+    expect(onLongPress).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+
+    c.dispose();
+  });
+
+  it('contextmenu cancels a running hold so the menu is not reopened', () => {
+    const onLongPress = vi.fn();
+    const c = createLongPressController({ onLongPress });
+
+    c.handlers.onPointerDown(at(0, 0));
+    c.cancel();
+    vi.advanceTimersByTime(LONG_PRESS_MS * 2);
+    expect(onLongPress).not.toHaveBeenCalled();
+
+    c.dispose();
+  });
+
+  it('a click after the menu opened is not suppressed', () => {
+    const c = createLongPressController({
+      onLongPress: () => c.clearClickSuppression(),
+    });
+
+    c.handlers.onPointerDown(at(0, 0));
+    vi.advanceTimersByTime(LONG_PRESS_MS);
+    c.handlers.onPointerUp();
+    expect(c.consumeClickSuppression()).toBe(false);
+
+    c.dispose();
+  });
 });

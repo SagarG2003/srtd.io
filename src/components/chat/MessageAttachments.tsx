@@ -5,10 +5,11 @@
 // thread of attachments never fires N+1 presigns and re-renders never re-presign.
 
 import { useEffect, useState } from 'react';
-import type { ReactElement } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import { IconFile } from '@/components/ui/icons';
 import { VoiceNote } from '@/components/chat/VoiceNote';
 import { fileExtension } from '@/lib/assets';
+import { cn } from '@/lib/cn';
 import type { PresignCache } from '@/lib/asset-presign';
 import { classifyAttachment, type MessageAttachment } from '@/lib/chat/attachments';
 
@@ -91,7 +92,13 @@ function FileChip({ name, url }: { name: string; url: string | null }): ReactEle
 export type AttachmentView =
   | { kind: 'image'; src: string; alt: string }
   | { kind: 'image-pending'; alt: string }
-  | { kind: 'audio'; url: string | null; name: string; transcript: string | undefined }
+  | {
+      kind: 'audio';
+      url: string | null;
+      name: string;
+      transcript: string | undefined;
+      durationMs: number | undefined;
+    }
   | { kind: 'file'; name: string; url: string | null };
 
 export function attachmentView(args: {
@@ -107,7 +114,13 @@ export function attachmentView(args: {
       : { kind: 'image-pending', alt: attachment.name };
   }
   if (classifyAttachment(attachment.mime) === 'audio' && presignEnabled && !failed) {
-    return { kind: 'audio', url, name: attachment.name, transcript: attachment.transcript };
+    return {
+      kind: 'audio',
+      url,
+      name: attachment.name,
+      transcript: attachment.transcript,
+      durationMs: attachment.durationMs,
+    };
   }
   return { kind: 'file', name: attachment.name, url };
 }
@@ -117,11 +130,13 @@ function AttachmentItem({
   cache,
   presignEnabled,
   onImageClick,
+  voiceSpacer,
 }: {
   attachment: MessageAttachment;
   cache: PresignCache;
   presignEnabled: boolean;
   onImageClick?: ((attachment: MessageAttachment) => void) | undefined;
+  voiceSpacer?: ReactNode;
 }): ReactElement {
   // The render layer presigns the attachment's VERSION id (assetId carries the
   // asset_versions.id) through the shared cache, which dedupes in-flight ids.
@@ -155,7 +170,15 @@ function AttachmentItem({
     case 'image-pending':
       return <div className="h-32 w-44 animate-pulse rounded-lg border border-border bg-panel-2" />;
     case 'audio':
-      return <VoiceNote url={view.url} name={view.name} transcript={view.transcript} />;
+      return (
+        <VoiceNote
+          url={view.url}
+          name={view.name}
+          transcript={view.transcript}
+          durationMs={view.durationMs}
+          {...(voiceSpacer !== undefined ? { spacer: voiceSpacer } : {})}
+        />
+      );
     case 'file':
       return <FileChip name={view.name} url={view.url} />;
   }
@@ -166,16 +189,27 @@ export function MessageAttachments({
   cache,
   presignEnabled,
   onImageClick,
+  voiceSpacer,
 }: {
   attachments: readonly MessageAttachment[];
   cache: PresignCache;
   presignEnabled: boolean;
   /** Optional: tap an image attachment to open it (comments). Chat omits it. */
   onImageClick?: ((attachment: MessageAttachment) => void) | undefined;
+  /**
+   * Chat voice-only bubbles: the inline time spacer a voice note ends with, and
+   * the list sits flush in the bubble (no top margin, full width).
+   */
+  voiceSpacer?: ReactNode;
 }): ReactElement | null {
   if (attachments.length === 0) return null;
   return (
-    <div className="mt-1.5 flex flex-col items-start gap-1.5">
+    <div
+      className={cn(
+        'flex flex-col gap-1.5',
+        voiceSpacer !== undefined ? 'items-stretch' : 'mt-1.5 items-start',
+      )}
+    >
       {attachments.map((attachment, index) => (
         <AttachmentItem
           key={`${attachment.assetId}-${index}`}
@@ -183,6 +217,7 @@ export function MessageAttachments({
           cache={cache}
           presignEnabled={presignEnabled}
           onImageClick={onImageClick}
+          {...(voiceSpacer !== undefined ? { voiceSpacer } : {})}
         />
       ))}
     </div>

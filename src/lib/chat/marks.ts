@@ -6,11 +6,12 @@
 // loop behind jump-to-message. Writes live in record.ts. Framework-free, so every
 // rule is unit-tested with no DOM and no database.
 //
-// A message carries at most one mark. Commitment and decision are frozen once
-// set (no unmark, no edit); pending can have its priority changed and can be
-// resolved, after which it is frozen too. A resolved row is kept in memory (it
-// still locks the message against delete, as the proc does) but shows no badge
-// and no list row.
+// A message carries at most one mark. The type is fixed once set; a pending
+// mark can have its priority changed while open. Any member can stamp any open
+// mark (commitment Delivered, decision Closed, pending Completed) and reopen a
+// stamped one. A resolved row stays in memory and in the History tab (it still
+// locks the message against delete, as the proc does); its bubble badge carries
+// the stamp word and is not interactive.
 
 import type { AgoraChat } from 'agora-chat';
 import type { Client, Result } from '@srtdio/rpc';
@@ -37,6 +38,10 @@ export interface ChatMark {
   priority: MarkPriority;
   markedAt: string;
   resolved: boolean;
+  /** Who stamped it; null while open. */
+  resolvedBy: string | null;
+  /** When it was stamped; null while open. */
+  resolvedAt: string | null;
 }
 
 const MARK_COLUMNS =
@@ -63,6 +68,8 @@ export function rowToMark(row: ChatMarkRow): ChatMark | undefined {
     priority,
     markedAt: row.marked_at,
     resolved: row.resolved_at !== null,
+    resolvedBy: row.resolved_at !== null ? row.resolved_by : null,
+    resolvedAt: row.resolved_at,
   };
 }
 
@@ -120,7 +127,8 @@ export function upsertMark(marks: Map<string, ChatMark>, mark: ChatMark): Map<st
 /** The mark types in menu order. */
 export const MARK_TYPES: readonly MarkType[] = ['commitment', 'decision', 'pending'];
 
-const TYPE_LABEL: Record<MarkType, string> = {
+/** Each mark type's display name. */
+export const TYPE_LABEL: Record<MarkType, string> = {
   commitment: 'Commitment',
   decision: 'Decision',
   pending: 'Pending',
@@ -154,9 +162,58 @@ export function priorityLabel(priority: MarkPriority): string {
   return priority === null ? '' : `P${priority}`;
 }
 
-/** Bubble badge text; '' (no badge) when unmarked or resolved. */
+/** The stamp word that resolves each mark type. */
+export const STAMP_WORD: Record<MarkType, string> = {
+  commitment: 'Delivered',
+  decision: 'Closed',
+  pending: 'Completed',
+};
+
+/** The noun a confirm names the mark by. */
+const CONFIRM_NOUN: Record<MarkType, string> = {
+  commitment: 'commitment',
+  decision: 'decision',
+  pending: 'priority',
+};
+
+/** A stamp or a reopen, the two transitions the pin board offers. */
+export type MarkTransition = 'resolve' | 'reopen';
+
+/** The inline confirm question for a transition. */
+export function markConfirmCopy(type: MarkType, action: MarkTransition): string {
+  const noun = CONFIRM_NOUN[type];
+  return action === 'resolve'
+    ? `Mark this ${noun} as ${STAMP_WORD[type].toLowerCase()}?`
+    : `Reopen this ${noun}?`;
+}
+
+/** The confirm's primary button label: the stamp word, or Reopen. */
+export function markConfirmAction(type: MarkType, action: MarkTransition): string {
+  return action === 'resolve' ? STAMP_WORD[type] : 'Reopen';
+}
+
+/** Toast when a stamp or reopen write fails (the row has already reverted). */
+export const MARK_UPDATE_FAILED = 'Could not update';
+
+/**
+ * The mark as it looks after a transition: stamped by `actorId` at `nowIso`, or
+ * reopened (resolver cleared, the original marked time kept).
+ */
+export function applyTransition(
+  mark: ChatMark,
+  action: MarkTransition,
+  actorId: string,
+  nowIso: string,
+): ChatMark {
+  return action === 'resolve'
+    ? { ...mark, resolved: true, resolvedBy: actorId, resolvedAt: nowIso }
+    : { ...mark, resolved: false, resolvedBy: null, resolvedAt: null };
+}
+
+/** Bubble badge text: '' when unmarked; a stamped mark appends its stamp word. */
 export function markBadgeLabel(mark: ChatMark | undefined): string {
-  if (mark === undefined || mark.resolved) return '';
+  if (mark === undefined) return '';
+  if (mark.resolved) return `${TYPE_LABEL[mark.type]} · ${STAMP_WORD[mark.type]}`;
   const base = TYPE_LABEL[mark.type];
   return mark.type === 'pending' && mark.priority !== null
     ? `${base} ${priorityLabel(mark.priority)}`
@@ -203,39 +260,56 @@ export function markStripLabel(counts: MarkCounts): string {
   return parts.join(' · ');
 }
 
-/** The sheet tabs. */
-export type MarkTab = 'commitment' | 'decision' | 'pending';
+/** The pin board tabs: open marks, and stamped marks. */
+export type MarkTab = 'open' | 'history';
 
 export const MARK_TABS: ReadonlyArray<{ key: MarkTab; label: string }> = [
-  { key: 'commitment', label: 'Commitments' },
-  { key: 'decision', label: 'Decisions' },
-  { key: 'pending', label: 'Pending' },
+  { key: 'open', label: 'Open' },
+  { key: 'history', label: 'History' },
 ];
 
 /** Epoch ms used for ordering: the marked message's time, else marked_at. */
 export type MarkTimeOf = (mark: ChatMark) => number;
 
-function priorityRank(priority: MarkPriority): number {
-  return priority === null ? 3 : priority;
+function epoch(iso: string | null): number {
+  if (iso === null) return 0;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? 0 : t;
+}
+
+/** Row count per tab. */
+export function markTabCounts(marks: Iterable<ChatMark>): Record<MarkTab, number> {
+  const counts: Record<MarkTab, number> = { open: 0, history: 0 };
+  for (const mark of marks) counts[mark.resolved ? 'history' : 'open'] += 1;
+  return counts;
 }
 
 /**
- * One tab's rows, open marks only. Commitments and decisions newest first;
- * pending P1, then P2, then unranked, each oldest first.
+ * One tab's rows. Open: unresolved marks, newest message first. History:
+ * stamped marks, most recently stamped first.
  */
 export function marksForTab(
   marks: Iterable<ChatMark>,
   tab: MarkTab,
   timeOf: MarkTimeOf,
 ): ChatMark[] {
-  const list = [...marks].filter((m) => !m.resolved && m.type === tab);
-  if (tab === 'pending') {
-    return list.sort((a, b) => {
-      const rank = priorityRank(a.priority) - priorityRank(b.priority);
-      return rank !== 0 ? rank : timeOf(a) - timeOf(b);
-    });
+  if (tab === 'history') {
+    return [...marks]
+      .filter((m) => m.resolved)
+      .sort((a, b) => epoch(b.resolvedAt) - epoch(a.resolvedAt));
   }
-  return list.sort((a, b) => timeOf(b) - timeOf(a));
+  return [...marks].filter((m) => !m.resolved).sort((a, b) => timeOf(b) - timeOf(a));
+}
+
+/** The resolver's name: 'You', a loaded profile's display name, else 'Member'. */
+export function resolverName(
+  mark: Pick<ChatMark, 'resolvedBy'>,
+  currentUserId: string,
+  displayNameOf: (userId: string) => string | undefined,
+): string {
+  if (mark.resolvedBy === null) return 'Member';
+  if (mark.resolvedBy === currentUserId) return 'You';
+  return displayNameOf(mark.resolvedBy) ?? 'Member';
 }
 
 /** Longest body snippet a sheet row shows. */

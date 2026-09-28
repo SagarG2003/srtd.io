@@ -296,7 +296,7 @@ Chat record: public.chat_messages is the single source of truth for chat history
 
 chat_messages carries shared_post_ids, reply_to_message_id and attachment_meta (mime, name, size, duration_ms per asset id); workspace_members.active flips enqueue member_add/member_remove for every group channel the user is in.
 
-Marks: chat_message_marks, one per message, types commitment/decision (frozen: no unmark, no delete) and pending (resolvable by any member, optional priority 1 or 2). Delete: chat_message_delete soft-deletes the caller's own messages only, never marked ones. shared_brief_ids alongside shared_post_ids.
+Marks: chat_message_marks, one per message, types commitment/decision (commitment/decision/pending are all resolvable by any member (Delivered / Closed / Completed) via chat_mark_resolve; chat_mark_reopen (any member) returns a resolved mark to open; resolved rows stay as history; marks hidden by the caller's clear, same as messages.) and pending (resolvable by any member, optional priority 1 or 2). Delete: chat_message_delete soft-deletes the caller's own messages only, never marked ones. shared_brief_ids alongside shared_post_ids.
 
 Forward: forwarded_from_message_id, same workspace only, source must be readable by the sender. Clear for me: chat_channel_clears(channel_id, user_id, cleared_at); the chat_messages read policy hides rows at or before the caller's cleared_at; other members unaffected.
 

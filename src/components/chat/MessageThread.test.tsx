@@ -12,9 +12,12 @@ import { Avatar } from '@/components/ui/Avatar';
 import {
   bubbleTimeLabel,
   ForwardedLabel,
+  isVoiceOnly,
+  keyOpensMenu,
   lastSeenLabel,
   MessageBubble,
 } from '@/components/chat/MessageThread';
+import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
 import { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
 import type { ThreadMessage } from '@/lib/chat/thread';
@@ -283,5 +286,155 @@ describe('MessageBubble forwarded label', () => {
       if (el.type === ForwardedLabel) count += 1;
     });
     expect(count).toBe(0);
+  });
+});
+
+describe('MessageBubble keyboard and hover actions', () => {
+  const noop = (): void => {};
+  function pressed(over: { onKeyOpen?: () => void; onMore?: (anchor: DOMRect) => void } = {}) {
+    return {
+      handlers: {
+        onPointerDown: noop,
+        onPointerMove: noop,
+        onPointerUp: noop,
+        onPointerCancel: noop,
+      },
+      onContextMenu: noop,
+      consumeClick: () => false,
+      onKeyOpen: over.onKeyOpen ?? noop,
+      ...(over.onMore !== undefined ? { onMore: over.onMore } : {}),
+    };
+  }
+  function bubbleOf(root: ReactElement): ReactElement<Record<string, unknown>> {
+    let found: ReactElement<Record<string, unknown>> | undefined;
+    walk(root, (el) => {
+      if ((el.props as Record<string, unknown>)['data-bubble'] !== undefined) {
+        found = el as ReactElement<Record<string, unknown>>;
+      }
+    });
+    if (found === undefined) throw new Error('no bubble');
+    return found;
+  }
+  function render(press: ReturnType<typeof pressed>, message = makeMessage({})): ReactElement {
+    return MessageBubble({
+      message,
+      profiles: PROFILES,
+      cache,
+      presignEnabled: false,
+      showTicks: false,
+      isGroup: false,
+      head: true,
+      timeZone: 'UTC',
+      onBadgeClick: noop,
+      press,
+    });
+  }
+
+  it('the bubble is a focusable group with a label', () => {
+    const bubble = bubbleOf(render(pressed()));
+    expect(bubble.props.role).toBe('group');
+    expect(bubble.props.tabIndex).toBe(0);
+    expect(bubble.props['aria-label']).toBe('Message from Alice, 18:45');
+  });
+
+  it('Enter, Space and Shift+F10 on the bubble open the menu; other keys do not', () => {
+    const onKeyOpen = vi.fn();
+    const bubble = bubbleOf(render(pressed({ onKeyOpen })));
+    const onKeyDown = bubble.props.onKeyDown as (e: unknown) => void;
+    const self = {};
+    const key = (k: string, shiftKey = false, target: unknown = self) => ({
+      key: k,
+      shiftKey,
+      target,
+      currentTarget: self,
+      preventDefault: vi.fn(),
+    });
+    onKeyDown(key('Enter'));
+    onKeyDown(key(' '));
+    onKeyDown(key('F10', true));
+    expect(onKeyOpen).toHaveBeenCalledTimes(3);
+    onKeyDown(key('a'));
+    // Enter on a control inside the bubble (quoted reply) is that control's own.
+    onKeyDown(key('Enter', false, {}));
+    expect(onKeyOpen).toHaveBeenCalledTimes(3);
+  });
+
+  it('keyOpensMenu covers the ContextMenu key and ignores bubbling Enter', () => {
+    const t = {};
+    expect(
+      keyOpensMenu({ key: 'ContextMenu', shiftKey: false, target: {}, currentTarget: t }),
+    ).toBe(true);
+    expect(keyOpensMenu({ key: 'Enter', shiftKey: false, target: {}, currentTarget: t })).toBe(
+      false,
+    );
+  });
+
+  it('Escape closes the menu, and the first action row gets focus on open', () => {
+    expect(menuClosesOnKey('Escape')).toBe(true);
+    expect(menuClosesOnKey('Enter')).toBe(false);
+    const focus = vi.fn();
+    const querySelector = vi.fn(() => ({ focus }));
+    expect(focusFirstMenuItem({ querySelector })).toBe(true);
+    expect(querySelector).toHaveBeenCalledWith('[data-menu-items] button');
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(focusFirstMenuItem(null)).toBe(false);
+  });
+
+  it('renders the 44x44 ⋯ control only when the pointer can hover', () => {
+    const onMore = vi.fn();
+    const more = (root: ReactElement): ReactElement<Record<string, unknown>>[] => {
+      const out: ReactElement<Record<string, unknown>>[] = [];
+      walk(root, (el) => {
+        if ((el.props as Record<string, unknown>)['data-more'] !== undefined) {
+          out.push(el as ReactElement<Record<string, unknown>>);
+        }
+      });
+      return out;
+    };
+    expect(more(render(pressed()))).toHaveLength(0);
+    const [button] = more(render(pressed({ onMore })));
+    expect(String(button?.props.className)).toContain('h-11 w-11');
+    expect(String(button?.props.className)).toContain('group-hover:opacity-100');
+    const rect = { top: 1 } as DOMRect;
+    (button?.props.onClick as (e: unknown) => void)({
+      currentTarget: { getBoundingClientRect: () => rect },
+    });
+    expect(onMore).toHaveBeenCalledWith(rect);
+  });
+});
+
+describe('voice-only bubble', () => {
+  const voice = makeMessage({
+    body: '',
+    attachments: [{ assetId: 'v1', name: 'note.webm', mime: 'audio/webm', durationMs: 18_000 }],
+  });
+
+  it('is detected only for a lone audio attachment with no text or cards', () => {
+    expect(isVoiceOnly(voice)).toBe(true);
+    expect(isVoiceOnly({ ...voice, body: 'hi' })).toBe(false);
+    expect(isVoiceOnly({ ...voice, sharedPostIds: ['p'] })).toBe(false);
+    expect(
+      isVoiceOnly({
+        ...voice,
+        attachments: [{ assetId: 'f', name: 'a.pdf', mime: 'application/pdf' }],
+      }),
+    ).toBe(false);
+  });
+
+  it('uses the text-bubble shell with the time inline, no separate time row', () => {
+    const root = renderBubble(voice);
+    let bubbleClass = '';
+    const inlineTimes: string[] = [];
+    let timeRow = false;
+    walk(root, (el) => {
+      const props = el.props as { className?: string } & Record<string, unknown>;
+      if (props['data-bubble'] !== undefined) bubbleClass = props.className ?? '';
+      if (props.className?.includes('absolute bottom-1.5 right-2.5')) inlineTimes.push('x');
+      if (props.className?.includes('mt-1 flex items-center justify-end')) timeRow = true;
+    });
+    expect(bubbleClass).toContain('rounded-2xl');
+    expect(bubbleClass).toContain('min-w-[220px]');
+    expect(inlineTimes).toHaveLength(1);
+    expect(timeRow).toBe(false);
   });
 });

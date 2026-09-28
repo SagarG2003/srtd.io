@@ -81,6 +81,17 @@ describe('attachmentView render dispatch', () => {
     });
   });
 
+  it('passes the stored durationMs through to the voice note', () => {
+    expect(
+      attachmentView({
+        attachment: { ...AUDIO, durationMs: 18_000 },
+        presignEnabled: true,
+        url: null,
+        failed: false,
+      }),
+    ).toMatchObject({ kind: 'audio', durationMs: 18_000 });
+  });
+
   it('keeps the voice note while the presign is still in flight (url null)', () => {
     expect(
       attachmentView({ attachment: AUDIO, presignEnabled: true, url: null, failed: false }),

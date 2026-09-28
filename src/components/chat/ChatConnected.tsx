@@ -284,6 +284,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               markedMessages={marks.markedMessages}
               onSetMark={marks.setMark}
               onResolveMark={marks.resolve}
+              onReopenMark={marks.reopen}
+              currentUserId={currentUserId}
               onDeleteMessages={thread.deleteMessages}
               forwardChannels={roster}
               onForward={thread.forward}

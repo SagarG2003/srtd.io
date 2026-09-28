@@ -1,7 +1,7 @@
 // Postgres writes for chat, through the SECURITY DEFINER procs that are the
 // only write paths: chat_message_send (the record, called BEFORE Agora),
 // chat_reaction_add / chat_reaction_remove, chat_read_cursor_set,
-// chat_mark_set / chat_mark_resolve, chat_message_delete and
+// chat_mark_set / chat_mark_resolve / chat_mark_reopen, chat_message_delete and
 // chat_channel_clear (delete a chat for the caller only). The actor
 // is auth.uid() server-side (never passed), and the trace id is the explicit
 // p_trace_id parameter of every proc (minted with uuid_v7 at the user action,
@@ -114,6 +114,7 @@ async function voidProc<
     | 'chat_read_cursor_set'
     | 'chat_mark_set'
     | 'chat_mark_resolve'
+    | 'chat_mark_reopen'
     | 'chat_message_delete',
 >(client: Client, fn: N, args: Functions[N]['Args']): Promise<WriteResult> {
   try {
@@ -211,9 +212,18 @@ export interface MarkResolveParams {
   traceId: string;
 }
 
-/** Resolve an open pending mark (the row stays; it leaves the lists and badges). */
+/** Stamp an open mark of any type (the row stays as history). */
 export function resolveMarkRecord(params: MarkResolveParams): Promise<WriteResult> {
   return voidProc(params.client, 'chat_mark_resolve', {
+    p_message_id: params.messageId,
+    p_channel_id: params.channelId,
+    p_trace_id: params.traceId,
+  });
+}
+
+/** Return a stamped mark to open (resolver and resolved time cleared). */
+export function reopenMarkRecord(params: MarkResolveParams): Promise<WriteResult> {
+  return voidProc(params.client, 'chat_mark_reopen', {
     p_message_id: params.messageId,
     p_channel_id: params.channelId,
     p_trace_id: params.traceId,

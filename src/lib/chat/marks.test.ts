@@ -13,6 +13,12 @@ import {
   markRowText,
   marksForTab,
   markStripLabel,
+  markTabCounts,
+  markConfirmAction,
+  markConfirmCopy,
+  applyTransition,
+  resolverName,
+  STAMP_WORD,
   MARKS_EVENT_HANDLER_ID,
   pruneSelection,
   rowToMark,
@@ -32,6 +38,8 @@ function mark(over: Partial<ChatMark>): ChatMark {
     priority: null,
     markedAt: '2026-09-27T10:00:00+00:00',
     resolved: false,
+    resolvedBy: null,
+    resolvedAt: null,
     ...over,
   };
 }
@@ -111,13 +119,19 @@ describe('marks menu', () => {
 });
 
 describe('badges', () => {
-  it('labels each type, adds P1/P2 on pending, and hides resolved', () => {
+  it('labels each type, adds P1/P2 on pending, and appends the stamp word once resolved', () => {
     expect(markBadgeLabel(undefined)).toBe('');
     expect(markBadgeLabel(mark({ type: 'commitment' }))).toBe('Commitment');
     expect(markBadgeLabel(mark({ type: 'decision' }))).toBe('Decision');
     expect(markBadgeLabel(mark({ type: 'pending' }))).toBe('Pending');
     expect(markBadgeLabel(mark({ type: 'pending', priority: 2 }))).toBe('Pending P2');
-    expect(markBadgeLabel(mark({ type: 'pending', priority: 1, resolved: true }))).toBe('');
+    expect(markBadgeLabel(mark({ type: 'pending', priority: 1, resolved: true }))).toBe(
+      'Pending · Completed',
+    );
+    expect(markBadgeLabel(mark({ type: 'commitment', resolved: true }))).toBe(
+      'Commitment · Delivered',
+    );
+    expect(markBadgeLabel(mark({ type: 'decision', resolved: true }))).toBe('Decision · Closed');
   });
 });
 
@@ -142,52 +156,80 @@ describe('strip counts', () => {
 describe('sheet lists', () => {
   const time = (m: ChatMark): number => Date.parse(m.markedAt);
 
-  it('commitments and decisions are newest first', () => {
+  it('Open lists every unresolved mark, newest first', () => {
     const list = marksForTab(
       [
         mark({ messageId: 'old', markedAt: '2026-09-01T00:00:00Z' }),
-        mark({ messageId: 'new', markedAt: '2026-09-20T00:00:00Z' }),
-        mark({ messageId: 'dec', type: 'decision' }),
+        mark({ messageId: 'new', type: 'pending', markedAt: '2026-09-20T00:00:00Z' }),
+        mark({ messageId: 'dec', type: 'decision', markedAt: '2026-09-10T00:00:00Z' }),
+        mark({ messageId: 'done', resolved: true, resolvedAt: '2026-09-21T00:00:00Z' }),
       ],
-      'commitment',
+      'open',
       time,
     );
-    expect(list.map((m) => m.messageId)).toEqual(['new', 'old']);
+    expect(list.map((m) => m.messageId)).toEqual(['new', 'dec', 'old']);
   });
 
-  it('pending sorts P1, P2, unranked, then oldest first', () => {
+  it('History lists stamped marks, most recently stamped first', () => {
     const list = marksForTab(
       [
-        mark({ messageId: 'u-new', type: 'pending', markedAt: '2026-09-20T00:00:00Z' }),
-        mark({ messageId: 'p2', type: 'pending', priority: 2, markedAt: '2026-09-01T00:00:00Z' }),
-        mark({ messageId: 'u-old', type: 'pending', markedAt: '2026-09-02T00:00:00Z' }),
+        mark({ messageId: 'open' }),
+        mark({ messageId: 'a', resolved: true, resolvedAt: '2026-09-02T00:00:00Z' }),
         mark({
-          messageId: 'p1-new',
-          type: 'pending',
-          priority: 1,
-          markedAt: '2026-09-10T00:00:00Z',
+          messageId: 'b',
+          type: 'decision',
+          resolved: true,
+          resolvedAt: '2026-09-05T00:00:00Z',
         }),
         mark({
-          messageId: 'p1-old',
+          messageId: 'c',
           type: 'pending',
-          priority: 1,
-          markedAt: '2026-09-03T00:00:00Z',
+          resolved: true,
+          resolvedAt: '2026-09-03T00:00:00Z',
         }),
       ],
-      'pending',
+      'history',
       time,
     );
-    expect(list.map((m) => m.messageId)).toEqual(['p1-old', 'p1-new', 'p2', 'u-old', 'u-new']);
+    expect(list.map((m) => m.messageId)).toEqual(['b', 'c', 'a']);
   });
 
-  it('resolve removes the row from the pending list', () => {
+  it('a stamp moves the row from Open to History and a reopen moves it back', () => {
     const open = mark({ messageId: 'a', type: 'pending' });
-    const before = indexMarks([open, mark({ messageId: 'b', type: 'pending' })]);
-    expect(marksForTab(before.values(), 'pending', time)).toHaveLength(2);
-    const after = new Map(before);
-    after.set('a', { ...open, resolved: true });
-    expect(marksForTab(after.values(), 'pending', time).map((m) => m.messageId)).toEqual(['b']);
-    expect(markCounts(after.values()).pending).toBe(1);
+    const before = indexMarks([open, mark({ messageId: 'b', type: 'decision' })]);
+    expect(markTabCounts(before.values())).toEqual({ open: 2, history: 0 });
+    const stamped = applyTransition(open, 'resolve', 'u1', '2026-09-28T09:00:00Z');
+    const after = new Map(before).set('a', stamped);
+    expect(marksForTab(after.values(), 'open', time).map((m) => m.messageId)).toEqual(['b']);
+    expect(marksForTab(after.values(), 'history', time)).toEqual([stamped]);
+    expect(markCounts(after.values()).pending).toBe(0);
+    const reopened = applyTransition(stamped, 'reopen', 'u2', '2026-09-28T10:00:00Z');
+    expect(reopened).toEqual(open);
+    expect(reopened.markedAt).toBe(open.markedAt);
+  });
+
+  it('stamp words and confirm copy per type', () => {
+    expect(STAMP_WORD).toEqual({
+      commitment: 'Delivered',
+      decision: 'Closed',
+      pending: 'Completed',
+    });
+    expect(markConfirmCopy('commitment', 'resolve')).toBe('Mark this commitment as delivered?');
+    expect(markConfirmCopy('decision', 'resolve')).toBe('Mark this decision as closed?');
+    expect(markConfirmCopy('pending', 'resolve')).toBe('Mark this priority as completed?');
+    expect(markConfirmCopy('commitment', 'reopen')).toBe('Reopen this commitment?');
+    expect(markConfirmCopy('decision', 'reopen')).toBe('Reopen this decision?');
+    expect(markConfirmCopy('pending', 'reopen')).toBe('Reopen this priority?');
+    expect(markConfirmAction('decision', 'resolve')).toBe('Closed');
+    expect(markConfirmAction('decision', 'reopen')).toBe('Reopen');
+  });
+
+  it('resolver name: You, a loaded profile, else Member', () => {
+    const names = (id: string): string | undefined => (id === 'u2' ? 'Asha' : undefined);
+    expect(resolverName({ resolvedBy: 'u1' }, 'u1', names)).toBe('You');
+    expect(resolverName({ resolvedBy: 'u2' }, 'u1', names)).toBe('Asha');
+    expect(resolverName({ resolvedBy: 'u3' }, 'u1', names)).toBe('Member');
+    expect(resolverName({ resolvedBy: null }, 'u1', names)).toBe('Member');
   });
 
   it('row text is the first 80 chars, else the card title', () => {
@@ -314,6 +356,8 @@ describe('mark reads and live signal', () => {
       priority: 1,
       markedAt: 't',
       resolved: false,
+      resolvedBy: null,
+      resolvedAt: null,
     });
     expect(
       rowToMark({ ...base, mark_type: 'decision', priority: 2, resolved_at: null })?.priority,

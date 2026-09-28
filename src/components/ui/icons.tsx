@@ -330,6 +330,17 @@ export function IconMore(props: IconProps) {
   );
 }
 
+/** Horizontal ⋯, the hover "more actions" control. */
+export function IconEllipsis(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx={5} cy={12} r={1.2} />
+      <circle cx={12} cy={12} r={1.2} />
+      <circle cx={19} cy={12} r={1.2} />
+    </Svg>
+  );
+}
+
 export function IconReply(props: IconProps) {
   return (
     <Svg {...props}>
@@ -419,6 +430,14 @@ export function IconPlay(props: IconProps) {
   return (
     <Svg {...props}>
       <path d="M8 5v14l11-7z" fill="currentColor" stroke="none" />
+    </Svg>
+  );
+}
+
+export function IconPause(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M9 5v14M15 5v14" />
     </Svg>
   );
 }
