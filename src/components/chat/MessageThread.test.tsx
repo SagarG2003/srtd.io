@@ -16,6 +16,7 @@ import {
   DayPill,
   dmHeaderLine,
   ForwardedLabel,
+  hasAlbum,
   HEADER_TYPING,
   isVoiceOnly,
   keyOpensMenu,
@@ -25,6 +26,7 @@ import {
   OWN_BUBBLE_CONTENT,
   THREAD_LIST_CLASS,
   threadListItems,
+  threadLightbox,
   threadRows,
   TimeLabel,
   type ThreadRow,
@@ -33,6 +35,7 @@ import { roleLabel } from '@/components/pages/settings/members-data';
 import { IconClock, IconTickDouble, IconTickSingle } from '@/components/ui/icons';
 import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
+import { MessageAttachments } from '@/components/chat/MessageAttachments';
 import { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
 import type { ThreadMessage } from '@/lib/chat/thread';
@@ -851,5 +854,93 @@ describe('time source', () => {
     const time = Date.parse('2026-09-22T18:52:00Z');
     expect(messageTimeSource({ createdAt: '', time })).toBe(time);
     expect(messageTimeSource({ createdAt: CREATED_AT, time })).toBe(CREATED_AT);
+  });
+});
+
+describe('image album and viewer', () => {
+  const img = (n: number) => ({ assetId: `v-${n}`, name: `p${n}.png`, mime: 'image/png' });
+  const pdf = { assetId: 'v-f', name: 'brief.pdf', mime: 'application/pdf' };
+  const albumMessage = makeMessage({
+    body: 'look',
+    attachments: [img(1), pdf, img(2), img(3)],
+  });
+
+  function attachmentsEl(root: ReactElement): ReactElement | null {
+    let found: ReactElement | null = null;
+    walk(root, (el) => {
+      if (el.type === MessageAttachments) found = el;
+    });
+    return found;
+  }
+
+  it('renders the album with its caption and 3px bubble padding', () => {
+    expect(hasAlbum(albumMessage)).toBe(true);
+    expect(hasAlbum(makeMessage({ attachments: [pdf] }))).toBe(false);
+    const el = attachmentsEl(renderBubble(albumMessage));
+    const props = el?.props as { album?: boolean; caption?: ReactElement };
+    expect(props.album).toBe(true);
+    expect(props.caption).toBeDefined();
+    const cls = bubbleClass({
+      mine: false,
+      tail: true,
+      sending: false,
+      failed: false,
+      checked: false,
+      voiceOnly: false,
+      album: true,
+    });
+    expect(cls).toContain('p-[3px]');
+    expect(cls).toContain('min-w-[240px]');
+    expect(cls).not.toContain('px-3');
+  });
+
+  it('a tile tap opens the viewer at the tapped index', () => {
+    const onOpenImage = vi.fn();
+    const root = MessageBubble({
+      message: albumMessage,
+      profiles: PROFILES,
+      cache,
+      presignEnabled: true,
+      showTicks: false,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      onBadgeClick: () => {},
+      onOpenImage,
+    });
+    const props = attachmentsEl(root)?.props as {
+      onImageClick: (a: unknown, index: number) => void;
+    };
+    props.onImageClick(img(3), 2);
+    expect(onOpenImage).toHaveBeenCalledWith(2);
+  });
+
+  it('the viewer gets the image list only, with sender and HH:mm', () => {
+    const { images, details } = threadLightbox(albumMessage, PROFILES, 'Asia/Kolkata');
+    expect(images).toEqual([
+      { assetId: 'v-1', name: 'p1.png' },
+      { assetId: 'v-2', name: 'p2.png' },
+      { assetId: 'v-3', name: 'p3.png' },
+    ]);
+    expect(details).toEqual({ sender: 'Alice', time: '00:15' });
+  });
+
+  it('an own upload still in flight opens from its local preview', () => {
+    const file = new File(['x'], 'p.png', { type: 'image/png' });
+    const message = makeMessage({
+      mine: true,
+      attachments: [
+        {
+          assetId: '',
+          name: 'p.png',
+          mime: 'image/png',
+          local: { key: 'local-1', file, previewUrl: 'blob:p', progress: 0.3 },
+        },
+      ],
+    });
+    const { images, details } = threadLightbox(message, PROFILES, 'UTC');
+    expect(images).toEqual([{ assetId: '', name: 'p.png', src: 'blob:p' }]);
+    expect(details.sender).toBe('You');
   });
 });
