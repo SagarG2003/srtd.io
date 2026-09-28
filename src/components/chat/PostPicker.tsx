@@ -5,8 +5,9 @@
 // full-text index), so a viewer only ever sees posts RLS lets them see. Selection
 // is controlled by the composer: toggling a row adds/removes a removable shared
 // post chip there. One read per filter change (no N+1 in the list). The Briefs
-// tab reads the workspace's briefs (title, Open/Closed, raised date) through
-// listBriefsForPicker and toggles brief chips the same way.
+// tab reads the workspace's briefs (title, objective, Open/Closed, target and
+// raised dates, live post count) through listBriefsForPicker, filtered by status
+// chips, and toggles brief chips the same way.
 
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
@@ -16,18 +17,28 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Field } from '@/components/ui/Field';
 import { Input } from '@/components/ui/Input';
 import { Sheet } from '@/components/ui/Sheet';
+import { Tag, isTagDot } from '@/components/ui/Tag';
 import { IconBriefs, IconCheck, IconPipeline, IconSearch } from '@/components/ui/icons';
+import { stageLabel } from '@/components/pages/pipeline/stage-meta';
 import { cn } from '@/lib/cn';
+import { formatEntityRef } from '@/lib/entityRef';
+import { formatLabel } from '@/lib/post-detail-presentation';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { listPostsForPicker, type PostCardFields } from '@srtdio/posts';
 import {
+  BRIEF_FILTERS,
+  DEFAULT_BRIEF_FILTER,
+  briefPostCountLabel,
   briefStatusLabel,
+  filterBriefStatus,
   isBriefSelected,
   listBriefsForPicker,
   type BriefCardFields,
+  type BriefFilter,
+  type BriefPickerRow,
 } from '@/lib/chat/briefs';
-import { formatShortDate, workspaceTimeZone } from '@/lib/chat/time-format';
+import { formatShortDate, formatShortDateOnly, workspaceTimeZone } from '@/lib/chat/time-format';
 import {
   DEFAULT_POST_FILTER,
   POST_FILTERS,
@@ -35,6 +46,12 @@ import {
   isPostSelected,
   type PostFilter,
 } from '@/components/chat/post-picker';
+
+/** One Posts-tab row: the card fields plus number, caption and target date. */
+type PostPickerRow = Extract<
+  Awaited<ReturnType<typeof listPostsForPicker>>,
+  { ok: true }
+>['data'][number];
 
 interface PostPickerProps {
   open: boolean;
@@ -51,27 +68,38 @@ interface PostPickerProps {
 
 type ShareTab = 'posts' | 'briefs';
 
-/** Title-case a stage value for its chip (stage strings come from the Row). */
-function stageLabel(stage: string): string {
-  return stage.charAt(0).toUpperCase() + stage.slice(1);
+/** Full-width row: hairline divider, 44px minimum, no rounded card. */
+function rowClass(active: boolean): string {
+  return cn(
+    'flex w-full items-start gap-3 border-b border-border px-4 py-3 min-h-[44px] text-left transition-colors',
+    active ? 'bg-accent-soft' : 'hover:bg-panel-2',
+  );
 }
 
 export function PostPicker(props: PostPickerProps): ReactElement {
-  const { workspaceId, workspaces } = useWorkspace();
+  const { workspaceId, workspaceKey, workspaces } = useWorkspace();
   const timeZone = workspaceTimeZone(workspaces.find((w) => w.id === workspaceId)?.timezone);
   const [tab, setTab] = useState<ShareTab>('posts');
-  const [briefs, setBriefs] = useState<BriefCardFields[]>([]);
+  const [briefs, setBriefs] = useState<BriefPickerRow[]>([]);
+  const [briefFilter, setBriefFilter] = useState<BriefFilter>(DEFAULT_BRIEF_FILTER);
   const [filter, setFilter] = useState<PostFilter>(DEFAULT_POST_FILTER);
   const [query, setQuery] = useState('');
-  const [posts, setPosts] = useState<PostCardFields[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [posts, setPosts] = useState<PostPickerRow[]>([]);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset to the default filter and empty search each time the picker opens.
+  // The read the current tab/filter/search asks for. The list renders only once
+  // the result for exactly this key has landed, so the first paint is final (no
+  // stale or empty frame between a change and its effect).
+  const requestKey = [workspaceId, tab, tab === 'posts' ? filter : briefFilter, query].join('|');
+  const loading = loadedKey !== requestKey;
+
+  // Reset to the default filters and empty search each time the picker opens.
   useEffect(() => {
     if (props.open) {
       setTab('posts');
       setFilter(DEFAULT_POST_FILTER);
+      setBriefFilter(DEFAULT_BRIEF_FILTER);
       setQuery('');
     }
   }, [props.open]);
@@ -80,18 +108,17 @@ export function PostPicker(props: PostPickerProps): ReactElement {
   useEffect(() => {
     if (!props.open || workspaceId === null) return;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
     if (tab === 'briefs') {
-      void listBriefsForPicker(supabase, { workspaceId, titleQuery: query }).then((result) => {
+      const status = filterBriefStatus(briefFilter);
+      void listBriefsForPicker(supabase, {
+        workspaceId,
+        titleQuery: query,
+        ...(status !== undefined ? { status } : {}),
+      }).then((result) => {
         if (cancelled) return;
-        setLoading(false);
-        if (!result.ok) {
-          setError(result.error.message);
-          setBriefs([]);
-          return;
-        }
-        setBriefs(result.data);
+        setError(result.ok ? null : result.error.message);
+        setBriefs(result.ok ? result.data : []);
+        setLoadedKey(requestKey);
       });
       return () => {
         cancelled = true;
@@ -104,18 +131,14 @@ export function PostPicker(props: PostPickerProps): ReactElement {
       ...(stage !== undefined ? { stage } : {}),
     }).then((result) => {
       if (cancelled) return;
-      setLoading(false);
-      if (!result.ok) {
-        setError(result.error.message);
-        setPosts([]);
-        return;
-      }
-      setPosts(result.data);
+      setError(result.ok ? null : result.error.message);
+      setPosts(result.ok ? result.data : []);
+      setLoadedKey(requestKey);
     });
     return () => {
       cancelled = true;
     };
-  }, [props.open, workspaceId, filter, query, tab]);
+  }, [props.open, workspaceId, filter, briefFilter, query, tab, requestKey]);
 
   const count = props.selected.length + props.selectedBriefs.length;
 
@@ -179,17 +202,34 @@ export function PostPicker(props: PostPickerProps): ReactElement {
               error={error}
               selected={props.selected}
               onToggle={props.onToggle}
+              workspaceKey={workspaceKey}
+              timeZone={timeZone}
             />
           </>
         ) : (
-          <BriefPickerList
-            briefs={briefs}
-            loading={loading}
-            error={error}
-            selected={props.selectedBriefs}
-            onToggle={props.onToggleBrief}
-            timeZone={timeZone}
-          />
+          <>
+            <div className="flex flex-wrap gap-2">
+              {BRIEF_FILTERS.map((option) => (
+                <Chip
+                  key={option.key}
+                  label={option.label}
+                  size="tap"
+                  selected={briefFilter === option.key}
+                  onClick={() => setBriefFilter(option.key)}
+                />
+              ))}
+            </div>
+
+            <BriefPickerList
+              briefs={briefs}
+              loading={loading}
+              error={error}
+              selected={props.selectedBriefs}
+              onToggle={props.onToggleBrief}
+              workspaceKey={workspaceKey}
+              timeZone={timeZone}
+            />
+          </>
         )}
       </div>
     </Sheet>
@@ -197,11 +237,13 @@ export function PostPicker(props: PostPickerProps): ReactElement {
 }
 
 function PostPickerList(props: {
-  posts: PostCardFields[];
+  posts: PostPickerRow[];
   loading: boolean;
   error: string | null;
   selected: readonly PostCardFields[];
   onToggle: (post: PostCardFields) => void;
+  workspaceKey: string | null;
+  timeZone: string;
 }): ReactElement {
   if (props.loading) {
     return <p className="px-1 py-3 text-sm text-fg-3">Loading posts</p>;
@@ -226,29 +268,50 @@ function PostPickerList(props: {
     );
   }
   return (
-    <ul className="flex max-h-[50vh] flex-col overflow-y-auto">
+    <ul className="-mx-[18px] flex max-h-[50vh] flex-col overflow-y-auto border-t border-border">
       {props.posts.map((post) => {
         const active = isPostSelected(props.selected, post.id);
+        const caption = post.caption?.trim() ?? '';
+        const due =
+          post.target_date !== null ? formatShortDate(post.target_date, props.timeZone) : '';
         return (
           <li key={post.id}>
             <button
               type="button"
               aria-pressed={active}
               onClick={() => props.onToggle(post)}
-              className={cn(
-                'flex w-full items-center gap-3 rounded-md px-2 py-2 min-h-[44px] text-left transition-colors',
-                active ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-panel-2',
-              )}
+              className={rowClass(active)}
             >
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium text-fg">{post.title}</span>
-                <span className="mt-1 flex flex-wrap gap-1.5">
-                  <Chip label={post.platform} />
-                  <Chip label={post.format} />
-                  <Chip label={stageLabel(post.stage)} />
+              <span className="flex min-w-0 flex-1 flex-col gap-1">
+                <span className="flex items-baseline gap-2">
+                  <span className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">
+                    {post.title}
+                  </span>
+                  {props.workspaceKey !== null ? (
+                    <span className="shrink-0 font-mono text-xs tabular-nums text-fg-3">
+                      {formatEntityRef(props.workspaceKey, post.number)}
+                    </span>
+                  ) : null}
+                </span>
+                {caption !== '' ? (
+                  <span className="line-clamp-2 text-sm text-fg-2 [overflow-wrap:anywhere]">
+                    {caption}
+                  </span>
+                ) : null}
+                <span className="flex items-center gap-2">
+                  <Tag label={formatLabel(post.format)} />
+                  {due !== '' ? <span className="text-xs text-fg-2">{`Due ${due}`}</span> : null}
+                  <span className="flex-1" />
+                  {isTagDot(post.stage) ? (
+                    <Tag label={stageLabel(post.stage)} dot={post.stage} />
+                  ) : null}
                 </span>
               </span>
-              {active ? <IconCheck size={18} /> : null}
+              {active ? (
+                <span className="shrink-0 pt-0.5 text-accent">
+                  <IconCheck size={18} />
+                </span>
+              ) : null}
             </button>
           </li>
         );
@@ -258,11 +321,12 @@ function PostPickerList(props: {
 }
 
 function BriefPickerList(props: {
-  briefs: BriefCardFields[];
+  briefs: BriefPickerRow[];
   loading: boolean;
   error: string | null;
   selected: readonly BriefCardFields[];
   onToggle: (brief: BriefCardFields) => void;
+  workspaceKey: string | null;
   timeZone: string;
 }): ReactElement {
   if (props.loading) {
@@ -283,35 +347,61 @@ function BriefPickerList(props: {
       <EmptyState
         icon={<IconBriefs size={22} />}
         title="No briefs"
-        description="No briefs match this search."
+        description="No briefs match this filter."
       />
     );
   }
   return (
-    <ul className="flex max-h-[50vh] flex-col overflow-y-auto">
+    <ul className="-mx-[18px] flex max-h-[50vh] flex-col overflow-y-auto border-t border-border">
       {props.briefs.map((brief) => {
         const active = isBriefSelected(props.selected, brief.id);
+        const target = brief.targetDate !== null ? formatShortDateOnly(brief.targetDate) : '';
         return (
           <li key={brief.id}>
             <button
               type="button"
               aria-pressed={active}
               onClick={() => props.onToggle(brief)}
-              className={cn(
-                'flex w-full items-center gap-3 rounded-md px-2 py-2 min-h-[44px] text-left transition-colors',
-                active ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-panel-2',
-              )}
+              className={rowClass(active)}
             >
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium text-fg">{brief.title}</span>
-                <span className="mt-1 flex flex-wrap items-center gap-1.5">
-                  <Chip label={briefStatusLabel(brief.status)} />
-                  <span className="text-xs text-fg-3">
-                    {`Raised ${formatShortDate(brief.createdAt, props.timeZone)}`}
+              <span className="flex min-w-0 flex-1 flex-col gap-1">
+                <span className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-[15px] font-medium text-fg">
+                    {brief.title}
+                  </span>
+                  {props.workspaceKey !== null ? (
+                    <span className="shrink-0 font-mono text-xs tabular-nums text-fg-3">
+                      {formatEntityRef(props.workspaceKey, brief.number)}
+                    </span>
+                  ) : null}
+                  <Tag
+                    label={briefStatusLabel(brief.status)}
+                    tone={brief.status === 'closed' ? 'neutral' : 'good'}
+                  />
+                </span>
+                {brief.objective.trim() !== '' ? (
+                  <span className="line-clamp-2 text-sm text-fg-2 [overflow-wrap:anywhere]">
+                    {brief.objective}
+                  </span>
+                ) : null}
+                <span className="flex flex-wrap items-center gap-2">
+                  {brief.formatRequested !== null && brief.formatRequested !== '' ? (
+                    <Tag label={formatLabel(brief.formatRequested)} />
+                  ) : null}
+                  {target !== '' ? (
+                    <span className="text-xs text-fg-2">{`Target ${target}`}</span>
+                  ) : null}
+                  <span className="flex-1" />
+                  <span className="text-xs text-fg-2">
+                    {`${briefPostCountLabel(brief.postCount)} · Raised ${formatShortDate(brief.createdAt, props.timeZone)}`}
                   </span>
                 </span>
               </span>
-              {active ? <IconCheck size={18} /> : null}
+              {active ? (
+                <span className="shrink-0 pt-0.5 text-accent">
+                  <IconCheck size={18} />
+                </span>
+              ) : null}
             </button>
           </li>
         );

@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Client } from '@srtdio/rpc';
 import {
+  BRIEF_FILTERS,
+  DEFAULT_BRIEF_FILTER,
+  briefPostCountLabel,
   briefRoute,
+  countPostsByBrief,
+  embedPostCount,
+  filterBriefStatus,
+  listBriefsForPicker,
+  toPickerRow,
   briefStatusLabel,
   readBriefsByIds,
   sharedBriefViews,
@@ -51,5 +59,147 @@ describe('shared briefs', () => {
       ok: true,
       data: [{ id: 'b1', title: 'Autumn launch', status: 'closed', createdAt: 't' }],
     });
+  });
+});
+
+interface Call {
+  table: string;
+  method: string;
+  args: unknown[];
+}
+
+// A recording builder per table: every chained method returns self and logs;
+// awaiting yields that table's configured result.
+function makeClient(results: Record<string, { data: unknown; error: { message: string } | null }>) {
+  const calls: Call[] = [];
+  const from = vi.fn((table: string) => {
+    const b: Record<string, unknown> = {};
+    for (const method of ['select', 'eq', 'is', 'in', 'ilike', 'order', 'limit']) {
+      b[method] = (...args: unknown[]) => {
+        calls.push({ table, method, args });
+        return b;
+      };
+    }
+    b.then = (resolve: (v: unknown) => unknown) =>
+      Promise.resolve(results[table] ?? { data: [], error: null }).then(resolve);
+    return b;
+  });
+  return { client: { from } as unknown as Client, from, calls };
+}
+
+const DB_ROW = {
+  id: 'b1',
+  number: 7,
+  title: 'Autumn launch',
+  objective: 'Drive signups',
+  format_requested: 'reel',
+  target_date: '2026-10-02',
+  status: 'open',
+  created_at: '2026-09-20T10:00:00Z',
+};
+
+describe('listBriefsForPicker', () => {
+  it('filters by status and title, newest first, then counts posts in ONE second query', async () => {
+    const { client, from, calls } = makeClient({
+      briefs: { data: [DB_ROW, { ...DB_ROW, id: 'b2', number: 8 }], error: null },
+      posts: { data: [{ brief_id: 'b1' }, { brief_id: 'b1' }], error: null },
+    });
+    const result = await listBriefsForPicker(client, {
+      workspaceId: 'w',
+      titleQuery: ' launch ',
+      status: 'open',
+    });
+    expect(from).toHaveBeenCalledTimes(2);
+    expect(calls).toContainEqual({
+      table: 'briefs',
+      method: 'select',
+      args: ['id, number, title, objective, format_requested, target_date, status, created_at'],
+    });
+    expect(calls).toContainEqual({ table: 'briefs', method: 'eq', args: ['workspace_id', 'w'] });
+    expect(calls).toContainEqual({ table: 'briefs', method: 'eq', args: ['status', 'open'] });
+    expect(calls).toContainEqual({ table: 'briefs', method: 'is', args: ['deleted_at', null] });
+    expect(calls).toContainEqual({ table: 'briefs', method: 'ilike', args: ['title', '%launch%'] });
+    expect(calls).toContainEqual({ table: 'posts', method: 'select', args: ['brief_id'] });
+    expect(calls).toContainEqual({ table: 'posts', method: 'eq', args: ['workspace_id', 'w'] });
+    expect(calls).toContainEqual({
+      table: 'posts',
+      method: 'in',
+      args: ['brief_id', ['b1', 'b2']],
+    });
+    expect(calls).toContainEqual({ table: 'posts', method: 'is', args: ['deleted_at', null] });
+    expect(result.ok && result.data.map((b) => [b.id, b.postCount])).toEqual([
+      ['b1', 2],
+      ['b2', 0],
+    ]);
+  });
+
+  it('passes no status for All briefs and skips the count query for an empty page', async () => {
+    const { client, from, calls } = makeClient({ briefs: { data: [], error: null } });
+    const result = await listBriefsForPicker(client, { workspaceId: 'w', titleQuery: '' });
+    expect(calls.some((c) => c.method === 'eq' && c.args[0] === 'status')).toBe(false);
+    expect(from).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ ok: true, data: [] });
+  });
+
+  it('surfaces either read failing as a Result error', async () => {
+    const a = makeClient({ briefs: { data: null, error: { message: 'boom' } } });
+    expect((await listBriefsForPicker(a.client, { workspaceId: 'w', titleQuery: '' })).ok).toBe(
+      false,
+    );
+    const b = makeClient({
+      briefs: { data: [DB_ROW], error: null },
+      posts: { data: null, error: { message: 'boom' } },
+    });
+    expect((await listBriefsForPicker(b.client, { workspaceId: 'w', titleQuery: '' })).ok).toBe(
+      false,
+    );
+  });
+});
+
+describe('brief picker helpers', () => {
+  it('maps the aggregate embed shape to a count', () => {
+    expect(embedPostCount([{ count: 3 }])).toBe(3);
+    expect(embedPostCount([])).toBe(0);
+    expect(embedPostCount(null)).toBe(0);
+  });
+
+  it('maps the fallback shape (one brief_id per live post) to counts', () => {
+    const counts = countPostsByBrief([
+      { brief_id: 'b1' },
+      { brief_id: 'b2' },
+      { brief_id: 'b1' },
+      { brief_id: null },
+    ]);
+    expect(counts.get('b1')).toBe(2);
+    expect(counts.get('b2')).toBe(1);
+    expect(counts.has('b3')).toBe(false);
+  });
+
+  it('maps a DB row to a picker row', () => {
+    expect(toPickerRow(DB_ROW, 4)).toEqual({
+      id: 'b1',
+      number: 7,
+      title: 'Autumn launch',
+      objective: 'Drive signups',
+      formatRequested: 'reel',
+      targetDate: '2026-10-02',
+      status: 'open',
+      createdAt: '2026-09-20T10:00:00Z',
+      postCount: 4,
+    });
+  });
+
+  it('labels the post count', () => {
+    expect(briefPostCountLabel(0)).toBe('No posts yet');
+    expect(briefPostCountLabel(1)).toBe('1 post');
+    expect(briefPostCountLabel(5)).toBe('5 posts');
+  });
+
+  it('describes the status filter chips, Open by default', () => {
+    expect(BRIEF_FILTERS.map((f) => f.label)).toEqual(['Open', 'Closed', 'All briefs']);
+    expect(DEFAULT_BRIEF_FILTER).toBe('open');
+    expect(filterBriefStatus('open')).toBe('open');
+    expect(filterBriefStatus('closed')).toBe('closed');
+    expect(filterBriefStatus('all')).toBeUndefined();
   });
 });

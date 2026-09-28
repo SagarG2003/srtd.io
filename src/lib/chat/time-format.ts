@@ -85,3 +85,32 @@ export function formatShortDate(createdAt: string | number, timeZone: string): s
   const read = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
   return `${read('month')} ${read('day')}`;
 }
+
+const SHORT_MONTHS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+/**
+ * A calendar DATE column (YYYY-MM-DD) in the same "Oct 2" style as
+ * {@link formatShortDate}, read straight off the string so no timezone can shift
+ * the day. Anything that is not a valid YYYY-MM-DD renders as an empty string.
+ */
+export function formatShortDateOnly(isoDate: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+  if (match === null) return '';
+  const month = SHORT_MONTHS[Number(match[2]) - 1];
+  const day = Number(match[3]);
+  if (month === undefined || day < 1 || day > 31) return '';
+  return `${month} ${day}`;
+}

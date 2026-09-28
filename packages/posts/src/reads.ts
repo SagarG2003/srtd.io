@@ -56,6 +56,15 @@ export type PostCardFields = Pick<Post, 'id' | 'title' | 'platform' | 'format' |
 
 const POST_CARD_COLUMNS = 'id, title, platform, format, stage';
 
+/**
+ * The chat picker row: the card fields plus the per-workspace number (for the
+ * entity ref), caption preview and target date. Picker-only, so the card fields
+ * shared with {@link readPostsByIds}, the composer chips and the card stay narrow.
+ */
+export type PostPickerRow = PostCardFields & Pick<Post, 'number' | 'caption' | 'target_date'>;
+
+export const POST_PICKER_COLUMNS = `${POST_CARD_COLUMNS}, number, caption, target_date`;
+
 export interface ListPostsForPickerInput {
   /** Workspace to scope to; RLS confines reads to the caller's workspaces. */
   workspaceId: string;
@@ -73,7 +82,7 @@ function escapeLike(term: string): string {
 }
 
 /**
- * List posts for the chat post picker: an RLS-scoped select of the card fields,
+ * List posts for the chat post picker: an RLS-scoped select of the picker fields,
  * newest first, soft-deleted rows excluded. Stage and a simple case-insensitive
  * title match are applied as filters in the single query (no full-text index).
  * RLS already excludes stages a viewer cannot see (e.g. Draft for clients), so
@@ -82,12 +91,12 @@ function escapeLike(term: string): string {
 export async function listPostsForPicker(
   client: Client,
   input: ListPostsForPickerInput,
-): Promise<Result<PostCardFields[]>> {
+): Promise<Result<PostPickerRow[]>> {
   const limit = Math.min(input.limit ?? POSTS_PAGE_SIZE, POSTS_PAGE_SIZE_MAX);
 
   let query = client
     .from('posts')
-    .select(POST_CARD_COLUMNS)
+    .select(POST_PICKER_COLUMNS)
     .eq('workspace_id', input.workspaceId)
     .is('deleted_at', null);
 
@@ -100,7 +109,7 @@ export async function listPostsForPicker(
   const { data, error } = await query.order('created_at', { ascending: false }).limit(limit);
 
   if (error) return { ok: false, error: transportError(error.message) };
-  return { ok: true, data: (data ?? []) as PostCardFields[] };
+  return { ok: true, data: (data ?? []) as PostPickerRow[] };
 }
 
 /**

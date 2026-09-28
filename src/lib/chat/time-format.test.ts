@@ -3,6 +3,7 @@ import {
   browserTimeZone,
   formatMessageTime,
   formatShortDate,
+  formatShortDateOnly,
   safeTimeZone,
   workspaceTimeZone,
 } from '@/lib/chat/time-format';
@@ -68,5 +69,19 @@ describe('workspaceTimeZone', () => {
     expect(workspaceTimeZone(null)).toBe('Asia/Kolkata');
     expect(workspaceTimeZone(undefined)).toBe('Asia/Kolkata');
     expect(workspaceTimeZone('')).toBe('Asia/Kolkata');
+  });
+});
+
+describe('formatShortDateOnly', () => {
+  it('formats a DATE column with no timezone shift', () => {
+    expect(formatShortDateOnly('2026-01-01')).toBe('Jan 1');
+    expect(formatShortDateOnly('2026-12-31')).toBe('Dec 31');
+    expect(formatShortDateOnly('2026-10-02')).toBe('Oct 2');
+  });
+
+  it('renders anything that is not YYYY-MM-DD as empty', () => {
+    expect(formatShortDateOnly('')).toBe('');
+    expect(formatShortDateOnly('2026-13-01')).toBe('');
+    expect(formatShortDateOnly('2026-10-02T00:00:00Z')).toBe('');
   });
 });

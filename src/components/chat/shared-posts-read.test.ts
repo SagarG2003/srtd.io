@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Client } from '@srtdio/rpc';
 import { listPostsForPicker, readPostsByIds } from '@srtdio/posts';
+import { POST_PICKER_COLUMNS } from '../../../packages/posts/src/reads';
 
 const WS = 'ws-1';
 
@@ -45,6 +46,17 @@ describe('listPostsForPicker', () => {
     expect(result.ok && result.data).toHaveLength(1);
   });
 
+  it('selects the picker columns: the card fields plus number, caption and target date', async () => {
+    const { client, calls } = makeClient({ data: [], error: null });
+    await listPostsForPicker(client, { workspaceId: WS });
+    expect(POST_PICKER_COLUMNS).toBe(
+      'id, title, platform, format, stage, number, caption, target_date',
+    );
+    expect(calls).toContainEqual({ method: 'select', args: [POST_PICKER_COLUMNS] });
+    expect(calls).toContainEqual({ method: 'order', args: ['created_at', { ascending: false }] });
+    expect(calls).toContainEqual({ method: 'limit', args: [50] });
+  });
+
   it('applies a case-insensitive title match when a search term is given', async () => {
     const { client, calls } = makeClient({ data: [], error: null });
     await listPostsForPicker(client, { workspaceId: WS, titleQuery: 'launch' });
@@ -80,6 +92,11 @@ describe('readPostsByIds', () => {
     // Batched: a single posts read, a single IN clause over all ids.
     expect(from).toHaveBeenCalledTimes(1);
     expect(from).toHaveBeenCalledWith('posts');
+    // The card columns stay narrow: the picker's extra fields are not read here.
+    expect(calls).toContainEqual({
+      method: 'select',
+      args: ['id, title, platform, format, stage'],
+    });
     const inCalls = calls.filter((c) => c.method === 'in');
     expect(inCalls).toHaveLength(1);
     expect(inCalls[0]?.args).toEqual(['id', ['p1', 'p2']]);
