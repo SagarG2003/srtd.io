@@ -55,6 +55,12 @@ function addWakeListener(handler: () => void): () => void {
 }
 
 /**
+ * The status before the connection effect has run. 'connecting', never
+ * 'unavailable': a cold mount must not flash an unavailable state for a frame.
+ */
+export const INITIAL_CHAT_STATUS: ChatStatus = 'connecting';
+
+/**
  * Drive the chat connection from auth + workspace state. When the token URL is
  * unset, there is no session, or no active workspace, the status is
  * 'unavailable' and no connection is attempted.
@@ -62,7 +68,7 @@ function addWakeListener(handler: () => void): () => void {
 export function useChatClient(): ChatContextValue {
   const { session } = useSession();
   const { workspaceId } = useWorkspace();
-  const [status, setStatus] = useState<ChatStatus>('unavailable');
+  const [status, setStatus] = useState<ChatStatus>(INITIAL_CHAT_STATUS);
   const [client, setClient] = useState<ChatConnection | null>(null);
 
   const url = env.VITE_CHAT_TOKEN_URL;

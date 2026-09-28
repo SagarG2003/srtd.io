@@ -3,9 +3,13 @@ import type { AgoraChat } from 'agora-chat';
 import {
   backoffDelayMs,
   BACKOFF_CAP_MS,
+  createStatusGate,
   RECONNECT_GRACE_MS,
   runChatConnection,
+  STATUS_GRACE_MS,
+  type BannerState,
   type RunChatConnectionParams,
+  type StatusGate,
 } from '@/lib/chat/controller';
 import type { ChatConnection, ChatStatus, ChatTokenResult } from '@/lib/chat/types';
 
@@ -584,5 +588,99 @@ describe('runChatConnection silent resume', () => {
     h.signout();
     await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS * 2);
     expect(h.statuses().slice(before)).toEqual(['unavailable']);
+  });
+});
+
+describe('createStatusGate (banner grace)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function gate(): { shown: () => BannerState; g: StatusGate } {
+    let banner: BannerState = 'none';
+    const g = createStatusGate({ onChange: (next) => (banner = next) });
+    return { shown: () => banner, g };
+  }
+
+  it("'connecting' for 4999ms shows nothing; at 5000ms it reads Reconnecting", () => {
+    const { shown, g } = gate();
+    g.update('connecting');
+    vi.advanceTimersByTime(STATUS_GRACE_MS - 1);
+    expect(shown()).toBe('none');
+    vi.advanceTimersByTime(1);
+    expect(shown()).toBe('reconnecting');
+  });
+
+  it("'reconnecting' obeys the same 5000ms rule", () => {
+    const { shown, g } = gate();
+    g.update('connected');
+    g.update('reconnecting');
+    vi.advanceTimersByTime(4_999);
+    expect(shown()).toBe('none');
+    vi.advanceTimersByTime(1);
+    expect(shown()).toBe('reconnecting');
+    g.update('connected');
+    expect(shown()).toBe('none');
+  });
+
+  it('a slow first connect that succeeds inside the grace is invisible', () => {
+    const changes: BannerState[] = [];
+    const g = createStatusGate({ onChange: (next) => changes.push(next) });
+    g.update('connecting');
+    vi.advanceTimersByTime(4_000);
+    g.update('connected');
+    vi.advanceTimersByTime(10_000);
+    expect(changes).toEqual(['none']);
+  });
+
+  it('a workspace switch that connects within the grace renders no banner', () => {
+    const changes: BannerState[] = [];
+    const g = createStatusGate({ onChange: (next) => changes.push(next) });
+    g.update('connected');
+    g.reset();
+    g.update('connecting');
+    vi.advanceTimersByTime(3_000);
+    g.update('connected');
+    vi.advanceTimersByTime(STATUS_GRACE_MS);
+    expect(changes).toEqual(['none']);
+  });
+
+  it('unavailable shows only after the down streak outlasts the grace, never at once', () => {
+    const { shown, g } = gate();
+    g.update('unavailable');
+    expect(shown()).toBe('none');
+    vi.advanceTimersByTime(2_000);
+    g.update('connecting');
+    g.update('unavailable');
+    vi.advanceTimersByTime(2_999);
+    expect(shown()).toBe('none');
+    vi.advanceTimersByTime(1);
+    expect(shown()).toBe('unavailable');
+  });
+
+  it('a Retry tap starts a fresh grace period', () => {
+    const { shown, g } = gate();
+    g.update('unavailable');
+    vi.advanceTimersByTime(STATUS_GRACE_MS);
+    expect(shown()).toBe('unavailable');
+    g.reset();
+    g.update('reconnecting');
+    expect(shown()).toBe('none');
+    vi.advanceTimersByTime(STATUS_GRACE_MS);
+    expect(shown()).toBe('reconnecting');
+  });
+
+  it('a kick shows at once, and dispose leaves no timer behind', () => {
+    const { shown, g } = gate();
+    g.update('kicked');
+    expect(shown()).toBe('kicked');
+    g.update('reconnecting');
+    g.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(STATUS_GRACE_MS);
+    expect(shown()).toBe('none');
   });
 });

@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { isSendKeydown, shouldShowMic } from '@/components/chat/Composer';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/lib/logger', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+import { dispatchSend, isSendKeydown, shouldShowMic } from '@/components/chat/Composer';
+import { createOutboxSender, type SendOutcome } from '@/lib/chat/send-flow';
+import { canSendAttachmentMessage } from '@/lib/chat/attachments';
 
 // The repo's vitest runs in the node environment with no @testing-library/react,
 // so caret/DOM behaviour is not exercised here. Following the codebase pattern
@@ -80,5 +87,60 @@ describe('shouldShowMic', () => {
 
   it('hides the mic when uploads are unavailable', () => {
     expect(shouldShowMic({ ...idle, hasUpload: false })).toBe(false);
+  });
+});
+
+describe('dispatchSend (Send never waits on the network)', () => {
+  const draft = {
+    text: 'hello',
+    attachments: [],
+    sharedPostIds: [],
+    reply: null,
+    sharedBriefIds: [],
+  };
+
+  it('takes the draft in the same tick while the record RPC is still pending', () => {
+    let resolveRecord: ((outcome: SendOutcome) => void) | undefined;
+    const sender = createOutboxSender({
+      deliver: () =>
+        new Promise<SendOutcome>((resolve) => {
+          resolveRecord = resolve;
+        }),
+      newTraceId: () => 'trace',
+      onEvent: () => {},
+      onChange: () => {},
+      onAttemptFailed: () => {},
+    });
+    const taken = dispatchSend(
+      (text) =>
+        sender.enqueue('c1', {
+          id: 'm1',
+          text,
+          local: { attachments: [], sharedPostIds: [], reply: null },
+          state: 'sending',
+        }),
+      draft,
+    );
+    // The composer clears on `taken` and Send is enabled again for the next draft.
+    expect(taken).toBe(true);
+    expect(resolveRecord).toBeDefined();
+    expect(sender.entries('c1')[0]?.state).toBe('sending');
+    expect(
+      canSendAttachmentMessage({
+        text: 'next',
+        attachmentCount: 0,
+        uploading: false,
+        sending: false,
+      }),
+    ).toBe(true);
+    sender.dispose();
+  });
+
+  it('keeps the draft only when onSend throws', () => {
+    expect(
+      dispatchSend(() => {
+        throw new Error('boom');
+      }, draft),
+    ).toBe(false);
   });
 });

@@ -5,11 +5,13 @@
 // 'connected', and every 60s while visible, whatever the Agora state. Agora is
 // live delivery only: an incoming text for the open channel is verified against
 // its chat_messages row (RLS) and the ROW renders; an id with no row is
-// dropped. Reaction / read signals arrive as command messages. Sends go to
-// chat_message_send FIRST; the returned row (server created_at) is what the
-// thread shows, and the Agora publish that follows (capped at 5s) cannot fail
-// the send. Unrecorded sends live in the per-channel outbox, so switching
-// channels keeps a sending or failed bubble and its Retry payload.
+// dropped. Reaction / read signals arrive as command messages. A send is queued
+// on the store's outbox and returns at once: the optimistic bubble shows in
+// the same tick, and the background sender records it (chat_message_send
+// FIRST; the returned row with its server created_at is what the thread shows),
+// publishes it live, and retries it with the same id. Unrecorded sends live in
+// the per-channel outbox, so switching channels keeps a sending or failed
+// bubble and its Retry payload.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Client } from '@srtdio/rpc';
@@ -28,12 +30,7 @@ import {
 } from '@/lib/chat/history';
 import { browserCatchUpTriggers, catchUpRows } from '@/lib/chat/catch-up';
 import { liveVerifierFor, type LiveVerifier } from '@/lib/chat/live-verify';
-import {
-  createChannelOutbox,
-  type ChannelOutbox,
-  type Outbox,
-  type OutboxEntry,
-} from '@/lib/chat/chat-store';
+import type { ChannelOutbox, OutboxEntry } from '@/lib/chat/chat-store';
 import {
   addReactionRecord,
   removeReactionRecord,
@@ -41,7 +38,7 @@ import {
   setReadCursorRecord,
 } from '@/lib/chat/record';
 import { createDebouncer, READ_CURSOR_DEBOUNCE_MS } from '@/lib/chat/read-cursor';
-import { LIVE_PUBLISH_TIMEOUT_MS, publishWithTimeout, runSend } from '@/lib/chat/send-flow';
+import { LIVE_PUBLISH_TIMEOUT_MS, publishWithTimeout } from '@/lib/chat/send-flow';
 import {
   forwardPreviewText,
   forwardRecordInput,
@@ -51,11 +48,7 @@ import {
 import type { ChannelSummary } from '@/lib/chat-reads';
 import { runDelete } from '@/lib/chat/delete-flow';
 import { findInOlderPages, type FindOlderOutcome } from '@/lib/chat/marks';
-import {
-  createInFlightGuard,
-  recordThenSignal,
-  settleSendFailure,
-} from '@/lib/chat/thread-actions';
+import { createInFlightGuard, recordThenSignal } from '@/lib/chat/thread-actions';
 import {
   applyReactionOp,
   hydrateReplies,
@@ -76,7 +69,6 @@ import {
   upsertMessage,
   withOutboxBubbles,
   type ChannelTarget,
-  type LocalMessageContent,
   type ThreadConnection,
   type ThreadMessage,
 } from '@/lib/chat/thread';
@@ -93,14 +85,17 @@ export interface UseChatThread {
   hasMore: boolean;
   /** Fetch the page before the oldest loaded message. */
   loadOlder: () => void;
-  /** Record + publish text and/or attachments and/or shared posts/briefs; a send with none is a no-op. */
+  /**
+   * Queue text and/or attachments and/or shared posts/briefs; a send with none
+   * is a no-op. Synchronous: the bubble shows now, delivery runs in the background.
+   */
   send: (
     text: string,
     attachments?: readonly MessageAttachment[],
     sharedPostIds?: readonly string[],
     reply?: ReplyQuote | null,
     sharedBriefIds?: readonly string[],
-  ) => Promise<void>;
+  ) => void;
   /**
    * Delete own messages for everyone (chunked at 100 per proc call). Accepted
    * chunks leave the thread at once and are signalled live; the first failing
@@ -125,7 +120,7 @@ export interface UseChatThread {
     messages: readonly ThreadMessage[],
     targets: readonly ChannelSummary[],
   ) => Promise<{ ok: true } | { ok: false; failed: ChannelSummary | null }>;
-  /** Re-run a failed send with the SAME message id. */
+  /** Resume a failed send (and its channel's queue) with the SAME message id. */
   retry: (messageId: string) => void;
   /** Add or remove the current user's reaction: optimistic, recorded, signalled live. */
   toggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void;
@@ -164,14 +159,14 @@ export function useChatThread(params: {
   currentUserId: string;
   /** The DM peer, for the seen ticks; null for groups. */
   peerUserId: string | null;
-  /** Called after a successful record write so the live store can show 'You: ...'. */
+  /** Called after a forward is recorded so the live store can show 'You: ...'. */
   onOwnMessage?: (channelId: string, text: string, ts: number) => void;
   /** Called after each catch-up so the caller can refresh unread counts and marks. */
   onCaughtUp?: () => void;
   /** Called when messages of the open channel were deleted (by us or live by a peer). */
   onMessagesDeleted?: (channelId: string, messageIds: readonly string[]) => void;
-  /** Per-channel unrecorded sends (the chat store's); a hook-local one when absent. */
-  outbox?: ChannelOutbox;
+  /** Per-channel unrecorded sends and their background sender (the chat store's). */
+  outbox: ChannelOutbox;
   /** Injected in tests; the app uses the shared Supabase client. */
   db?: Client;
   /** Injected in tests; the app shares one verifier per client with the store. */
@@ -181,9 +176,7 @@ export function useChatThread(params: {
     params;
   const db: Client = params.db ?? supabase;
   const verifier = params.verifier ?? liveVerifierFor(db);
-  const localOutboxRef = useRef<Outbox>({});
-  const localOutbox = useMemo(() => createChannelOutbox(localOutboxRef), []);
-  const outbox = params.outbox ?? localOutbox;
+  const outbox = params.outbox;
   const outboxRef = useRef(outbox);
   outboxRef.current = outbox;
 
@@ -280,9 +273,9 @@ export function useChatThread(params: {
   const foldRows = useCallback(
     (fetched: ThreadMessage[], forChannel: string): void => {
       for (const m of fetched) {
-        // A failed send whose row landed anyway (timeout after commit) is done.
+        // A queued send whose row landed anyway (timeout after commit) is done.
         if (outboxRef.current.entries(forChannel).some((e) => e.id === m.id)) {
-          outboxRef.current.remove(forChannel, m.id);
+          outboxRef.current.settle(forChannel, m.id);
         }
       }
       const entries = outboxRef.current.entries(forChannel);
@@ -481,76 +474,24 @@ export function useChatThread(params: {
     [db, currentUserId, foldRows],
   );
 
-  /**
-   * Record a message (Postgres first), then publish it live. The outcome is
-   * written to the channel's outbox whatever channel is open now; the visible
-   * list is only touched while that channel is still open. A record failure is
-   * always logged.
-   */
-  const deliver = useCallback(
-    async (id: string, forChannel: string, entry: OutboxEntry): Promise<void> => {
-      const traceId = generateTraceId();
-      const connection = clientRef.current;
-      const liveTarget = targetRef.current;
-      const publishLive =
-        connection !== null && liveTarget !== null
-          ? (input: { id: string; channelId: string; text: string; local: LocalMessageContent }) =>
-              sendText({
-                connection: asThreadConnection(connection),
-                target: liveTarget,
-                text: input.text,
-                attachments: input.local.attachments,
-                sharedPostIds: input.local.sharedPostIds,
-                reply: input.local.reply,
-                createMessage: createTextMessage,
-                liveIds: { sorted_message_id: input.id, sorted_channel_id: input.channelId },
-              })
-          : undefined;
-      try {
-        const outcome = await runSend(
-          {
-            recordMessage: (input) => sendMessageRecord({ client: db, ...input }),
-            publishLive,
-            // The row exists; receivers catch up from Postgres.
-            onLiveWarning: (context) => logger.warn('chat: live publish did not complete', context),
-            // The bubble goes 'sent' the moment the row exists, not after Agora.
-            onRecorded: (message) => {
-              outboxRef.current.remove(forChannel, id);
-              if (channelRef.current === forChannel) {
-                setMessages((prev) => upsertMessage(prev, message));
-              }
-              onOwnMessageRef.current?.(forChannel, entry.text, message.time);
-            },
-          },
-          {
-            id,
-            channelId: forChannel,
-            currentUserId,
-            traceId,
-            text: entry.text,
-            local: entry.local,
-          },
-        );
-        if (outcome.ok) return;
-        settleSendFailure({
-          outcome,
-          id,
-          channelId: forChannel,
-          traceId,
-          outbox: outboxRef.current,
-          isOpen: () => channelRef.current === forChannel,
-          markFailed: () => setMessages((prev) => setMessageState(prev, id, 'failed')),
-          logError: (message, context) => logger.error(message, context),
-        });
-      } finally {
-        inFlight.finish(id);
-      }
-    },
-    [db, currentUserId, inFlight],
+  // Background sender updates for the open channel: a retry flips a bubble's
+  // state, a recorded row replaces the optimistic bubble.
+  useEffect(
+    () =>
+      outbox.subscribe((event) => {
+        if (channelRef.current !== event.channelId) return;
+        if (event.type === 'recorded') {
+          const message = event.message;
+          setMessages((prev) => upsertMessage(prev, message));
+          return;
+        }
+        setMessages((prev) => setMessageState(prev, event.id, event.state));
+      }),
+    [outbox],
   );
 
   const send = useCallback<UseChatThread['send']>(
-    async (text, attachments = [], sharedPostIds = [], reply = null, sharedBriefIds = []) => {
+    (text, attachments = [], sharedPostIds = [], reply = null, sharedBriefIds = []) => {
       const forChannel = channelRef.current;
       const trimmed = text.trim();
       if (
@@ -561,9 +502,8 @@ export function useChatThread(params: {
           sharedBriefIds.length === 0)
       )
         return;
-      const id = newMessageId();
       const entry: OutboxEntry = {
-        id,
+        id: newMessageId(),
         text: trimmed,
         local: {
           attachments: [...attachments],
@@ -573,12 +513,10 @@ export function useChatThread(params: {
         },
         state: 'sending',
       };
-      outboxRef.current.put(forChannel, entry);
       setMessages((prev) => withOutboxBubbles(prev, [entry], currentUserId));
-      inFlight.tryStart(id);
-      await deliver(id, forChannel, entry);
+      outboxRef.current.enqueue(forChannel, entry);
     },
-    [currentUserId, deliver, inFlight],
+    [currentUserId],
   );
 
   const forward = useCallback<UseChatThread['forward']>(
@@ -662,20 +600,11 @@ export function useChatThread(params: {
     [db, currentUserId, inFlight],
   );
 
-  const retry = useCallback(
-    (messageId: string): void => {
-      const forChannel = channelRef.current;
-      if (forChannel === null) return;
-      const entry = outboxRef.current.entries(forChannel).find((e) => e.id === messageId);
-      if (entry === undefined || entry.state !== 'failed') return;
-      // A second tap while the first retry is still recording is ignored.
-      if (!inFlight.tryStart(messageId)) return;
-      outboxRef.current.setState(forChannel, messageId, 'sending');
-      setMessages((prev) => setMessageState(prev, messageId, 'sending'));
-      void deliver(messageId, forChannel, { ...entry, state: 'sending' });
-    },
-    [deliver, inFlight],
-  );
+  const retry = useCallback((messageId: string): void => {
+    const forChannel = channelRef.current;
+    if (forChannel === null) return;
+    outboxRef.current.retry(forChannel, messageId);
+  }, []);
 
   const toggleReaction = useCallback(
     (messageId: string, emoji: string, currentlyMine: boolean): void => {

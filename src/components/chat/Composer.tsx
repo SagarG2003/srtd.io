@@ -29,14 +29,11 @@ import {
 import type { PostCardFields } from '@srtdio/posts';
 
 interface ComposerProps {
-  /** Sends the trimmed text plus any completed attachments and shared posts and briefs. */
-  onSend: (
-    text: string,
-    attachments: MessageAttachment[],
-    sharedPostIds: string[],
-    reply: ReplyQuote | null,
-    sharedBriefIds: string[],
-  ) => Promise<void>;
+  /**
+   * Queues the trimmed text plus any completed attachments and shared posts and
+   * briefs. Synchronous: delivery and its retries run in the background.
+   */
+  onSend: ComposerSend;
   disabled: boolean;
   /** Upload one picked file via the asset pipeline; absent disables attaching. */
   uploadFile?: ((file: File) => Promise<ChatAttachmentUpload>) | undefined;
@@ -64,6 +61,40 @@ interface Pending {
 }
 
 let pendingSeq = 0;
+
+export type ComposerSend = (
+  text: string,
+  attachments: MessageAttachment[],
+  sharedPostIds: string[],
+  reply: ReplyQuote | null,
+  sharedBriefIds: string[],
+) => void;
+
+/**
+ * Hand one draft to the thread. The thread only queues it (the record write and
+ * publish run in the background), so this returns in the same tick and the
+ * composer clears and re-enables Send at once. True when the draft was taken;
+ * false only when onSend threw, which is unexpected and logged, so the caller
+ * keeps the draft.
+ */
+export function dispatchSend(
+  onSend: ComposerSend,
+  draft: {
+    text: string;
+    attachments: MessageAttachment[];
+    sharedPostIds: string[];
+    reply: ReplyQuote | null;
+    sharedBriefIds: string[];
+  },
+): boolean {
+  try {
+    onSend(draft.text, draft.attachments, draft.sharedPostIds, draft.reply, draft.sharedBriefIds);
+    return true;
+  } catch (error) {
+    logger.error('chat composer: send threw', { error: String(error) });
+    return false;
+  }
+}
 
 /**
  * True when `window.matchMedia('(pointer: coarse)')` matches, i.e. the primary
@@ -139,10 +170,10 @@ function completedAttachments(pending: readonly Pending[]): MessageAttachment[] 
  * removable chips with progress; an upload failure surfaces inline on its chip
  * and never throws. Send carries the completed attachments plus any text;
  * attachments-only is allowed, empty is blocked, and send is disabled while any
- * upload is in flight. `onSend` resolves once the thread has taken the message
- * (a record failure surfaces on the bubble with Retry, not here); a rejection is
- * unexpected, so it is logged, surfaced as a toast, and the draft is kept. The
- * `submitting` flag is the double-submit guard.
+ * upload is in flight. `onSend` only queues the message, so the draft clears
+ * and Send re-enables in the same tick (delivery, retries and a final failure
+ * surface on the bubble, not here); a throw is unexpected, so it is logged,
+ * surfaced as a toast, and the draft is kept.
  */
 export function Composer(props: ComposerProps): ReactElement {
   const [text, setText] = useState('');
@@ -151,7 +182,6 @@ export function Composer(props: ComposerProps): ReactElement {
   const [sharedBriefs, setSharedBriefs] = useState<BriefCardFields[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const recorder = useAudioRecorder();
   const toast = useToast();
@@ -171,7 +201,7 @@ export function Composer(props: ComposerProps): ReactElement {
       sharedPostCount: sharedPosts.length,
       sharedBriefCount: sharedBriefs.length,
       uploading,
-      sending: submitting,
+      sending: false,
     });
 
   const menuItems = useMemo(
@@ -249,32 +279,29 @@ export function Composer(props: ComposerProps): ReactElement {
     formRef.current?.requestSubmit();
   }
 
-  async function submit(event: FormEvent): Promise<void> {
+  function submit(event: FormEvent): void {
     event.preventDefault();
     if (!canSend) return;
-    const pendingText = text;
-    const attachments = ready;
-    const postIds = sharedPosts.map((post) => post.id);
-    const briefIds = sharedBriefs.map((brief) => brief.id);
-    setSubmitting(true);
-    try {
-      await props.onSend(pendingText, attachments, postIds, props.reply?.quote ?? null, briefIds);
-      for (const item of pending) {
-        if (item.previewUrl != null) URL.revokeObjectURL(item.previewUrl);
-      }
-      setText('');
-      setPending([]);
-      setSharedPosts([]);
-      setSharedBriefs([]);
-      props.onCancelReply?.();
-    } catch (error) {
-      // Unexpected: the thread reports record failures on the bubble instead of
-      // throwing. Keep the draft (text + chips + shared posts) so it is not lost.
-      logger.error('chat composer: send threw', { error: String(error) });
+    const taken = dispatchSend(props.onSend, {
+      text,
+      attachments: ready,
+      sharedPostIds: sharedPosts.map((post) => post.id),
+      reply: props.reply?.quote ?? null,
+      sharedBriefIds: sharedBriefs.map((brief) => brief.id),
+    });
+    if (!taken) {
+      // Keep the draft (text + chips + shared posts) so it is not lost.
       toast.show({ title: 'Could not send the message. Your draft is kept.' });
-    } finally {
-      setSubmitting(false);
+      return;
     }
+    for (const item of pending) {
+      if (item.previewUrl != null) URL.revokeObjectURL(item.previewUrl);
+    }
+    setText('');
+    setPending([]);
+    setSharedPosts([]);
+    setSharedBriefs([]);
+    props.onCancelReply?.();
   }
 
   async function start(): Promise<void> {
@@ -317,15 +344,16 @@ export function Composer(props: ComposerProps): ReactElement {
       durationMs,
       ...(transcript !== undefined ? { transcript } : {}),
     };
-    try {
-      await props.onSend('', [attachment], [], props.reply?.quote ?? null, []);
-      props.onCancelReply?.();
-    } catch (error) {
-      logger.error('chat composer: voice note send threw', { error: String(error) });
-      toast.show({ title: 'Could not send the voice note.' });
-    } finally {
-      setVoiceBusy(false);
-    }
+    const taken = dispatchSend(props.onSend, {
+      text: '',
+      attachments: [attachment],
+      sharedPostIds: [],
+      reply: props.reply?.quote ?? null,
+      sharedBriefIds: [],
+    });
+    if (taken) props.onCancelReply?.();
+    else toast.show({ title: 'Could not send the voice note.' });
+    setVoiceBusy(false);
   }
 
   const showMic = shouldShowMic({

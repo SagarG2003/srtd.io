@@ -19,7 +19,13 @@
 // Silent resume: the last good token is cached and reused on reopen until it is
 // within TOKEN_REUSE_MARGIN_MS of expiry (any open failure or onTokenExpired
 // drops it). After a wake or an SDK reconnecting/offline event the status stays
-// as is for RECONNECT_GRACE_MS; 'reconnecting' shows only if still not live.
+// as is for RECONNECT_GRACE_MS; 'reconnecting' reports only if still not live.
+//
+// The raw status is not what the user sees. createStatusGate turns it into the
+// banner: nothing until the connection has been down (connecting, reconnecting
+// or unavailable) for STATUS_GRACE_MS continuously, so a first connect, a
+// workspace switch or a short gap that recovers stays invisible. A kick is a
+// real event and shows at once.
 
 import type { AgoraChat } from 'agora-chat';
 import { logger } from '@/lib/logger';
@@ -44,6 +50,8 @@ export const KICKED_ERROR_TYPES: readonly number[] = [206, 217];
 
 /** How long a gap may last before the status flips to 'reconnecting'. */
 export const RECONNECT_GRACE_MS = 1_500;
+/** How long the connection must stay down before the banner shows. */
+export const STATUS_GRACE_MS = 5_000;
 /** A cached token is reused only while it has more than this left before expiry. */
 export const TOKEN_REUSE_MARGIN_MS = 5 * 60_000;
 
@@ -345,7 +353,8 @@ export function runChatConnection(params: RunChatConnectionParams): ChatConnecti
     void attempt();
   };
 
-  // The user's tap: also reconnects after a kick, and shows progress at once.
+  // The user's tap: also reconnects after a kick. The status updates at once;
+  // the banner gate decides what (if anything) the user sees.
   const retry = (): void => {
     if (cancelled || live || opening) return;
     kicked = false;
@@ -374,4 +383,96 @@ export function runChatConnection(params: RunChatConnectionParams): ChatConnecti
   void attempt();
 
   return { teardown, retry };
+}
+
+/**
+ * What the connection banner shows. 'none' while connected and during the
+ * grace period; 'reconnecting' once a connect or reconnect has run past it;
+ * 'unavailable' once the token endpoint has refused us for that long; 'kicked'
+ * at once.
+ */
+export type BannerState = 'none' | 'reconnecting' | 'unavailable' | 'kicked';
+
+export interface StatusGate {
+  /** Feed the latest raw status. */
+  update: (status: ChatStatus) => void;
+  /** Start a fresh grace period (workspace switch, Retry tap). */
+  reset: () => void;
+  /** Clear the grace timer; nothing is reported afterwards. */
+  dispose: () => void;
+}
+
+/**
+ * The banner debounce. A down streak (any status other than 'connected' and
+ * 'kicked') shows nothing until it has lasted STATUS_GRACE_MS without a
+ * 'connected' in between; after that the banner follows the status live until
+ * the next 'connected'. onChange fires on the first update and on every change.
+ */
+export function createStatusGate(params: {
+  onChange: (banner: BannerState) => void;
+  setTimer?: (fn: () => void, delayMs: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}): StatusGate {
+  const setTimer =
+    params.setTimer ?? ((fn: () => void, delayMs: number): unknown => setTimeout(fn, delayMs));
+  const clearTimer =
+    params.clearTimer ?? ((handle: unknown): void => clearTimeout(handle as number));
+  let current: ChatStatus | null = null;
+  let timer: unknown = null;
+  let elapsed = false;
+  let shown: BannerState | null = null;
+  let disposed = false;
+
+  const emit = (next: BannerState): void => {
+    if (disposed || next === shown) return;
+    shown = next;
+    params.onChange(next);
+  };
+
+  const clearGrace = (): void => {
+    if (timer !== null) {
+      clearTimer(timer);
+      timer = null;
+    }
+  };
+
+  const isDown = (status: ChatStatus): boolean => status !== 'connected' && status !== 'kicked';
+  const downBanner = (status: ChatStatus): BannerState =>
+    status === 'unavailable' ? 'unavailable' : 'reconnecting';
+
+  const update = (status: ChatStatus): void => {
+    if (disposed) return;
+    current = status;
+    if (!isDown(status)) {
+      clearGrace();
+      elapsed = false;
+      emit(status === 'kicked' ? 'kicked' : 'none');
+      return;
+    }
+    if (elapsed) {
+      emit(downBanner(status));
+      return;
+    }
+    if (timer === null) {
+      timer = setTimer(() => {
+        timer = null;
+        elapsed = true;
+        if (current !== null && isDown(current)) emit(downBanner(current));
+      }, STATUS_GRACE_MS);
+    }
+    emit('none');
+  };
+
+  return {
+    update,
+    reset: () => {
+      clearGrace();
+      elapsed = false;
+      if (current !== null) update(current);
+    },
+    dispose: () => {
+      disposed = true;
+      clearGrace();
+    },
+  };
 }
