@@ -169,6 +169,22 @@ export async function readBriefsByIds(
   return { ok: true, data: ((res.data ?? []) as BriefCardRow[]).map(toFields) };
 }
 
+/** Brief ids by per-workspace number (pasted /b/ links), one IN read; empty in, empty out. */
+export async function readBriefIdsByNumbers(
+  client: Client,
+  params: { workspaceId: string; numbers: readonly number[] },
+): Promise<Result<Array<{ id: string; number: number }>>> {
+  if (params.numbers.length === 0) return { ok: true, data: [] };
+  const res = await client
+    .from('briefs')
+    .select('id, number')
+    .eq('workspace_id', params.workspaceId)
+    .in('number', [...params.numbers])
+    .is('deleted_at', null);
+  if (res.error) return fail(`readBriefIdsByNumbers: ${res.error.message}`);
+  return { ok: true, data: (res.data ?? []) as Array<{ id: string; number: number }> };
+}
+
 /** The in-app route a brief card opens. */
 export function briefRoute(id: string): string {
   return `/briefs/${id}`;

@@ -8,8 +8,10 @@ import {
   composerCanSend,
   dispatchSend,
   draftAttachments,
+  hasLinkCards,
   isSendKeydown,
   shouldShowMic,
+  withLinkCards,
 } from '@/components/chat/Composer';
 import { createOutboxSender, type SendOutcome } from '@/lib/chat/send-flow';
 import { canSendAttachmentMessage } from '@/lib/chat/attachments';
@@ -188,5 +190,71 @@ describe('instant attachment send (files upload after Send)', () => {
       },
     ]);
     expect(upload).not.toHaveBeenCalled();
+  });
+});
+
+describe('pasted post and brief links become cards at Send', () => {
+  const ORIGIN = 'https://app.example.test';
+  const context = { workspaceKey: 'gbl', origin: ORIGIN };
+  const draft = (text: string) => ({ text, sharedPostIds: [], sharedBriefIds: [] });
+  const readers = () => ({
+    postIds: vi.fn((numbers: number[]) =>
+      Promise.resolve({
+        ok: true as const,
+        data: numbers.filter((n) => n !== 404).map((n) => ({ id: `post-${n}`, number: n })),
+      }),
+    ),
+    briefIds: vi.fn((numbers: number[]) =>
+      Promise.resolve({
+        ok: true as const,
+        data: numbers.map((n) => ({ id: `brief-${n}`, number: n })),
+      }),
+    ),
+  });
+
+  it('a link-only body sends the cards with an empty body', async () => {
+    const r = readers();
+    const out = await withLinkCards(
+      draft(` ${ORIGIN}/p/gbl-12\n${ORIGIN}/b/gbl-3 ${ORIGIN}/p/GBL-12 `),
+      context,
+      r,
+    );
+    expect(out).toEqual({ text: '', sharedPostIds: ['post-12'], sharedBriefIds: ['brief-3'] });
+    // One batched read per entity type, never one per link.
+    expect(r.postIds).toHaveBeenCalledTimes(1);
+    expect(r.postIds).toHaveBeenCalledWith([12]);
+    expect(r.briefIds).toHaveBeenCalledTimes(1);
+  });
+
+  it('a mixed body keeps the text as typed and adds the cards', async () => {
+    const text = `Can you check ${ORIGIN}/p/gbl-12 today? https://example.com`;
+    const out = await withLinkCards(
+      { text, sharedPostIds: ['picked'], sharedBriefIds: [] },
+      context,
+      readers(),
+    );
+    expect(out).toEqual({ text, sharedPostIds: ['picked', 'post-12'], sharedBriefIds: [] });
+  });
+
+  it('an unresolved ref stays a plain link, with no error', async () => {
+    const text = `${ORIGIN}/p/gbl-404`;
+    expect(await withLinkCards(draft(text), context, readers())).toEqual(draft(text));
+    const failing = {
+      postIds: () =>
+        Promise.resolve({ ok: false as const, error: { code: 'unknown' as const, message: 'x' } }),
+      briefIds: () => Promise.resolve({ ok: true as const, data: [] }),
+    };
+    expect(await withLinkCards(draft(text), context, failing)).toEqual(draft(text));
+  });
+
+  it('skips the reads for external links, other workspaces and other origins', async () => {
+    const r = readers();
+    const text = `https://example.com ${ORIGIN}/p/abc-1 https://other.test/p/gbl-1`;
+    expect(hasLinkCards(text, 'gbl', ORIGIN)).toBe(false);
+    expect(await withLinkCards(draft(text), context, r)).toEqual(draft(text));
+    expect(r.postIds).not.toHaveBeenCalled();
+    expect(r.briefIds).not.toHaveBeenCalled();
+    expect(hasLinkCards(`${ORIGIN}/b/gbl-1`, 'gbl', ORIGIN)).toBe(true);
+    expect(hasLinkCards(`${ORIGIN}/b/gbl-1`, null, ORIGIN)).toBe(false);
   });
 });

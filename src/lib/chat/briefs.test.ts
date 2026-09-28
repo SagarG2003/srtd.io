@@ -11,6 +11,7 @@ import {
   listBriefsForPicker,
   toPickerRow,
   briefStatusLabel,
+  readBriefIdsByNumbers,
   readBriefsByIds,
   sharedBriefViews,
   toggleBrief,
@@ -59,6 +60,39 @@ describe('shared briefs', () => {
       ok: true,
       data: [{ id: 'b1', title: 'Autumn launch', status: 'closed', createdAt: 't' }],
     });
+  });
+});
+
+describe('readBriefIdsByNumbers', () => {
+  it('reads ids by number in one workspace-scoped IN query over live briefs', async () => {
+    const is = vi.fn(() => Promise.resolve({ data: [{ id: 'b1', number: 7 }], error: null }));
+    const inFn = vi.fn(() => ({ is }));
+    const eq = vi.fn(() => ({ in: inFn }));
+    const select = vi.fn(() => ({ eq }));
+    const from = vi.fn(() => ({ select }));
+    const client = { from } as unknown as Client;
+    expect(await readBriefIdsByNumbers(client, { workspaceId: 'w', numbers: [] })).toEqual({
+      ok: true,
+      data: [],
+    });
+    expect(from).not.toHaveBeenCalled();
+    const result = await readBriefIdsByNumbers(client, { workspaceId: 'w', numbers: [7, 8] });
+    expect(from).toHaveBeenCalledTimes(1);
+    expect(from).toHaveBeenCalledWith('briefs');
+    expect(select).toHaveBeenCalledWith('id, number');
+    expect(eq).toHaveBeenCalledWith('workspace_id', 'w');
+    expect(inFn).toHaveBeenCalledWith('number', [7, 8]);
+    expect(is).toHaveBeenCalledWith('deleted_at', null);
+    expect(result).toEqual({ ok: true, data: [{ id: 'b1', number: 7 }] });
+  });
+
+  it('surfaces a read failure as a Result error', async () => {
+    const is = vi.fn(() => Promise.resolve({ data: null, error: { message: 'boom' } }));
+    const client = {
+      from: () => ({ select: () => ({ eq: () => ({ in: () => ({ is }) }) }) }),
+    } as unknown as Client;
+    const result = await readBriefIdsByNumbers(client, { workspaceId: 'w', numbers: [1] });
+    expect(result.ok).toBe(false);
   });
 });
 
