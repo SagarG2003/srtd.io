@@ -29,7 +29,7 @@ import { Sheet } from '@/components/ui/Sheet';
 import { Tag, isTagDot } from '@/components/ui/Tag';
 import { IconBriefs, IconCheck, IconPipeline, IconSearch } from '@/components/ui/icons';
 import { stageLabel } from '@/components/pages/pipeline/stage-meta';
-import { fetchMemberRole } from '@/lib/assets';
+import { fetchMemberRole } from '@/lib/chat/viewer-role';
 import { cn } from '@/lib/cn';
 import { formatEntityRef } from '@/lib/entityRef';
 import { formatLabel } from '@/lib/post-detail-presentation';

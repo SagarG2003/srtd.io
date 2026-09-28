@@ -1,27 +1,43 @@
-// Renders the posts shared into one message as cards. The whole message's ids
-// resolve in ONE batched RLS read (readPostsByIds, IN-clause over every id), per
-// viewer, so the viewer's RLS gates visibility: a post they cannot see comes back
-// absent and renders as a neutral "not visible" card, no content leaks. The resolve is
-// keyed on the message's ids, so a re-render never re-reads. No thumbnail is
-// presigned: the existing posts read surfaces no cover image (a post's first
-// image lives in asset_attachments and building that join is out of scope), so
-// each card uses a neutral placeholder.
+// Renders the posts shared into one message as live cards. The whole message's
+// ids resolve in ONE batch per viewer: readPostCards (a posts IN read plus one
+// asset_attachments IN read, so at most two queries) and one readProfiles call
+// for the distinct approvers (the same batched lookup the thread's profile map
+// uses). The viewer's RLS gates visibility: a post they cannot see comes back
+// absent and renders as a neutral "not visible" card, no content leaks. Cards
+// paint only once the batch AND the viewer's side have resolved, so the footer
+// wording never flips after first paint. No realtime: the batch refetches when
+// the tab returns after a minute away, or when a sorted:post-changed event names
+// one of its posts. The cover presigns lazily through the shared thumbnail hook.
 
-import { useEffect, useMemo, useState } from 'react';
-import type { ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent, ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { PlatformMark } from '@/components/ui/PlatformMark';
 import { Tag, isTagDot } from '@/components/ui/Tag';
-import { IconPipeline } from '@/components/ui/icons';
+import { IconCheck, IconPlay } from '@/components/ui/icons';
+import { useThumbnail } from '@/components/media/use-thumbnail';
+import { PresignCache } from '@/lib/asset-presign';
+import { readProfiles } from '@/lib/chat-reads';
+import { formatShortDate, workspaceTimeZone } from '@/lib/chat/time-format';
+import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
+import { cn } from '@/lib/cn';
+import { formatEntityRef } from '@/lib/entityRef';
+import { env } from '@/lib/env';
+import { fetchWithTrace } from '@/lib/fetch';
+import { formatLabel } from '@/lib/post-detail-presentation';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
-import { readPostsByIds, type PostCardFields } from '@srtdio/posts';
+import type { Client } from '@srtdio/rpc';
+import { readPostCards, type PostCardRow } from '../../../packages/posts/src/reads';
 import {
   NOT_VISIBLE_BODY,
   NOT_VISIBLE_TITLE,
+  approverIds,
+  cardFooter,
   indexPostsById,
+  mediaPills,
   postRoute,
   sharedPostViews,
+  watchBatchFreshness,
   type SharedPostView,
 } from '@/components/chat/post-card';
 
@@ -30,58 +46,151 @@ function stageLabel(stage: string): string {
   return stage.charAt(0).toUpperCase() + stage.slice(1);
 }
 
+/** One resolved batch: the visible posts plus approver display names by user id. */
+export interface PostCardBatch {
+  posts: PostCardRow[];
+  names: Map<string, string>;
+}
+
 /**
- * Resolve one message's shared post ids once via the batched RLS read. While the
- * read is in flight the views are empty (a calm placeholder renders); after it
- * settles each id is a card or a "not visible" card. Never throws: a failed read
- * resolves to no posts, so every id falls back to "not visible".
+ * Resolve one message's batch: readPostCards (at most two queries) then ONE
+ * readProfiles over the distinct approver ids (skipped when there are none).
+ * Null when the posts read fails; a failed name read only drops the names (the
+ * approved footer falls back to its date).
+ */
+export async function loadPostCardBatch(
+  client: Client,
+  workspaceId: string,
+  ids: string[],
+): Promise<PostCardBatch | null> {
+  const result = await readPostCards(client, { workspaceId, ids });
+  if (!result.ok) return null;
+  const names = new Map<string, string>();
+  const approvers = approverIds(result.data);
+  if (approvers.length > 0) {
+    const profiles = await readProfiles(client, approvers);
+    if (profiles.ok) for (const p of profiles.data) names.set(p.userId, p.displayName);
+  }
+  return { posts: result.data, names };
+}
+
+/**
+ * Resolve and keep fresh one message's shared posts. While the first read is in
+ * flight `loading` is true; a refetch keeps the current cards on screen. Never
+ * throws: a failed first read resolves to no posts, so every id falls back to
+ * "not visible"; a failed refetch keeps what was shown.
  */
 function useSharedPosts(postIds: string[]): { views: SharedPostView[]; loading: boolean } {
   const { workspaceId } = useWorkspace();
-  const [postsById, setPostsById] = useState<Map<string, PostCardFields>>(new Map());
+  const [batch, setBatch] = useState<PostCardBatch>({ posts: [], names: new Map() });
   const [loading, setLoading] = useState(true);
+  const [tick, setTick] = useState(0);
+  const batchKey = postIds.join(',');
+  const loadedKey = useRef<string | null>(null);
+  const fetchedAt = useRef(0);
+  const idsRef = useRef(postIds);
+  idsRef.current = postIds;
 
   useEffect(() => {
-    if (workspaceId === null) {
+    if (workspaceId === null || postIds.length === 0) {
       setLoading(false);
       return;
     }
+    const key = `${workspaceId}|${batchKey}`;
+    const first = loadedKey.current !== key;
+    if (first) setLoading(true);
     let cancelled = false;
-    setLoading(true);
-    void readPostsByIds(supabase, { workspaceId, ids: postIds }).then((result) => {
+    void loadPostCardBatch(supabase, workspaceId, postIds).then((next) => {
       if (cancelled) return;
+      fetchedAt.current = Date.now();
+      loadedKey.current = key;
       setLoading(false);
-      setPostsById(indexPostsById(result.ok ? result.data : []));
+      if (next !== null) setBatch(next);
+      else if (first) setBatch({ posts: [], names: new Map() });
     });
     return () => {
       cancelled = true;
     };
-  }, [postIds, workspaceId]);
+    // postIds is read through batchKey so a new array with the same ids never re-reads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchKey, workspaceId, tick]);
 
-  const views = useMemo(() => sharedPostViews(postIds, postsById), [postIds, postsById]);
+  useEffect(
+    () =>
+      watchBatchFreshness(
+        { window, document },
+        {
+          ids: () => idsRef.current,
+          fetchedAt: () => fetchedAt.current,
+          now: () => Date.now(),
+          refetch: () => setTick((t) => t + 1),
+        },
+      ),
+    [],
+  );
+
+  const views = useMemo(
+    () => sharedPostViews(postIds, indexPostsById(batch.posts), batch.names),
+    [postIds, batch],
+  );
   return { views, loading };
 }
 
+// One presign cache for every shared card in the session: it bounds concurrency
+// and keeps URLs warm across messages. Created on first use, never per card.
+let cardPresignCache: PresignCache | null = null;
+function sharedCardPresignCache(): PresignCache {
+  if (cardPresignCache === null) {
+    cardPresignCache = new PresignCache({
+      endpoint: env.VITE_ASSET_READ_URL ?? null,
+      getAccessToken: async () =>
+        (await supabase.auth.getSession()).data.session?.access_token ?? null,
+      fetcher: (input, init) => fetchWithTrace(input, init),
+    });
+  }
+  return cardPresignCache;
+}
+const PRESIGN_ENABLED = env.VITE_ASSET_READ_URL !== undefined && env.VITE_ASSET_READ_URL !== '';
+
 export function SharedPostCards({ postIds }: { postIds: string[] }): ReactElement | null {
+  const { workspaceId, workspaceKey, workspaces } = useWorkspace();
+  const { side, ready } = useViewerSide(workspaceId);
   const { views, loading } = useSharedPosts(postIds);
+  const timeZone = workspaceTimeZone(workspaces.find((w) => w.id === workspaceId)?.timezone);
   if (postIds.length === 0) return null;
-  if (loading) {
+  if (loading || !ready) {
     return (
       <div className="mt-1.5 flex flex-col items-start gap-1.5">
         {postIds.map((id) => (
-          <div
-            key={id}
-            className="h-[54px] w-[240px] animate-pulse rounded-lg border border-border bg-panel-2"
-          />
+          <div key={id} className={`${CARD_SKELETON} animate-pulse`} />
         ))}
       </div>
     );
   }
   return (
+    <SharedPostCardList views={views} side={side} workspaceKey={workspaceKey} timeZone={timeZone} />
+  );
+}
+
+/** Everything a card needs besides its view; resolved once per message. */
+export interface CardContext {
+  side: ViewerSide;
+  workspaceKey: string | null;
+  timeZone: string;
+}
+
+/** The resolved cards in postIds order (presentational; no reads). */
+export function SharedPostCardList(props: { views: SharedPostView[] } & CardContext): ReactElement {
+  const { views, ...context } = props;
+  return (
     <div className="mt-1.5 flex flex-col items-start gap-1.5">
-      {views.map((view) => (
-        <PostCardItem key={view.postId} view={view} />
-      ))}
+      {views.map((view) =>
+        view.kind === 'not_visible' ? (
+          <NotVisibleCard key={view.postId} />
+        ) : (
+          <PostCardItem key={view.postId} view={view} {...context} />
+        ),
+      )}
     </div>
   );
 }
@@ -91,34 +200,132 @@ const SHARED_CARD_BOX =
   'flex w-[240px] items-center gap-2.5 rounded-lg border border-border px-2.5 py-2 min-h-[44px]';
 export const SHARED_CARD = `${SHARED_CARD_BOX} bg-panel`;
 
-function PostCardItem({ view }: { view: SharedPostView }): ReactElement {
+/** The live post card frame: media (optional), body, footer stacked. */
+export const POST_CARD =
+  'flex w-[240px] flex-col overflow-hidden rounded-lg border border-border bg-panel text-left';
+
+/** A loading card: the height of a no-media card (one title line, meta row, footer). */
+export const CARD_SKELETON = 'h-[118px] w-[240px] rounded-lg border border-border bg-panel-2';
+
+/** A small pill laid over the cover image. */
+const MEDIA_PILL =
+  'inline-flex h-5 items-center gap-1 rounded-md bg-panel px-1.5 text-[11px] font-medium text-fg';
+
+/** The KEY-N reference, or null before the workspace key resolves. */
+function entityRef(workspaceKey: string | null, number: number): string | null {
+  return workspaceKey !== null && workspaceKey !== ''
+    ? formatEntityRef(workspaceKey, number)
+    : null;
+}
+
+export function PostCardItem(
+  props: { view: Extract<SharedPostView, { kind: 'post' }> } & CardContext,
+): ReactElement {
+  const { view, side, workspaceKey, timeZone } = props;
   const navigate = useNavigate();
-  if (view.kind === 'not_visible') {
-    return <NotVisibleCard />;
-  }
+  const { post } = view;
+  const ref = entityRef(workspaceKey, post.number);
+  const footer = cardFooter(post, view.approverName, side, timeZone);
+  const target = post.target_date !== null ? formatShortDate(post.target_date, timeZone) : '';
+  const open = (): void => navigate(postRoute(view.postId));
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    open();
+  };
   return (
-    <button
-      type="button"
-      aria-label={`Open post ${view.title}`}
-      onClick={() => navigate(postRoute(view.postId))}
-      className={`${SHARED_CARD} text-left transition-colors hover:bg-panel-2`}
+    <div
+      role="link"
+      tabIndex={0}
+      data-msg-link=""
+      aria-label={`Open post ${post.title}`}
+      onClick={open}
+      onKeyDown={onKeyDown}
+      className={cn(POST_CARD, 'cursor-pointer transition-colors hover:bg-panel-2')}
     >
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-3 text-fg-3">
-        <IconPipeline size={18} />
-      </span>
-      <span className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="truncate text-sm font-medium text-fg" title={view.title}>
-          {view.title}
+      {post.thumbnailAssetVersionId !== null ? (
+        <CardMedia post={post} assetVersionId={post.thumbnailAssetVersionId} entityRef={ref} />
+      ) : null}
+      <div className="flex flex-col gap-1.5 px-3 py-2.5">
+        <span
+          data-card-title=""
+          className="line-clamp-2 text-[15px] font-medium leading-[20px] text-fg"
+          title={post.title}
+        >
+          {post.thumbnailAssetVersionId === null && ref !== null ? (
+            <span data-card-ref="" className="mr-1.5 font-mono text-fg-3">
+              {ref}
+            </span>
+          ) : null}
+          {post.title}
         </span>
         <span className="flex items-center gap-1.5 text-xs text-fg-3">
           <Tag
-            label={stageLabel(view.stage)}
-            {...(isTagDot(view.stage) ? { dot: view.stage } : {})}
+            label={stageLabel(post.stage)}
+            {...(isTagDot(post.stage) ? { dot: post.stage } : {})}
           />
-          <PlatformMark platform={view.platform} />
+          {target !== '' ? <span data-card-target="">{target}</span> : null}
         </span>
-      </span>
-    </button>
+      </div>
+      <div
+        data-card-footer=""
+        className="flex h-[44px] items-center justify-between gap-2 border-t border-border px-3 text-xs"
+      >
+        <span
+          className={cn(
+            'flex min-w-0 items-center gap-1',
+            footer.accent ? 'font-medium text-accent' : 'text-fg-2',
+          )}
+        >
+          {footer.check ? <IconCheck size={14} className="shrink-0 text-good" /> : null}
+          <span className="truncate">{footer.state}</span>
+        </span>
+        <span className="shrink-0 font-medium text-accent">{footer.action}</span>
+      </div>
+    </div>
+  );
+}
+
+/** The 4:3 cover with its corner pills; presigns lazily when scrolled into view. */
+function CardMedia(props: {
+  post: PostCardRow;
+  assetVersionId: string;
+  entityRef: string | null;
+}): ReactElement {
+  const { post, assetVersionId, entityRef: ref } = props;
+  const thumb = useThumbnail<HTMLDivElement>({
+    assetVersionId,
+    cache: sharedCardPresignCache(),
+    enabled: PRESIGN_ENABLED,
+  });
+  const pills = mediaPills(post);
+  return (
+    <div ref={thumb.ref} data-card-media="" className="relative aspect-[4/3] w-full bg-panel-3">
+      {thumb.url !== null && !thumb.failed ? (
+        <img
+          src={thumb.url}
+          alt=""
+          loading="lazy"
+          onError={thumb.onError}
+          className="h-full w-full object-cover"
+        />
+      ) : null}
+      {ref !== null ? (
+        <span className={cn(MEDIA_PILL, 'absolute left-2 top-2 font-mono')}>{ref}</span>
+      ) : null}
+      <span className={cn(MEDIA_PILL, 'absolute right-2 top-2')}>{formatLabel(post.format)}</span>
+      {pills.slides !== null || pills.video !== null ? (
+        <span className="absolute bottom-2 right-2 flex gap-1">
+          {pills.video !== null ? (
+            <span className={MEDIA_PILL}>
+              <IconPlay size={10} />
+              {pills.video}
+            </span>
+          ) : null}
+          {pills.slides !== null ? <span className={MEDIA_PILL}>{pills.slides}</span> : null}
+        </span>
+      ) : null}
+    </div>
   );
 }
 

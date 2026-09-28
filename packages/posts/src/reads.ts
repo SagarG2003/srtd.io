@@ -309,7 +309,7 @@ function transportError(message: string): DomainError {
 // pinned version's mime_type embedded via an inner join (so only image-backed
 // attachments survive). The aliased select is wider than the generated row type
 // can express, so callers cast through `unknown`.
-interface FirstImageRow {
+export interface FirstImageRow {
   entity_id: string;
   asset_version_id: string;
   asset_versions: { mime_type: string | null } | null;
@@ -344,12 +344,127 @@ async function firstImageByPost(
 
   if (error) return { ok: false, error: transportError(error.message) };
 
-  const rows = (data ?? []) as unknown as FirstImageRow[];
+  return { ok: true, data: firstImageFromRows((data ?? []) as unknown as FirstImageRow[]) };
+}
+
+/**
+ * The first image per post from attachment rows already ordered entity_id, then
+ * position, then attached_at ascending: the first image-mime row seen per post
+ * wins. Rows with a non-image (or unknown) mime are skipped, so the same pick
+ * serves the image-only read above and the all-media read below.
+ */
+function firstImageFromRows(rows: readonly FirstImageRow[]): Map<string, string> {
   const firstByPost = new Map<string, string>();
   for (const row of rows) {
-    if (!firstByPost.has(row.entity_id)) firstByPost.set(row.entity_id, row.asset_version_id);
+    if (firstByPost.has(row.entity_id)) continue;
+    if (row.asset_versions?.mime_type?.startsWith('image/') !== true) continue;
+    firstByPost.set(row.entity_id, row.asset_version_id);
   }
-  return { ok: true, data: firstByPost };
+  return firstByPost;
+}
+
+/** Per-post media summary for the chat post card. */
+export interface PostMediaSummary {
+  /** The first image attachment's version id (the card cover), or null. */
+  thumbnailAssetVersionId: string | null;
+  /** Live (non-deleted) attachments on the post. */
+  mediaCount: number;
+  /** Whether any live attachment's version is a video. */
+  hasVideo: boolean;
+}
+
+/**
+ * Fold live attachment rows (ordered as {@link firstImageFromRows} expects) into
+ * one media summary per post. Pure; posts with no rows are absent from the map.
+ */
+export function mediaSummaryByPost(rows: readonly FirstImageRow[]): Map<string, PostMediaSummary> {
+  const firstImage = firstImageFromRows(rows);
+  const summary = new Map<string, PostMediaSummary>();
+  for (const row of rows) {
+    const current = summary.get(row.entity_id) ?? {
+      thumbnailAssetVersionId: firstImage.get(row.entity_id) ?? null,
+      mediaCount: 0,
+      hasVideo: false,
+    };
+    current.mediaCount += 1;
+    if (row.asset_versions?.mime_type?.startsWith('video/') === true) current.hasVideo = true;
+    summary.set(row.entity_id, current);
+  }
+  return summary;
+}
+
+/**
+ * The shared post card row: the posts columns the card shows plus its media
+ * summary. approved_by is a user id; the caller resolves display names in one
+ * batched lookup of its own.
+ */
+export type PostCardRow = Pick<
+  Post,
+  | 'id'
+  | 'number'
+  | 'title'
+  | 'format'
+  | 'platform'
+  | 'stage'
+  | 'target_date'
+  | 'stage_entered_at'
+  | 'approved_by'
+  | 'approved_at'
+> &
+  PostMediaSummary;
+
+export const POST_CARD_ROW_COLUMNS =
+  'id, number, title, format, platform, stage, target_date, stage_entered_at, approved_by, approved_at';
+
+/**
+ * Batched resolve of shared posts for the live chat post card: at most TWO
+ * queries for the whole batch, never one per post. (1) One RLS-scoped posts IN
+ * read over every id. (2) One asset_attachments IN read over the posts that came
+ * back (live rows, version mime embedded), folded into the first image, the live
+ * attachment count and a has-video flag per post. A post the viewer cannot see
+ * or that is deleted does not come back, and its attachments are never read.
+ * Returns [] for no ids without a round trip; the second read is skipped when no
+ * post came back. Rows arrive in the database's order; the caller orders them.
+ */
+export async function readPostCards(
+  client: Client,
+  params: { workspaceId: string; ids: string[] },
+): Promise<Result<PostCardRow[]>> {
+  if (params.ids.length === 0) return { ok: true, data: [] };
+
+  const { data, error } = await client
+    .from('posts')
+    .select(POST_CARD_ROW_COLUMNS)
+    .eq('workspace_id', params.workspaceId)
+    .in('id', params.ids)
+    .is('deleted_at', null);
+  if (error) return { ok: false, error: transportError(error.message) };
+
+  const posts = (data ?? []) as Array<Omit<PostCardRow, keyof PostMediaSummary>>;
+  if (posts.length === 0) return { ok: true, data: [] };
+
+  const media = await client
+    .from('asset_attachments')
+    .select('entity_id, asset_version_id, asset_versions!inner(mime_type)')
+    .eq('entity_type', 'post')
+    .in(
+      'entity_id',
+      posts.map((post) => post.id),
+    )
+    .is('deleted_at', null)
+    .order('entity_id', { ascending: true })
+    .order('position', { ascending: true })
+    .order('attached_at', { ascending: true });
+  if (media.error) return { ok: false, error: transportError(media.error.message) };
+
+  const byPost = mediaSummaryByPost((media.data ?? []) as unknown as FirstImageRow[]);
+  return {
+    ok: true,
+    data: posts.map((post) => ({
+      ...post,
+      ...(byPost.get(post.id) ?? { thumbnailAssetVersionId: null, mediaCount: 0, hasVideo: false }),
+    })),
+  };
 }
 
 /**

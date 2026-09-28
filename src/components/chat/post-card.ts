@@ -2,9 +2,12 @@
 // view dispatch is derived from the message's shared post ids and the batched
 // resolve, so it is unit-tested without a DOM: every id maps to exactly one card,
 // and an id the RLS-scoped read did not return (e.g. a client receiving a draft)
-// maps to a neutral "not visible" card rather than throwing or leaking.
+// maps to a neutral "not visible" card rather than throwing or leaking. The card's
+// footer wording, media pills and refetch triggers are decided here too.
 
-import type { PostCardFields } from '@srtdio/posts';
+import type { PostCardRow } from '../../../packages/posts/src/reads';
+import { formatMessageTime, formatShortDate } from '@/lib/chat/time-format';
+import type { ViewerSide } from '@/lib/chat/viewer-role';
 
 /** The route a shared post card navigates to (the existing /posts/:id view). */
 export function postRoute(id: string): string {
@@ -13,7 +16,7 @@ export function postRoute(id: string): string {
 
 /** The render branch for one shared post id. */
 export type SharedPostView =
-  | { kind: 'post'; postId: string; title: string; stage: string; platform: string }
+  | { kind: 'post'; postId: string; post: PostCardRow; approverName: string | null }
   | { kind: 'not_visible'; postId: string };
 
 /** Copy for the neutral card shown when the reader's RLS hides a shared post. */
@@ -21,26 +24,167 @@ export const NOT_VISIBLE_TITLE = 'Post not visible to you yet';
 export const NOT_VISIBLE_BODY = 'It will appear here once it is shared for review';
 
 /** Index a batched post resolve by id for O(1) per-id lookup (no per-id scan). */
-export function indexPostsById(posts: readonly PostCardFields[]): Map<string, PostCardFields> {
-  const map = new Map<string, PostCardFields>();
+export function indexPostsById<T extends { id: string }>(posts: readonly T[]): Map<string, T> {
+  const map = new Map<string, T>();
   for (const post of posts) map.set(post.id, post);
   return map;
 }
 
+/** The distinct, non-null approver ids of a batch: the input of ONE name lookup. */
+export function approverIds(posts: readonly Pick<PostCardRow, 'approved_by'>[]): string[] {
+  const ids = new Set<string>();
+  for (const post of posts) if (post.approved_by !== null) ids.add(post.approved_by);
+  return [...ids];
+}
+
+/** The first word of a display name; blank stays blank. */
+export function firstName(displayName: string): string {
+  return displayName.trim().split(/\s+/)[0] ?? '';
+}
+
 /**
  * One view per shared post id, preserving the message's order. An id present in
- * the resolve renders as a card (title + stage + platform); an id the resolve did not return
- * renders as a "not visible" card. The viewer's RLS is the security boundary:
- * a post the viewer cannot see simply never appears in `postsById`.
+ * the resolve renders as a card; an id the resolve did not return renders as a
+ * "not visible" card. `names` maps approver user ids to display names. The
+ * viewer's RLS is the security boundary: a post the viewer cannot see simply
+ * never appears in `postsById`.
  */
 export function sharedPostViews(
   ids: readonly string[],
-  postsById: Map<string, PostCardFields>,
+  postsById: Map<string, PostCardRow>,
+  names: ReadonlyMap<string, string> = new Map(),
 ): SharedPostView[] {
   return ids.map((postId) => {
     const post = postsById.get(postId);
-    return post !== undefined
-      ? { kind: 'post', postId, title: post.title, stage: post.stage, platform: post.platform }
-      : { kind: 'not_visible', postId };
+    if (post === undefined) return { kind: 'not_visible', postId };
+    const name = post.approved_by !== null ? names.get(post.approved_by) : undefined;
+    const first = name !== undefined ? firstName(name) : '';
+    return { kind: 'post', postId, post, approverName: first !== '' ? first : null };
   });
+}
+
+/** The card footer: the state on the left, one action label on the right. */
+export interface CardFooter {
+  state: string;
+  action: 'Open' | 'Review';
+  /** Accent ink for the state (the viewer is the one being waited on). */
+  accent: boolean;
+  /** A leading check glyph (approved). */
+  check: boolean;
+}
+
+/** "Oct 2 14:05" in the workspace zone, or '' for an unparseable instant. */
+function dateTime(iso: string, timeZone: string): string {
+  const date = formatShortDate(iso, timeZone);
+  return date === '' ? '' : `${date} ${formatMessageTime(iso, timeZone)}`;
+}
+
+/**
+ * The footer for a card, by stage and the viewer's side. Approved names the
+ * approver (first name) and when; with no approver on record (or no resolvable
+ * name) it falls back to the date the post entered approved. Review words by
+ * side: the client is waited on ("Review"), the agency waits; an unknown side
+ * reads neutral. Every other stage is its label with "Open".
+ */
+export function cardFooter(
+  post: Pick<PostCardRow, 'stage' | 'approved_at' | 'stage_entered_at'>,
+  approverName: string | null,
+  side: ViewerSide,
+  timeZone: string,
+): CardFooter {
+  const plain = { action: 'Open', accent: false, check: false } as const;
+  switch (post.stage) {
+    case 'approved': {
+      if (approverName !== null && post.approved_at !== null) {
+        const at = dateTime(post.approved_at, timeZone);
+        return {
+          ...plain,
+          check: true,
+          state: at === '' ? `Approved by ${approverName}` : `Approved by ${approverName} · ${at}`,
+        };
+      }
+      const on = formatShortDate(post.stage_entered_at, timeZone);
+      return { ...plain, check: true, state: on === '' ? 'Approved' : `Approved · ${on}` };
+    }
+    case 'review':
+      if (side === 'client')
+        return { state: 'Waiting on you', action: 'Review', accent: true, check: false };
+      if (side === 'agency') return { ...plain, state: 'Waiting on client' };
+      return { ...plain, state: 'In review' };
+    case 'draft':
+      return { ...plain, state: 'Draft' };
+    case 'parked':
+      return { ...plain, state: 'Parked' };
+    case 'rejected':
+      return { ...plain, state: 'Rejected' };
+    default:
+      return { ...plain, state: post.stage.charAt(0).toUpperCase() + post.stage.slice(1) };
+  }
+}
+
+/** The media-corner pills: "<n> slides" past one item, and a video label. */
+export function mediaPills(post: Pick<PostCardRow, 'mediaCount' | 'hasVideo' | 'format'>): {
+  slides: string | null;
+  video: string | null;
+} {
+  return {
+    slides: post.mediaCount > 1 ? `${post.mediaCount} slides` : null,
+    video: post.hasVideo ? (post.format === 'video' ? 'Reel' : 'Video') : null,
+  };
+}
+
+/** The window event PR 3's sheet dispatches after it changes a post. */
+export const POST_CHANGED_EVENT = 'sorted:post-changed';
+
+/** A returning tab refetches the batch only when it is older than this. */
+export const REFETCH_AFTER_MS = 60_000;
+
+/** Whether a tab becoming visible again should refetch a batch fetched at `fetchedAt`. */
+export function staleOnVisible(fetchedAt: number, now: number): boolean {
+  return now - fetchedAt > REFETCH_AFTER_MS;
+}
+
+/** Whether a post-changed event's detail names a post in this batch. */
+export function eventTouchesBatch(detail: unknown, ids: readonly string[]): boolean {
+  if (typeof detail !== 'object' || detail === null) return false;
+  const postId = (detail as { postId?: unknown }).postId;
+  return typeof postId === 'string' && ids.includes(postId);
+}
+
+/** The event sources the freshness watcher listens on (window and document in the app). */
+export interface FreshnessTargets {
+  window: Pick<EventTarget, 'addEventListener' | 'removeEventListener'>;
+  document: Pick<EventTarget, 'addEventListener' | 'removeEventListener'> & {
+    visibilityState: string;
+  };
+}
+
+/**
+ * Watch one batch for staleness without a realtime subscription: refetch when the
+ * tab becomes visible again more than {@link REFETCH_AFTER_MS} after the last
+ * fetch, and when a {@link POST_CHANGED_EVENT} names a post in the batch. Returns
+ * the unsubscribe. React-free so the triggers are unit tested with plain targets.
+ */
+export function watchBatchFreshness(
+  targets: FreshnessTargets,
+  opts: {
+    ids: () => readonly string[];
+    fetchedAt: () => number;
+    now: () => number;
+    refetch: () => void;
+  },
+): () => void {
+  const onVisibility = (): void => {
+    if (targets.document.visibilityState !== 'visible') return;
+    if (staleOnVisible(opts.fetchedAt(), opts.now())) opts.refetch();
+  };
+  const onChanged = (event: Event): void => {
+    if (eventTouchesBatch((event as CustomEvent<unknown>).detail, opts.ids())) opts.refetch();
+  };
+  targets.document.addEventListener('visibilitychange', onVisibility);
+  targets.window.addEventListener(POST_CHANGED_EVENT, onChanged);
+  return () => {
+    targets.document.removeEventListener('visibilitychange', onVisibility);
+    targets.window.removeEventListener(POST_CHANGED_EVENT, onChanged);
+  };
 }
