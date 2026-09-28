@@ -66,6 +66,7 @@ import { MessageActionMenu } from '@/components/chat/MessageActionMenu';
 import { SharedBriefCards } from '@/components/chat/BriefCard';
 import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
 import { MarkStrip, MarksSheet, PrioritySheet } from '@/components/chat/MarksSheet';
+import { ContactSheet } from '@/components/chat/ContactSheet';
 import { SelectionBar } from '@/components/chat/SelectionBar';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { withDaySeparators } from '@/components/chat/day-separators';
@@ -91,6 +92,8 @@ import type { WriteResult } from '@/lib/chat/record';
 
 interface MessageThreadProps {
   title: string;
+  /** The open channel; a DM's header opens the Contact sheet over its reads. */
+  channelId?: string;
   /** Header avatar src (the DM peer's); absent or null falls back to initials. */
   avatarUrl?: string | null;
   /** The workspace name, the tail of a DM header's resting second line. */
@@ -384,6 +387,68 @@ function TypingIndicator(props: {
       </span>
       <span>{label}</span>
     </div>
+  );
+}
+
+/**
+ * The header's photo and name block. In a DM with `onOpenContact` it is one
+ * 44px-tall button spanning both that opens the Contact sheet; groups (and a
+ * DM without the handler) keep the plain block. Hook-free.
+ */
+export function ThreadHeaderIdentity(props: {
+  isGroup: boolean;
+  title: string;
+  avatarUrl: string | null;
+  presence: 'online' | undefined;
+  headerLine: string | null;
+  onOpenContact?: () => void;
+}): ReactElement {
+  const photo = props.isGroup ? (
+    <span
+      aria-hidden="true"
+      className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-panel-3 text-fg-2"
+    >
+      <IconUsers size={14} />
+    </span>
+  ) : (
+    <Avatar
+      name={props.title}
+      size="row"
+      {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
+      presence={props.presence}
+    />
+  );
+  const text = (
+    <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
+      <span className="block truncate text-[15px] font-semibold leading-tight text-fg">
+        {props.title}
+      </span>
+      {props.headerLine !== null ? (
+        <span data-header-line="" className="truncate text-xs text-fg-3">
+          {props.headerLine}
+        </span>
+      ) : null}
+    </span>
+  );
+  if (!props.isGroup && props.onOpenContact !== undefined) {
+    return (
+      <button
+        type="button"
+        data-contact-open=""
+        aria-label={`Contact info for ${props.title}`}
+        onClick={props.onOpenContact}
+        className="flex min-h-[44px] min-w-0 flex-1 items-center gap-2.5 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        {photo}
+        {text}
+      </button>
+    );
+  }
+  return (
+    <>
+      {photo}
+      {text}
+    </>
   );
 }
 
@@ -1449,6 +1514,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [marksOpen, setMarksOpen] = useState(false);
+  const [contactOpen, setContactOpen] = useState(false);
   const [priorityFor, setPriorityFor] = useState<{
     messageId: string;
     mode: 'mark' | 'change';
@@ -1462,6 +1528,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setSelecting(false);
     setSelected(new Set());
     setMarksOpen(false);
+    setContactOpen(false);
     setPriorityFor(null);
     setJumpRequest(null);
     setForwardFor(null);
@@ -1519,6 +1586,19 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     workspaceName: props.subtitle,
     timeZone: props.timeZone,
   });
+  const canOpenContact = props.isGroup !== true && props.channelId !== undefined;
+  // The Contact sheet's role line is the header's resting line: never typing,
+  // never presence, so it reads "role · workspace" from the same source.
+  const contactRoleLine = dmHeaderLine({
+    isGroup: false,
+    peerTyping: false,
+    presence: undefined,
+    role: props.role ?? null,
+    workspaceName: props.subtitle,
+    timeZone: props.timeZone,
+  });
+  const jumpTo = (id: string): void =>
+    setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
   return (
     <div className="flex h-full flex-col bg-bg">
       <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-2 md:px-4">
@@ -1527,31 +1607,14 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
             <IconChevronLeft size={20} />
           </IconButton>
         ) : null}
-        {props.isGroup === true ? (
-          <span
-            aria-hidden="true"
-            className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-panel-3 text-fg-2"
-          >
-            <IconUsers size={14} />
-          </span>
-        ) : (
-          <Avatar
-            name={props.title}
-            size="row"
-            {...(props.avatarUrl != null ? { src: props.avatarUrl } : {})}
-            presence={headerAvatarPresence(props.presence)}
-          />
-        )}
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="block truncate text-[15px] font-semibold leading-tight text-fg">
-            {props.title}
-          </span>
-          {headerLine !== null ? (
-            <span data-header-line="" className="truncate text-xs text-fg-3">
-              {headerLine}
-            </span>
-          ) : null}
-        </div>
+        <ThreadHeaderIdentity
+          isGroup={props.isGroup === true}
+          title={props.title}
+          avatarUrl={props.avatarUrl ?? null}
+          presence={headerAvatarPresence(props.presence)}
+          headerLine={headerLine}
+          {...(canOpenContact ? { onOpenContact: () => setContactOpen(true) } : {})}
+        />
         {props.onOpenInfo !== undefined ? (
           <IconButton label="Group info" onClick={props.onOpenInfo}>
             <IconSettings size={20} />
@@ -1655,10 +1718,42 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           timeZone={props.timeZone}
           onJump={(id) => {
             setMarksOpen(false);
-            setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
+            jumpTo(id);
           }}
           onResolve={props.onResolveMark}
           onReopen={props.onReopenMark}
+        />
+      ) : null}
+      {canOpenContact && props.channelId !== undefined ? (
+        <ContactSheet
+          key={props.channelId}
+          open={contactOpen}
+          onClose={() => setContactOpen(false)}
+          channelId={props.channelId}
+          title={props.title}
+          avatarUrl={props.avatarUrl ?? null}
+          roleLine={contactRoleLine}
+          profiles={props.profiles}
+          currentUserId={props.currentUserId ?? ''}
+          timeZone={props.timeZone}
+          cache={presignCache}
+          presignEnabled={presignEnabled}
+          marks={
+            props.marks !== undefined &&
+            props.onResolveMark !== undefined &&
+            props.onReopenMark !== undefined
+              ? {
+                  marks,
+                  messageFor,
+                  profiles: props.profiles,
+                  currentUserId: props.currentUserId ?? '',
+                  timeZone: props.timeZone,
+                  onResolve: props.onResolveMark,
+                  onReopen: props.onReopenMark,
+                }
+              : null
+          }
+          onJump={jumpTo}
         />
       ) : null}
       {onForward !== undefined && forwardChannels !== undefined ? (
