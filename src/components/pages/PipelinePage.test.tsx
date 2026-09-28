@@ -141,6 +141,8 @@ function makePost(id: string, stage: Stage): PipelinePost {
     created_at: '2026-01-01',
     updated_at: '2026-01-01',
     stage_entered_at: '2026-01-01',
+    approved_by: null,
+    approved_at: null,
     thumbnailAssetVersionId: null,
   };
 }

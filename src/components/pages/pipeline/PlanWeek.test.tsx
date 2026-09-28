@@ -75,6 +75,8 @@ function makePost(id: string, target: string | null, stage: Stage = 'draft'): Pi
     created_at: '2026-01-01',
     updated_at: '2026-01-01',
     stage_entered_at: '2026-01-01',
+    approved_by: null,
+    approved_at: null,
     thumbnailAssetVersionId: null,
   };
 }

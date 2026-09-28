@@ -136,6 +136,13 @@ describe.runIf(RPC_SUITE)('SECURITY DEFINER write procs (authenticated role)', (
     return rows?.[0]?.stage;
   }
 
+  async function readApproval(
+    postId: string,
+  ): Promise<{ approved_by: string | null; approved_at: string | null } | undefined> {
+    const res = await admin.from('posts').select('approved_by, approved_at').eq('id', postId);
+    return res.data?.[0];
+  }
+
   interface PostMeta {
     row_version: number;
     updated_at: string;
@@ -472,6 +479,44 @@ describe.runIf(RPC_SUITE)('SECURITY DEFINER write procs (authenticated role)', (
         expect(expectError(result).code).toBe('invalid_stage_transition');
         expect(await readPostStage(postId)).toBe(from);
       }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Approver columns: set on entering approved, cleared on leaving it
+  // -------------------------------------------------------------------------
+  describe('approver columns', () => {
+    async function transition(postId: string, to: string): Promise<void> {
+      expectOk(
+        await stageTransition(ownerClient, {
+          p_post_id: postId,
+          p_to_stage: to,
+          p_trace_id: generateTraceId(),
+        }),
+      );
+    }
+
+    it('review -> approved sets approved_by to the actor and stamps approved_at', async () => {
+      const postId = await insertPost(ctxA, 'review');
+      const before = Date.now();
+      await transition(postId, 'approved');
+      const row = await readApproval(postId);
+      expect(row?.approved_by).toBe(owner.id);
+      expect(row?.approved_at).not.toBeNull();
+      expect(new Date(row?.approved_at ?? 0).getTime()).toBeGreaterThanOrEqual(before - 60_000);
+    });
+
+    it('approved -> parked clears approved_by and approved_at', async () => {
+      const postId = await insertPost(ctxA, 'review');
+      await transition(postId, 'approved');
+      await transition(postId, 'parked');
+      expect(await readApproval(postId)).toEqual({ approved_by: null, approved_at: null });
+    });
+
+    it('review -> parked leaves approved_by and approved_at null', async () => {
+      const postId = await insertPost(ctxA, 'review');
+      await transition(postId, 'parked');
+      expect(await readApproval(postId)).toEqual({ approved_by: null, approved_at: null });
     });
   });
 

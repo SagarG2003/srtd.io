@@ -7177,6 +7177,8 @@ export type Database = {
       }
       posts: {
         Row: {
+          approved_at: string | null
+          approved_by: string | null
           brief_id: string | null
           bucket_id: string | null
           caption: string | null
@@ -7199,6 +7201,8 @@ export type Database = {
           workspace_id: string
         }
         Insert: {
+          approved_at?: string | null
+          approved_by?: string | null
           brief_id?: string | null
           bucket_id?: string | null
           caption?: string | null
@@ -7221,6 +7225,8 @@ export type Database = {
           workspace_id: string
         }
         Update: {
+          approved_at?: string | null
+          approved_by?: string | null
           brief_id?: string | null
           bucket_id?: string | null
           caption?: string | null
