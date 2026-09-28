@@ -13,14 +13,23 @@ import {
   bubbleClass,
   bubbleStatus,
   bubbleTimeLabel,
+  DayPill,
+  dmHeaderLine,
   ForwardedLabel,
+  HEADER_TYPING,
   isVoiceOnly,
   keyOpensMenu,
   lastSeenLabel,
   MessageBubble,
+  messageTimeSource,
+  OWN_BUBBLE_CONTENT,
+  THREAD_LIST_CLASS,
+  threadListItems,
   threadRows,
+  TimeLabel,
   type ThreadRow,
 } from '@/components/chat/MessageThread';
+import { roleLabel } from '@/components/pages/settings/members-data';
 import { IconClock, IconTickDouble, IconTickSingle } from '@/components/ui/icons';
 import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
@@ -70,6 +79,7 @@ function renderBubble(
     isGroup?: boolean;
     head?: boolean;
     tail?: boolean;
+    afterLabel?: boolean;
     showTicks?: boolean;
     timeZone?: string;
     onRetry?: (id: string) => void;
@@ -84,6 +94,7 @@ function renderBubble(
     isGroup: opts?.isGroup ?? false,
     head: opts?.head ?? true,
     tail: opts?.tail ?? true,
+    ...(opts?.afterLabel !== undefined ? { afterLabel: opts.afterLabel } : {}),
     timeZone: opts?.timeZone ?? 'UTC',
     onBadgeClick: () => {},
     ...(opts?.onRetry !== undefined ? { onRetry: opts.onRetry } : {}),
@@ -231,10 +242,11 @@ describe('MessageBubble time and state', () => {
 describe('bubble shell', () => {
   const base = { sending: false, failed: false, checked: false, voiceOnly: false };
 
-  it('own is the solid accent with the primary Button ink, peer is panel-2; no border', () => {
+  it('own is the bubble-own fill with accent-fg ink, peer is panel-2; no border', () => {
     const own = bubbleClass({ ...base, mine: true, tail: true });
     const peer = bubbleClass({ ...base, mine: false, tail: true });
-    expect(own).toContain('bg-accent text-accent-fg');
+    expect(own).toContain('bg-bubble-own text-accent-fg');
+    expect(own.split(' ')).not.toContain('bg-accent');
     expect(peer).toContain('bg-panel-2 text-fg');
     for (const cls of [own, peer]) {
       expect(cls).toContain('rounded-[18px]');
@@ -634,5 +646,184 @@ describe('voice-only bubble', () => {
     expect(cls).toContain('min-w-[220px]');
     expect(timeInside).toBe(false);
     expect(allText(root)).not.toContain('18:45');
+  });
+});
+
+describe('bottom pin', () => {
+  const rows = threadRows(
+    [makeMessage({ id: 'first' }), makeMessage({ id: 'second' })],
+    Date.parse('2026-09-22T20:00:00Z'),
+    'UTC',
+  );
+  const render = (row: Extract<ThreadRow, { kind: 'message' }>) => (
+    <li key={row.message.id} data-msg-id={row.message.id} />
+  );
+
+  it('the list is a flex column, never justify-end on the scroll container', () => {
+    expect(THREAD_LIST_CLASS.split(' ')).toEqual(
+      expect.arrayContaining(['flex', 'flex-col', 'flex-1', 'overflow-y-auto']),
+    );
+    expect(THREAD_LIST_CLASS).not.toContain('justify-end');
+  });
+
+  it('renders the aria-hidden mt-auto spacer first, then the first message', () => {
+    const items = threadListItems(rows, false, render);
+    const spacer = items[0]?.props as Record<string, unknown>;
+    expect(spacer['aria-hidden']).toBe('true');
+    expect(spacer.className).toBe('mt-auto');
+    const firstMessage = items.find(
+      (el) => (el.props as Record<string, unknown>)['data-msg-id'] !== undefined,
+    );
+    expect((firstMessage?.props as Record<string, unknown>)['data-msg-id']).toBe('first');
+    expect(items.indexOf(firstMessage as never)).toBeGreaterThan(0);
+  });
+
+  it('keeps the spacer ahead of the older-page row', () => {
+    const items = threadListItems(rows, true, render);
+    expect((items[0]?.props as Record<string, unknown>)['data-thread-spacer']).toBe('');
+    expect(allText(items[1] as ReactElement)).toContain('Loading earlier messages');
+  });
+});
+
+describe('dmHeaderLine', () => {
+  const base = {
+    isGroup: false,
+    peerTyping: false,
+    presence: { online: false, lastTimeMs: null, available: true },
+    role: 'client',
+    workspaceName: 'Northwind',
+    timeZone: 'UTC',
+  };
+
+  it('typing beats online beats the role line', () => {
+    const online = { online: true, lastTimeMs: null, available: true };
+    expect(dmHeaderLine({ ...base, peerTyping: true, presence: online })).toBe(HEADER_TYPING);
+    expect(dmHeaderLine({ ...base, presence: online })).toBe('Online');
+  });
+
+  it('rests on "<role label> · <workspace>", labelled through roleLabel', () => {
+    expect(dmHeaderLine(base)).toBe(`${roleLabel(base.role)} · ${base.workspaceName}`);
+    expect(dmHeaderLine({ ...base, presence: undefined })).toBe(
+      `${roleLabel(base.role)} · ${base.workspaceName}`,
+    );
+  });
+
+  it('shows the workspace name alone when the role is null', () => {
+    expect(dmHeaderLine({ ...base, role: null })).toBe(base.workspaceName);
+  });
+
+  it('groups keep no second line', () => {
+    expect(dmHeaderLine({ ...base, isGroup: true, peerTyping: true })).toBeNull();
+  });
+});
+
+describe('label spacing', () => {
+  it('a head directly under a time label or day pill gets no top padding', () => {
+    const flush = rootClass(renderBubble(makeMessage({}), { head: true, afterLabel: true }));
+    expect(flush).toContain('pt-0');
+    expect(flush).not.toContain('pt-2.5');
+    // Between runs with no label the gap stays 10px.
+    expect(rootClass(renderBubble(makeMessage({}), { head: true }))).toContain('pt-2.5');
+  });
+
+  it('the label carries the 6px gap below it', () => {
+    expect(rootClass(TimeLabel({ label: '10:00' }))).toContain('pb-1.5');
+    let pill = '';
+    walk(DayPill({ label: 'Today' }), (el) => {
+      const cls = (el.props as { className?: string }).className ?? '';
+      if (cls.includes('rounded-full')) pill = cls;
+    });
+    expect(pill).toContain('mb-1.5');
+  });
+
+  it('threadListItems flags the message after a time label or day pill only', () => {
+    const t = (iso: string) => ({ createdAt: iso, time: Date.parse(iso) });
+    const rows = threadRows(
+      [
+        makeMessage({ id: 'a', ...t('2026-09-22T10:00:00Z') }),
+        makeMessage({ id: 'b', ...t('2026-09-22T10:01:00Z') }),
+        makeMessage({ id: 'c', mine: true, senderUserId: 'me', ...t('2026-09-22T10:02:00Z') }),
+      ],
+      Date.parse('2026-09-22T12:00:00Z'),
+      'UTC',
+    );
+    const flags: Record<string, boolean> = {};
+    threadListItems(rows, false, (row, afterLabel) => {
+      flags[row.message.id] = afterLabel;
+      return <li key={row.message.id} />;
+    });
+    expect(flags).toEqual({ a: true, b: false, c: false });
+  });
+});
+
+describe('own-bubble inner content', () => {
+  function contentClass(root: ReactElement): string | null {
+    let cls: string | null = null;
+    walk(root, (el) => {
+      const props = el.props as Record<string, unknown>;
+      if (props['data-bubble-content'] !== undefined) cls = String(props.className);
+    });
+    return cls;
+  }
+
+  it('own bubbles restyle quote, chips, cards and voice onto the fill', () => {
+    const cls = contentClass(renderBubble(makeMessage({ mine: true, senderUserId: 'me' })));
+    expect(cls).toContain(OWN_BUBBLE_CONTENT);
+    for (const token of [
+      '[&_.text-fg]:text-accent-fg',
+      '[&_.text-accent]:text-accent-fg',
+      '[&_.text-fg-2]:text-accent-fg',
+      '[&_.text-fg-2]:opacity-80',
+      '[&_.text-fg-3]:opacity-80',
+      '[&_.bg-panel]:bg-white/[.16]',
+      '[&_.bg-panel-3]:bg-white/[.16]',
+      '[&_.bg-accent]:bg-white/70',
+    ]) {
+      expect(OWN_BUBBLE_CONTENT).toContain(token);
+    }
+    // No theme-literal variants: token ink plus accent-fg's own value only.
+    expect(OWN_BUBBLE_CONTENT).not.toContain(['dark', ':'].join(''));
+  });
+
+  it('peer bubbles are unchanged', () => {
+    const cls = contentClass(renderBubble(makeMessage({ mine: false })));
+    expect(cls).toBe('contents');
+  });
+
+  it('the reaction count on an own bubble reads on its panel badge', () => {
+    const reactions = [
+      { emoji: '👍', count: 2, mine: false },
+      { emoji: '🎉', count: 1, mine: false },
+    ];
+    const own = findByChildren(
+      renderBubble(makeMessage({ mine: true, senderUserId: 'me', reactions })),
+      3 as never,
+    );
+    expect((own?.props as { className?: string }).className).toContain('text-fg-2');
+  });
+});
+
+describe('time source', () => {
+  it('the run time label and the bubble aria-label read the same server createdAt', () => {
+    // Agora time a few minutes off the server clock: the server time wins for both.
+    const message = makeMessage({
+      createdAt: '2026-09-22T18:45:00Z',
+      time: Date.parse('2026-09-22T18:52:00Z'),
+    });
+    const rows = threadRows([message], Date.parse('2026-09-22T20:00:00Z'), 'UTC');
+    const label = rows.find((r) => r.kind === 'time');
+    expect(label).toMatchObject({ label: '18:45' });
+    const aria = (findByAriaLabel(renderBubble(message), 'Message from Alice, 18:45') ??
+      null) as ReactElement | null;
+    expect(aria).not.toBeNull();
+    expect(bubbleTimeLabel(message, 'UTC')).toBe(
+      (label as Extract<ThreadRow, { kind: 'time' }>).label,
+    );
+  });
+
+  it('falls back to the Agora time only while createdAt is absent', () => {
+    const time = Date.parse('2026-09-22T18:52:00Z');
+    expect(messageTimeSource({ createdAt: '', time })).toBe(time);
+    expect(messageTimeSource({ createdAt: CREATED_AT, time })).toBe(CREATED_AT);
   });
 });

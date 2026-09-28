@@ -19,6 +19,7 @@ export default {
         'accent-fg': 'var(--accent-fg)',
         'accent-soft': 'var(--accent-soft)',
         'accent-line': 'var(--accent-line)',
+        'bubble-own': 'var(--bubble-own)',
         good: 'var(--good)',
         warn: 'var(--warn)',
         bad: 'var(--bad)',
