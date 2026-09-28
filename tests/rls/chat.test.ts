@@ -36,6 +36,13 @@
 //  11. chat_message_delete soft-deletes the caller's own messages only and
 //      never a marked one.
 //
+// Edit, delete window (20260928190717_chat_message_edit_and_delete_window.sql):
+//
+//  11a. chat_message_delete only reaches the caller's own messages from the
+//       last 30 minutes (tombstone: deleted_at set, row kept).
+//  11b. chat_message_edit edits the caller's own message body within 15
+//       minutes, sets edited_at, and refuses marked or deleted messages.
+//
 // Forward, clear-for-me (20260927200000_chat_forward_and_clear.sql):
 //
 //  12. chat_message_send with p_forwarded_from_message_id raises when the
@@ -89,6 +96,7 @@ type CursorArgs = Database['public']['Functions']['chat_read_cursor_set']['Args'
 type MarkSetArgs = Database['public']['Functions']['chat_mark_set']['Args'];
 type MarkResolveArgs = Database['public']['Functions']['chat_mark_resolve']['Args'];
 type DeleteArgs = Database['public']['Functions']['chat_message_delete']['Args'];
+type EditArgs = Database['public']['Functions']['chat_message_edit']['Args'];
 type ClearArgs = Database['public']['Functions']['chat_channel_clear']['Args'];
 
 // Proc arguments are built here (not inline at the .rpc() call) so each call
@@ -128,6 +136,20 @@ function markResolveArgs(messageId: string, channelId: string): MarkResolveArgs 
 
 function deleteArgs(messageIds: string[], channelId: string): DeleteArgs {
   return { p_message_ids: messageIds, p_channel_id: channelId, p_trace_id: generateTraceId() };
+}
+
+function editArgs(messageId: string, channelId: string, body: string): EditArgs {
+  return {
+    p_message_id: messageId,
+    p_channel_id: channelId,
+    p_body: body,
+    p_trace_id: generateTraceId(),
+  };
+}
+
+/** ISO timestamp `minutes` before now (for the edit / delete windows). */
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
 }
 
 function clearArgs(channelId: string): ClearArgs {
@@ -178,12 +200,17 @@ async function syncEvents(admin: GenericClient, match: MatchSpec): Promise<SyncE
   return (res.data as SyncEventRow[] | null) ?? [];
 }
 
-/** Seed one chat_messages row through the service role and return its id. */
+/**
+ * Seed one chat_messages row through the service role and return its id.
+ * `createdAt` defaults to partitionTimestamp; pass a recent time for rows the
+ * edit / delete windows must still reach.
+ */
 async function seedMessage(
   admin: GenericClient,
   channelId: string,
   workspaceId: string,
   senderId: string,
+  createdAt: string = partitionTimestamp,
 ): Promise<string> {
   const id = crypto.randomUUID();
   await insertRow(admin, 'chat_messages', {
@@ -193,7 +220,7 @@ async function seedMessage(
     sender_user_id: senderId,
     body: `seeded ${randomSuffix()}`,
     agora_event_id: null,
-    created_at: partitionTimestamp,
+    created_at: createdAt,
   });
   return id;
 }
@@ -1142,9 +1169,14 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
       return rows[0]?.deleted_at ?? null;
     }
 
+    // Rows the 30 minute window still reaches.
+    function recentMessage(senderId: string): Promise<string> {
+      return seedMessage(adminGeneric, ctx.channelId, wsA.id, senderId, minutesAgo(1));
+    }
+
     it('soft-deletes the caller own messages', async () => {
-      const a = await seedMessage(adminGeneric, ctx.channelId, wsA.id, userB.id);
-      const b = await seedMessage(adminGeneric, ctx.channelId, wsA.id, userB.id);
+      const a = await recentMessage(userB.id);
+      const b = await recentMessage(userB.id);
       const res = await clientFor(userB.id).rpc(
         'chat_message_delete',
         deleteArgs([a, b], ctx.channelId),
@@ -1157,13 +1189,15 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
     });
 
     it("raises on another member's message and deletes nothing", async () => {
-      const own = await seedMessage(adminGeneric, ctx.channelId, wsA.id, userB.id);
-      const theirs = await seedMessage(adminGeneric, ctx.channelId, wsA.id, owner.id);
+      const own = await recentMessage(userB.id);
+      const theirs = await recentMessage(owner.id);
       const res = await clientFor(userB.id).rpc(
         'chat_message_delete',
         deleteArgs([own, theirs], ctx.channelId),
       );
-      expect(res.error?.message).toBe('only your own messages in this chat can be deleted');
+      expect(res.error?.message).toBe(
+        'only your own messages from the last 30 minutes can be deleted',
+      );
       // The whole call rolls back, including the caller's own message.
       expect(await deletedAt(own)).toBeNull();
       expect(await deletedAt(theirs)).toBeNull();
@@ -1198,6 +1232,110 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
         deleteArgs([], ctx.channelId),
       );
       expect(empty.error?.message).toBe('select between 1 and 100 messages');
+    });
+
+    it('raises after the 30 minute window and deletes nothing', async () => {
+      const old = await seedMessage(adminGeneric, ctx.channelId, wsA.id, userB.id, minutesAgo(40));
+      const res = await clientFor(userB.id).rpc(
+        'chat_message_delete',
+        deleteArgs([old], ctx.channelId),
+      );
+      expect(res.error?.message).toBe(
+        'only your own messages from the last 30 minutes can be deleted',
+      );
+      expect(await deletedAt(old)).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 11b. chat_message_edit
+  // -------------------------------------------------------------------------
+
+  describe('chat_message_edit', () => {
+    interface EditedRow {
+      body: string | null;
+      edited_at: string | null;
+    }
+
+    async function editedRow(id: string): Promise<EditedRow> {
+      const res = await adminGeneric.from('chat_messages').select('body, edited_at').eq('id', id);
+      if (res.error) throw new Error(`chat_messages read failed: ${res.error.message}`);
+      const rows = (res.data as EditedRow[] | null) ?? [];
+      const row = rows[0];
+      if (rows.length !== 1 || !row) throw new Error(`expected one chat_messages row for ${id}`);
+      return row;
+    }
+
+    function messageAt(senderId: string, minutes: number): Promise<string> {
+      return seedMessage(adminGeneric, ctx.channelId, wsA.id, senderId, minutesAgo(minutes));
+    }
+
+    it('edits the caller own message inside the window and sets edited_at', async () => {
+      const id = await messageAt(userB.id, 1);
+      const res = await clientFor(userB.id).rpc(
+        'chat_message_edit',
+        editArgs(id, ctx.channelId, 'edited body'),
+      );
+      expect(res.error).toBeNull();
+      expect(res.data?.body).toBe('edited body');
+      expect(res.data?.edited_at).not.toBeNull();
+      const row = await editedRow(id);
+      expect(row.body).toBe('edited body');
+      expect(row.edited_at).not.toBeNull();
+    });
+
+    it("raises on another member's message and leaves it unchanged", async () => {
+      const id = await messageAt(owner.id, 1);
+      const before = await editedRow(id);
+      const res = await clientFor(userB.id).rpc(
+        'chat_message_edit',
+        editArgs(id, ctx.channelId, 'not mine'),
+      );
+      expect(res.error?.message).toBe('only your own messages in this chat can be edited');
+      expect(await editedRow(id)).toEqual(before);
+    });
+
+    it('raises after the 15 minute window', async () => {
+      const id = await messageAt(userB.id, 20);
+      const before = await editedRow(id);
+      const res = await clientFor(userB.id).rpc(
+        'chat_message_edit',
+        editArgs(id, ctx.channelId, 'too late'),
+      );
+      expect(res.error?.message).toBe('edit window has closed');
+      expect(await editedRow(id)).toEqual(before);
+    });
+
+    it('raises on a marked message', async () => {
+      const id = await messageAt(userB.id, 1);
+      const mark = await clientFor(owner.id).rpc(
+        'chat_mark_set',
+        markSetArgs(id, ctx.channelId, 'pending'),
+      );
+      expect(mark.error).toBeNull();
+      const before = await editedRow(id);
+      const res = await clientFor(userB.id).rpc(
+        'chat_message_edit',
+        editArgs(id, ctx.channelId, 'marked'),
+      );
+      expect(res.error?.message).toBe('marked messages cannot be edited');
+      expect(await editedRow(id)).toEqual(before);
+    });
+
+    it('raises on a deleted message', async () => {
+      const id = await messageAt(userB.id, 1);
+      const del = await clientFor(userB.id).rpc(
+        'chat_message_delete',
+        deleteArgs([id], ctx.channelId),
+      );
+      expect(del.error).toBeNull();
+      const before = await editedRow(id);
+      const res = await clientFor(userB.id).rpc(
+        'chat_message_edit',
+        editArgs(id, ctx.channelId, 'gone'),
+      );
+      expect(res.error?.message).toBe('deleted messages cannot be edited');
+      expect(await editedRow(id)).toEqual(before);
     });
   });
 
