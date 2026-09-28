@@ -5,22 +5,35 @@
 // fabricates post fields.
 
 import type { PostCardFields, Stage } from '@srtdio/posts';
+import { isAgencySide } from '@/components/pages/pcs/roles';
 
 /** The picker's stage filter: a real stage, or all stages the viewer can see. */
-export type PostFilter = 'review' | 'approved' | 'all';
+export type PostFilter = 'draft' | 'review' | 'approved' | 'all';
 
 /** The filter chips, in display order. Review is the default selection. */
 export const POST_FILTERS: ReadonlyArray<{ key: PostFilter; label: string }> = [
+  { key: 'draft', label: 'Drafts' },
   { key: 'review', label: 'Review' },
   { key: 'approved', label: 'Approved' },
-  { key: 'all', label: 'All Posts' },
+  { key: 'all', label: 'All posts' },
 ];
+
+/**
+ * The chips a viewer sees. Drafts shows only once the member's role is known and
+ * is agency side (isAgencySide, the same predicate PCS gates on); an unknown
+ * (null) role hides it, so the chip never flashes in and then disappears.
+ */
+export function visiblePostFilters(
+  role: string | null,
+): ReadonlyArray<{ key: PostFilter; label: string }> {
+  return isAgencySide(role) ? POST_FILTERS : POST_FILTERS.filter((f) => f.key !== 'draft');
+}
 
 /** The default chip when the picker opens. */
 export const DEFAULT_POST_FILTER: PostFilter = 'review';
 
 /**
- * The stage to pass to the read for a filter. "All Posts" passes none, so RLS
+ * The stage to pass to the read for a filter. "All posts" passes none, so RLS
  * alone bounds the result (e.g. clients never see Draft); roles are never
  * special-cased in the query.
  */
