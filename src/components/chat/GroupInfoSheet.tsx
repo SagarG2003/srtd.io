@@ -24,6 +24,36 @@ import {
   type MemberOption,
 } from '@/components/chat/member-picker';
 import { useWorkspaceMembers } from '@/components/chat/use-workspace-members';
+import { isOwnerOrAdmin } from '@/components/pages/pcs/roles';
+import { fetchMemberRole } from '@/lib/assets';
+
+/** The inline line a member who cannot rename the group sees (WhatsApp's wording). */
+export const GROUP_INFO_ADMIN_ONLY = "Only admins can edit this group's info";
+
+/** The proc's refusal when the caller is neither the creator nor a workspace owner / admin. */
+const GROUP_MANAGE_DENIED = 'group_manage_denied';
+
+/**
+ * Whether the viewer may edit the group's info, mirroring group_rename: the
+ * group's creator, or a workspace owner or admin. Pure.
+ */
+export function canEditGroupInfo(input: {
+  currentUserId: string;
+  creatorId: string | null;
+  role: string | null;
+}): boolean {
+  return (
+    (input.creatorId !== null && input.creatorId === input.currentUserId) ||
+    isOwnerOrAdmin(input.role)
+  );
+}
+
+/** A group action's failure as shown: the denial reads the admin line, never the code. */
+export function groupActionMessage(error: { code: string; message: string }): string {
+  return error.code === GROUP_MANAGE_DENIED || error.message === GROUP_MANAGE_DENIED
+    ? GROUP_INFO_ADMIN_ONLY
+    : error.message;
+}
 
 interface GroupInfoSheetProps {
   open: boolean;
@@ -67,6 +97,10 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
   const [leaving, setLeaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether the viewer may rename: null until the creator and role reads land
+  // (the proc stays the authority either way).
+  const [canEditInfo, setCanEditInfo] = useState<boolean | null>(null);
+  const [infoNotice, setInfoNotice] = useState(false);
 
   const loadMembers = useCallback(async (): Promise<MembersState> => {
     const ids = await listGroupMemberIds(supabase, { groupId: props.groupId });
@@ -75,6 +109,27 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     if (!profiles.ok) return { options: [], loading: false, error: profiles.error.message };
     return { options: toMemberOptions(profiles.data), loading: false, error: null };
   }, [props.groupId]);
+
+  useEffect(() => {
+    if (!props.open) return;
+    let cancelled = false;
+    setCanEditInfo(null);
+    setInfoNotice(false);
+    void Promise.all([
+      fetchMemberRole(supabase, props.workspaceId, props.currentUserId),
+      supabase.from('groups').select('created_by').eq('id', props.groupId).maybeSingle(),
+    ])
+      .then(([role, creator]) => {
+        if (cancelled) return;
+        const creatorId =
+          (creator.data as { created_by: string | null } | null)?.created_by ?? null;
+        setCanEditInfo(canEditGroupInfo({ currentUserId: props.currentUserId, creatorId, role }));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [props.open, props.groupId, props.workspaceId, props.currentUserId]);
 
   useEffect(() => {
     if (!props.open) return;
@@ -101,7 +156,14 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     setMembers(next);
   }
 
+  const infoLocked = canEditInfo === false;
+  const showAdminOnly = (): void => setInfoNotice(true);
+
   async function submitRename(): Promise<void> {
+    if (infoLocked) {
+      showAdminOnly();
+      return;
+    }
     if (!nameChanged || busy) return;
     setBusy(true);
     setError(null);
@@ -111,7 +173,9 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
       props.onChanged,
     );
     setBusy(false);
-    if (failure !== null) setError(failure.message);
+    if (failure === null) return;
+    if (groupActionMessage(failure) === GROUP_INFO_ADMIN_ONLY) setInfoNotice(true);
+    else setError(failure.message);
   }
 
   async function submitAdd(): Promise<void> {
@@ -125,7 +189,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     );
     setBusy(false);
     if (failure !== null) {
-      setError(failure.message);
+      setError(groupActionMessage(failure));
       return;
     }
     setAddId(null);
@@ -144,7 +208,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     setBusy(false);
     setRemoveTarget(null);
     if (failure !== null) {
-      setError(failure.message);
+      setError(groupActionMessage(failure));
       return;
     }
     await refreshMembers();
@@ -160,7 +224,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     );
     setBusy(false);
     setLeaving(false);
-    if (failure !== null) setError(failure.message);
+    if (failure !== null) setError(groupActionMessage(failure));
   }
 
   return (
@@ -182,18 +246,28 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
                 <Input
                   id="group-rename"
                   value={name}
+                  readOnly={infoLocked}
+                  aria-readonly={infoLocked || undefined}
                   onChange={(event) => setName(event.target.value)}
+                  onClick={infoLocked ? showAdminOnly : undefined}
+                  onFocus={infoLocked ? showAdminOnly : undefined}
                   aria-label="Group name"
+                  aria-describedby={infoNotice ? 'group-rename-note' : undefined}
                 />
                 <Button
                   size="lg"
                   variant="primary"
-                  disabled={!nameChanged || busy}
+                  disabled={infoLocked ? false : !nameChanged || busy}
                   onClick={() => void submitRename()}
                 >
                   Save
                 </Button>
               </div>
+              {infoNotice ? (
+                <p id="group-rename-note" role="status" className="mt-1.5 text-sm text-fg-2">
+                  {GROUP_INFO_ADMIN_ONLY}
+                </p>
+              ) : null}
             </Field>
           ) : (
             <div>

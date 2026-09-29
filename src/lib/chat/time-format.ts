@@ -71,6 +71,23 @@ export function formatMessageTime(createdAt: string | number, timeZone: string):
 }
 
 /**
+ * A bubble's in-bubble time in the workspace zone, WhatsApp style: "2:05 pm"
+ * (12-hour, no leading zero, lowercase am / pm). Unparseable input is ''.
+ */
+export function formatBubbleTime(createdAt: string | number, timeZone: string): string {
+  const instant = instantOf(createdAt);
+  if (instant === undefined) return '';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: safeTimeZone(timeZone),
+    hour: 'numeric',
+    minute: '2-digit',
+    hourCycle: 'h12',
+  }).formatToParts(instant);
+  const read = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
+  return `${read('hour')}:${read('minute')} ${read('dayPeriod').toLowerCase()}`;
+}
+
+/**
  * A short calendar date in the workspace zone, e.g. "Jun 20", for conversation
  * cards once a relative reading stops being useful.
  */

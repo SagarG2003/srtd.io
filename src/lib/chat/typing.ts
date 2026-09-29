@@ -55,19 +55,66 @@ export function cmdBelongsToTarget(msg: AgoraChat.CmdMsgBody, target: ChannelTar
   );
 }
 
-/** Build a typing command for the channel and send it via the SDK. */
+/** The `ext` key a typing command carries the Sorted channel id under. */
+export const TYPING_CHANNEL_KEY = 'channelId';
+
+/** The Sorted channel id a typing command names in its ext; null when absent (older client). */
+export function typingChannelId(ext: unknown): string | null {
+  if (typeof ext !== 'object' || ext === null) return null;
+  const value = (ext as Record<string, unknown>)[TYPING_CHANNEL_KEY];
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+/**
+ * Whether an inbound typing command is for the open chat. A command naming a
+ * channel id must name this one; one without (an older client) falls back to
+ * the Agora from / to match.
+ */
+export function typingForChannel(
+  msg: AgoraChat.CmdMsgBody,
+  target: ChannelTarget,
+  channelId: string | undefined,
+): boolean {
+  const named = typingChannelId((msg as { ext?: unknown }).ext);
+  if (named !== null && channelId !== undefined) return named === channelId;
+  return cmdBelongsToTarget(msg, target);
+}
+
+/**
+ * Build a typing command for the channel and send it via the SDK. With a
+ * channelId it rides ext { channelId } so the receiver scopes it to that chat.
+ */
 export function sendTyping(params: {
   connection: TypingConnection;
   target: ChannelTarget;
   createCmd: CreateCmdMessage;
+  channelId?: string;
 }): Promise<AgoraChat.SendMsgResult> {
   const message = params.createCmd({
     chatType: params.target.chatType,
     type: 'cmd',
     to: params.target.targetId,
     action: TYPING_ACTION,
+    ...(params.channelId !== undefined ? { ext: { [TYPING_CHANNEL_KEY]: params.channelId } } : {}),
   });
   return params.connection.send(message);
+}
+
+/**
+ * The typing ids a chat may show: in a DM only the peer, in a group only its
+ * members (none until the member list is known). Pure.
+ */
+export function visibleTypingIds(input: {
+  ids: readonly string[];
+  isGroup: boolean;
+  peerUserId: string | null;
+  memberIds: ReadonlySet<string> | null;
+}): string[] {
+  if (input.isGroup) {
+    const members = input.memberIds;
+    return members === null ? [] : input.ids.filter((id) => members.has(id));
+  }
+  return input.peerUserId === null ? [] : input.ids.filter((id) => id === input.peerUserId);
 }
 
 /** Build a live signal command (reaction / read) for the channel and send it. */
@@ -96,14 +143,16 @@ export function sendSignal(params: {
 export function subscribeTyping(params: {
   connection: TypingConnection;
   target: ChannelTarget;
+  /** The open Sorted channel; a command naming another channel is dropped. */
+  channelId?: string;
   currentUserId: string;
   onTypingFrom: (userId: string) => void;
 }): () => void {
-  const { connection, target, currentUserId, onTypingFrom } = params;
+  const { connection, target, channelId, currentUserId, onTypingFrom } = params;
   connection.addEventHandler(TYPING_EVENT_HANDLER_ID, {
     onCmdMessage: (msg) => {
       if (msg.action !== TYPING_ACTION) return;
-      if (!cmdBelongsToTarget(msg, target)) return;
+      if (!typingForChannel(msg, target, channelId)) return;
       if (msg.from === undefined) return;
       const mapped = userIdFromAgoraUsername(msg.from);
       if (mapped.ok && mapped.userId !== currentUserId) onTypingFrom(mapped.userId);

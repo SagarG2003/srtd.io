@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { forwardRef, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import type { CSSProperties, TextareaHTMLAttributes } from 'react';
 import { cn } from '@/lib/cn';
 
@@ -17,16 +17,21 @@ interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {
   compact?: boolean;
 }
 
-export function Textarea({
-  className,
-  autoGrow: autoGrowProp = false,
-  compact = false,
-  style,
-  value,
-  ...props
-}: TextareaProps) {
+/** Forwards its ref to the textarea (the chat composer focuses it); no visual change. */
+export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function Textarea(
+  { className, autoGrow: autoGrowProp = false, compact = false, style, value, ...props },
+  forwardedRef,
+) {
   const autoGrow = autoGrowProp || compact;
-  const ref = useRef<HTMLTextAreaElement>(null);
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  const setRef = useCallback(
+    (el: HTMLTextAreaElement | null): void => {
+      ref.current = el;
+      if (typeof forwardedRef === 'function') forwardedRef(el);
+      else if (forwardedRef !== null) forwardedRef.current = el;
+    },
+    [forwardedRef],
+  );
 
   const fit = useCallback((): void => {
     const el = ref.current;
@@ -66,7 +71,7 @@ export function Textarea({
 
   return (
     <textarea
-      ref={ref}
+      ref={setRef}
       value={value}
       className={cn(
         'w-full px-3 rounded-md border border-border bg-panel-2 text-fg text-sm placeholder:text-fg-3 outline-none focus:border-accent-line focus:ring-2 focus:ring-accent-soft py-2.5 h-auto',
@@ -77,4 +82,4 @@ export function Textarea({
       {...props}
     />
   );
-}
+});

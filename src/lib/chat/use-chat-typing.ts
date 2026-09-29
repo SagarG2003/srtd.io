@@ -32,26 +32,62 @@ export interface UseChatTyping {
   notifyTyping: () => void;
 }
 
+/** Typing ids tagged with the channel they were heard in. */
+export interface TypingState {
+  channelId: string | null;
+  ids: string[];
+}
+
+/**
+ * The ids to show for the open channel: only ones heard in it. A switch reads
+ * as empty in the same render (the state still names the old channel), so no
+ * stale id from the previous chat ever paints. Pure.
+ */
+export function typingIdsFor(state: TypingState, channelId: string | null): string[] {
+  return channelId !== null && state.channelId === channelId ? state.ids : NO_IDS;
+}
+
+/** Add one id heard in a channel; a different channel starts a fresh list. Pure. */
+export function addTypingId(state: TypingState, channelId: string, userId: string): TypingState {
+  if (state.channelId !== channelId) return { channelId, ids: [userId] };
+  return state.ids.includes(userId) ? state : { channelId, ids: [...state.ids, userId] };
+}
+
+/** Drop one id from a channel's list; other channels are left alone. Pure. */
+export function removeTypingId(state: TypingState, channelId: string, userId: string): TypingState {
+  if (state.channelId !== channelId || !state.ids.includes(userId)) return state;
+  return { channelId, ids: state.ids.filter((id) => id !== userId) };
+}
+
+const NO_IDS: string[] = [];
+const EMPTY: TypingState = { channelId: null, ids: NO_IDS };
+
 export function useChatTyping(params: {
   client: ChatConnection | null;
   target: ChannelTarget | null;
+  /** The open Sorted channel id; typing is scoped to it both ways. */
+  channelId: string | null;
   currentUserId: string;
 }): UseChatTyping {
-  const { client, target, currentUserId } = params;
+  const { client, target, channelId, currentUserId } = params;
 
-  const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
+  const [state, setState] = useState<TypingState>(EMPTY);
+  const typingUserIds = typingIdsFor(state, channelId);
 
   // Outbound state read through refs so notifyTyping stays a stable callback.
   const clientRef = useRef(client);
   clientRef.current = client;
   const targetRef = useRef(target);
   targetRef.current = target;
+  const channelIdRef = useRef(channelId);
+  channelIdRef.current = channelId;
   const lastSentRef = useRef(0);
 
   const notifyTyping = useCallback(() => {
     const activeClient = clientRef.current;
     const activeTarget = targetRef.current;
-    if (activeClient === null || activeTarget === null) return;
+    const activeChannelId = channelIdRef.current;
+    if (activeClient === null || activeTarget === null || activeChannelId === null) return;
     const now = Date.now();
     if (now - lastSentRef.current < OUTBOUND_THROTTLE_MS) return;
     lastSentRef.current = now;
@@ -59,6 +95,7 @@ export function useChatTyping(params: {
       connection: asTypingConnection(activeClient),
       target: activeTarget,
       createCmd: createCmdMessage,
+      channelId: activeChannelId,
     });
   }, []);
 
@@ -66,24 +103,23 @@ export function useChatTyping(params: {
   // so the row stays while they type and disappears INBOUND_CLEAR_MS after they
   // stop. Switching channels or unmounting clears every timer and the handler.
   useEffect(() => {
-    if (client === null || target === null) {
-      setTypingUserIds([]);
-      return;
-    }
+    setState(EMPTY);
+    if (client === null || target === null || channelId === null) return;
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
     const teardown = subscribeTyping({
       connection: asTypingConnection(client),
       target,
+      channelId,
       currentUserId,
       onTypingFrom: (userId) => {
-        setTypingUserIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+        setState((prev) => addTypingId(prev, channelId, userId));
         const existing = timers.get(userId);
         if (existing !== undefined) clearTimeout(existing);
         timers.set(
           userId,
           setTimeout(() => {
             timers.delete(userId);
-            setTypingUserIds((prev) => prev.filter((id) => id !== userId));
+            setState((prev) => removeTypingId(prev, channelId, userId));
           }, INBOUND_CLEAR_MS),
         );
       },
@@ -93,7 +129,7 @@ export function useChatTyping(params: {
       timers.clear();
       teardown();
     };
-  }, [client, target, currentUserId]);
+  }, [client, target, channelId, currentUserId]);
 
   return { typingUserIds, notifyTyping };
 }

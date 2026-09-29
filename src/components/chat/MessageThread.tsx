@@ -27,13 +27,9 @@ import { IconButton } from '@/components/ui/IconButton';
 import {
   IconChat,
   IconChevronLeft,
-  IconClock,
-  IconEllipsis,
   IconForward,
   IconRotateCcw,
   IconSettings,
-  IconTickDouble,
-  IconTickSingle,
   IconTrash,
   IconUsers,
 } from '@/components/ui/icons';
@@ -45,13 +41,27 @@ import type { ChannelSummary, ChatProfile } from '@/lib/chat-reads';
 import {
   breaksRun,
   DELETED_MESSAGE_LABEL,
-  isTimeGap,
   replyPreview,
   type ThreadMessage,
 } from '@/lib/chat/thread';
 import { classifyAttachment, splitAlbum, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
-import { formatMessageTime } from '@/lib/chat/time-format';
+import { formatBubbleTime, formatMessageTime } from '@/lib/chat/time-format';
+import { getDraft, setDraft, type DraftReply } from '@/lib/chat/drafts';
+import {
+  BUBBLE_BODY_TYPE,
+  BUBBLE_MAX_MD,
+  BUBBLE_META_TYPE,
+  BUBBLE_PAD_MD,
+  BUBBLE_SHAPE_MD,
+  DATE_PILL_TYPE,
+  GROUP_SENDER_TYPE,
+  HEADER_LINE_TYPE,
+  HEADER_NAME_TYPE,
+  REACTION_EMOJI_TYPE,
+  TICK_ICON_BOX,
+  TYPING_ROW_TYPE,
+} from '@/components/chat/chat-type';
 import {
   createSwipeReplyController,
   SWIPE_SPRING_MS,
@@ -571,7 +581,10 @@ function TypingIndicator(props: {
   const label = typingLabel(props.ids, props.profiles);
   if (label === null) return null;
   return (
-    <div className="flex shrink-0 items-center gap-2 px-4 py-1.5 text-xs text-fg-3">
+    <div
+      data-typing-row=""
+      className={cn('flex shrink-0 items-center gap-2 px-4 py-1.5 text-fg-3', TYPING_ROW_TYPE)}
+    >
       <span className="flex items-center gap-1" aria-hidden="true">
         <span className="h-1.5 w-1.5 rounded-full bg-fg-3 animate-pulse [animation-delay:0ms]" />
         <span className="h-1.5 w-1.5 rounded-full bg-fg-3 animate-pulse [animation-delay:150ms]" />
@@ -612,11 +625,9 @@ export function ThreadHeaderIdentity(props: {
   );
   const text = (
     <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
-      <span className="block truncate text-[15px] font-semibold leading-tight text-fg">
-        {props.title}
-      </span>
+      <span className={cn('block truncate text-fg', HEADER_NAME_TYPE)}>{props.title}</span>
       {props.headerLine !== null ? (
-        <span data-header-line="" className="truncate text-xs text-fg-3">
+        <span data-header-line="" className={cn('truncate text-fg-3', HEADER_LINE_TYPE)}>
           {props.headerLine}
         </span>
       ) : null}
@@ -669,15 +680,14 @@ export function messageTimeSource(
 }
 
 /**
- * The footer label for a bubble: the server time on the workspace clock once
- * the message is recorded, 'Sending' while the record write is in flight or
- * retrying (shown as a clock, the label is for screen readers), and 'Not sent'
- * once the background retries gave up (the Retry control sits beside it).
+ * A bubble's spoken time for its aria-label: the server time on the workspace
+ * clock ("2:05 pm") once recorded, 'Sending' while the record write is in
+ * flight or retrying, and 'Not sent' once the background retries gave up.
  */
 export function bubbleTimeLabel(message: ThreadMessage, timeZone: string): string {
   if (message.state === 'sending') return 'Sending';
   if (message.state === 'failed') return message.filesMissing === true ? FILES_MISSING : 'Not sent';
-  const time = formatMessageTime(messageTimeSource(message), timeZone);
+  const time = formatBubbleTime(messageTimeSource(message), timeZone);
   return isEdited(message) ? `${EDITED_LABEL}, ${time}` : time;
 }
 
@@ -692,50 +702,172 @@ export function isEdited(message: Pick<ThreadMessage, 'editedAt' | 'deleted'>): 
 /** The status of a send whose picked files did not survive a reload. */
 export const FILES_MISSING = 'Photos not sent';
 
-/** What the line under an own bubble shows; null renders no line. */
+/** The tick state a bubble's meta shows; null draws no glyph. */
 export type BubbleStatus = 'sending' | 'failed' | 'files-missing' | 'delivered' | 'read';
 
 /**
- * The status line under a bubble: a clock while sending and 'Not sent' once
- * failed (any bubble in the run), else Delivered / Read for own DM messages on
- * the LAST bubble of a run only.
+ * A bubble's status glyph: a clock while sending and an alert once failed (any
+ * message), else a single tick (delivered) or double tick (read) on every own
+ * DM message.
  */
 export function bubbleStatus(
   message: Pick<ThreadMessage, 'mine' | 'state' | 'status' | 'filesMissing'>,
-  opts: { showTicks: boolean; tail: boolean },
+  opts: { showTicks: boolean },
 ): BubbleStatus | null {
   if (message.state === 'sending') return 'sending';
   if (message.state === 'failed') return message.filesMissing === true ? 'files-missing' : 'failed';
-  if (!message.mine || !opts.showTicks || !opts.tail) return null;
+  if (!message.mine || !opts.showTicks) return null;
   return message.status === 'read' ? 'read' : 'delivered';
 }
 
+/** What every bubble shows at its bottom-right: "edited", the time, the tick. */
+export interface BubbleMeta {
+  time: string;
+  edited: boolean;
+  status: BubbleStatus | null;
+}
+
+/** A message's in-bubble meta, on the workspace clock ("2:05 pm"). Pure. */
+export function bubbleMeta(
+  message: ThreadMessage,
+  timeZone: string,
+  opts: { showTicks: boolean },
+): BubbleMeta {
+  return {
+    time: formatBubbleTime(messageTimeSource(message), timeZone),
+    edited: isEdited(message),
+    status: bubbleStatus(message, opts),
+  };
+}
+
+/** The spoken name of each status glyph. */
+const STATUS_LABEL: Record<BubbleStatus, string> = {
+  sending: 'Sending',
+  failed: 'Not sent',
+  'files-missing': FILES_MISSING,
+  delivered: 'Delivered',
+  read: 'Read',
+};
+
 /**
- * The line itself, right-aligned under own bubbles. Token colours only (Read in
- * the accent), so light and dark stay at parity; no animation.
+ * The 16x11 status glyph: clock (sending), single tick (delivered), double tick
+ * in the read token (read), alert in the bad token (failed). currentColor
+ * otherwise, so it takes the meta ink (or the media pill's white).
  */
-function StatusLine({ status }: { status: BubbleStatus }): ReactElement {
+export function MetaGlyph({ status }: { status: BubbleStatus }): ReactElement {
+  const failed = status === 'failed' || status === 'files-missing';
   return (
-    <span data-status={status} className="flex items-center gap-1 text-[11px] text-fg-3">
+    <svg
+      role="img"
+      aria-label={STATUS_LABEL[status]}
+      data-tick={status}
+      viewBox="0 0 16 11"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={cn(
+        TICK_ICON_BOX,
+        status === 'read' && 'text-[color:var(--tick-read)]',
+        failed && 'text-bad',
+      )}
+    >
       {status === 'sending' ? (
-        <span role="img" aria-label="Sending">
-          <IconClock size={12} />
-        </span>
-      ) : null}
-      {status === 'failed' ? <span className="text-bad">Not sent</span> : null}
-      {status === 'files-missing' ? <span className="text-bad">{FILES_MISSING}</span> : null}
-      {status === 'delivered' ? (
         <>
-          <span>Delivered</span>
-          <IconTickSingle />
+          <circle cx={8} cy={5.5} r={4.5} />
+          <path d="M8 3.2v2.5l1.6 1" />
         </>
       ) : null}
+      {status === 'delivered' ? <path d="M3.5 5.8l2.8 2.8L12.5 2.2" /> : null}
       {status === 'read' ? (
-        <span className="inline-flex items-center gap-1 text-accent">
-          <span>Read</span>
-          <IconTickDouble />
-        </span>
+        <>
+          <path d="M1 5.8l2.8 2.8L10 2.2" />
+          <path d="M7.2 8.2l.4.4L14.9 2.2" />
+        </>
       ) : null}
+      {failed ? (
+        <>
+          <circle cx={8} cy={5.5} r={4.5} />
+          <path d="M8 3.2v2.6M8 7.7v.1" />
+        </>
+      ) : null}
+    </svg>
+  );
+}
+
+/** The meta's inner run: "edited", time, glyph. Shared by the meta and its spacer. */
+function metaParts(meta: BubbleMeta): ReactElement {
+  return (
+    <>
+      {meta.edited ? <span data-edited="">{EDITED_LABEL}</span> : null}
+      {meta.time !== '' ? <span aria-hidden="true">{meta.time}</span> : null}
+      {meta.status !== null ? <MetaGlyph status={meta.status} /> : null}
+    </>
+  );
+}
+
+/** Where a bubble's meta sits: after its text (inline) or over its media (pill). */
+export type MetaPlacement = 'inline' | 'pill';
+
+/**
+ * The meta itself, absolutely placed at the bubble's bottom-right. Inline meta
+ * takes the bubble's meta ink (own or peer token); over media it sits on the
+ * translucent dark pill in white. Opacity-free, no motion.
+ */
+export function BubbleMetaView(props: {
+  meta: BubbleMeta;
+  mine: boolean;
+  placement: MetaPlacement;
+}): ReactElement {
+  const pill = props.placement === 'pill';
+  return (
+    <span
+      data-meta={props.placement}
+      data-status={props.meta.status ?? undefined}
+      className={cn(
+        'pointer-events-none absolute inline-flex items-center gap-1 whitespace-nowrap',
+        BUBBLE_META_TYPE,
+        pill
+          ? 'bottom-2 right-2 rounded-full bg-[color:var(--media-meta-bg)] px-1.5 py-px text-[color:var(--media-meta-fg)]'
+          : cn(
+              'bottom-[3px] right-2',
+              props.mine
+                ? 'text-[color:var(--bubble-meta-own)]'
+                : 'text-[color:var(--bubble-meta)]',
+            ),
+      )}
+    >
+      {metaParts(props.meta)}
+    </span>
+  );
+}
+
+/**
+ * The invisible inline spacer at the end of a bubble's text: the meta's own
+ * width (same parts, same type) plus a gap. A short last line keeps the meta
+ * beside it; a full one pushes the spacer, and so the meta, to its own line.
+ */
+export function MetaSpacer({ meta }: { meta: BubbleMeta }): ReactElement {
+  return (
+    <span
+      aria-hidden="true"
+      data-meta-spacer=""
+      className={cn(
+        'pointer-events-none invisible inline-flex select-none items-center gap-1 whitespace-nowrap pl-3 align-baseline',
+        BUBBLE_META_TYPE,
+      )}
+    >
+      {metaParts(meta)}
+    </span>
+  );
+}
+
+/** The line under a failed own bubble ("Not sent" / "Photos not sent"); Retry sits beside the bubble. */
+function FailedLine({ status }: { status: 'failed' | 'files-missing' }): ReactElement {
+  return (
+    <span data-failed={status} className={cn('text-bad', BUBBLE_META_TYPE)}>
+      {status === 'failed' ? 'Not sent' : FILES_MISSING}
     </span>
   );
 }
@@ -756,8 +888,9 @@ export function bubbleClass(state: {
   album?: boolean;
 }): string {
   return cn(
-    'relative min-w-0 select-none [-webkit-touch-callout:none] rounded-[18px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
-    state.album === true ? 'min-w-[240px] p-[3px]' : 'px-3 py-2',
+    'group/bubble relative min-w-0 select-none [-webkit-touch-callout:none] rounded-[18px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
+    BUBBLE_SHAPE_MD,
+    state.album === true ? 'min-w-[240px] p-[3px]' : cn('px-3 py-2', BUBBLE_PAD_MD),
     state.voiceOnly && 'min-w-[220px]',
     state.mine ? 'bg-bubble-own text-accent-fg' : 'bg-panel-2 text-fg',
     state.tail && (state.mine ? 'rounded-br-[4px]' : 'rounded-bl-[4px]'),
@@ -772,10 +905,16 @@ export function bubbleClass(state: {
  */
 export function tombstoneClass(state: { mine: boolean; tail: boolean }): string {
   return cn(
-    'relative flex min-w-0 select-none items-center gap-1.5 rounded-[18px] border border-border px-3 py-2 text-[15px] italic text-fg-3',
+    'relative flex min-w-0 select-none items-center gap-1.5 rounded-[18px] border border-border px-3 py-2 italic text-fg-3',
+    BUBBLE_BODY_TYPE,
+    BUBBLE_SHAPE_MD,
+    BUBBLE_PAD_MD,
     state.tail && (state.mine ? 'rounded-br-[4px]' : 'rounded-bl-[4px]'),
   );
 }
+
+/** What a deleted message's bubble reads (WhatsApp's wording). */
+export const TOMBSTONE_LABEL = 'This message was deleted';
 
 /** A checked row's neutral tint: panel-3 at partial opacity across the full row. */
 export const SELECTED_ROW_TINT = 'pointer-events-none absolute inset-0 -z-10 bg-panel-3 opacity-60';
@@ -845,24 +984,80 @@ export function isLinkTarget(target: unknown): boolean {
   );
 }
 
-/** Message body text at 17px / 22px; the ink comes from the bubble (fg or accent-fg). */
-export const BODY_TEXT = 'whitespace-pre-wrap [overflow-wrap:anywhere] text-[17px] leading-[22px]';
+/** Message body text on the chat type scale; the ink comes from the bubble (fg or accent-fg). */
+export const BODY_TEXT = cn('whitespace-pre-wrap [overflow-wrap:anywhere]', BUBBLE_BODY_TYPE);
 
-/** The in-bubble quote's author and preview at 14px / 18px (the composer draft is unchanged). */
-export const BUBBLE_QUOTE_TEXT = '[&_.text-xs]:text-[14px] [&_.text-xs]:leading-[18px]';
+/**
+ * Where a bubble's meta goes: after the text when text ends the bubble (a text
+ * message, or an album whose caption is last), else as a pill over the media or
+ * card that ends it. Pure.
+ */
+export function metaPlacement(
+  message: Pick<ThreadMessage, 'body' | 'attachments' | 'sharedPostIds' | 'sharedBriefIds'>,
+): MetaPlacement {
+  const hasBody = message.body.trim() !== '';
+  const hasCards = message.sharedPostIds.length > 0 || message.sharedBriefIds.length > 0;
+  if (!hasBody || hasCards) return 'pill';
+  if (message.attachments.length === 0) return 'inline';
+  const { images, others } = splitAlbum(message.attachments);
+  return images.length > 0 && others.length === 0 ? 'inline' : 'pill';
+}
+
+/** The small chevron in a bubble's top-right corner (laptop hover). */
+function ChevronGlyph(): ReactElement {
+  return (
+    <svg
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
+/** The smiley beside a bubble (laptop hover): opens the reactions row. */
+function SmileyGlyph(): ReactElement {
+  return (
+    <svg
+      width={20}
+      height={20}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx={12} cy={12} r={9} />
+      <path d="M8.5 14.5a4.5 4.5 0 0 0 7 0" />
+      <path d="M9 9.5h.01M15 9.5h.01" />
+    </svg>
+  );
+}
+
+/** Hover-only controls fade in on opacity alone, 120ms, and not at all under reduced motion. */
+const HOVER_FADE = 'transition-opacity duration-[120ms] motion-reduce:transition-none';
 
 /**
  * One message row in the thread. Own messages (`message.mine`) right-align on
  * the solid accent, no avatar and no sender name. Peer messages left-align; in a
  * group the run head carries the avatar + sender name above the bubble, while
- * tucked replies reserve an aligned gutter. No time inside the bubble: the time
- * label sits above a run (ThreadBody) and the status line (sending clock, Not
- * sent, or Delivered / Read on the run's last own DM bubble) sits under it. A
- * failed own send offers a 44px Retry beside the bubble; reactions hang as one
- * small badge over the tail edge. Rows in a run sit 2px apart, runs 10px.
- * Pure and hook-free: long-press wiring is owned by the MessageRow wrapper and
- * passed in via `press`, so the unit test can call this directly. All colours
- * are design tokens, so light and dark stay at parity.
+ * tucked replies reserve an aligned gutter. Every bubble carries its meta at the
+ * bottom-right inside it ("edited", the time, and on own messages the tick),
+ * after the text (an invisible spacer keeps the last line clear of it) or as a
+ * pill over media. A failed own send reads "Not sent" under the bubble with a
+ * 44px Retry beside it; reactions hang as one small badge over the tail edge.
+ * On a laptop (fine pointer) a chevron fades in at the bubble's top-right and a
+ * smiley beside it; touch keeps long-press and swipe. Rows in a run sit 2px
+ * apart, runs 10px. Pure and hook-free: long-press wiring is owned by the
+ * MessageRow wrapper and passed in via `press`, so the unit test can call this
+ * directly. All colours are design tokens, so light and dark stay at parity.
  */
 export function MessageBubble(props: {
   message: ThreadMessage;
@@ -872,11 +1067,13 @@ export function MessageBubble(props: {
   showTicks: boolean;
   isGroup: boolean;
   head: boolean;
-  /** Last bubble of its run: tail corner and the Delivered / Read line. */
+  /** Last bubble of its run: the tail corner. */
   tail: boolean;
-  /** Directly under a TimeLabel or DayPill, which carries the gap: no top padding. */
+  /** Directly under a DayPill, which carries the gap: no top padding. */
   afterLabel?: boolean;
   timeZone: string;
+  /** The in-bubble meta; computed from the message when absent. */
+  meta?: BubbleMeta;
   onBadgeClick: () => void;
   onRetry?: (messageId: string) => void;
   onJumpToMessage?: (messageId: string) => void;
@@ -899,8 +1096,10 @@ export function MessageBubble(props: {
     consumeClick: () => boolean;
     /** Keyboard open (Enter / Space / Shift+F10), anchored to the bubble. */
     onKeyOpen: () => void;
-    /** Present on hover pointer devices: the ⋯ control, anchored to itself. */
-    onMore?: (anchor: DOMRect) => void;
+    /** Fine pointer only: the in-bubble chevron, opening the full menu. */
+    onMore?: () => void;
+    /** Fine pointer only: the smiley beside the bubble, opening the reactions row. */
+    onReact?: () => void;
   };
 }): ReactElement {
   const { message, profiles, cache, presignEnabled, showTicks, isGroup, head, tail } = props;
@@ -928,8 +1127,10 @@ export function MessageBubble(props: {
     message.sharedBriefIds.length === 0;
   const totalReactions = message.reactions.reduce((sum, r) => sum + r.count, 0);
   const distinctEmojis = message.reactions.map((r) => r.emoji).join('');
-  const status = bubbleStatus(message, { showTicks, tail });
+  const meta = props.meta ?? bubbleMeta(message, timeZone, { showTicks });
+  const placement = metaPlacement(message);
   const onMore = selection === undefined ? press?.onMore : undefined;
+  const onReact = selection === undefined && message.state === 'sent' ? press?.onReact : undefined;
   const swipe = selection === undefined ? props.swipe : undefined;
   const chip = props.postRefs?.chip;
   const cardRefs = {
@@ -937,21 +1138,26 @@ export function MessageBubble(props: {
     onTalkAbout: props.postRefs?.onTalkAbout,
     onShowPost: props.postRefs?.onShowPost,
   };
+  const column = cn('flex min-w-0 max-w-[76%] flex-col gap-1', BUBBLE_MAX_MD, mine && 'items-end');
+  const senderLine = showMeta ? (
+    <span className={cn('text-fg', GROUP_SENDER_TYPE)}>{name}</span>
+  ) : null;
   const rowClass = cn(
     'group flex items-start gap-2 px-4',
     head ? (props.afterLabel === true ? 'pt-0' : 'pt-2.5') : 'pt-0.5',
     mine ? 'flex-row-reverse' : 'flex-row',
   );
   if (message.deleted === true) {
-    // A tombstone keeps its side, time slot and run grouping; nothing else.
+    // A tombstone keeps its side, meta and run grouping; nothing else.
+    const tombMeta: BubbleMeta = { time: meta.time, edited: false, status: null };
     return (
       <li data-msg-id={message.id} data-state={message.state} data-deleted="" className={rowClass}>
         {showMeta ? (
           <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" />
         ) : null}
         {gutter ? <span className="w-[26px] shrink-0" aria-hidden="true" /> : null}
-        <div className={cn('flex min-w-0 max-w-[76%] flex-col gap-1', mine && 'items-end')}>
-          {showMeta ? <span className="text-sm font-medium text-fg">{name}</span> : null}
+        <div className={column}>
+          {senderLine}
           <div
             data-bubble=""
             data-tombstone=""
@@ -960,7 +1166,11 @@ export function MessageBubble(props: {
             className={tombstoneClass({ mine, tail })}
           >
             <BanGlyph size={16} />
-            <span>{DELETED_MESSAGE_LABEL}</span>
+            <span>
+              {TOMBSTONE_LABEL}
+              <MetaSpacer meta={tombMeta} />
+            </span>
+            <BubbleMetaView meta={tombMeta} mine={false} placement="inline" />
           </div>
         </div>
       </li>
@@ -968,6 +1178,13 @@ export function MessageBubble(props: {
   }
   const checked = selection?.checked === true;
   const parentDeleted = message.parentDeleted === true;
+  const spacer = placement === 'inline' ? <MetaSpacer meta={meta} /> : null;
+  const body = (
+    <p className={BODY_TEXT}>
+      {renderMessageBody(message.body, mine)}
+      {spacer}
+    </p>
+  );
   return (
     <li
       data-msg-id={message.id}
@@ -985,8 +1202,8 @@ export function MessageBubble(props: {
       {selection?.role === 'locked' ? <SelectLock /> : null}
       {showMeta ? <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" /> : null}
       {gutter ? <span className="w-[26px] shrink-0" aria-hidden="true" /> : null}
-      <div className={cn('relative flex min-w-0 max-w-[76%] flex-col gap-1', mine && 'items-end')}>
-        {showMeta ? <span className="text-sm font-medium text-fg">{name}</span> : null}
+      <div className={cn('relative', column)}>
+        {senderLine}
         {swipe !== undefined ? <SwipeReplyIcon iconRef={swipe.iconRef} /> : null}
         <div
           ref={bubbleRef}
@@ -1054,12 +1271,13 @@ export function MessageBubble(props: {
                 }
                 preview={parentDeleted ? DELETED_MESSAGE_LABEL : reply.preview}
                 deleted={parentDeleted}
+                inBubble
                 onJump={() => props.onJumpToMessage?.(reply.id)}
-                className={cn(BUBBLE_QUOTE_TEXT, album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1')}
+                className={album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1'}
               />
             ) : null}
             {textOnly ? (
-              <p className={BODY_TEXT}>{renderMessageBody(message.body, mine)}</p>
+              body
             ) : voiceOnly ? (
               <MessageAttachments
                 attachments={message.attachments}
@@ -1073,11 +1291,7 @@ export function MessageBubble(props: {
                   cache={cache}
                   presignEnabled={presignEnabled}
                   album
-                  caption={
-                    hasBody ? (
-                      <p className={BODY_TEXT}>{renderMessageBody(message.body, mine)}</p>
-                    ) : undefined
-                  }
+                  caption={hasBody ? body : undefined}
                   onImageClick={(_attachment, index) => props.onOpenImage?.(index)}
                 />
                 {hasCards ? (
@@ -1089,9 +1303,7 @@ export function MessageBubble(props: {
               </>
             ) : (
               <>
-                {hasBody ? (
-                  <p className={BODY_TEXT}>{renderMessageBody(message.body, mine)}</p>
-                ) : null}
+                {hasBody ? body : null}
                 <MessageAttachments
                   attachments={message.attachments}
                   cache={cache}
@@ -1102,45 +1314,72 @@ export function MessageBubble(props: {
               </>
             )}
           </div>
+          <BubbleMetaView meta={meta} mine={mine} placement={placement} />
+          {onMore !== undefined ? (
+            <button
+              type="button"
+              data-more=""
+              aria-label="Message options"
+              aria-haspopup="menu"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onMore();
+              }}
+              className={cn(
+                'pointer-events-none absolute right-0 top-0 z-10 flex h-11 w-11 items-start justify-end rounded-tr-[inherit] opacity-0 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover/bubble:pointer-events-auto group-hover/bubble:opacity-100',
+                HOVER_FADE,
+              )}
+            >
+              <span
+                aria-hidden="true"
+                data-more-glyph=""
+                className={cn(
+                  'flex h-[18px] w-10 items-start justify-end rounded-tr-[inherit] bg-gradient-to-l from-50% pr-1',
+                  mine
+                    ? 'from-bubble-own text-[color:var(--bubble-meta-own)]'
+                    : 'from-panel-2 text-[color:var(--bubble-meta)]',
+                )}
+              >
+                <ChevronGlyph />
+              </span>
+            </button>
+          ) : null}
           {hasReactions ? (
             <button
               type="button"
               onClick={onBadgeClick}
-              className={cn(
-                'absolute -bottom-2.5 inline-flex items-center gap-0.5 rounded-full border border-border bg-panel px-1.5 py-0.5 text-xs',
-                mine ? 'right-2' : 'left-2',
-              )}
+              // Bottom-left on both sides: the bottom-right is the meta's.
+              className="absolute -bottom-2.5 left-2 inline-flex items-center gap-0.5 rounded-full border border-border bg-panel px-1.5 py-0.5"
             >
-              <span aria-hidden="true">{distinctEmojis}</span>
+              <span aria-hidden="true" className={REACTION_EMOJI_TYPE}>
+                {distinctEmojis}
+              </span>
               {totalReactions > 1 ? (
-                <span className={cn('text-[11px]', mine ? 'text-fg-2' : 'text-fg-3')}>
+                <span className={cn(BUBBLE_META_TYPE, mine ? 'text-fg-2' : 'text-fg-3')}>
                   {totalReactions}
                 </span>
               ) : null}
             </button>
           ) : null}
         </div>
-        {isEdited(message) ? (
-          <span className="flex items-center gap-1.5">
-            <span data-edited="" className="text-[11px] text-fg-3">
-              {EDITED_LABEL}
-            </span>
-            {status !== null ? <StatusLine status={status} /> : null}
-          </span>
-        ) : status !== null ? (
-          <StatusLine status={status} />
+        {meta.status === 'failed' || meta.status === 'files-missing' ? (
+          <FailedLine status={meta.status} />
         ) : null}
       </div>
-      {onMore !== undefined ? (
+      {onReact !== undefined ? (
         <button
           type="button"
-          data-more=""
-          aria-label="Message actions"
+          data-react=""
+          aria-label="React to message"
           aria-haspopup="menu"
-          onClick={(e) => onMore(e.currentTarget.getBoundingClientRect())}
-          className="flex h-11 w-11 shrink-0 items-center justify-center self-center rounded-full text-fg-3 opacity-0 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100 group-focus-within:opacity-100"
+          onClick={onReact}
+          className={cn(
+            'flex h-11 w-11 shrink-0 items-center justify-center self-center rounded-full text-fg-3 opacity-0 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100',
+            HOVER_FADE,
+          )}
         >
-          <IconEllipsis size={20} />
+          <SmileyGlyph />
         </button>
       ) : null}
       {failed && mine && message.filesMissing === true ? (
@@ -1183,24 +1422,24 @@ export function ForwardedLabel(props: { mine?: boolean } = {}): ReactElement {
 /** One rendered row of the thread list, grouped once before the first paint. */
 export type ThreadRow =
   | { kind: 'day'; key: string; label: string }
-  | { kind: 'time'; key: string; label: string }
-  | { kind: 'message'; message: ThreadMessage; head: boolean; tail: boolean };
+  | { kind: 'message'; message: ThreadMessage; head: boolean; tail: boolean; meta: BubbleMeta };
 
 /**
  * The thread's render list: day pills, then runs. A run is consecutive messages
  * from one sender with no day pill and no 10-minute gap between neighbours; its
- * first message is the head, its last the tail. A centred time label (workspace
- * clock) goes above a run that starts a new day or follows a 10-minute gap.
- * Pure, so the list is grouped in one pass and never re-groups after painting.
- * With `times: false` (one post's conversation) the time labels drop.
+ * first message is the head, its last the tail. There are no time rows: every
+ * message row carries its own meta (time on the workspace clock, "edited", and
+ * the tick) for inside its bubble. Pure, so the list is grouped in one pass and
+ * never re-groups after painting.
  */
 export function threadRows(
   messages: readonly ThreadMessage[],
   nowMs: number,
   timeZone: string,
-  opts: { times?: boolean } = {},
+  opts: { showTicks?: boolean } = {},
 ): ThreadRow[] {
   const items = withDaySeparators(messages, nowMs, timeZone);
+  const showTicks = opts.showTicks === true;
   const rows: ThreadRow[] = [];
   items.forEach((item, k) => {
     if (item.kind === 'day') {
@@ -1214,22 +1453,15 @@ export function threadRows(
     const beforeDay = items[k + 1]?.kind === 'day';
     const head = afterDay || breaksRun(prev, message);
     const tail = next === undefined || beforeDay || breaksRun(message, next);
-    if (opts.times !== false && (afterDay || (prev !== undefined && isTimeGap(prev, message)))) {
-      const label = formatMessageTime(messageTimeSource(message), timeZone);
-      if (label !== '') rows.push({ kind: 'time', key: `time-${message.id}`, label });
-    }
-    rows.push({ kind: 'message', message, head, tail });
+    rows.push({
+      kind: 'message',
+      message,
+      head,
+      tail,
+      meta: bubbleMeta(message, timeZone, { showTicks }),
+    });
   });
   return rows;
-}
-
-/** The centred run time label: mono, tabular, tertiary. No motion. */
-export function TimeLabel({ label }: { label: string }): ReactElement {
-  return (
-    <li className="flex justify-center pb-1.5 pt-2.5">
-      <span className="font-mono text-[11px] tabular-nums text-fg-3">{label}</span>
-    </li>
-  );
 }
 
 /**
@@ -1241,8 +1473,8 @@ export const THREAD_LIST_CLASS = 'flex flex-1 flex-col overflow-y-auto py-2';
 
 /**
  * The list's children in order: the bottom-pin spacer, the older-page row, then
- * the grouped rows. A message row learns whether it sits directly under a time
- * label or day pill (afterLabel) so the label carries the gap. With `loadOlder`
+ * the grouped rows. A message row learns whether it sits directly under a day
+ * pill (afterLabel) so the pill carries the gap. With `loadOlder`
  * (the per-post filter) a 44px "Load older" row sits at the top instead of the
  * scroll-to-top request. Pure.
  */
@@ -1283,7 +1515,6 @@ export function threadListItems(
   }
   rows.forEach((row, i) => {
     if (row.kind === 'day') items.push(<DayPill key={row.key} label={row.label} />);
-    else if (row.kind === 'time') items.push(<TimeLabel key={row.key} label={row.label} />);
     else items.push(renderMessage(row, i > 0 && rows[i - 1]?.kind !== 'message'));
   });
   if (rows.length === 0 && emptyNote !== undefined) {
@@ -1317,14 +1548,23 @@ function MessageRow(props: {
   tail: boolean;
   afterLabel: boolean;
   timeZone: string;
-  /** Open the menu: its anchor rect and the pressed bubble (drawn above the dim). */
-  onOpen: (message: ThreadMessage, rect: DOMRect | null, held: HTMLElement | null) => void;
+  meta: BubbleMeta;
+  /**
+   * Open the menu: its anchor rect and the pressed bubble (drawn above the dim);
+   * `reactionsOnly` (the laptop smiley) shows just the reactions row.
+   */
+  onOpen: (
+    message: ThreadMessage,
+    rect: DOMRect | null,
+    held: HTMLElement | null,
+    reactionsOnly?: boolean,
+  ) => void;
   onRetry?: (messageId: string) => void;
   onJumpToMessage?: (messageId: string) => void;
   mark: ChatMark | undefined;
   onChangePriority?: (messageId: string) => void;
   selection?: RowSelection;
-  /** Hover pointer device: render the ⋯ control. */
+  /** Fine pointer device: the in-bubble chevron and the smiley. */
   hoverMenu: boolean;
   /** prefers-reduced-motion: the swipe resets without a spring. */
   reducedMotion: boolean;
@@ -1373,11 +1613,11 @@ function MessageRow(props: {
       swipe.dispose();
     };
   }, [swipe]);
-  function open(anchor: DOMRect | null): void {
+  function open(anchor: DOMRect | null, reactionsOnly = false): void {
     if (selecting) return;
     // The menu's backdrop takes the trailing pointerup, so no click to swallow.
     clearClickSuppression();
-    props.onOpen(props.message, anchor, bubbleRef.current);
+    props.onOpen(props.message, anchor, bubbleRef.current, reactionsOnly);
   }
   const onContextMenu = (e: MouseEvent): void => {
     e.preventDefault();
@@ -1418,6 +1658,7 @@ function MessageRow(props: {
       tail={props.tail}
       afterLabel={props.afterLabel}
       timeZone={props.timeZone}
+      meta={props.meta}
       bubbleRef={bubbleRef}
       swipe={{ iconRef }}
       press={{
@@ -1430,7 +1671,10 @@ function MessageRow(props: {
           return held || swiped;
         },
         onKeyOpen: () => open(bubbleRect()),
-        ...(props.hoverMenu ? { onMore: (anchor: DOMRect) => open(anchor) } : {}),
+        // Chevron, right-click and long-press all open the same one-box menu.
+        ...(props.hoverMenu
+          ? { onMore: () => open(bubbleRect()), onReact: () => open(bubbleRect(), true) }
+          : {}),
       }}
       {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
       {...(props.onJumpToMessage !== undefined ? { onJumpToMessage: props.onJumpToMessage } : {})}
@@ -1471,7 +1715,6 @@ function paintSwipe(
 function ThreadBody(
   props: Pick<
     MessageThreadProps,
-    | 'title'
     | 'messages'
     | 'loading'
     | 'loadingOlder'
@@ -1483,6 +1726,8 @@ function ThreadBody(
     | 'onRetry'
     | 'timeZone'
   > & {
+    /** The open channel (its id; the title only where no id is known). */
+    channelKey: string;
     cache: PresignCache;
     presignEnabled: boolean;
     showTicks: boolean;
@@ -1509,7 +1754,7 @@ function ThreadBody(
     chipFor?: (message: ThreadMessage) => BubbleChip | undefined;
     onTalkAbout?: (postId: string, messageId: string) => void;
     onShowPost?: (postId: string) => void;
-    /** One post's conversation: no time labels, a "Load older" row at the top. */
+    /** One post's conversation: a "Load older" row at the top. */
     filtering?: boolean;
     /** The filtered post's KEY, for the filtered thread's empty line. */
     filterRef?: string | null;
@@ -1523,6 +1768,8 @@ function ThreadBody(
     rect: DOMRect | null;
     held: HTMLElement | null;
     openedAt: number;
+    /** The laptop smiley: just the reactions row. */
+    reactionsOnly: boolean;
   } | null>(null);
   // The thread's one image viewer: which message's album, at which image.
   const [viewer, setViewer] = useState<{ messageId: string; index: number } | null>(null);
@@ -1588,16 +1835,16 @@ function ThreadBody(
     });
   }, [jumpRequest, reveal]);
   // Reset on conversation switch so a fresh thread always lands at the latest
-  // message even if the previous one was scrolled up. `title` is the only
-  // per-conversation identifier reaching this component. Declared BEFORE the
-  // messages effect so the reset commits first on a switch.
+  // message even if the previous one was scrolled up. Keyed on the channel
+  // (the thread also remounts per channel). Declared BEFORE the messages effect
+  // so the reset commits first on a switch.
   useLayoutEffect(() => {
     didInitialScrollRef.current = false;
     atBottomRef.current = true;
     anchorHeightRef.current = null;
     newestIdRef.current = null;
     setViewer(null);
-  }, [props.title]);
+  }, [props.channelKey]);
   // Keep the latest message in view: instant pre-paint snap on first load (no
   // top-flash), then a smooth follow for own sends or when already at bottom.
   // After an older page is prepended, restore the reader's position instead.
@@ -1690,7 +1937,7 @@ function ThreadBody(
         className={THREAD_LIST_CLASS}
       >
         {threadListItems(
-          threadRows(props.messages, nowMs, props.timeZone, { times: props.filtering !== true }),
+          threadRows(props.messages, nowMs, props.timeZone, { showTicks: props.showTicks }),
           props.loadingOlder === true,
           (row, afterLabel) => (
             <MessageRow
@@ -1705,9 +1952,16 @@ function ThreadBody(
               tail={row.tail}
               afterLabel={afterLabel}
               timeZone={props.timeZone}
-              onOpen={(m, rect, held) => {
+              meta={row.meta}
+              onOpen={(m, rect, held, reactionsOnly) => {
                 if (m.deleted === true) return;
-                setMenu({ message: m, rect, held, openedAt: Date.now() });
+                setMenu({
+                  message: m,
+                  rect,
+                  held,
+                  openedAt: Date.now(),
+                  reactionsOnly: reactionsOnly === true,
+                });
               }}
               onOpenImage={(m, index) => setViewer({ messageId: m.id, index })}
               hoverMenu={hoverMenu}
@@ -1750,6 +2004,7 @@ function ThreadBody(
         held={menu?.held ?? null}
         mine={menu?.message.mine ?? false}
         canReact={menu !== null && menu.message.state === 'sent'}
+        reactionsOnly={menu?.reactionsOnly === true}
         markedAs={menu !== null ? (props.marks.get(menu.message.id)?.type ?? null) : null}
         canEdit={props.onEditMessage !== undefined && menuOwn.canEdit}
         onEdit={() => {
@@ -1819,7 +2074,12 @@ function ThreadBody(
 export function DayPill({ label }: { label: string }): ReactElement {
   return (
     <li role="separator" aria-label={label} className="flex justify-center">
-      <span className="self-center mb-1.5 mt-2 rounded-full border border-border bg-panel-2 px-2.5 py-0.5 text-[11px] font-medium text-fg-3">
+      <span
+        className={cn(
+          'self-center mb-1.5 mt-2 rounded-full border border-border bg-panel-2 px-2.5 py-0.5 text-fg-3',
+          DATE_PILL_TYPE,
+        )}
+      >
         {label}
       </span>
     </li>
@@ -1872,9 +2132,21 @@ export function rowSelection(
 export function MessageThread(props: MessageThreadProps): ReactElement {
   const { canAttach, presignEnabled, presignCache, uploadFile, transcribe, canTranscribe } =
     useChatAttachments();
-  const [replyDraft, setReplyDraft] = useState<{ authorName: string; quote: ReplyQuote } | null>(
-    null,
+  // Everything per chat is keyed on the channel id (the parent also remounts
+  // the thread per channel), never the title.
+  const channelId = props.channelId;
+  const channelKey = channelId ?? props.title;
+  // The reply chip is part of this chat's draft: it starts from the draft map
+  // on the first render (a switch back paints it on its first frame).
+  const [replyDraft, setReplyDraftState] = useState<DraftReply | null>(() =>
+    channelId !== undefined ? getDraft(channelId).reply : null,
   );
+  const setReplyDraft = (next: DraftReply | null): void => {
+    setReplyDraftState(next);
+    if (channelId !== undefined) setDraft(channelId, { reply: next });
+  };
+  // Laptop (fine pointer): the composer takes the cursor when the chat opens.
+  const finePointer = useMediaQuery(HOVER_POINTER_QUERY);
   // The post the conversation is about: sends with no reply draft reply to its
   // card message. Independent of the reply draft; only its X clears it.
   const [aboutDraft, setAboutDraft] = useState<{ postId: string; cardMessageId: string } | null>(
@@ -1894,7 +2166,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const marks = props.marks ?? NO_MARKS;
   // Open loops: posts in review (two reads per thread open) and the viewer's side.
   const viewerSide = useViewerSide(workspaceId);
-  const openPosts = useOpenPosts(workspaceId, props.channelId ?? props.title);
+  const openPosts = useOpenPosts(workspaceId, channelKey);
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [marksOpen, setMarksOpen] = useState(false);
@@ -1925,7 +2197,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setEditing(null);
     setDeleteFor(null);
     cardWait.clear();
-  }, [props.title, cardWait]);
+  }, [channelKey, cardWait]);
 
   // The message being edited was deleted or left the thread: stop editing it.
   const editingId = editing?.messageId ?? null;
@@ -2042,12 +2314,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // (own sends, live rows, state changes on shown rows) is never held. The
   // filter reads the full list: its rows are the post's own, whose chip post
   // is already known.
-  const title = props.title;
   const admitted = useMemo(() => {
     const nowMs = Date.now();
     const next = admitRows(
       gateRef.current,
-      title,
+      channelKey,
       props.messages,
       (row, since) => rowReady(row, since, { parentIndex, chipSettled, nowMs }),
       nowMs,
@@ -2056,7 +2327,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     return next;
     // hydrationTick re-runs the cut once a hydration wait has run out.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [title, props.messages, parentIndex, chipSettled, hydrationTick]);
+  }, [channelKey, props.messages, parentIndex, chipSettled, hydrationTick]);
   const onScreen = admitted.rows;
   const gatedIndex = useMemo(() => parentIndexOf(onScreen), [onScreen]);
   const shownMessages = useMemo(
@@ -2127,8 +2398,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
    * Show one post's conversation; what is typed next stays about it. A chip
    * whose card is on an unloaded page pages it in first (or toasts).
    */
-  const titleRef = useRef(title);
-  titleRef.current = title;
+  const channelRef = useRef(channelKey);
+  channelRef.current = channelKey;
   const showPost = (postId: string, cardMessageId?: string): void => {
     void openPostFilter({
       postId,
@@ -2136,7 +2407,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       rows: props.messages,
       ensureLoaded: props.onEnsureLoaded,
       apply: (id, card) => {
-        if (titleRef.current !== title) return;
+        if (channelRef.current !== channelKey) return;
         setFilterPostId(id);
         if (card !== null) setAboutDraft({ postId: id, cardMessageId: card });
       },
@@ -2219,7 +2490,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         />
       ) : null}
       <ThreadBody
-        title={props.title}
+        channelKey={channelKey}
         marks={marks}
         jumpRequest={jumpRequest}
         {...(props.onEnsureLoaded !== undefined ? { onEnsureLoaded: props.onEnsureLoaded } : {})}
@@ -2300,6 +2571,9 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         />
       ) : (
         <Composer
+          key={channelKey}
+          channelId={channelId}
+          focusOnMount={finePointer}
           onSend={composerSend}
           disabled={!props.canSend}
           onTyping={props.onTyping}

@@ -33,6 +33,7 @@ import { readProfiles } from '@/lib/chat-reads';
 import { formatShortDate, workspaceTimeZone } from '@/lib/chat/time-format';
 import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { cn } from '@/lib/cn';
+import { POST_CARD_META_TYPE, POST_CARD_TITLE_TYPE } from '@/components/chat/chat-type';
 import { formatEntityRef } from '@/lib/entityRef';
 import { env } from '@/lib/env';
 import { fetchWithTrace } from '@/lib/fetch';
@@ -412,7 +413,7 @@ export function PostCardItem(
         <div className="flex flex-col gap-1.5 px-3 py-2.5">
           <span
             data-card-title=""
-            className="line-clamp-2 text-[15px] font-medium leading-[20px] text-fg"
+            className={cn('line-clamp-2 text-fg', POST_CARD_TITLE_TYPE)}
             title={post.title}
           >
             {post.thumbnailAssetVersionId === null && ref !== null ? (
@@ -425,7 +426,7 @@ export function PostCardItem(
             ) : null}
             {post.title}
           </span>
-          <span className="flex items-center gap-1.5 text-xs text-fg-3">
+          <span className={cn('flex items-center gap-1.5 text-fg-3', POST_CARD_META_TYPE)}>
             <Tag
               label={stageLabel(post.stage)}
               {...(isTagDot(post.stage) ? { dot: post.stage } : {})}

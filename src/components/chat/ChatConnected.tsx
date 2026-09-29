@@ -5,8 +5,13 @@ import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { useMediaQuery } from '@/lib/use-media-query';
 import { useWorkspace } from '@/lib/workspace-context';
-import { readProfiles, type ChannelSummary, type ChatProfile } from '@/lib/chat-reads';
-import { targetFromSummary, type ChannelTarget } from '@/lib/chat/thread';
+import {
+  listGroupMemberIds,
+  readProfiles,
+  type ChannelSummary,
+  type ChatProfile,
+} from '@/lib/chat-reads';
+import { targetFromSummary, type ChannelTarget, type ThreadMessage } from '@/lib/chat/thread';
 import { generateTraceId } from '@/lib/trace';
 import { clearChannelRecord } from '@/lib/chat/record';
 import { runClearChannels, type ClearRunResult } from '@/lib/chat/clear-flow';
@@ -14,6 +19,7 @@ import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { useChatThread } from '@/lib/chat/use-chat-thread';
 import { useChatMarks } from '@/lib/chat/use-chat-marks';
 import { useChatTyping } from '@/lib/chat/use-chat-typing';
+import { visibleTypingIds } from '@/lib/chat/typing';
 import { useChatPresence } from '@/lib/chat/use-chat-presence';
 import { useChatStore } from '@/components/chat/ChatStoreProvider';
 import type { ChatConnection, ChatStatus } from '@/lib/chat/types';
@@ -32,6 +38,8 @@ interface ChatConnectedProps {
 }
 
 const DESKTOP_QUERY = '(min-width: 768px)';
+
+const NO_MESSAGES: ThreadMessage[] = [];
 
 /** Resolve a channel's Agora target defensively; a bad row yields no target. */
 function safeTarget(channel: ChannelSummary | null): ChannelTarget | null {
@@ -252,7 +260,46 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     onMessagesDeleted,
     outbox,
   });
-  const typing = useChatTyping({ client, target, currentUserId });
+  // The thread hook resets its messages in an effect after a switch, so the
+  // first render for a new channel still holds the previous chat's rows. Until
+  // that reset has committed, the thread gets the loading skeleton instead:
+  // never a frame of the old chat. Declared after useChatThread so both land
+  // in the same re-render.
+  const [threadChannelId, setThreadChannelId] = useState(selectedChannelId);
+  useEffect(() => setThreadChannelId(selectedChannelId), [selectedChannelId]);
+  const threadCurrent = threadChannelId === selectedChannelId;
+
+  const typing = useChatTyping({ client, target, channelId: selectedChannelId, currentUserId });
+
+  // A group's member ids, so its typing row only names members. Tagged with the
+  // group they belong to; another group's set never applies.
+  const selectedGroupId = selected?.channelType === 'group' ? (selected.groupId ?? null) : null;
+  const [groupMembers, setGroupMembers] = useState<{
+    groupId: string;
+    ids: ReadonlySet<string>;
+  } | null>(null);
+  useEffect(() => {
+    if (selectedGroupId === null) return;
+    let cancelled = false;
+    void listGroupMemberIds(supabase, { groupId: selectedGroupId }).then((result) => {
+      if (cancelled) return;
+      if (!result.ok) {
+        logger.warn('chat: group member read failed', { error: result.error.message });
+        return;
+      }
+      setGroupMembers({ groupId: selectedGroupId, ids: new Set(result.data) });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedGroupId]);
+  const typingUserIds = visibleTypingIds({
+    ids: typing.typingUserIds,
+    isGroup: selected?.channelType === 'group',
+    peerUserId: selected?.peerUserId ?? null,
+    memberIds:
+      groupMembers !== null && groupMembers.groupId === selectedGroupId ? groupMembers.ids : null,
+  });
   const presence = useChatPresence({ client, peerUserId: selected?.peerUserId ?? null });
 
   // Resolve sender display info in one batched read per set of new ids (no N+1).
@@ -312,6 +359,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
         <div className="h-full min-w-0 flex-1">
           {selected !== null ? (
             <MessageThread
+              key={selected.channelId}
               title={selected.title}
               channelId={selected.channelId}
               avatarUrl={selected.avatarUrl}
@@ -319,8 +367,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               {...(!isGroup ? { role: selected.role ?? null } : {})}
               isGroup={isGroup}
               profiles={profiles}
-              messages={thread.messages}
-              loading={thread.loading}
+              messages={threadCurrent ? thread.messages : NO_MESSAGES}
+              loading={thread.loading || !threadCurrent}
               loadingOlder={thread.loadingOlder}
               hasMore={thread.hasMore}
               onLoadOlder={thread.loadOlder}
@@ -329,7 +377,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               canSend
               onSend={thread.send}
               onRetry={thread.retry}
-              typingUserIds={typing.typingUserIds}
+              typingUserIds={typingUserIds}
               onTyping={typing.notifyTyping}
               onToggleReaction={thread.toggleReaction}
               marks={marks.marks}

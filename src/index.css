@@ -26,6 +26,15 @@
   /* Own chat bubble fill. Light matches the accent; dark goes deeper than the
      accent so accent-fg ink clears 4.5:1 (#5560d0 on #ffffff is 5.3:1). */
   --bubble-own: #5e6ad2;
+  /* Chat bubble meta (time, edited, ticks). Peer meta on panel-2 is 5.2:1;
+     own meta on bubble-own is white, 4.7:1 (the read tick, a glyph, 3.8:1).
+     The media pill is a translucent black under white ink: 4.7:1 even over a
+     white image. */
+  --bubble-meta: #62666d;
+  --bubble-meta-own: #ffffff;
+  --tick-read: #a5f3fc;
+  --media-meta-bg: rgba(0, 0, 0, 0.55);
+  --media-meta-fg: #ffffff;
   --good: #3e7d54;
   --warn: #b8772b;
   --bad: #c2392b;
@@ -74,6 +83,12 @@
   --accent-soft: rgba(111, 121, 227, 0.16);
   --accent-line: rgba(111, 121, 227, 0.34);
   --bubble-own: #5560d0;
+  /* Peer meta on panel-2 6.5:1; own meta on bubble-own 5.3:1 (read tick 4.2:1). */
+  --bubble-meta: #9aa0a8;
+  --bubble-meta-own: #ffffff;
+  --tick-read: #a5f3fc;
+  --media-meta-bg: rgba(0, 0, 0, 0.55);
+  --media-meta-fg: #ffffff;
   --good: #5fb07d;
   --warn: #d59a4a;
   --bad: #e0685a;
@@ -119,7 +134,11 @@
       'Inter',
       -apple-system,
       BlinkMacSystemFont,
-      sans-serif;
+      sans-serif,
+      'Apple Color Emoji',
+      'Segoe UI Emoji',
+      'Segoe UI Symbol',
+      'Noto Color Emoji';
     -webkit-font-smoothing: antialiased;
     letter-spacing: -0.006em;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
