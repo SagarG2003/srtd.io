@@ -22,6 +22,7 @@ import { createOutboxSender, type SendOutcome } from '@/lib/chat/send-flow';
 import { canSendAttachmentMessage } from '@/lib/chat/attachments';
 import { stripHashToken } from '@/lib/chat/post-refs';
 import { IconButton } from '@/components/ui/IconButton';
+import { postRefKey } from '@/components/chat/PostRefChip';
 
 // The repo's vitest runs in the node environment with no @testing-library/react,
 // so caret/DOM behaviour is not exercised here. Following the codebase pattern
@@ -335,9 +336,16 @@ describe('About bar', () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
-  it('the placeholder follows About', () => {
+  it('the placeholder follows About, and mentions the hash otherwise', () => {
+    // default
+    expect(composerPlaceholder(null)).toBe(`Message, or ${HASH} for a post`);
+    // reply draft, no About
+    expect(composerPlaceholder(null, true)).toBe(`Reply, or ${HASH} for a post`);
+    // About visible (with or without a reply draft)
     expect(composerPlaceholder('GBL-14')).toBe('Message about GBL-14');
-    expect(composerPlaceholder(null)).toBe('Write a message');
+    expect(composerPlaceholder('GBL-14', true)).toBe('Message about GBL-14');
+    // workspaceKey null: postRefKey yields no ref, so the default applies
+    expect(composerPlaceholder(postRefKey(null, 14))).toBe(`Message, or ${HASH} for a post`);
   });
 });
 

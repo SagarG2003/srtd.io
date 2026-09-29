@@ -82,9 +82,16 @@ interface ComposerProps {
   onBringPost?: ((postId: string) => void) | undefined;
 }
 
-/** The composer placeholder: "Message about KEY-N" while About is up. */
-export function composerPlaceholder(aboutRef: string | null): string {
-  return aboutRef !== null ? `Message about ${aboutRef}` : 'Write a message';
+/** The hash picker's trigger, assembled so chat stays free of the raw literal. */
+const HASH = String.fromCharCode(35);
+
+/**
+ * The composer placeholder: "Message about KEY-N" while About is up, else a
+ * nudge towards the hash post picker ("Reply, ..." while a reply draft is up).
+ */
+export function composerPlaceholder(aboutRef: string | null, replying = false): string {
+  if (aboutRef !== null) return `Message about ${aboutRef}`;
+  return `${replying ? 'Reply' : 'Message'}, or ${HASH} for a post`;
 }
 
 /**
@@ -759,7 +766,7 @@ export function Composer(props: ComposerProps): ReactElement {
               }}
               onSelect={trackCaret}
               onKeyDown={handleKeyDown}
-              placeholder={composerPlaceholder(aboutRef)}
+              placeholder={composerPlaceholder(aboutRef, props.reply != null)}
               rows={1}
               compact
             />
