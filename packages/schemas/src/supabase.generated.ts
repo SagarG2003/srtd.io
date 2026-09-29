@@ -7832,6 +7832,10 @@ export type Database = {
         }
         Returns: undefined
       }
+      chat_mentions_resolve: {
+        Args: { p_actor: string; p_channel_id: string; p_mentions: Json }
+        Returns: string[]
+      }
       chat_message_delete: {
         Args: {
           p_channel_id: string
@@ -7844,6 +7848,7 @@ export type Database = {
         Args: {
           p_body: string
           p_channel_id: string
+          p_mentions?: Json
           p_message_id: string
           p_trace_id: string
         }
