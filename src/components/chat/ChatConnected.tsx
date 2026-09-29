@@ -228,7 +228,8 @@ export function pendingJumpAfter(
 /**
  * A deep link whose chat is not in my list re-reads the list once before
  * saying it is unavailable (a chat made moments ago may not be in the snapshot
- * yet). A failed re-read counts as absent. Pure over the injected reload.
+ * yet). A failed re-read, or one still unanswered after the 5s read timeout,
+ * counts as absent. Pure over the injected reload.
  */
 export async function deepLinkAfterRefresh(
   params: URLSearchParams,
@@ -237,8 +238,37 @@ export async function deepLinkAfterRefresh(
 ): Promise<ReturnType<typeof deepLinkStep>> {
   const step = deepLinkStep(params, roster);
   if (step.open !== null) return step;
-  const next = await reload().catch(() => null);
-  return deepLinkStep(params, next ?? []);
+  const next = await withReadTimeout(
+    async (): Promise<Result<readonly ChannelSummary[]>> => {
+      const list = await reload();
+      return list !== null
+        ? { ok: true, data: list }
+        : { ok: false, error: { code: 'unknown', message: 'roster reload failed' } };
+    },
+  );
+  return deepLinkStep(params, next.ok ? next.data : []);
+}
+
+/** Where a deep-link refresh started, and where the page is when it answers. */
+export interface DeepLinkRefreshContext {
+  mounted: boolean;
+  workspaceId: string | null;
+  channel: string | null;
+}
+
+/**
+ * What a deep-link refresh's answer does: it applies only while the page is
+ * still mounted on the same workspace with the same ?channel=; otherwise it is
+ * dropped silently (no open, no toast). Pure.
+ */
+export function deepLinkRefreshOutcome(
+  step: ReturnType<typeof deepLinkStep>,
+  started: DeepLinkRefreshContext,
+  now: DeepLinkRefreshContext,
+): 'open' | 'toast' | 'discard' {
+  if (!now.mounted || now.workspaceId !== started.workspaceId || now.channel !== started.channel)
+    return 'discard';
+  return step.open !== null ? 'open' : 'toast';
 }
 
 /** The jump the open chat takes: the pending one only while it is for this chat. Pure. */
@@ -327,6 +357,19 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  // The latest workspace and ?channel=, and whether the page is still mounted,
+  // for answers that land after the render that asked.
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
+  const channelParamRef = useRef(searchParams.get('channel'));
+  channelParamRef.current = searchParams.get('channel');
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const writeChannelParam = useCallback(
     (channelId: string | null) => {
       setSearchParams(
@@ -390,9 +433,17 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       return;
     }
     // Not in the snapshot: re-read the list once; toast only if still absent.
+    // The answer applies only on the same mounted page, workspace and link.
+    const started: DeepLinkRefreshContext = { mounted: true, workspaceId, channel };
     void deepLinkAfterRefresh(linkParams, roster, reloadRoster).then((again) => {
       if (selectedFromParam.current !== channel) return;
-      if (again.open !== null) {
+      const outcome = deepLinkRefreshOutcome(again, started, {
+        mounted: mountedRef.current,
+        workspaceId: workspaceIdRef.current,
+        channel: channelParamRef.current,
+      });
+      if (outcome === 'discard') return;
+      if (outcome === 'open' && again.open !== null) {
         setPendingJump(again.jump);
         setSelected(again.open);
         return;
@@ -400,7 +451,15 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       writeChannelParam(null);
       toastRef.current.show({ title: CHAT_UNAVAILABLE_TOAST });
     });
-  }, [loadStatus, roster, searchParams, setSearchParams, writeChannelParam, reloadRoster]);
+  }, [
+    loadStatus,
+    roster,
+    searchParams,
+    setSearchParams,
+    writeChannelParam,
+    reloadRoster,
+    workspaceId,
+  ]);
 
   // A ?channel= that disappears by any route other than closeChannel (browser
   // back, external navigation) closes the thread below md so the chrome returns.

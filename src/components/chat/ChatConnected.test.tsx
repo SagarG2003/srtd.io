@@ -14,6 +14,7 @@ import {
   applyProfileRead,
   CHAT_UNAVAILABLE_TOAST,
   deepLinkAfterRefresh,
+  deepLinkRefreshOutcome,
   deepLinkStep,
   idsToRead,
   initialJumpFor,
@@ -492,5 +493,49 @@ describe('H7 a deep link re-reads the chat list before saying unavailable', () =
     const noReload = vi.fn(async () => []);
     await deepLinkAfterRefresh(new URLSearchParams('channel=c1'), [channel('c1')], noReload);
     expect(noReload).not.toHaveBeenCalled();
+  });
+});
+
+describe('J4 a hanging deep-link refresh times out as absent', () => {
+  it('J4 hanging refresh toasts after timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const params = new URLSearchParams('channel=new');
+      let step: Awaited<ReturnType<typeof deepLinkAfterRefresh>> | null = null;
+      void deepLinkAfterRefresh(params, [channel('c1')], () => new Promise(() => undefined)).then(
+        (next) => {
+          step = next;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS - 1);
+      expect(step).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(step).toEqual({ open: null, jump: null, unavailable: true });
+      const here = { mounted: true, workspaceId: 'w1', channel: 'new' };
+      expect(deepLinkRefreshOutcome(step ?? deepLinkStep(params, []), here, here)).toBe('toast');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('J5 a deep-link refresh applies only on the same page', () => {
+  it('J5 workspace switch during refresh: no open, no toast', () => {
+    const started = { mounted: true, workspaceId: 'w1', channel: 'new' };
+    const found = deepLinkStep(new URLSearchParams('channel=new'), [channel('new')]);
+    const absent = deepLinkStep(new URLSearchParams('channel=new'), []);
+    const switched = { ...started, workspaceId: 'w2' };
+    expect(deepLinkRefreshOutcome(found, started, switched)).toBe('discard');
+    expect(deepLinkRefreshOutcome(absent, started, switched)).toBe('discard');
+    // Unmounted, or a different ?channel=, discards too.
+    expect(deepLinkRefreshOutcome(absent, started, { ...started, mounted: false })).toBe(
+      'discard',
+    );
+    expect(deepLinkRefreshOutcome(found, started, { ...started, channel: 'other' })).toBe(
+      'discard',
+    );
+    // Unchanged: opens when found, toasts when absent.
+    expect(deepLinkRefreshOutcome(found, started, started)).toBe('open');
+    expect(deepLinkRefreshOutcome(absent, started, started)).toBe('toast');
   });
 });
