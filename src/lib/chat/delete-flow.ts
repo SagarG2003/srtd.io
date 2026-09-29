@@ -9,14 +9,19 @@
 // holds it), then peers get ext { sorted_event: 'edit', message_ids: [id],
 // body, edited_at }. A failed record returns the mapped user copy. The edit
 // always carries the body's COMPLETE mention list (empty when none): the proc
-// reads an omitted list as "clear all mentions".
+// reads an omitted list as "clear all mentions". A refused mention re-reads the
+// chat's members once and edits again without the ones who left (without any
+// mention when that re-read fails).
 //
 // Pure of React and the SDK so the ordering is unit-tested directly.
 
 import type { Client } from '@srtdio/rpc';
 import { deleteMessagesRecord, editFailureCopy, editMessageRecord } from '@/lib/chat/record';
 import { deleteEventExt, editEventExt, type ChatMessageRow } from '@/lib/chat/thread';
-import { mentionIds } from '@/lib/chat/mentions';
+import { isMentionRefusal, mentionTargets, mentionsAfterRefusal } from '@/lib/chat/mentions';
+import { recheck } from '@/lib/chat/send-flow';
+import { readChannelMemberIds } from '@/lib/chat-reads';
+import type { Result } from '@srtdio/rpc';
 
 export interface DeleteFlowDeps {
   client: Client;
@@ -59,6 +64,8 @@ export interface EditFlowDeps {
   /** Publish the live edit command; undefined while there is no connection. */
   signal: ((ext: Record<string, unknown>) => Promise<unknown>) | undefined;
   onSignalFailed: (error: unknown) => void;
+  /** Re-read the chat's members after a refused mention; defaults to readChannelMemberIds. */
+  recheckMentions?: (channelId: string) => Promise<Result<string[]>>;
   /** Override for tests. */
   timeoutMs?: number;
 }
@@ -67,15 +74,24 @@ export async function runEdit(
   deps: EditFlowDeps,
   input: { channelId: string; messageId: string; body: string; traceId: string },
 ): Promise<{ ok: true } | { ok: false; message: string; error: string }> {
-  const result = await editMessageRecord({
-    client: deps.client,
-    channelId: input.channelId,
-    messageId: input.messageId,
-    body: input.body,
-    mentions: mentionIds(input.body),
-    traceId: input.traceId,
-    ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
-  });
+  const edit = (mentions: string[]): ReturnType<typeof editMessageRecord> =>
+    editMessageRecord({
+      client: deps.client,
+      channelId: input.channelId,
+      messageId: input.messageId,
+      body: input.body,
+      mentions,
+      traceId: input.traceId,
+      ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
+    });
+  const mentions = mentionTargets(input.body);
+  let result = await edit(mentions);
+  if (!result.ok && mentions.length > 0 && isMentionRefusal(result.message)) {
+    const read =
+      deps.recheckMentions ??
+      ((channelId: string) => readChannelMemberIds(deps.client, { channelId }));
+    result = await edit(mentionsAfterRefusal(mentions, await recheck(read, input.channelId)));
+  }
   if (!result.ok) {
     return { ok: false, message: editFailureCopy(result.message), error: result.message };
   }

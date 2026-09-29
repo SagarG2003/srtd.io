@@ -7,7 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import type { KeyboardEvent, MouseEvent, PointerEvent, ReactElement } from 'react';
+import type { KeyboardEvent, MouseEvent, PointerEvent, ReactElement, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/Button';
@@ -40,7 +40,7 @@ import { sortChannelsByRecency } from '@/lib/chat/sort-conversations';
 import { formatRelativeTime } from '@/lib/chat/format-relative-time';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { draftText, draftsVersion, subscribeDrafts } from '@/lib/chat/drafts';
-import { knownMentionName, resolveMentionText } from '@/lib/chat/mentions';
+import { knownMentionName, resolveMentionText, splitAllMentions } from '@/lib/chat/mentions';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import {
   CHAT_LIST_NAME_TYPE,
@@ -71,6 +71,21 @@ export function rowDraft(draft: string, open: boolean): string | null {
 /** A stored draft as its list line: its @[uuid] tokens read "@Name". Pure over the registry. */
 export function draftLine(stored: string): string {
   return resolveMentionText(stored, knownMentionName);
+}
+
+/** A list line with each "@all" drawn bold (the ink stays the line's own). */
+export function boldAllMentions(text: string): ReactNode {
+  const runs = splitAllMentions(text);
+  if (runs.every((run) => !run.all)) return text;
+  return runs.map((run, i) =>
+    run.all ? (
+      <span key={i} data-mention-all="" className="font-bold">
+        {run.text}
+      </span>
+    ) : (
+      run.text
+    ),
+  );
 }
 
 /** Per-channel store lookup the cards read (preview, time, unread). */
@@ -408,7 +423,7 @@ export function channelRowBody(props: {
               )}
             >
               <span className={cn('text-accent', DRAFT_PREFIX_TYPE)}>{DRAFT_PREFIX}</span>
-              {draft}
+              {boldAllMentions(draft)}
             </span>
           ) : (
             <span
@@ -418,7 +433,7 @@ export function channelRowBody(props: {
                 hasMessage ? 'text-fg-2' : 'text-fg-3',
               )}
             >
-              {preview}
+              {boldAllMentions(preview)}
             </span>
           )}
           {isUnread ? <CountBadge count={unread} className="shrink-0" /> : null}

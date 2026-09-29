@@ -699,3 +699,65 @@ describe('mentions on send', () => {
     }
   });
 });
+
+describe('H2 a refused mention never fails the send', () => {
+  const ANA = '22222222-2222-4222-8222-222222222222';
+  const EX = '44444444-4444-4444-8444-444444444444';
+  const body = `@[${ANA}] and @[${EX}]`;
+  const refused = {
+    ok: false as const,
+    reason: 'error' as const,
+    message: 'mentioned people must be in this chat',
+  };
+
+  it('H2 server rejection re-reads members once, drops only the non-member and succeeds', async () => {
+    const recordMessage = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const recheckMentions = vi.fn(async () => ({ ok: true as const, data: [ME, ANA] }));
+    const outcome = await runSend(deps({ recordMessage, recheckMentions }), input({ text: body }));
+    expect(outcome.ok).toBe(true);
+    expect(recheckMentions).toHaveBeenCalledTimes(1);
+    expect(recheckMentions).toHaveBeenCalledWith(CHANNEL);
+    expect(recordMessage).toHaveBeenCalledTimes(2);
+    expect(recordMessage.mock.calls[0]?.[0].mentions).toEqual([ANA, EX]);
+    expect(recordMessage.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ body, mentions: [ANA] }),
+    );
+  });
+
+  it('H2 double failure (refused, then the re-read fails) sends without mentions, no visible failure', async () => {
+    const recordMessage = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const recheckMentions = vi.fn(async () => ({
+      ok: false as const,
+      error: { code: 'unknown' as const, message: 'timed out' },
+    }));
+    const outcome = await runSend(deps({ recordMessage, recheckMentions }), input({ text: body }));
+    expect(outcome.ok).toBe(true);
+    expect(recordMessage).toHaveBeenCalledTimes(2);
+    expect(recordMessage.mock.calls[1]?.[0].mentions).toEqual([]);
+    // A throwing re-read counts as failed too.
+    const again = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const throwing = await runSend(
+      deps({ recordMessage: again, recheckMentions: () => Promise.reject(new Error('x')) }),
+      input({ text: body }),
+    );
+    expect(throwing.ok).toBe(true);
+    expect(again.mock.calls[1]?.[0].mentions).toEqual([]);
+  });
+
+  it('A2 p_mentions carries "all" alongside uuids', async () => {
+    const d = deps();
+    await runSend(d, input({ text: `@[all] and @[${ANA}]` }));
+    expect(d.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ mentions: [ANA, 'all'] }),
+    );
+  });
+});

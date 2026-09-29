@@ -17,6 +17,11 @@ import {
   truncateBody,
   UNKNOWN_MEMBER,
   type MentionMember,
+  ALL_MENTION_ROW,
+  mentionPickerRows,
+  mentionTargets,
+  mentionsAfterRefusal,
+  splitAllMentions,
 } from '@/lib/chat/mentions';
 
 const ANA = '11111111-1111-4111-8111-111111111111';
@@ -165,5 +170,54 @@ describe('name registry', () => {
     expect(knownMentionName(ANA)).toBeUndefined();
     rememberMentionNames([{ userId: ANA, displayName: 'Ana Roy' }]);
     expect(knownMentionName(ANA)).toBe('Ana Roy');
+  });
+});
+
+describe('@all', () => {
+  const members: MentionMember[] = [
+    { userId: ANA, displayName: 'Ana Roy', avatarUrl: null, role: 'agency' },
+    { userId: BEN, displayName: 'Alfie', avatarUrl: null, role: 'client' },
+  ];
+
+  it('A1 group picker offers "@all" first for an empty query or an all / everyone prefix', () => {
+    expect(mentionPickerRows(members, '', null, true)[0]).toEqual(ALL_MENTION_ROW);
+    expect(mentionPickerRows(members, 'al', null, true).map((m) => m.userId)).toEqual(['all', BEN]);
+    expect(mentionPickerRows(members, 'Every', null, true)[0]?.userId).toBe('all');
+    expect(mentionPickerRows(members, 'ana', null, true).map((m) => m.userId)).toEqual([ANA]);
+  });
+
+  it('A1 a DM never offers "@all"', () => {
+    expect(mentionPickerRows(members, '', null, false).some((m) => m.userId === 'all')).toBe(false);
+    expect(mentionPickerRows(members, 'all', null, false)).toEqual([]);
+  });
+
+  it('A2 "@all" serializes to "@[all]" and parses back', () => {
+    const picks = [
+      { userId: 'all', name: 'all' },
+      { userId: ANA, name: 'Ana Roy' },
+    ];
+    const body = serializeMentions('@all and @Ana Roy', picks);
+    expect(body).toBe(`@[all] and @[${ANA}]`);
+    const back = deserializeMentions(body, nameOf);
+    expect(back.text).toBe('@all and @Ana Roy');
+    expect(back.picks).toEqual(picks);
+    // "@allison" typed is not the everyone pick.
+    expect(serializeMentions('@allison', picks)).toBe('@allison');
+  });
+
+  it('A2 p_mentions carries "all" as a string; mention ids stay uuids only', () => {
+    const body = `@[all] hi @[${ANA}]`;
+    expect(mentionIds(body)).toEqual([ANA]);
+    expect(mentionTargets(body)).toEqual([ANA, 'all']);
+    expect(mentionTargets(`@[${ANA}]`)).toEqual([ANA]);
+    expect(mentionsAfterRefusal(['all', ANA], { ok: true, data: [] })).toEqual(['all']);
+  });
+
+  it('A3 resolves to "@all" everywhere text is drawn (copy, previews), split for bold', () => {
+    expect(resolveMentionText('@[all] ship it', nameOf)).toBe('@all ship it');
+    expect(splitAllMentions('@all ship it, @allison')).toEqual([
+      { text: '@all', all: true },
+      { text: ' ship it, @allison', all: false },
+    ]);
   });
 });

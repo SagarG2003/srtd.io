@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { KeyboardEvent, ReactElement } from 'react';
 import { cn } from '@/lib/cn';
 import { Avatar } from '@/components/ui/Avatar';
+import { splitAllMentions } from '@/lib/chat/mentions';
 import { Thumbnail, type ThumbnailFallback } from '@/components/media';
 import { FORMAT_GLYPH_LABEL, type FormatGlyphToken } from '@/components/ui/format-icon';
 import type { PresignCache } from '@/lib/asset-presign';
@@ -44,15 +45,24 @@ interface ActivityCardProps {
  * leaving every other name in the surrounding body colour. Plain string in, so no
  * `@[uuid]` ever reaches the DOM.
  */
-function mentionPreview(body: string, selfName: string | null): ReactElement[] {
-  return segmentSelfMentions(body, selfName).map((seg, i) =>
-    seg.self ? (
-      <span key={`s${i}`} className="font-medium text-accent">
-        {seg.text}
-      </span>
-    ) : (
-      <span key={`t${i}`}>{seg.text}</span>
-    ),
+function mentionPreview(body: string, selfName: string | null, chat = false): ReactElement[] {
+  return segmentSelfMentions(body, selfName).flatMap((seg, i) =>
+    seg.self
+      ? [
+          <span key={`s${i}`} className="font-medium text-accent">
+            {seg.text}
+          </span>,
+        ]
+      : // A chat "@all" reached me too: bold, with the same accent as my own name.
+        (chat ? splitAllMentions(seg.text) : [{ text: seg.text, all: false }]).map((run, j) =>
+          run.all ? (
+            <span key={`a${i}-${j}`} data-mention-all="" className="font-bold text-accent">
+              {run.text}
+            </span>
+          ) : (
+            <span key={`t${i}-${j}`}>{run.text}</span>
+          ),
+        ),
   );
 }
 
@@ -244,7 +254,7 @@ export function ActivityCard({
 
             {lead.eventType === MENTION_EVENT_TYPE && lead.body !== null ? (
               <p className="mt-[3px] line-clamp-2 text-sm leading-[1.4] text-fg-2 [overflow-wrap:anywhere]">
-                {mentionPreview(lead.body, selfName)}
+                {mentionPreview(lead.body, selfName, isChatMention(lead))}
               </p>
             ) : null}
           </div>

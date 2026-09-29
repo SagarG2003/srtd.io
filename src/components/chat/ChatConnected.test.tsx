@@ -13,6 +13,7 @@ vi.mock('@/lib/logger', () => ({
 import {
   applyProfileRead,
   CHAT_UNAVAILABLE_TOAST,
+  deepLinkAfterRefresh,
   deepLinkStep,
   idsToRead,
   initialJumpFor,
@@ -20,6 +21,7 @@ import {
   NO_NAME_READS,
   openMentionDm,
   paintableMessages,
+  pendingJumpAfter,
   profileIdsNeeded,
   type NameReads,
 } from '@/components/chat/ChatConnected';
@@ -28,7 +30,12 @@ import {
   profileNameOf,
   renderBodyWithMentions,
 } from '@/components/chat/MessageThread';
-import type { ChannelSummary, ChatProfile } from '@/lib/chat-reads';
+import {
+  READ_TIMEOUT_MS,
+  withReadTimeout,
+  type ChannelSummary,
+  type ChatProfile,
+} from '@/lib/chat-reads';
 import { findInOlderPages } from '@/lib/chat/marks';
 import { knownMentionName, resetMentionNames } from '@/lib/chat/mentions';
 import type { ChatMessageRow, ThreadMessage } from '@/lib/chat/thread';
@@ -134,11 +141,17 @@ function profile(userId: string, displayName: string): ChatProfile {
 }
 
 /** ChatConnected's row gate: a row paints once each name it needs has settled. */
-function paint(messages: ThreadMessage[], profiles: Profiles, reads: NameReads): ThreadMessage[] {
+function paint(
+  messages: ThreadMessage[],
+  profiles: Profiles,
+  reads: NameReads,
+  painted?: ReadonlySet<string>,
+): ThreadMessage[] {
   return paintableMessages(
     messages,
     (id) => profiles.has(id) || knownMentionName(id) !== undefined,
     reads,
+    painted,
   );
 }
 
@@ -200,7 +213,9 @@ describe('F2 live and older-page mentions paint final', () => {
       message({ id: 'o2', reply: { id: 'o1', authorUserId: BEN, preview: `for @[${ANA}]` } }),
     ];
     const messages = [...older, ...firstPage];
-    expect(paint(messages, known, NO_NAME_READS).map((m) => m.id)).toEqual(['m1']);
+    // The first page is already on screen (painted), so the held page never takes it away.
+    const onScreen = new Set(['m1']);
+    expect(paint(messages, known, NO_NAME_READS, onScreen).map((m) => m.id)).toEqual(['m1']);
     const read = vi.fn(async () => ok([profile(ANA, 'Ana'), profile(BEN, 'Ben')]));
     const after = await readOnce(messages, known, NO_NAME_READS, read);
     // One batched read for the whole page.
@@ -324,5 +339,158 @@ describe('F6 Activity jump lands on the mention', () => {
     const step = deepLinkStep(new URLSearchParams('channel=gone&message=m1'), roster);
     expect(step).toEqual({ open: null, jump: null, unavailable: true });
     expect(CHAT_UNAVAILABLE_TOAST).toBe("That chat isn't available");
+  });
+});
+
+// --- fix round 2 -------------------------------------------------------------
+
+describe('H1 hanging or throwing name reads settle as failed', () => {
+  beforeEach(() => resetMentionNames());
+
+  it('H1 hanging profile read paints the held row after the 5s timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const known: Profiles = new Map([['sender', profile('sender', 'Sam')]]);
+      const live = message({ id: 'm2', body: `ping @[${ANA}]` });
+      const messages = [message({ id: 'm1', body: 'hi' }), live];
+      expect(paint(messages, known, NO_NAME_READS).map((m) => m.id)).toEqual(['m1']);
+      const asked = idsToRead(profileIdsNeeded(messages, null, known), NO_NAME_READS, new Set());
+      const pending = withReadTimeout<ChatProfile[]>(() => new Promise(() => undefined));
+      await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+      const result = await pending;
+      expect(result.ok).toBe(false);
+      const reads = applyProfileRead(NO_NAME_READS, asked, result);
+      expect(paint(messages, known, reads).map((m) => m.id)).toEqual(['m1', 'm2']);
+      const html = bubbleHtml(live, known);
+      expect(html).toContain('@Unknown member');
+      expect(html).not.toContain('<button');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('H1 thrown rejection is handled as a failed read, never unhandled', async () => {
+    const result = await withReadTimeout<ChatProfile[]>(() => Promise.reject(new Error('boom')));
+    expect(result.ok).toBe(false);
+    const sync = await withReadTimeout<ChatProfile[]>(() => {
+      throw new Error('sync boom');
+    });
+    expect(sync.ok).toBe(false);
+    const reads = applyProfileRead(NO_NAME_READS, [ANA], result);
+    expect(reads.failed.has(ANA)).toBe(true);
+  });
+});
+
+describe('H3 own sends are never held', () => {
+  it('H3 own reply quoting a row with an unresolved author paints on first render', () => {
+    const own = message({
+      id: 'local-1',
+      senderUserId: 'me',
+      mine: true,
+      state: 'sending',
+      body: `re @[${BEN}]`,
+      reply: { id: 'm1', authorUserId: ANA, preview: 'quoted' },
+    });
+    const painted = paint([message({ id: 'm1', body: 'hi' }), own], new Map(), NO_NAME_READS);
+    expect(painted.map((m) => m.id)).toEqual(['m1', 'local-1']);
+    const html = bubbleHtml(own, new Map());
+    expect(html).toContain('@Unknown member');
+    expect(html).not.toContain('<button');
+  });
+});
+
+describe('H4 a held row keeps later rows behind it', () => {
+  beforeEach(() => resetMentionNames());
+
+  it('H4 held row N, arriving row N+1: neither paints until N releases, then both in order', () => {
+    const known: Profiles = new Map([['sender', profile('sender', 'Sam')]]);
+    const first = message({ id: 'm1', body: 'hi' });
+    const n = message({ id: 'n', body: `for @[${ANA}]` });
+    const next = message({ id: 'n1', body: 'plain' });
+    const onScreen = new Set(['m1']);
+    expect(paint([first, n, next], known, NO_NAME_READS, onScreen).map((m) => m.id)).toEqual([
+      'm1',
+    ]);
+    const released: Profiles = new Map([...known, [ANA, profile(ANA, 'Ana')]]);
+    expect(paint([first, n, next], released, NO_NAME_READS, onScreen).map((m) => m.id)).toEqual([
+      'm1',
+      'n',
+      'n1',
+    ]);
+  });
+});
+
+describe('H5 a chat switch never re-holds painted rows', () => {
+  beforeEach(() => resetMentionNames());
+
+  it('H5 painted row with a failed id stays painted across channel switch and back', async () => {
+    const known: Profiles = new Map([['sender', profile('sender', 'Sam')]]);
+    const row = message({ id: 'm1', body: `hey @[${ANA}]` });
+    const one = await readOnce([row], known, NO_NAME_READS, async () => failed);
+    const shown = paint([row], one.profiles, one.reads);
+    expect(shown.map((m) => m.id)).toEqual(['m1']);
+    const onScreen = new Set(shown.map((m) => m.id));
+    // Switch away and back: the failed id is retried in place, still failed meanwhile.
+    const retry = idsToRead(
+      profileIdsNeeded([row], null, one.profiles),
+      one.reads,
+      new Set(),
+      true,
+    );
+    expect(retry).toEqual([ANA]);
+    expect(one.reads.failed.has(ANA)).toBe(true);
+    expect(paint([row], one.profiles, one.reads, onScreen).map((m) => m.id)).toEqual(['m1']);
+    // The retry answers: the same row updates in place with the name.
+    const after = applyProfileRead(one.reads, retry, ok([profile(ANA, 'Ana')]));
+    const withName: Profiles = new Map([...one.profiles, [ANA, profile(ANA, 'Ana')]]);
+    expect(paint([row], withName, after, onScreen).map((m) => m.id)).toEqual(['m1']);
+    expect(bubbleHtml(row, withName)).toContain('@Ana');
+  });
+});
+
+describe('H6 a pending jump belongs to its chat', () => {
+  it('H6 open link to chat A, switch to B before load, reopen A later: no jump', () => {
+    const roster = [channel('A'), channel('B')];
+    let pending = deepLinkStep(new URLSearchParams('channel=A&message=m9'), roster).jump;
+    pending = pendingJumpAfter(pending, 'A');
+    expect(initialJumpFor(pending, 'A')).toBe('m9');
+    // Switched to B before the jump ran.
+    pending = pendingJumpAfter(pending, 'B');
+    expect(pending).toBeNull();
+    // Reopen A later.
+    pending = pendingJumpAfter(pending, 'A');
+    expect(initialJumpFor(pending, 'A')).toBeNull();
+    // Closing drops it too, and an unknown-channel link carries none.
+    expect(pendingJumpAfter({ channelId: 'A', messageId: 'm9' }, null)).toBeNull();
+    expect(deepLinkStep(new URLSearchParams('channel=gone&message=m1'), roster).jump).toBeNull();
+  });
+});
+
+describe('H7 a deep link re-reads the chat list before saying unavailable', () => {
+  it('H7 missing from the snapshot but present after refresh opens normally', async () => {
+    const reload = vi.fn(async () => [channel('c1'), channel('new')]);
+    const step = await deepLinkAfterRefresh(
+      new URLSearchParams('channel=new&message=m1'),
+      [channel('c1')],
+      reload,
+    );
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(step.open?.channelId).toBe('new');
+    expect(step.jump).toEqual({ channelId: 'new', messageId: 'm1' });
+    expect(step.unavailable).toBe(false);
+  });
+
+  it('H7 truly absent (or a failed refresh) toasts', async () => {
+    const reload = vi.fn(async () => [channel('c1')]);
+    const params = new URLSearchParams('channel=gone');
+    const step = await deepLinkAfterRefresh(params, [channel('c1')], reload);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(step).toEqual({ open: null, jump: null, unavailable: true });
+    const failedReload = await deepLinkAfterRefresh(params, [], async () => null);
+    expect(failedReload.unavailable).toBe(true);
+    // Present in the snapshot: no refresh at all.
+    const noReload = vi.fn(async () => []);
+    await deepLinkAfterRefresh(new URLSearchParams('channel=c1'), [channel('c1')], noReload);
+    expect(noReload).not.toHaveBeenCalled();
   });
 });

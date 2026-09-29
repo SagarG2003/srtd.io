@@ -350,3 +350,21 @@ describe('ActivityCard chat mention row', () => {
     expect(html).not.toContain('mentioned you in');
   });
 });
+
+describe('A3 @all in the Activity preview', () => {
+  it('A3 "@all" draws bold with the mention-of-me accent (tokens only)', () => {
+    const html = renderCard([
+      item({
+        eventType: 'mention',
+        entityType: 'chat_channel',
+        entityId: 'chan-1',
+        channelType: 'group',
+        title: 'Launch crew',
+        actorName: 'Bob',
+        body: '@all standup in 5',
+      }),
+    ]);
+    expect(html).toMatch(/<span data-mention-all="" class="font-bold text-accent">@all<\/span>/);
+    expect(html).not.toContain('@[');
+  });
+});

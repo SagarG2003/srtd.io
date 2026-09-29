@@ -4,13 +4,15 @@
 // dismissal (Escape, or the caret leaving the @ run). Rows are 44px min: avatar,
 // display name, role line. A press never takes focus from the textarea (so the
 // keyboard stays up on touch); the keyboard is driven by the composer, which
-// owns the active row. Tokens only, so light and dark stay at parity.
+// owns the active row. In a group the first row can be "@all" ("Everyone in
+// this group"), drawn with the same row grammar. Tokens only, so light and
+// dark stay at parity.
 
 import type { ReactElement } from 'react';
 import { Avatar } from '@/components/ui/Avatar';
 import { cn } from '@/lib/cn';
 import { roleLabel } from '@/components/pages/settings/members-data';
-import type { MentionMember } from '@/lib/chat/mentions';
+import { ALL_MENTION, ALL_MENTION_LINE, type MentionMember } from '@/lib/chat/mentions';
 
 /** The accessible name of the picker's list. */
 export const MENTION_PICKER_LABEL = 'Mention someone';
@@ -53,17 +55,34 @@ export function MentionPicker(props: MentionPickerProps): ReactElement | null {
               index === props.active ? 'bg-panel-2' : undefined,
             )}
           >
-            <Avatar
-              name={member.displayName}
-              {...(member.avatarUrl !== null ? { src: member.avatarUrl } : {})}
-              size="md"
-            />
-            <span className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-sm font-medium text-fg">{member.displayName}</span>
-              {member.role !== null ? (
-                <span className="truncate text-xs text-fg-3">{roleLabel(member.role)}</span>
-              ) : null}
-            </span>
+            {member.userId === ALL_MENTION ? (
+              <>
+                <span
+                  aria-hidden="true"
+                  className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-accent-soft text-xs font-bold text-accent-hover"
+                >
+                  @
+                </span>
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-sm font-bold text-fg">@{ALL_MENTION}</span>
+                  <span className="truncate text-xs text-fg-3">{ALL_MENTION_LINE}</span>
+                </span>
+              </>
+            ) : (
+              <>
+                <Avatar
+                  name={member.displayName}
+                  {...(member.avatarUrl !== null ? { src: member.avatarUrl } : {})}
+                  size="md"
+                />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-sm font-medium text-fg">{member.displayName}</span>
+                  {member.role !== null ? (
+                    <span className="truncate text-xs text-fg-3">{roleLabel(member.role)}</span>
+                  ) : null}
+                </span>
+              </>
+            )}
           </li>
         ))}
       </ul>

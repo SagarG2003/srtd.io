@@ -52,10 +52,10 @@ import {
   addPick,
   deserializeMentions,
   displayCaret,
-  filterMentionMembers,
   insertMention,
   knownMentionName,
   mentionIds,
+  mentionPickerRows,
   mentionQuery,
   rememberMentionNames,
   resolveMentionText,
@@ -152,6 +152,14 @@ export interface ComposerMentions {
    * unknown. Absent counts as ready.
    */
   ready?: boolean;
+  /** A group chat: the picker offers "@all" first. Absent counts as a DM. */
+  isGroup?: boolean;
+  /**
+   * True only for a person a successful member read confirmed has left: their
+   * stored mention drops. Any other unresolved mention (a failed or timed-out
+   * read) stays a pick, shown as "@Unknown member", and still sends.
+   */
+  gone?: (userId: string) => boolean;
   selfId: string | null;
   nameOf: NameOf;
 }
@@ -169,8 +177,9 @@ function mentionNameOf(mentions: ComposerMentions | undefined): NameOf {
 export function restoreDraftText(
   stored: { text: string; caret: number },
   nameOf: NameOf,
+  gone?: (userId: string) => boolean,
 ): { text: string; caret: number; picks: MentionPick[] } {
-  const restored = deserializeMentions(stored.text, nameOf);
+  const restored = deserializeMentions(stored.text, nameOf, gone);
   return { ...restored, caret: displayCaret(stored.text, stored.caret, nameOf) };
 }
 
@@ -186,11 +195,12 @@ export function composerBodyFor(
   stored: { text: string; caret: number },
   ready: boolean,
   nameOf: NameOf,
+  gone?: (userId: string) => boolean,
 ): { text: string; caret: number; picks: MentionPick[]; held: boolean } {
   if (!ready && mentionIds(stored.text).length > 0) {
     return { text: stored.text, caret: stored.caret, picks: [], held: true };
   }
-  return { ...restoreDraftText(stored, nameOf), held: false };
+  return { ...restoreDraftText(stored, nameOf, gone), held: false };
 }
 
 /**
@@ -694,7 +704,8 @@ export function Composer(props: ComposerProps): ReactElement {
   // Until this chat's names are in, a body with tokens stays held (verbatim).
   const nameOf = mentionNameOf(props.mentions);
   const namesReady = props.mentions?.ready !== false;
-  const [restored] = useState(() => composerBodyFor(initial, namesReady, nameOf));
+  const gone = props.mentions?.gone;
+  const [restored] = useState(() => composerBodyFor(initial, namesReady, nameOf, gone));
   const [text, setText] = useState(restored.text);
   const [picks, setPicks] = useState<MentionPick[]>(restored.picks);
   const [held, setHeld] = useState(restored.held);
@@ -769,7 +780,7 @@ export function Composer(props: ComposerProps): ReactElement {
       step.session === null && channelId !== undefined
         ? editRestoreText(channelId, step.text)
         : step.text;
-    const shown = composerBodyFor({ text: stored, caret: stored.length }, namesReady, nameOf);
+    const shown = composerBodyFor({ text: stored, caret: stored.length }, namesReady, nameOf, gone);
     setText(shown.text);
     setPicks(shown.picks);
     setCaret(shown.caret);
@@ -789,7 +800,7 @@ export function Composer(props: ComposerProps): ReactElement {
   // The chat's names settled: a held body becomes "@Name" text and its picks.
   useLayoutEffect(() => {
     if (!held || !namesReady) return;
-    const shown = composerBodyFor({ text, caret }, true, nameOf);
+    const shown = composerBodyFor({ text, caret }, true, nameOf, gone);
     setText(shown.text);
     setPicks(shown.picks);
     setCaret(shown.caret);
@@ -1038,14 +1049,20 @@ export function Composer(props: ComposerProps): ReactElement {
     caret,
   });
 
-  // The @ picker's rows: this chat's people matching the typed run, never me.
+  // The @ picker's rows: "@all" first in a group, then this chat's people
+  // matching the typed run, never me.
   const openMention =
     props.mentions !== undefined && !props.disabled && !mentionDismissed && !held
       ? mentionQuery(text, caret)
       : null;
   const mentionRows =
     openMention !== null && props.mentions !== undefined
-      ? filterMentionMembers(props.mentions.members, openMention.query, props.mentions.selfId)
+      ? mentionPickerRows(
+          props.mentions.members,
+          openMention.query,
+          props.mentions.selfId,
+          props.mentions.isGroup === true,
+        )
       : [];
   const activeRow = Math.min(mentionActive, Math.max(mentionRows.length - 1, 0));
 

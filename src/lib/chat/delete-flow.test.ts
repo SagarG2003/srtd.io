@@ -411,3 +411,83 @@ describe('runEdit mentions: every edit passes the complete current list', () => 
     expect((await editArgs(`@[${Y}] and @[${Z}]`)).p_mentions).toEqual([Y, Z]);
   });
 });
+
+describe('H2 / A4 edit mentions', () => {
+  const ANA = '44444444-4444-4444-8444-444444444444';
+  const EX = '55555555-5555-4555-8555-555555555555';
+
+  function rpcSequence(results: Array<{ data: unknown; error: { message: string } | null }>) {
+    const queue = [...results];
+    return vi.fn(() => ({
+      abortSignal: () => Promise.resolve(queue.shift() ?? { data: null, error: null }),
+    }));
+  }
+
+  function editDeps(
+    rpc: ReturnType<typeof rpcSequence>,
+    recheck?: () => Promise<Result<string[]>>,
+  ) {
+    return {
+      client: { rpc } as unknown as Client,
+      applyLocal: () => undefined,
+      signal: undefined,
+      onSignalFailed: () => undefined,
+      ...(recheck !== undefined ? { recheckMentions: recheck } : {}),
+    };
+  }
+
+  const argsOf = (rpc: ReturnType<typeof rpcSequence>, n: number): Record<string, unknown> =>
+    (rpc.mock.calls[n] as unknown as [string, Record<string, unknown>])[1];
+
+  it('H2 edit refused for a non-member re-reads once, drops only them and succeeds', async () => {
+    const body = `@[${ANA}] @[${EX}]`;
+    const rpc = rpcSequence([
+      { data: null, error: { message: 'mentioned people must be in this chat' } },
+      { data: { id: 'm1', body, edited_at: 'now' }, error: null },
+    ]);
+    const recheck = vi.fn(async () => ({ ok: true as const, data: [ANA] }));
+    const result = await runEdit(editDeps(rpc, recheck), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body,
+      traceId: 't',
+    });
+    expect(result.ok).toBe(true);
+    expect(recheck).toHaveBeenCalledTimes(1);
+    expect(argsOf(rpc, 0).p_mentions).toEqual([ANA, EX]);
+    expect(argsOf(rpc, 1).p_mentions).toEqual([ANA]);
+  });
+
+  it('H2 edit refused and the re-read fails: edits without mentions, no failure', async () => {
+    const body = `@[${ANA}]`;
+    const rpc = rpcSequence([
+      { data: null, error: { message: 'mentioned people must be in this chat' } },
+      { data: { id: 'm1', body, edited_at: 'now' }, error: null },
+    ]);
+    const result = await runEdit(
+      editDeps(rpc, async () => ({ ok: false, error: { code: 'unknown', message: 'down' } })),
+      { channelId: 'c1', messageId: 'm1', body, traceId: 't' },
+    );
+    expect(result.ok).toBe(true);
+    expect(argsOf(rpc, 1).p_mentions).toEqual([]);
+  });
+
+  it('A4 edit passes "all" while the token is present and omits it once removed', async () => {
+    const withAll = rpcSequence([{ data: { id: 'm1', body: 'x', edited_at: 'now' }, error: null }]);
+    await runEdit(editDeps(withAll), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body: `@[all] and @[${ANA}]`,
+      traceId: 't',
+    });
+    expect(argsOf(withAll, 0).p_mentions).toEqual([ANA, 'all']);
+    const removed = rpcSequence([{ data: { id: 'm1', body: 'x', edited_at: 'now' }, error: null }]);
+    await runEdit(editDeps(removed), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body: `just @[${ANA}]`,
+      traceId: 't',
+    });
+    expect(argsOf(removed, 0).p_mentions).toEqual([ANA]);
+  });
+});

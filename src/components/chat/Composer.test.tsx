@@ -33,7 +33,7 @@ import {
   withLinkCards,
 } from '@/components/chat/Composer';
 import { editFailureCopy } from '@/lib/chat/record';
-import { createOutboxSender, type SendOutcome } from '@/lib/chat/send-flow';
+import { createOutboxSender, runSend, type SendOutcome } from '@/lib/chat/send-flow';
 import { canSendAttachmentMessage } from '@/lib/chat/attachments';
 import { stripHashToken } from '@/lib/chat/post-refs';
 import { IconButton } from '@/components/ui/IconButton';
@@ -688,5 +688,53 @@ describe('F4 draft restore and edit keep mentions whose names are still loading'
     );
     const args = (rpc.mock.calls[0] as unknown as [string, Record<string, unknown>])[1];
     expect(args.p_mentions).toEqual([ANA]);
+  });
+});
+
+describe('H2 a failed member read never drops a mention', () => {
+  const ANA = '11111111-1111-4111-8111-111111111111';
+  const BEN = '22222222-2222-4222-8222-222222222222';
+  const EX = '33333333-3333-4333-8333-333333333333';
+
+  it('H2 failed read keeps the mention (shown "@Unknown member") and sends it', async () => {
+    const stored = `hi @[${ANA}] and @[${BEN}] `;
+    // The member read failed: nothing is confirmed gone, no names resolved.
+    const shown = composerBodyFor(
+      { text: stored, caret: stored.length },
+      true,
+      () => undefined,
+      () => false,
+    );
+    expect(shown.text).toBe('hi @Unknown member and @Unknown member ');
+    expect(shown.picks).toHaveLength(2);
+    const body = serializeMentions(shown.text, shown.picks);
+    expect(body).toBe(stored);
+    const recordMessage = vi.fn(async () => ({
+      ok: false as const,
+      reason: 'error' as const,
+      message: 'x',
+    }));
+    await runSend(
+      { recordMessage, publishLive: undefined, onLiveWarning: () => undefined },
+      {
+        id: 'id-1',
+        channelId: 'c1',
+        currentUserId: 'me',
+        traceId: 't',
+        text: body,
+        local: { attachments: [], sharedPostIds: [], reply: null },
+      },
+    );
+    expect(recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ body: stored, mentions: [ANA, BEN] }),
+    );
+    // Only an id a successful read confirmed gone drops.
+    const confirmed = composerBodyFor(
+      { text: `x @[${EX}] @[${ANA}]`, caret: 0 },
+      true,
+      () => undefined,
+      (id) => id === EX,
+    );
+    expect(mentionIds(serializeMentions(confirmed.text, confirmed.picks))).toEqual([ANA]);
   });
 });

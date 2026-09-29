@@ -477,7 +477,7 @@ describe('chat list mentions', () => {
       readNames,
     );
     expect(readNames).toHaveBeenCalledTimes(1);
-    expect(readNames).toHaveBeenCalledWith([ANA, GONE]);
+    expect(readNames).toHaveBeenCalledWith([ANA, GONE], expect.any(AbortSignal));
     expect(result.ok && result.data.map((p) => p.body)).toEqual([
       'hi @Ana',
       'and @Unknown member @Ana',

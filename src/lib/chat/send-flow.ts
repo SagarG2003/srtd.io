@@ -24,6 +24,10 @@
 //
 // Mentions ride in the body as @[uuid] tokens; every attempt derives p_mentions
 // from the body, so a retry (or a send restored from storage) resends them.
+// When the server refuses a mention ('mentioned people must be in this chat')
+// the attempt re-reads the chat's members once and records again without the
+// ones who left (without any mention when that re-read fails): never a failed
+// bubble for it.
 
 import type { SendRecordResult } from '@/lib/chat/record';
 import {
@@ -44,7 +48,8 @@ import {
   type ChatAttachmentUpload,
   type MessageAttachment,
 } from '@/lib/chat/attachments';
-import { mentionIds } from '@/lib/chat/mentions';
+import { isMentionRefusal, mentionTargets, mentionsAfterRefusal } from '@/lib/chat/mentions';
+import type { Result } from '@srtdio/rpc';
 import {
   rowToThreadMessage,
   type LocalMessageContent,
@@ -71,7 +76,7 @@ export interface SendFlowDeps {
     channelId: string;
     traceId: string;
     body: string;
-    /** The body's mentioned user ids (from its @[uuid] tokens); empty when none. */
+    /** The body's mentioned user ids (and "all"), from its tokens; empty when none. */
     mentions: string[];
     attachmentAssetIds: string[];
     sharedPostIds: string[];
@@ -91,6 +96,11 @@ export interface SendFlowDeps {
         local: LocalMessageContent;
       }) => Promise<unknown>)
     | undefined;
+  /**
+   * Re-read who this chat's mentions may name, after the server refused one.
+   * Absent (or failed): the retry carries no mentions.
+   */
+  recheckMentions?: (channelId: string) => Promise<Result<string[]>>;
   /** Live publish problems are reported here, never surfaced to the user. */
   onLiveWarning: (context: Record<string, unknown>) => void;
   /** Called as soon as the row exists, before the live publish settles. */
@@ -125,20 +135,44 @@ export async function publishWithTimeout(
   }
 }
 
+/** One member re-read for a refused mention; a missing reader or a throw is a failed read. */
+export async function recheck(
+  read: ((channelId: string) => Promise<Result<string[]>>) | undefined,
+  channelId: string,
+): Promise<Result<string[]>> {
+  const failed: Result<string[]> = {
+    ok: false,
+    error: { code: 'unknown', message: 'mention re-check unavailable' },
+  };
+  if (read === undefined) return failed;
+  try {
+    return await read(channelId);
+  } catch {
+    return failed;
+  }
+}
+
 /** Record, then publish. Resolves to the rendered message or a failure. */
 export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<SendOutcome> {
-  const recorded = await deps.recordMessage({
-    id: input.id,
-    channelId: input.channelId,
-    traceId: input.traceId,
-    body: input.text,
-    mentions: mentionIds(input.text),
-    attachmentAssetIds: input.local.attachments.map((a) => a.assetId),
-    sharedPostIds: [...input.local.sharedPostIds],
-    sharedBriefIds: [...(input.local.sharedBriefIds ?? [])],
-    replyToMessageId: input.local.reply?.id ?? null,
-    attachmentMeta: buildAttachmentMeta(input.local.attachments),
-  });
+  const record = (mentions: string[]): Promise<SendRecordResult> =>
+    deps.recordMessage({
+      id: input.id,
+      channelId: input.channelId,
+      traceId: input.traceId,
+      body: input.text,
+      mentions,
+      attachmentAssetIds: input.local.attachments.map((a) => a.assetId),
+      sharedPostIds: [...input.local.sharedPostIds],
+      sharedBriefIds: [...(input.local.sharedBriefIds ?? [])],
+      replyToMessageId: input.local.reply?.id ?? null,
+      attachmentMeta: buildAttachmentMeta(input.local.attachments),
+    });
+  const mentions = mentionTargets(input.text);
+  let recorded = await record(mentions);
+  if (!recorded.ok && mentions.length > 0 && isMentionRefusal(recorded.message)) {
+    const fresh = await recheck(deps.recheckMentions, input.channelId);
+    recorded = await record(mentionsAfterRefusal(mentions, fresh));
+  }
   if (!recorded.ok) {
     return { ok: false, reason: recorded.reason, error: recorded.message };
   }

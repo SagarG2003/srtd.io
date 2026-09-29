@@ -81,7 +81,9 @@ import {
   profileNameOf,
   renderBodyWithMentions,
 } from '@/components/chat/MessageThread';
-import { resolveMentionText } from '@/lib/chat/mentions';
+import { mentionPickerRows, resolveMentionText, type MentionMember } from '@/lib/chat/mentions';
+import { boldAllMentions, draftLine } from '@/components/chat/ChannelList';
+import { MentionPicker } from '@/components/chat/MentionPicker';
 import { renderToStaticMarkup as renderStrip } from 'react-dom/server';
 import { MarkStrip } from '@/components/chat/MarksSheet';
 import type { ChatMark } from '@/lib/chat/marks';
@@ -3388,5 +3390,70 @@ describe('F5 mentions are bold and the peer ink clears 4.5:1 in both themes', ()
       expect(mentionClass(mine, false)).not.toContain('bg-accent-soft');
     }
     expect(mentionClass(true, false)).toContain('text-accent-fg');
+  });
+});
+
+describe('A3 "@all" renders bold, as a mention of me for recipients, and inert', () => {
+  const names = new Map<string, ChatProfile>();
+
+  function allMarkup(mine: boolean): string {
+    return renderStrip(
+      <p>
+        {renderBodyWithMentions('@[all] standup', mine, {
+          nameOf: profileNameOf(names),
+          viewerUserId: 'me',
+          mentions: { peerUserId: null, onOpen: vi.fn() },
+        })}
+      </p>,
+    );
+  }
+
+  it('A3 recipient: "@all" bold with the mention-of-me tint, never a button', () => {
+    const html = allMarkup(false);
+    expect(html).toContain('@all');
+    expect(html).not.toContain('@[');
+    expect(html).not.toContain('<button');
+    expect(html).toContain(mentionClass(false, true));
+    expect(mentionClass(false, true)).toContain('font-bold');
+    expect(mentionClass(false, true)).toContain('bg-accent-soft');
+  });
+
+  it('A3 sender: "@all" bold in own ink, no me tint', () => {
+    const html = allMarkup(true);
+    expect(html).toContain(mentionClass(true, false));
+    expect(html).not.toContain('bg-accent-soft');
+    expect(html).not.toContain('<button');
+  });
+
+  it('A3 list preview and draft line draw "@all" bold', () => {
+    const html = renderStrip(<span>{boldAllMentions(draftLine('@[all] ship it'))}</span>);
+    expect(html).toContain('<span data-mention-all="" class="font-bold">@all</span> ship it');
+    expect(boldAllMentions('no everyone here')).toBe('no everyone here');
+  });
+
+  it('A1 picker in a group shows the "@all" row first; a DM does not', () => {
+    const members: MentionMember[] = [
+      { userId: 'u1', displayName: 'Ana', avatarUrl: null, role: 'agency' },
+    ];
+    const group = renderStrip(
+      <MentionPicker
+        members={mentionPickerRows(members, '', null, true)}
+        active={0}
+        onPick={() => undefined}
+      />,
+    );
+    expect(group).toContain('data-mention-option="all"');
+    expect(group).toContain('@all');
+    expect(group).toContain('Everyone in this group');
+    expect(group.match(/min-h-\[44px\]/g)).toHaveLength(2);
+    const dm = renderStrip(
+      <MentionPicker
+        members={mentionPickerRows(members, '', null, false)}
+        active={0}
+        onPick={() => undefined}
+      />,
+    );
+    expect(dm).not.toContain('data-mention-option="all"');
+    expect(dm).not.toContain('Everyone in this group');
   });
 });

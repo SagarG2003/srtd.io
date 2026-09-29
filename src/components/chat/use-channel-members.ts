@@ -3,12 +3,18 @@
 // group's member ids (listGroupMemberIds, groups only) and one readChatMembers
 // (users IN + workspace_members IN, active only). Loaded once per chat open;
 // the names also go to the mention registry so the chat list's "Draft:" line
-// resolves a draft's tokens.
+// resolves a draft's tokens. Each read has a 5s timeout (withReadTimeout): a
+// hang is a failed read, so the composer's hold always releases.
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
-import { listGroupMemberIds, readChatMembers, type ChatMember } from '@/lib/chat-reads';
+import {
+  listGroupMemberIds,
+  readChatMembers,
+  withReadTimeout,
+  type ChatMember,
+} from '@/lib/chat-reads';
 import type { Result } from '@srtdio/rpc';
 import { rememberMentionNames, type MentionMember } from '@/lib/chat/mentions';
 
@@ -22,8 +28,37 @@ export interface ChannelMembersInput {
 
 /** The two reads, injected so the rules are unit-tested without a client. */
 export interface ChannelMemberReaders {
-  groupMemberIds: (groupId: string) => Promise<Result<string[]>>;
-  members: (workspaceId: string, userIds: string[]) => Promise<Result<ChatMember[]>>;
+  groupMemberIds: (groupId: string, signal?: AbortSignal) => Promise<Result<string[]>>;
+  members: (
+    workspaceId: string,
+    userIds: string[],
+    signal?: AbortSignal,
+  ) => Promise<Result<ChatMember[]>>;
+}
+
+/** One chat's member list: loaded, or failed (a read error or a 5s timeout). */
+export type ChannelMembersLoad = { ok: true; members: MentionMember[] } | { ok: false };
+
+async function channelMemberIdsResult(
+  input: ChannelMembersInput,
+  readers: ChannelMemberReaders,
+): Promise<Result<string[]>> {
+  if (input.groupId !== null) {
+    const groupId = input.groupId;
+    const ids = await withReadTimeout((signal) => readers.groupMemberIds(groupId, signal));
+    if (!ids.ok) {
+      logger.warn('chat: mention members read failed', { error: ids.error.message });
+      return ids;
+    }
+    return { ok: true, data: ids.data.filter((id) => id !== input.currentUserId) };
+  }
+  return {
+    ok: true,
+    data:
+      input.peerUserId !== null && input.peerUserId !== input.currentUserId
+        ? [input.peerUserId]
+        : [],
+  };
 }
 
 /** The candidate ids: the group's members, or the DM peer; never the viewer. */
@@ -31,17 +66,37 @@ export async function channelMemberIds(
   input: ChannelMembersInput,
   readers: ChannelMemberReaders,
 ): Promise<string[]> {
-  if (input.groupId !== null) {
-    const ids = await readers.groupMemberIds(input.groupId);
-    if (!ids.ok) {
-      logger.warn('chat: mention members read failed', { error: ids.error.message });
-      return [];
-    }
-    return ids.data.filter((id) => id !== input.currentUserId);
+  const ids = await channelMemberIdsResult(input, readers);
+  return ids.ok ? ids.data : [];
+}
+
+/**
+ * Load one chat's picker rows, keeping a failure (read error or timeout) apart
+ * from an empty list: only a successful read may say someone left. Never throws.
+ */
+export async function loadChannelMembersResult(
+  input: ChannelMembersInput,
+  readers: ChannelMemberReaders,
+): Promise<ChannelMembersLoad> {
+  if (input.workspaceId === null) return { ok: true, members: [] };
+  const workspaceId = input.workspaceId;
+  const ids = await channelMemberIdsResult(input, readers);
+  if (!ids.ok) return { ok: false };
+  if (ids.data.length === 0) return { ok: true, members: [] };
+  const result = await withReadTimeout((signal) => readers.members(workspaceId, ids.data, signal));
+  if (!result.ok) {
+    logger.warn('chat: mention member profiles read failed', { error: result.error.message });
+    return { ok: false };
   }
-  return input.peerUserId !== null && input.peerUserId !== input.currentUserId
-    ? [input.peerUserId]
-    : [];
+  return {
+    ok: true,
+    members: result.data.map((m) => ({
+      userId: m.userId,
+      displayName: m.displayName,
+      avatarUrl: m.avatarUrl,
+      role: m.role,
+    })),
+  };
 }
 
 /** Load the picker rows for one chat; a failed read yields none (logged). */
@@ -49,48 +104,69 @@ export async function loadChannelMembers(
   input: ChannelMembersInput,
   readers: ChannelMemberReaders,
 ): Promise<MentionMember[]> {
-  if (input.workspaceId === null) return [];
-  const ids = await channelMemberIds(input, readers);
-  if (ids.length === 0) return [];
-  const result = await readers.members(input.workspaceId, ids);
-  if (!result.ok) {
-    logger.warn('chat: mention member profiles read failed', { error: result.error.message });
-    return [];
-  }
-  return result.data.map((m) => ({
-    userId: m.userId,
-    displayName: m.displayName,
-    avatarUrl: m.avatarUrl,
-    role: m.role,
-  }));
+  const load = await loadChannelMembersResult(input, readers);
+  return load.ok ? load.members : [];
+}
+
+/**
+ * Whether a stored mention's person is confirmed gone from this chat: only a
+ * SUCCESSFUL member read that does not list them says so. Loading or a failed
+ * read confirms nothing, so their mention is kept. Pure.
+ */
+export function mentionGone(
+  load: ChannelMembersLoad | null,
+  selfId: string | null,
+): (userId: string) => boolean {
+  if (load === null || !load.ok) return () => false;
+  const ids = new Set(load.members.map((m) => m.userId));
+  return (userId) => userId !== selfId && !ids.has(userId);
 }
 
 const READERS: ChannelMemberReaders = {
-  groupMemberIds: (groupId) => listGroupMemberIds(supabase, { groupId }),
-  members: (workspaceId, userIds) => readChatMembers(supabase, { workspaceId, userIds }),
+  groupMemberIds: (groupId, signal) =>
+    listGroupMemberIds(supabase, { groupId, ...(signal !== undefined ? { signal } : {}) }),
+  members: (workspaceId, userIds, signal) =>
+    readChatMembers(supabase, {
+      workspaceId,
+      userIds,
+      ...(signal !== undefined ? { signal } : {}),
+    }),
 };
 
 /**
- * The mention picker's people for the open chat: null until the list for THIS
- * chat has settled (loaded, or failed to []), so the composer knows when its
- * names are in; a previous chat's list never counts.
+ * The open chat's member list as loaded (ok or failed): null until the list
+ * for THIS chat has settled, so the composer knows when its names are in; a
+ * previous chat's list never counts. A timeout or a rejection settles it as
+ * failed, so it never stays null.
  */
-export function useChannelMembers(input: ChannelMembersInput): MentionMember[] | null {
-  const [loaded, setLoaded] = useState<{ key: string; members: MentionMember[] } | null>(null);
+export function useChannelMembersState(input: ChannelMembersInput): ChannelMembersLoad | null {
+  const [loaded, setLoaded] = useState<{ key: string; load: ChannelMembersLoad } | null>(null);
   const { workspaceId, currentUserId, groupId, peerUserId } = input;
   const key = [workspaceId, currentUserId, groupId, peerUserId].join('|');
   useEffect(() => {
     let cancelled = false;
-    void loadChannelMembers({ workspaceId, currentUserId, groupId, peerUserId }, READERS).then(
-      (next) => {
+    void loadChannelMembersResult({ workspaceId, currentUserId, groupId, peerUserId }, READERS)
+      .catch((error: unknown): ChannelMembersLoad => {
+        logger.warn('chat: mention members load threw', { error: String(error) });
+        return { ok: false };
+      })
+      .then((next) => {
         if (cancelled) return;
-        rememberMentionNames(next);
-        setLoaded({ key, members: next });
-      },
-    );
+        if (next.ok) rememberMentionNames(next.members);
+        setLoaded({ key, load: next });
+      });
     return () => {
       cancelled = true;
     };
   }, [key, workspaceId, currentUserId, groupId, peerUserId]);
-  return loaded !== null && loaded.key === key ? loaded.members : null;
+  return loaded !== null && loaded.key === key ? loaded.load : null;
+}
+
+/**
+ * The mention picker's people for the open chat: null until the list for THIS
+ * chat has settled (loaded, or failed to []).
+ */
+export function useChannelMembers(input: ChannelMembersInput): MentionMember[] | null {
+  const load = useChannelMembersState(input);
+  return load === null ? null : load.ok ? load.members : [];
 }

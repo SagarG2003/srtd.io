@@ -1858,5 +1858,117 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
         actor_user_id: owner.id,
       });
     });
+
+    describe('@all', () => {
+      // A group of its own, so earlier tests' extra members never change who
+      // @all reaches: owner (sender), userB and p (active), q (inactive).
+      let allChannelId: string;
+      let p: SeededUser;
+      let q: SeededUser;
+
+      beforeAll(async () => {
+        p = await seedUser(loadRlsEnv(), admin);
+        q = await seedUser(loadRlsEnv(), admin);
+        extraUsers.push(p, q);
+        await seedMember(adminGeneric, wsA, p, 'agency');
+        await seedMember(adminGeneric, wsA, q, 'client');
+        const group = await insertRow(adminGeneric, 'groups', {
+          workspace_id: wsA.id,
+          name: `All ${randomSuffix()}`,
+          created_by: owner.id,
+        });
+        allChannelId = `group__${wsA.id}__${String(group.id)}`;
+        await insertRow(adminGeneric, 'chat_channels', {
+          channel_id: allChannelId,
+          workspace_id: wsA.id,
+          channel_type: 'group',
+          entity_id: group.id,
+        });
+        for (const member of [owner, userB, p, q]) {
+          await insertRow(adminGeneric, 'group_members', {
+            group_id: group.id,
+            user_id: member.id,
+            workspace_id: wsA.id,
+          });
+        }
+        const deactivated = await adminGeneric
+          .from('workspace_members')
+          .update({ active: false })
+          .eq('workspace_id', wsA.id)
+          .eq('user_id', q.id);
+        expect(deactivated.error).toBeNull();
+      });
+
+      it('T15 @all notifies every active group member except the sender, one entry each', async () => {
+        const args = sendArgs(allChannelId, 'standup @all', { mentions: ['all'] });
+        const res = await clientFor(owner.id).rpc('chat_message_send', args);
+        expect(res.error).toBeNull();
+        expect([...((res.data?.mentions as string[] | null) ?? [])].sort()).toEqual(
+          [userB.id, p.id].sort(),
+        );
+        const entries = await mentionEntries(args.p_id);
+        expect(live(entries, userB.id)).toHaveLength(1);
+        expect(live(entries, p.id)).toHaveLength(1);
+        expect(live(entries, owner.id)).toHaveLength(0);
+        expect(entries.filter((e) => e.deleted_at === null)).toHaveLength(2);
+        expect(live(entries, p.id)[0]).toMatchObject({
+          entity_type: 'chat_channel',
+          entity_id: allChannelId,
+          scope: 'groups',
+          tier: 'urgent',
+          payload: { message_id: args.p_id },
+          actor_user_id: owner.id,
+        });
+      });
+
+      it('T16 @all plus a named member: no duplicate entry', async () => {
+        const args = sendArgs(allChannelId, '@all and @b', { mentions: ['all', userB.id] });
+        const res = await clientFor(owner.id).rpc('chat_message_send', args);
+        expect(res.error).toBeNull();
+        const entries = await mentionEntries(args.p_id);
+        expect(live(entries, userB.id)).toHaveLength(1);
+        expect(live(entries, p.id)).toHaveLength(1);
+        expect(entries.filter((e) => e.deleted_at === null)).toHaveLength(2);
+      });
+
+      it("T17 @all in a DM raises 'everyone mention works only in groups'", async () => {
+        const args = sendArgs(dmChannelId, 'hey @all', { mentions: ['all'] });
+        const res = await clientFor(owner.id).rpc('chat_message_send', args);
+        expect(res.error?.message).toMatch(/everyone mention works only in groups/);
+        expect(await countWhere(adminGeneric, 'chat_messages', [['id', args.p_id]])).toBe(0);
+      });
+
+      it('T18 an edit removing @all retracts every entry except people still named', async () => {
+        const args = sendArgs(allChannelId, '@all ship it', { mentions: ['all'] });
+        const sent = await clientFor(owner.id).rpc('chat_message_send', args);
+        expect(sent.error).toBeNull();
+        const before = await mentionEntries(args.p_id);
+        const pBefore = live(before, p.id);
+        expect(pBefore).toHaveLength(1);
+        expect(live(before, userB.id)).toHaveLength(1);
+
+        const res = await clientFor(owner.id).rpc(
+          'chat_message_edit',
+          editArgs(args.p_id, allChannelId, '@p ship it', [p.id]),
+        );
+        expect(res.error).toBeNull();
+        expect(res.data?.mentions).toEqual([p.id]);
+        const after = await mentionEntries(args.p_id);
+        expect(live(after, userB.id)).toHaveLength(0);
+        expect(
+          after.filter((e) => e.user_id === userB.id).every((e) => e.deleted_at !== null),
+        ).toBe(true);
+        expect(live(after, p.id)).toEqual(pBefore);
+      });
+
+      it('T19 an inactive workspace member in the group gets no entry and causes no error', async () => {
+        const args = sendArgs(allChannelId, '@all heads up', { mentions: ['all'] });
+        const res = await clientFor(owner.id).rpc('chat_message_send', args);
+        expect(res.error).toBeNull();
+        expect(res.data?.mentions as string[] | null).not.toContain(q.id);
+        const entries = await mentionEntries(args.p_id);
+        expect(entries.filter((e) => e.user_id === q.id)).toHaveLength(0);
+      });
+    });
   });
 });

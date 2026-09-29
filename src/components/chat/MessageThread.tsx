@@ -16,6 +16,7 @@ import {
 import { Link } from 'react-router-dom';
 import { isNearBottom } from '@/lib/chat/scroll';
 import {
+  ALL_MENTION,
   knownMentionName,
   mentionLabel,
   resolveMentionText,
@@ -267,6 +268,11 @@ interface MessageThreadProps {
    * Null while they load: the composer keeps a stored body's tokens untouched.
    */
   mentionMembers?: readonly MentionMember[] | null;
+  /**
+   * True for a stored mention's person a successful member read confirmed has
+   * left; only those drop from a restored draft or an edit. Absent: none.
+   */
+  mentionGone?: (userId: string) => boolean;
   /** Bubble @mentions: tap opens a DM with that person (never me or our DM's peer). */
   mentions?: BubbleMentions;
   /** Open with this message in view (an Activity mention); a miss toasts, the chat stays at the bottom. */
@@ -1169,12 +1175,14 @@ export function renderBodyWithMentions(
       return <Fragment key={i}>{renderMessageBody(segment.text, mine)}</Fragment>;
     }
     const id = segment.userId;
-    const self = id === ctx.viewerUserId;
+    // "@all" names everyone but its sender: a recipient sees it as a mention of them.
+    const everyone = id === ALL_MENTION;
+    const self = id === ctx.viewerUserId || (everyone && !mine);
     const label = mentionLabel(id, ctx.nameOf);
     const open = ctx.mentions;
     // An unresolvable id ("@Unknown member") has no one to open a chat with.
     const known = ctx.nameOf(id) !== undefined;
-    if (open === undefined || self || !known || id === open.peerUserId) {
+    if (open === undefined || self || everyone || !known || id === open.peerUserId) {
       return (
         <span key={i} data-mention={id} className={mentionClass(mine, self)}>
           {label}
@@ -3719,6 +3727,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
                 mentions: {
                   members: props.mentionMembers ?? [],
                   ready: props.mentionMembers !== null,
+                  isGroup: props.isGroup === true,
+                  ...(props.mentionGone !== undefined ? { gone: props.mentionGone } : {}),
                   selfId: props.currentUserId ?? null,
                   nameOf: profileNameOf(props.profiles),
                 },

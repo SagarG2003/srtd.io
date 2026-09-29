@@ -7,8 +7,15 @@ vi.mock('@/lib/logger', () => ({
 import {
   channelMemberIds,
   loadChannelMembers,
+  loadChannelMembersResult,
+  mentionGone,
   type ChannelMemberReaders,
 } from '@/components/chat/use-channel-members';
+import { READ_TIMEOUT_MS } from '@/lib/chat-reads';
+import { composerBodyFor } from '@/components/chat/Composer';
+import { mentionIds, serializeMentions } from '@/lib/chat/mentions';
+
+const ANA = '11111111-1111-4111-8111-111111111111';
 
 const ME = 'me';
 const PEER = 'peer';
@@ -54,7 +61,7 @@ describe('loadChannelMembers', () => {
     );
     expect(members.map((m) => m.userId)).toEqual(['a', 'b']);
     expect(r.members).toHaveBeenCalledTimes(1);
-    expect(r.members).toHaveBeenCalledWith('w', ['a', 'b']);
+    expect(r.members).toHaveBeenCalledWith('w', ['a', 'b'], expect.any(AbortSignal));
   });
 
   it('a failed read yields no rows', async () => {
@@ -66,5 +73,67 @@ describe('loadChannelMembers', () => {
       },
     );
     expect(members).toEqual([]);
+  });
+});
+
+describe('H1 member-list reads time out and settle as failed', () => {
+  it('H1 hanging member read releases the composer after the timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const hanging: ChannelMemberReaders = {
+        groupMemberIds: () => new Promise(() => undefined),
+        members: () => new Promise(() => undefined),
+      };
+      const pending = loadChannelMembersResult(
+        { workspaceId: 'w', currentUserId: ME, groupId: 'g', peerUserId: null },
+        hanging,
+      );
+      await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+      const load = await pending;
+      // Settled (not null), so the composer's hold releases; a failure confirms no one gone.
+      expect(load).toEqual({ ok: false });
+      expect(mentionGone(load, ME)(ANA)).toBe(false);
+      const stored = `hi @[${ANA}] `;
+      const shown = composerBodyFor(
+        { text: stored, caret: stored.length },
+        true,
+        () => undefined,
+        mentionGone(load, ME),
+      );
+      expect(shown.held).toBe(false);
+      expect(shown.text).toBe('hi @Unknown member ');
+      expect(mentionIds(serializeMentions(shown.text, shown.picks))).toEqual([ANA]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('H1 thrown rejection in a member read is a failed load, never unhandled', async () => {
+    const throwing: ChannelMemberReaders = {
+      groupMemberIds: () => Promise.reject(new Error('down')),
+      members: () => Promise.reject(new Error('down')),
+    };
+    await expect(
+      loadChannelMembersResult(
+        { workspaceId: 'w', currentUserId: ME, groupId: 'g', peerUserId: null },
+        throwing,
+      ),
+    ).resolves.toEqual({ ok: false });
+    await expect(
+      loadChannelMembersResult(
+        { workspaceId: 'w', currentUserId: ME, groupId: null, peerUserId: PEER },
+        throwing,
+      ),
+    ).resolves.toEqual({ ok: false });
+  });
+
+  it('only a successful read confirms someone gone', () => {
+    const load = {
+      ok: true as const,
+      members: [{ userId: 'a', displayName: 'A', avatarUrl: null, role: 'agency' }],
+    };
+    expect(mentionGone(load, ME)('ex')).toBe(true);
+    expect(mentionGone(load, ME)('a')).toBe(false);
+    expect(mentionGone(null, ME)('ex')).toBe(false);
   });
 });

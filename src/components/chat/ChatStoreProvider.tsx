@@ -40,7 +40,9 @@ import { Avatar } from '@/components/ui/Avatar';
 import {
   listChannelClears,
   listChannelSummaries,
+  readChannelMemberIds,
   readProfiles,
+  withReadTimeout,
   type ChannelSummary,
   type ChatProfile,
 } from '@/lib/chat-reads';
@@ -242,18 +244,19 @@ export function previewMentionText(text: string): string {
 
 /**
  * Make sure every @mention in these bodies has a remembered name: one batched
- * profile read for the ids not known yet (none when all are). A failed read is
- * logged; those mentions then read "@Unknown member", never a raw token.
+ * profile read for the ids not known yet (none when all are). A failed read (an
+ * error, a rejection or the 5s timeout) is logged; those mentions then read
+ * "@Unknown member", never a raw token. Never throws.
  */
 export async function rememberBodyNames(
   bodies: readonly string[],
-  readNames: (ids: string[]) => Promise<Result<ChatProfile[]>>,
+  readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<ChatProfile[]>>,
 ): Promise<void> {
   const ids = [...new Set(bodies.flatMap(mentionIds))].filter(
     (id) => knownMentionName(id) === undefined,
   );
   if (ids.length === 0) return;
-  const result = await readNames(ids);
+  const result = await withReadTimeout((signal) => readNames(ids, signal));
   if (!result.ok) {
     logger.warn('chat store: mention names read failed', { error: result.error.message });
     return;
@@ -267,7 +270,7 @@ export async function rememberBodyNames(
  */
 export async function resolvePreviewMentions(
   previews: Result<ConversationPreview[]>,
-  readNames: (ids: string[]) => Promise<Result<ChatProfile[]>>,
+  readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<ChatProfile[]>>,
 ): Promise<Result<ConversationPreview[]>> {
   if (!previews.ok) return previews;
   await rememberBodyNames(
@@ -283,7 +286,7 @@ export async function resolvePreviewMentions(
 /** The last-line previews with their mention names resolved. */
 function readPreviews(workspaceId: string): Promise<Result<ConversationPreview[]>> {
   return loadConversationPreviews(supabase, workspaceId).then((result) =>
-    resolvePreviewMentions(result, (ids) => readProfiles(supabase, ids)),
+    resolvePreviewMentions(result, (ids, signal) => readProfiles(supabase, ids, signal)),
   );
 }
 
@@ -573,6 +576,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
                         },
                       })
                   : undefined,
+              // A refused mention re-reads the chat's members once (5s timeout).
+              recheckMentions: (id) => readChannelMemberIds(supabase, { channelId: id }),
               // The row exists; receivers catch up from Postgres.
               onLiveWarning: (context) =>
                 logger.warn('chat: live publish did not complete', context),
@@ -681,7 +686,9 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         if (summary === undefined) return;
         // Names first (one batched read for unknown ids), so the line and the
         // toast read "@Name" from their first paint.
-        await rememberBodyNames([row.body ?? ''], (ids) => readProfiles(supabase, ids));
+        await rememberBodyNames([row.body ?? ''], (ids, signal) =>
+          readProfiles(supabase, ids, signal),
+        );
         const text = store.previewText({
           body: previewMentionText(row.body ?? ''),
           hasAttachments:
