@@ -15,6 +15,8 @@ import {
   applyChannelPreviews,
   applyPreviews,
   applyServerClock,
+  createClockSampler,
+  outboxIds,
   channelsShowingDeleted,
   stripDeletedQuotes,
   stripPersistedQuotes,
@@ -710,6 +712,27 @@ describe('D3: server clock offset', () => {
     expect(next.serverClockOffsetMs).toBe(120_000);
     // A bad time keeps it.
     expect(applyServerClock(next, 'not a time', sentAt)).toBe(next);
+  });
+
+  it('a fresh first attempt samples the clock; a retry and an outbox replay never do', () => {
+    let device = Date.parse('2026-09-22T10:00:00.000Z');
+    const sampler = createClockSampler(() => device);
+    sampler.replayed(
+      outboxIds({ c1: [{ id: 'queued' } as never], c2: [{ id: 'queued-2' } as never] }),
+    );
+    let state = initialState();
+    // Replayed: the ack carries the original created_at, so it is never applied.
+    expect(sampler.begin('queued')).toBeNull();
+    expect(state.serverClockOffsetMs).toBe(0);
+    // Fresh: applied.
+    const fresh = sampler.begin('fresh');
+    expect(fresh).toBe(device);
+    state = applyServerClock(state, '2026-09-22T10:00:03.000Z', fresh as number);
+    expect(state.serverClockOffsetMs).toBe(3000);
+    // A retry of the fresh id hours later: the old created_at must not move it.
+    device += 3 * 60 * 60 * 1000;
+    expect(sampler.begin('fresh')).toBeNull();
+    expect(sampler.begin('queued-2')).toBeNull();
   });
 
   it('survives a reload of the list', () => {

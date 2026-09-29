@@ -154,9 +154,15 @@ export async function editMessageRecord(params: EditRecordParams): Promise<EditR
 /** User-facing copy for a failed edit, mapped from the proc's exception text. */
 export function editFailureCopy(message: string): string {
   if (/edit window has closed/i.test(message)) return 'Edit window has closed (15 min)';
-  if (/marked messages cannot be edited/i.test(message)) return "Marked messages can't be edited";
+  // Also matches its own copy, so mapping twice is harmless.
+  if (/marked messages (cannot|can't) be edited/i.test(message)) {
+    return "Marked messages can't be edited";
+  }
   return "Couldn't edit, try again";
 }
+
+/** User-facing copy for a failed mark; the raw proc text is only ever logged. */
+export const MARK_FAILED_COPY = "Couldn't mark, try again";
 
 /**
  * User-facing copy for a failed delete, mapped from the proc's exception text

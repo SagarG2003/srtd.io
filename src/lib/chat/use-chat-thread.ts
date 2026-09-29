@@ -165,6 +165,18 @@ function liveTargetFor(channel: ChannelSummary): ChannelTarget | null {
   }
 }
 
+/**
+ * Ids of rows that were visible (not deleted) and come back from a fetch as
+ * tombstones. Pure.
+ */
+export function newlyTombstoned(
+  visible: readonly ThreadMessage[],
+  fetched: readonly ThreadMessage[],
+): string[] {
+  const live = new Set(visible.filter((m) => m.deleted !== true).map((m) => m.id));
+  return fetched.filter((m) => m.deleted === true && live.has(m.id)).map((m) => m.id);
+}
+
 /** The Foundation client is the real connection; widen it to the messaging surface. */
 function asThreadConnection(client: ChatConnection): ThreadConnection {
   return client as ThreadConnection;
@@ -309,7 +321,12 @@ export function useChatThread(params: {
         }
       }
       const entries = outboxRef.current.entries(forChannel);
+      // A load, catch-up or reload can turn a row on screen into a tombstone
+      // (its delete signal was missed): report it like a live delete.
+      const turned =
+        channelRef.current === forChannel ? newlyTombstoned(messagesRef.current, fetched) : [];
       setMessages((prev) => withOutboxBubbles(mergeFetched(prev, fetched), entries, currentUserId));
+      if (turned.length > 0) reportDeleted(forChannel, turned);
       if (fetched.length === 0) return;
       void attachReactions(
         fetched.map((m) => m.id),
@@ -317,7 +334,7 @@ export function useChatThread(params: {
       );
       void resolveReplies(fetched, forChannel);
     },
-    [currentUserId, attachReactions, resolveReplies],
+    [currentUserId, attachReactions, resolveReplies, reportDeleted],
   );
 
   // Load the latest page whenever the channel changes. The channel's unrecorded

@@ -1,15 +1,17 @@
-// The full emoji picker behind the reactions row's "+". A search field on top
-// (matching the CLDR short name), a row of group tabs that stays put, and the
-// grid grouped by Unicode group below it. Glyphs render as text in the app's
-// emoji font stack (no images, no emoji library); the data is generated once
-// from Unicode 15.0 (emoji-data.ts). Touch opens it as a bottom sheet that
-// moves on Y only; the laptop layout opens a popover anchored to the menu that
-// fades (opacity only). Every control is at least 44x44. Tokens only, so light
-// and dark stay at parity.
+// The full emoji picker's body behind the reactions row's "+": a search field
+// on top (matching the CLDR short name), a row of group tabs that stays put,
+// and the grid grouped by Unicode group below it. Glyphs render as text in the
+// app's emoji font stack (no images, no emoji library); the data is generated
+// once from Unicode 15.0 (emoji-data.ts). This module and its data load through
+// a dynamic import() (MessageActionMenu starts it when the menu opens), so
+// neither is in the main chunk; the sheet / popover shell, its focus trap and
+// its close rules live in MessageActionMenu. The grid is virtualized: fixed
+// 44px rows, only the visible rows plus a 3-row buffer are rendered, and a
+// group tab jumps by row index. Every control is at least 44x44. Tokens only,
+// so light and dark stay at parity.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ReactElement, Ref } from 'react';
-import { createPortal } from 'react-dom';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import { IconSearch } from '@/components/ui/icons';
 import { cn } from '@/lib/cn';
 import { EMOJI, EMOJI_GROUPS, type EmojiEntry } from '@/components/chat/emoji-data';
@@ -26,6 +28,12 @@ export const EMOJI_NO_RESULTS = 'No emoji found';
 
 /** The search field's placeholder. */
 export const EMOJI_SEARCH_PLACEHOLDER = 'Search emoji';
+
+/** Every grid row (a group heading or a line of glyphs) is this tall. */
+export const EMOJI_ROW_PX = 44;
+
+/** Rows rendered past each edge of the visible window. */
+export const EMOJI_ROW_BUFFER = 3;
 
 /** One group of the grid. */
 export interface EmojiSection {
@@ -62,6 +70,68 @@ export function groupTabGlyph(section: EmojiSection): string {
 
 const SECTIONS = emojiSections();
 
+/** One fixed-height row of the virtual grid. */
+export type EmojiRow =
+  | { kind: 'heading'; group: string }
+  | { kind: 'glyphs'; emojis: readonly EmojiEntry[] };
+
+/** The grid as rows: a heading then its glyph lines per section (or just result lines). Pure. */
+export function emojiRows(
+  sections: readonly EmojiSection[],
+  columns: number,
+  headings = true,
+): EmojiRow[] {
+  const perRow = Math.max(1, Math.floor(columns));
+  const rows: EmojiRow[] = [];
+  for (const section of sections) {
+    if (headings) rows.push({ kind: 'heading', group: section.group });
+    for (let i = 0; i < section.emojis.length; i += perRow) {
+      rows.push({ kind: 'glyphs', emojis: section.emojis.slice(i, i + perRow) });
+    }
+  }
+  return rows;
+}
+
+/** The row index each group's heading sits at: where its tab jumps. Pure. */
+export function groupRowIndex(rows: readonly EmojiRow[]): Map<string, number> {
+  const index = new Map<string, number>();
+  rows.forEach((row, i) => {
+    if (row.kind === 'heading') index.set(row.group, i);
+  });
+  return index;
+}
+
+/** The group whose heading is at or above the top of the window. Pure. */
+export function groupAtRow(rows: readonly EmojiRow[], topRow: number): string | null {
+  let current: string | null = null;
+  for (let i = 0; i < rows.length && i <= topRow; i += 1) {
+    const row = rows[i];
+    if (row?.kind === 'heading') current = row.group;
+  }
+  return current;
+}
+
+/**
+ * The rows to render for a scroll position: the visible ones plus a
+ * EMOJI_ROW_BUFFER-row buffer each way, as [start, end). Pure.
+ */
+export function visibleRowRange(
+  scrollTop: number,
+  viewportHeight: number,
+  rowCount: number,
+): { start: number; end: number } {
+  const first = Math.floor(Math.max(0, scrollTop) / EMOJI_ROW_PX);
+  const visible = Math.ceil(Math.max(0, viewportHeight) / EMOJI_ROW_PX) + 1;
+  const start = Math.max(0, first - EMOJI_ROW_BUFFER);
+  const end = Math.min(rowCount, first + visible + EMOJI_ROW_BUFFER);
+  return { start, end: Math.max(start, end) };
+}
+
+/** Glyph columns that fit a grid this wide (44px each, 4px side padding). Pure. */
+export function gridColumns(width: number): number {
+  return Math.max(1, Math.floor((width - 8) / EMOJI_ROW_PX));
+}
+
 /** One 44x44 glyph button. */
 function EmojiButton(props: { entry: EmojiEntry; onPick: (char: string) => void }): ReactElement {
   return (
@@ -72,7 +142,7 @@ function EmojiButton(props: { entry: EmojiEntry; onPick: (char: string) => void 
       title={props.entry.name}
       onClick={() => props.onPick(props.entry.char)}
       className={cn(
-        'flex h-11 w-11 items-center justify-center rounded-lg hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+        'flex h-11 w-11 shrink-0 items-center justify-center rounded-lg hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
         EMOJI_GLYPH_TYPE,
       )}
     >
@@ -81,25 +151,16 @@ function EmojiButton(props: { entry: EmojiEntry; onPick: (char: string) => void 
   );
 }
 
-const GRID = 'grid grid-cols-[repeat(auto-fill,minmax(44px,1fr))] justify-items-center';
-
-/** The picker's props shared by its parts. */
-interface PickerPartProps {
+/** The search field (normal text selection, never under 16px on touch); `trailing` sits beside it. */
+export function EmojiSearchField(props: {
   query: string;
   onQuery: (query: string) => void;
-  onPick: (char: string) => void;
   layout: ChatLayout;
-  activeGroup: string | null;
-  onTab: (group: string) => void;
-}
-
-/** The search field (normal text selection, never under 16px on touch). */
-export function EmojiSearchField(
-  props: Pick<PickerPartProps, 'query' | 'onQuery' | 'layout'>,
-): ReactElement {
+  trailing?: ReactNode;
+}): ReactElement {
   return (
-    <div className="shrink-0 px-2 pt-2">
-      <label className="flex h-11 items-center gap-2 rounded-lg border border-border bg-panel-2 px-3 text-fg-3 focus-within:ring-2 focus-within:ring-accent">
+    <div className="flex shrink-0 items-center gap-1 px-2 pt-2">
+      <label className="flex h-11 min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-panel-2 px-3 text-fg-3 focus-within:ring-2 focus-within:ring-accent">
         <IconSearch size={16} />
         <input
           type="search"
@@ -115,14 +176,17 @@ export function EmojiSearchField(
           )}
         />
       </label>
+      {props.trailing}
     </div>
   );
 }
 
 /** The group tab row: one 44x44 tab per Unicode group; it sits outside the scroll. */
-export function EmojiTabs(
-  props: Pick<PickerPartProps, 'query' | 'activeGroup' | 'onTab'>,
-): ReactElement {
+export function EmojiTabs(props: {
+  query: string;
+  activeGroup: string | null;
+  onTab: (group: string) => void;
+}): ReactElement {
   const searching = props.query.trim() !== '';
   return (
     <div
@@ -152,219 +216,176 @@ export function EmojiTabs(
   );
 }
 
-/** The grid: the search results while a query is typed, else every group in order. */
-export function EmojiGrid(props: Pick<PickerPartProps, 'query' | 'onPick'>): ReactElement {
-  if (props.query.trim() !== '') {
-    const results = searchEmoji(props.query);
-    if (results.length === 0) {
-      return (
-        <p data-emoji-empty="" className="px-4 py-6 text-center text-sm text-fg-3">
-          {EMOJI_NO_RESULTS}
-        </p>
-      );
-    }
-    return (
-      <div data-emoji-results="" className={cn(GRID, 'p-1')}>
-        {results.map((entry) => (
-          <EmojiButton key={entry.char} entry={entry} onPick={props.onPick} />
-        ))}
-      </div>
-    );
-  }
+/**
+ * The virtual grid: a spacer as tall as every row, with only the rows in
+ * visibleRowRange rendered at their offsets. Hook-free.
+ */
+export function EmojiVirtualGrid(props: {
+  rows: readonly EmojiRow[];
+  scrollTop: number;
+  viewportHeight: number;
+  onPick: (char: string) => void;
+}): ReactElement {
+  const { start, end } = visibleRowRange(props.scrollTop, props.viewportHeight, props.rows.length);
   return (
-    <>
-      {SECTIONS.map((section) => (
-        <section key={section.group} data-emoji-section={section.group} className="px-1">
-          <h3 className={cn('px-2 pb-1 pt-3 text-fg-3', EMOJI_GROUP_TYPE)}>{section.group}</h3>
-          <div className={GRID}>
-            {section.emojis.map((entry) => (
+    <div
+      data-emoji-rows={props.rows.length}
+      className="relative"
+      style={{ height: props.rows.length * EMOJI_ROW_PX }}
+    >
+      {props.rows.slice(start, end).map((row, offset) => {
+        const index = start + offset;
+        const top = index * EMOJI_ROW_PX;
+        if (row.kind === 'heading') {
+          return (
+            <h3
+              key={`h-${row.group}`}
+              data-emoji-row={index}
+              data-emoji-section={row.group}
+              className={cn(
+                'absolute inset-x-0 flex h-11 items-end px-3 pb-1 text-fg-3',
+                EMOJI_GROUP_TYPE,
+              )}
+              style={{ top }}
+            >
+              {row.group}
+            </h3>
+          );
+        }
+        return (
+          <div
+            key={`r-${index}`}
+            data-emoji-row={index}
+            className="absolute inset-x-0 flex h-11 justify-start px-1"
+            style={{ top }}
+          >
+            {row.emojis.map((entry) => (
               <EmojiButton key={entry.char} entry={entry} onPick={props.onPick} />
             ))}
           </div>
-        </section>
-      ))}
-    </>
+        );
+      })}
+    </div>
   );
 }
 
 /**
- * The picker's contents: search on top, the group tabs, then the scrolling
- * grid. Hook-free: the query, the active tab and the handlers come in.
+ * The grid for a query: the result lines while a query is typed (or the empty
+ * line), else every group with its heading. Hook-free.
  */
-export function EmojiPickerBody(
-  props: PickerPartProps & { scrollRef?: Ref<HTMLDivElement>; onScroll?: () => void },
-): ReactElement {
+export function EmojiGrid(props: {
+  query: string;
+  onPick: (char: string) => void;
+  columns: number;
+  scrollTop: number;
+  viewportHeight: number;
+}): ReactElement {
+  const searching = props.query.trim() !== '';
+  const results = searching ? searchEmoji(props.query) : [];
+  if (searching && results.length === 0) {
+    return (
+      <p data-emoji-empty="" className="px-4 py-6 text-center text-sm text-fg-3">
+        {EMOJI_NO_RESULTS}
+      </p>
+    );
+  }
+  const rows = searching
+    ? emojiRows([{ group: '', emojis: results }], props.columns, false)
+    : emojiRows(SECTIONS, props.columns);
   return (
-    <>
-      <EmojiSearchField query={props.query} onQuery={props.onQuery} layout={props.layout} />
-      <EmojiTabs query={props.query} activeGroup={props.activeGroup} onTab={props.onTab} />
-      <div
-        ref={props.scrollRef}
-        onScroll={props.onScroll}
-        data-emoji-scroll=""
-        className="relative min-h-0 flex-1 overflow-y-auto"
-      >
-        <EmojiGrid query={props.query} onPick={props.onPick} />
-      </div>
-    </>
+    <EmojiVirtualGrid
+      rows={rows}
+      scrollTop={props.scrollTop}
+      viewportHeight={props.viewportHeight}
+      onPick={props.onPick}
+    />
   );
 }
 
-/** The laptop popover's size. */
-const POPOVER_WIDTH = 352;
-const POPOVER_HEIGHT = 400;
-
 /**
- * Where the laptop popover sits: above the anchor (the action menu) when there
- * is room, else below it, else pinned inside the viewport; aligned to the
- * anchor's left edge and kept 8px inside. Pure.
+ * The picker's contents inside the shell: search (with `trailing`, the
+ * shell's close control, beside it), the group tabs, then the scrolling
+ * virtual grid. Owns the query, the active tab and the scroll window.
  */
-export function popoverPosition(
-  anchor: Pick<DOMRect, 'top' | 'bottom' | 'left'>,
-  viewport: { width: number; height: number },
-): { top: number; left: number } {
-  const above = anchor.top - POPOVER_HEIGHT - 8;
-  const below = anchor.bottom + 8;
-  const top =
-    above >= 8
-      ? above
-      : below + POPOVER_HEIGHT <= viewport.height - 8
-        ? below
-        : Math.max(8, viewport.height - POPOVER_HEIGHT - 8);
-  const left = Math.max(8, Math.min(anchor.left, viewport.width - POPOVER_WIDTH - 8));
-  return { top, left };
-}
-
-/**
- * The picker. Touch: a bottom sheet over a dim, translateY only, the safe-area
- * inset kept clear. Laptop: a popover anchored to `anchor`, opacity only. A
- * pick calls onPick (the caller reacts and closes the picker and the menu);
- * Escape or the dim closes just the picker.
- */
-export function EmojiPicker(props: {
-  open: boolean;
-  onClose: () => void;
+export function EmojiPickerPanel(props: {
   onPick: (char: string) => void;
   layout: ChatLayout;
-  /** The laptop popover's anchor (the menu's rect); ignored on touch. */
-  anchor: DOMRect | null;
-}): ReactElement | null {
-  const { open, onClose, layout } = props;
+  trailing?: ReactNode;
+}): ReactElement {
   const [query, setQuery] = useState('');
   const [activeGroup, setActiveGroup] = useState<string | null>(SECTIONS[0]?.group ?? null);
-  const [shown, setShown] = useState(false);
+  const [view, setView] = useState({ scrollTop: 0, height: 0, width: 0 });
   const scrollRef = useRef<HTMLDivElement>(null);
+  const columns = gridColumns(view.width);
+  const sectionRows = useMemo(() => emojiRows(SECTIONS, columns), [columns]);
+  const headingRow = useMemo(() => groupRowIndex(sectionRows), [sectionRows]);
 
-  useEffect(() => {
-    if (open) return;
-    setQuery('');
-    setActiveGroup(SECTIONS[0]?.group ?? null);
-  }, [open]);
-
-  // Entrance: flip after mount so the one transition runs.
-  useEffect(() => {
-    if (!open) {
-      setShown(false);
-      return;
-    }
-    const id = requestAnimationFrame(() => setShown(true));
-    return () => cancelAnimationFrame(id);
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    function onKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape') {
-        event.stopPropagation();
-        onClose();
-      }
-    }
-    document.addEventListener('keydown', onKeyDown, true);
-    return () => document.removeEventListener('keydown', onKeyDown, true);
-  }, [open, onClose]);
-
-  const position = useMemo(
-    () =>
-      props.anchor !== null && typeof window !== 'undefined'
-        ? popoverPosition(props.anchor, { width: window.innerWidth, height: window.innerHeight })
-        : null,
-    [props.anchor],
-  );
+  // The window's size, before paint and on every resize of the grid.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el === null) return;
+    const measure = (): void =>
+      setView((v) =>
+        v.height === el.clientHeight && v.width === el.clientWidth
+          ? v
+          : { ...v, height: el.clientHeight, width: el.clientWidth },
+      );
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // A new query starts the list from the top.
   useLayoutEffect(() => {
-    if (scrollRef.current !== null) scrollRef.current.scrollTop = 0;
+    const el = scrollRef.current;
+    if (el !== null) el.scrollTop = 0;
+    setView((v) => (v.scrollTop === 0 ? v : { ...v, scrollTop: 0 }));
   }, [query]);
-
-  if (!open) return null;
 
   const onTab = (group: string): void => {
     setQuery('');
     setActiveGroup(group);
-    const list = scrollRef.current;
-    const target = list?.querySelector(`[data-emoji-section="${CSS.escape(group)}"]`);
-    if (list != null && target instanceof HTMLElement) list.scrollTop = target.offsetTop;
+    const top = (headingRow.get(group) ?? 0) * EMOJI_ROW_PX;
+    const el = scrollRef.current;
+    if (el !== null) el.scrollTop = top;
+    setView((v) => ({ ...v, scrollTop: top }));
   };
-  // The tab follows the section at the top of the list.
+  // The tab follows the group at the top of the window.
   const onScroll = (): void => {
-    const list = scrollRef.current;
-    if (list === null || query.trim() !== '') return;
-    let current: string | null = null;
-    for (const node of Array.from(list.querySelectorAll<HTMLElement>('[data-emoji-section]'))) {
-      if (node.offsetTop <= list.scrollTop + 1) current = node.dataset.emojiSection ?? current;
-    }
+    const el = scrollRef.current;
+    if (el === null) return;
+    const scrollTop = el.scrollTop;
+    setView((v) => (v.scrollTop === scrollTop ? v : { ...v, scrollTop }));
+    if (query.trim() !== '') return;
+    const current = groupAtRow(sectionRows, Math.floor(scrollTop / EMOJI_ROW_PX));
     if (current !== null && current !== activeGroup) setActiveGroup(current);
   };
 
-  const body = (
-    <EmojiPickerBody
-      query={query}
-      onQuery={setQuery}
-      onPick={props.onPick}
-      layout={layout}
-      activeGroup={activeGroup}
-      onTab={onTab}
-      scrollRef={scrollRef}
-      onScroll={onScroll}
-    />
-  );
-
-  if (layout === 'laptop') {
-    return createPortal(
-      <>
-        <div data-emoji-dismiss="" className="fixed inset-0 z-[60]" onClick={onClose} />
-        <div
-          role="dialog"
-          aria-label="Emoji picker"
-          data-emoji-picker="laptop"
-          className={cn(
-            'fixed z-[60] flex h-[400px] w-[352px] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-xl border border-border-strong bg-panel shadow-2xl transition-opacity duration-fast motion-reduce:transition-none',
-            shown ? 'opacity-100 ease-enter' : 'opacity-0 ease-exit',
-          )}
-          style={{ top: position?.top ?? 8, left: position?.left ?? 8 }}
-        >
-          {body}
-        </div>
-      </>,
-      document.body,
-    );
-  }
-  return createPortal(
-    <div data-emoji-dismiss="" className="fixed inset-0 z-[60] bg-black/45" onClick={onClose}>
+  return (
+    <>
+      <EmojiSearchField
+        query={query}
+        onQuery={setQuery}
+        layout={props.layout}
+        trailing={props.trailing}
+      />
+      <EmojiTabs query={query} activeGroup={activeGroup} onTab={onTab} />
       <div
-        role="dialog"
-        aria-label="Emoji picker"
-        aria-modal="true"
-        data-emoji-picker="touch"
-        onClick={(e) => e.stopPropagation()}
-        className={cn(
-          'absolute inset-x-0 bottom-0 flex h-[70vh] flex-col overflow-hidden rounded-t-2xl border-t border-border-strong bg-panel pb-[env(safe-area-inset-bottom)] shadow-2xl transition-transform duration-base motion-reduce:transition-none',
-          shown ? 'translate-y-0 ease-enter' : 'translate-y-full ease-exit',
-        )}
+        ref={scrollRef}
+        onScroll={onScroll}
+        data-emoji-scroll=""
+        className="relative min-h-0 flex-1 overflow-y-auto"
       >
-        {body}
+        <EmojiGrid
+          query={query}
+          onPick={props.onPick}
+          columns={columns}
+          scrollTop={view.scrollTop}
+          viewportHeight={view.height}
+        />
       </div>
-    </div>,
-    document.body,
+    </>
   );
 }

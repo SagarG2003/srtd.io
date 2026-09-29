@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Client } from '@srtdio/rpc';
+
+// use-chat-thread's import graph pulls the agora-chat browser SDK; mock it so
+// importing the module in node never touches browser globals.
+vi.mock('agora-chat', () => ({
+  default: { connection: vi.fn(), message: { create: vi.fn() } },
+}));
+
 import { runDelete, runEdit } from '@/lib/chat/delete-flow';
+import { newlyTombstoned } from '@/lib/chat/use-chat-thread';
 import { deleteOutcomeCopy } from '@/lib/chat/record';
 import { pruneThreadSelection } from '@/lib/chat/forward';
 import { markMessagesDeleted, parseLiveEvent, type ThreadMessage } from '@/lib/chat/thread';
@@ -205,5 +213,35 @@ describe('runEdit', () => {
     );
     expect(result).toEqual({ ok: true });
     await vi.waitFor(() => expect(onSignalFailed).toHaveBeenCalledOnce());
+  });
+});
+
+describe('D1: a reload that turns a visible row into a tombstone', () => {
+  const row = (id: string, deleted = false): ThreadMessage => ({
+    id,
+    senderUserId: 'peer',
+    body: deleted ? '' : `body ${id}`,
+    createdAt: '2026-09-22T10:00:00Z',
+    time: 1,
+    provisionalTime: false,
+    mine: false,
+    attachments: [],
+    sharedPostIds: [],
+    sharedBriefIds: [],
+    reply: null,
+    state: 'sent',
+    status: 'sent',
+    reactions: [],
+    ...(deleted ? { deleted: true } : {}),
+  });
+
+  it('reports only the rows that were on screen live and came back deleted', () => {
+    const visible = [row('a'), row('b'), row('gone', true)];
+    const fetched = [row('a', true), row('b'), row('gone', true), row('never-seen', true)];
+    const reportDeleted = vi.fn();
+    const turned = newlyTombstoned(visible, fetched);
+    if (turned.length > 0) reportDeleted('c', turned);
+    expect(reportDeleted).toHaveBeenCalledExactlyOnceWith('c', ['a']);
+    expect(newlyTombstoned(visible, [row('a'), row('b')])).toEqual([]);
   });
 });

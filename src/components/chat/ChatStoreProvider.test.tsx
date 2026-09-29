@@ -11,8 +11,10 @@ vi.mock('agora-chat', () => ({
 import {
   handleMessagesDeleted,
   loadChatList,
+  routeGlobalCmd,
   type ChatListReaders,
 } from '@/components/chat/ChatStoreProvider';
+import { deleteEventExt, readEventExt } from '@/lib/chat/thread';
 import { ChannelCard, channelListContent } from '@/components/chat/ChannelList';
 import { EmptyState } from '@/components/ui/EmptyState';
 import type { ChannelSummary } from '@/lib/chat-reads';
@@ -322,6 +324,50 @@ describe('D1: the store handles a delete signal for any channel', () => {
     expect(selectConversation(state, 'open')?.lastMessageText).toBe('open line');
     expect(stripDrafts).toHaveBeenCalledWith(['x9', 'x10']);
     expect(stripOutbox).toHaveBeenCalledWith(['x9', 'x10']);
+  });
+
+  it('a live delete cmd for a non-open chat strips its preview, draft and outbox', () => {
+    const state: ChatStoreState = setActive(
+      applyPreviews(
+        {
+          ...initialState(),
+          conversations: {
+            open: { lastMessageText: '', lastMessageTs: 0, unread: 0 },
+            other: { lastMessageText: '', lastMessageTs: 0, unread: 0 },
+          },
+        },
+        [
+          {
+            channelId: 'other',
+            messageId: 'x9',
+            senderUserId: 'p',
+            body: 'deleted words',
+            hasAttachments: false,
+            createdAt: '1970-01-01T00:00:00.020Z',
+          },
+        ],
+        ME,
+      ),
+      'open',
+    );
+    const rereadPreviews = vi.fn();
+    const stripDrafts = vi.fn();
+    const stripOutbox = vi.fn();
+    const deps = {
+      channelsShowing: (ids: readonly string[]) => channelsShowingDeleted(state, ids),
+      rereadPreviews,
+      stripDrafts,
+      stripOutbox,
+    };
+    routeGlobalCmd(deleteEventExt({ messageIds: ['x9'] }), (ids) =>
+      handleMessagesDeleted(deps, ids),
+    );
+    routeGlobalCmd(readEventExt({ channelId: 'other', messageId: 'x9' }), (ids) =>
+      handleMessagesDeleted(deps, ids),
+    );
+    expect(rereadPreviews).toHaveBeenCalledExactlyOnceWith(['other']);
+    expect(stripDrafts).toHaveBeenCalledExactlyOnceWith(['x9']);
+    expect(stripOutbox).toHaveBeenCalledExactlyOnceWith(['x9']);
   });
 
   it('no line shows a deleted id: no read at all', () => {

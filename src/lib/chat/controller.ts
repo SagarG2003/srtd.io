@@ -84,6 +84,27 @@ function dispatchGlobalMessage(message: AgoraChat.TextMsgBody): void {
   }
 }
 
+/** A subscriber to every incoming command message, regardless of the open thread. */
+export type GlobalCmdHandler = (message: AgoraChat.CmdMsgBody) => void;
+
+// Always-on fan-out for incoming commands (delete, edit, read, ...), mirroring
+// the text fan-out above, so the store sees a signal for any channel.
+const globalCmdHandlers = new Set<GlobalCmdHandler>();
+
+/** Subscribe to every incoming command message; returns the unsubscribe. */
+export function subscribeGlobalCmds(handler: GlobalCmdHandler): () => void {
+  globalCmdHandlers.add(handler);
+  return () => {
+    globalCmdHandlers.delete(handler);
+  };
+}
+
+function dispatchGlobalCmd(message: AgoraChat.CmdMsgBody): void {
+  for (const handler of globalCmdHandlers) {
+    handler(message);
+  }
+}
+
 export interface RunChatConnectionParams {
   /** Mints a fresh token; reused for every open and for renewal. */
   fetchToken: () => Promise<ChatTokenResult>;
@@ -306,6 +327,7 @@ export function runChatConnection(params: RunChatConnectionParams): ChatConnecti
           wake();
         },
         onTextMessage: (message) => dispatchGlobalMessage(message),
+        onCmdMessage: (message) => dispatchGlobalCmd(message),
         onError: (error) => {
           if (isCurrent() && isKickReason(error)) {
             onKicked(error.message);

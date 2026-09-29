@@ -5,5 +5,9 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["../../tests/etl/**/*.ts", "../../packages/etl/**/*.ts"]
+  "include": [
+    "../../tests/etl/**/*.ts",
+    "../../packages/etl/**/*.ts",
+    "../../scripts/gen-emoji-data.ts"
+  ]
 }

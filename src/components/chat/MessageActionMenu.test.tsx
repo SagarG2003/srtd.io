@@ -19,6 +19,16 @@ import {
   pickReaction,
   scheduleWindowBoundary,
   scrollFromPicker,
+  menuClosesOnViewport,
+  loadEmojiPicker,
+  loadedEmojiPicker,
+  resetEmojiPickerLoad,
+  pickerInitialFocus,
+  nextTrapFocus,
+  returnPickerFocus,
+  type EmojiPickerModule,
+  type Focusable,
+  type PickerRoot,
   type MessageMenuItem,
 } from '@/components/chat/MessageActionMenu';
 import { applyServerClock, initialState } from '@/lib/chat/chat-store';
@@ -499,5 +509,105 @@ describe('D3: window visibility on server time', () => {
     expect(vi.getTimerCount()).toBe(0);
     vi.advanceTimersByTime(60 * MIN);
     expect(onBoundary).not.toHaveBeenCalled();
+  });
+});
+
+describe('F4: the picker never closes itself', () => {
+  it('a resize or scroll while the picker is open does not close the menu (so not the picker)', () => {
+    expect(menuClosesOnViewport('resize', { picking: true, target: null })).toBe(false);
+    expect(menuClosesOnViewport('scroll', { picking: true, target: null })).toBe(false);
+    // Without the picker: any resize and any scroll outside it still close the menu.
+    expect(menuClosesOnViewport('resize', { picking: false, target: null })).toBe(true);
+    expect(menuClosesOnViewport('scroll', { picking: false, target: null })).toBe(true);
+  });
+});
+
+describe('F3: the picker chunk loads once, on menu open', () => {
+  afterEach(() => resetEmojiPickerLoad());
+
+  it('one import however often it is asked for; the module is then ready synchronously', async () => {
+    const module = { EmojiPickerPanel: () => null } as unknown as EmojiPickerModule;
+    const importer = vi.fn(() => Promise.resolve(module));
+    expect(loadedEmojiPicker()).toBeNull();
+    await Promise.all([loadEmojiPicker(importer), loadEmojiPicker(importer)]);
+    expect(importer).toHaveBeenCalledOnce();
+    expect(loadedEmojiPicker()).toBe(module);
+  });
+
+  it('a failed load is forgotten, so the next open tries again', async () => {
+    const importer = vi.fn(() => Promise.reject(new Error('chunk')));
+    await expect(loadEmojiPicker(importer)).rejects.toThrow('chunk');
+    await expect(loadEmojiPicker(importer)).rejects.toThrow('chunk');
+    expect(importer).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('F5: picker focus', () => {
+  function root(): PickerRoot & { focused: string[] } {
+    const focused: string[] = [];
+    const search: Focusable = { focus: () => focused.push('search') };
+    return {
+      focused,
+      focus: () => focused.push('sheet'),
+      querySelector: (selector) => (selector === '[data-emoji-search]' ? search : null),
+    };
+  }
+
+  it('laptop: initial focus on the search field; touch: on the sheet, never the search field', () => {
+    const laptop = root();
+    pickerInitialFocus('laptop', laptop).focus();
+    expect(laptop.focused).toEqual(['search']);
+    const touch = root();
+    pickerInitialFocus('touch', touch).focus();
+    expect(touch.focused).toEqual(['sheet']);
+  });
+
+  it('laptop before the body arrives: the shell holds focus until the search field exists', () => {
+    const shell: PickerRoot & { focused: boolean } = {
+      focused: false,
+      focus: () => {
+        shell.focused = true;
+      },
+      querySelector: () => null,
+    };
+    pickerInitialFocus('laptop', shell).focus();
+    expect(shell.focused).toBe(true);
+  });
+
+  it('Tab is trapped inside: it wraps at both ends, and enters from the container', () => {
+    const items = ['close', 'search', 'tab1', 'glyph'];
+    expect(nextTrapFocus(items, 'glyph', false)).toBe('close');
+    expect(nextTrapFocus(items, 'close', true)).toBe('glyph');
+    expect(nextTrapFocus(items, 'search', false)).toBe('tab1');
+    expect(nextTrapFocus(items, null, false)).toBe('close');
+    expect(nextTrapFocus(items, 'outside', true)).toBe('glyph');
+    expect(nextTrapFocus([], null, false)).toBeNull();
+  });
+
+  it('on close, focus returns to "+" (skipped when "+" left with the menu)', () => {
+    const plus = { isConnected: true, focus: vi.fn() };
+    expect(returnPickerFocus(plus)).toBe(true);
+    expect(plus.focus).toHaveBeenCalledOnce();
+    expect(returnPickerFocus({ isConnected: false, focus: vi.fn() })).toBe(false);
+    expect(returnPickerFocus(null)).toBe(false);
+  });
+
+  it('the "+" carries the ref the picker returns focus to', () => {
+    const moreRef = { current: null };
+    const row = ReactionsRow({
+      currentReaction: null,
+      reactionsOnly: false,
+      onReact: () => {},
+      onMore: () => {},
+      moreRef,
+    });
+    const plus = (row.props.children as ReactNode[])
+      .flat()
+      .find(
+        (el) =>
+          isValidElement(el) &&
+          (el.props as Record<string, unknown>)['data-react-more'] !== undefined,
+      ) as ReactElement & { ref?: unknown };
+    expect(plus.ref).toBe(moreRef);
   });
 });

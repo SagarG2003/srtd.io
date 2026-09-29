@@ -368,6 +368,38 @@ export function applyServerClock(
 }
 
 /**
+ * Which record attempts may sample the server clock: only the first send
+ * attempt of a message id in this session. A retry, or a replay of a persisted
+ * outbox entry, gets the original created_at back from the idempotent
+ * chat_message_send, so its ack says nothing about the clock now.
+ */
+export interface ClockSampler {
+  /** Ids replayed from the persisted outbox: never sampled. */
+  replayed: (ids: readonly string[]) => void;
+  /** A record attempt starts: the device time to sample against, or null when it must not. */
+  begin: (id: string) => number | null;
+}
+
+export function createClockSampler(now: () => number = Date.now): ClockSampler {
+  const attempted = new Set<string>();
+  return {
+    replayed: (ids) => {
+      for (const id of ids) attempted.add(id);
+    },
+    begin: (id) => {
+      if (attempted.has(id)) return null;
+      attempted.add(id);
+      return now();
+    },
+  };
+}
+
+/** Every message id queued in an outbox. Pure. */
+export function outboxIds(outbox: Outbox): string[] {
+  return Object.values(outbox).flatMap((list) => list.map((entry) => entry.id));
+}
+
+/**
  * Fold a live incoming message into the store. Self-sent messages are ignored
  * (the sender already echoes its own send). A message for the active channel
  * refreshes the last line but stays read; any other channel also increments

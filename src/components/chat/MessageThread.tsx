@@ -14,6 +14,7 @@ import {
 } from 'react';
 import { Link } from 'react-router-dom';
 import { isNearBottom } from '@/lib/chat/scroll';
+import { logger } from '@/lib/logger';
 import {
   distanceFromBottom,
   anchorAfterOlderLoad,
@@ -49,6 +50,7 @@ import {
   IconUsers,
 } from '@/components/ui/icons';
 import { useLongPress } from '@/components/ui';
+import { LONG_PRESS_MS, MOVE_CANCEL_PX } from '@/components/ui/useLongPress';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
@@ -134,6 +136,7 @@ import {
   canForward,
   deleteSelectionBlock,
   pruneThreadSelection,
+  scheduleSelectionBoundary,
   selectedForForward,
   threadSelectable,
   threadSelectionRole,
@@ -148,7 +151,7 @@ import {
   type MarkType,
   type SelectionRole,
 } from '@/lib/chat/marks';
-import type { WriteResult } from '@/lib/chat/record';
+import { MARK_FAILED_COPY, type WriteResult } from '@/lib/chat/record';
 import {
   aboutState,
   admitRows,
@@ -503,6 +506,26 @@ const JUMP_HIGHLIGHT_MS = 2000;
 export const JUMP_NOT_LOADED_TOAST = 'Message is older than loaded history';
 
 const NO_MARKS: Map<string, ChatMark> = new Map();
+
+/**
+ * What a bubble hands its post cards. While selecting, no talkAbout: a hold on
+ * a card is the row's hold (it toggles the row), never "talk about this post".
+ */
+export function cardRefsFor(
+  messageId: string,
+  selection: RowSelection | undefined,
+  postRefs: BubblePostRefs | undefined,
+): {
+  messageId: string;
+  onTalkAbout: BubblePostRefs['onTalkAbout'];
+  onShowPost: BubblePostRefs['onShowPost'];
+} {
+  return {
+    messageId,
+    onTalkAbout: selection === undefined ? postRefs?.onTalkAbout : undefined,
+    onShowPost: postRefs?.onShowPost,
+  };
+}
 
 /** Selection-mode state for one row, when selection mode is on. */
 export interface RowSelection {
@@ -899,10 +922,14 @@ export function MetaSpacer({ meta }: { meta: BubbleMeta }): ReactElement {
   );
 }
 
-/** The line under a failed own bubble ("Not sent" / "Photos not sent"); its alert (Retry) sits beside the bubble. */
-function FailedLine({ status }: { status: 'failed' | 'files-missing' }): ReactElement {
+/**
+ * The line under a failed own bubble ("Not sent" / "Photos not sent"), its own
+ * role="status" element so it is announced; its alert (Retry) sits beside the
+ * bubble and stays a plain button.
+ */
+export function FailedLine({ status }: { status: 'failed' | 'files-missing' }): ReactElement {
   return (
-    <span data-failed={status} className={cn('text-bad', BUBBLE_META_TYPE)}>
+    <span role="status" data-failed={status} className={cn('text-bad', BUBBLE_META_TYPE)}>
       {status === 'failed' ? 'Not sent' : FILES_MISSING}
     </span>
   );
@@ -1189,17 +1216,14 @@ export function MessageBubble(props: {
   /** The KEY chip and the cards' talk-about / filter hooks. */
   postRefs?: BubblePostRefs | undefined;
   bubbleRef?: Ref<HTMLDivElement>;
+  /** The row; in selection mode its taps and holds are the selection gesture's. */
+  rowRef?: Ref<HTMLLIElement>;
   /** Swipe right to reply (touch and pen); off while selecting. */
   swipe?: { iconRef?: Ref<HTMLSpanElement> };
   press?: {
     handlers: BubblePointerHandlers;
     onContextMenu: (event: MouseEvent) => void;
     consumeClick: () => boolean;
-    /**
-     * Selection mode: true (once) when this click trails a long-press that
-     * already toggled the row, so the tap is not counted twice.
-     */
-    consumeSelectHold?: () => boolean;
     /** A coarse (touch-first) pointer: the row suppresses the native contextmenu. */
     coarse?: boolean;
     /** Keyboard open (Enter / Space / Shift+F10), anchored to the bubble. */
@@ -1240,11 +1264,7 @@ export function MessageBubble(props: {
   const onReact = selection === undefined && message.state === 'sent' ? press?.onReact : undefined;
   const swipe = selection === undefined ? props.swipe : undefined;
   const chip = props.postRefs?.chip;
-  const cardRefs = {
-    messageId: message.id,
-    onTalkAbout: props.postRefs?.onTalkAbout,
-    onShowPost: props.postRefs?.onShowPost,
-  };
+  const cardRefs = cardRefsFor(message.id, selection, props.postRefs);
   const column = cn('flex min-w-0 flex-col gap-1', sized(BUBBLE_MAX, layout), mine && 'items-end');
   const senderLine = showMeta ? (
     <span className={cn('text-fg', sized(GROUP_SENDER_TYPE, layout))}>{name}</span>
@@ -1266,11 +1286,12 @@ export function MessageBubble(props: {
     const tombMeta: BubbleMeta = { time: meta.time, edited: false, status: null };
     return (
       <li
+        ref={props.rowRef}
         data-msg-id={message.id}
         data-state={message.state}
         data-deleted=""
         className={rowClass}
-        onContextMenu={rowContextMenu}
+        onContextMenu={selecting ? undefined : rowContextMenu}
       >
         {showMeta ? (
           <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" />
@@ -1309,26 +1330,17 @@ export function MessageBubble(props: {
   );
   return (
     <li
+      ref={props.rowRef}
       data-msg-id={message.id}
       data-state={message.state}
       data-selection={selection?.role}
       data-checked={checked ? '' : undefined}
       className={cn(rowClass, hasReactions && REACTION_ROW_SPACE, checked && 'isolate')}
-      // Selection mode: the whole row is the target. A tap anywhere on it
+      // Selection mode: the whole row is the target, owned by the selection
+      // gesture (createSelectionGesture, attached to this row): a tap anywhere
       // (bubble, blank space, the circle) toggles, and nothing inside opens
       // (links, media, cards, voice, chips); a long-press toggles too.
-      {...(selection !== undefined
-        ? {
-            ...press?.handlers,
-            onContextMenu: press?.onContextMenu,
-            onClickCapture: (e: MouseEvent) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (press?.consumeSelectHold?.() === true) return;
-              if (selection.role === 'selectable') selection.onToggle();
-            },
-          }
-        : { onContextMenu: rowContextMenu })}
+      {...(selection !== undefined ? {} : { onContextMenu: rowContextMenu })}
     >
       {checked ? (
         <span aria-hidden="true" data-selected-tint="" className={SELECTED_ROW_TINT} />
@@ -1773,6 +1785,21 @@ function MessageRow(props: {
       swipe.dispose();
     };
   }, [swipe]);
+  // Selection mode: the row's own pointer gesture decides every toggle.
+  const rowRef = useRef<HTMLLIElement>(null);
+  const gestureRef = useRef<SelectionGesture | null>(null);
+  gestureRef.current ??= createSelectionGesture({
+    selection: () => latest.current.selection,
+    coarse: () => latest.current.coarsePointer,
+  });
+  const gesture = gestureRef.current;
+  // A row that turns into a tombstone renders a new <li>: attach to that one.
+  const tombstone = props.message.deleted === true;
+  useEffect(() => {
+    const row = rowRef.current;
+    if (!selecting || row === null) return;
+    return gesture.attach(row);
+  }, [selecting, gesture, tombstone]);
   function open(anchor: DOMRect | null, reactionsOnly = false): void {
     if (latest.current.selection !== undefined) return;
     // The menu's backdrop takes the trailing pointerup, so no click to swallow.
@@ -1819,6 +1846,7 @@ function MessageRow(props: {
       viewerUserId={props.viewerUserId}
       meta={props.meta}
       bubbleRef={bubbleRef}
+      rowRef={rowRef}
       swipe={{ iconRef }}
       press={{
         handlers: pointer,
@@ -1829,7 +1857,6 @@ function MessageRow(props: {
           const swiped = swipe.consumeClickSuppression();
           return held || swiped;
         },
-        consumeSelectHold: rowHold.consumeSelectHold,
         coarse: props.coarsePointer,
         onKeyOpen: () => open(bubbleRect()),
         // Chevron, right-click and long-press all open the same one-box menu.
@@ -1915,6 +1942,142 @@ export function createRowHold(deps: {
       const toggled = selectHold;
       selectHold = false;
       return toggled;
+    },
+  };
+}
+
+/** The pointer fields the selection gesture reads (a DOM PointerEvent has them). */
+interface GesturePointer {
+  clientX: number;
+  clientY: number;
+  button: number;
+  pointerType: string;
+}
+
+function gesturePointer(event: Event): GesturePointer {
+  const e = event as Partial<GesturePointer>;
+  return {
+    clientX: e.clientX ?? 0,
+    clientY: e.clientY ?? 0,
+    button: e.button ?? 0,
+    pointerType: e.pointerType ?? 'mouse',
+  };
+}
+
+/** One row's selection-mode gesture; see createSelectionGesture. */
+export interface SelectionGesture {
+  /** Listen on the row (capture phase); returns the detach, which also stops the hold timer. */
+  attach: (row: EventTarget) => () => void;
+}
+
+/**
+ * The selection-mode gesture of one row, on real DOM events so it is tested
+ * with dispatched events. A press released within 10 px toggles the row once;
+ * a press that moves further (a scroll or a drag) or is cancelled never
+ * toggles and leaves nothing armed. A touch or pen hold (450 ms, still)
+ * toggles instead, and on a coarse pointer a contextmenu that beats the timer
+ * acts as that hold; the release and the click after a hold do nothing. Every
+ * click on the row is swallowed in capture (nothing inside opens); a click
+ * with no press before it (the keyboard on the circle) toggles.
+ */
+export function createSelectionGesture(deps: {
+  selection: () => RowSelection | undefined;
+  coarse: () => boolean;
+  holdMs?: number;
+  moveTolerancePx?: number;
+}): SelectionGesture {
+  const holdMs = deps.holdMs ?? LONG_PRESS_MS;
+  const tolerance = deps.moveTolerancePx ?? MOVE_CANCEL_PX;
+  let start: { x: number; y: number } | null = null;
+  let moved = false;
+  let held = false;
+  let swallowClick = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const stopTimer = (): void => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+  };
+  const toggle = (): void => {
+    const selection = deps.selection();
+    if (selection?.role === 'selectable') selection.onToggle();
+  };
+  const hold = (): void => {
+    stopTimer();
+    held = true;
+    swallowClick = true;
+    toggle();
+  };
+
+  const onPointerDown = (event: Event): void => {
+    const p = gesturePointer(event);
+    if (deps.selection() === undefined || p.button !== 0) return;
+    stopTimer();
+    start = { x: p.clientX, y: p.clientY };
+    moved = false;
+    held = false;
+    swallowClick = false;
+    if (p.pointerType !== 'mouse') timer = setTimeout(hold, holdMs);
+  };
+  const onPointerMove = (event: Event): void => {
+    if (start === null || moved) return;
+    const p = gesturePointer(event);
+    if (Math.hypot(p.clientX - start.x, p.clientY - start.y) > tolerance) {
+      moved = true;
+      stopTimer();
+    }
+  };
+  const onPointerUp = (): void => {
+    stopTimer();
+    if (start === null) return;
+    start = null;
+    // This press decided; the click that trails it is swallowed.
+    swallowClick = true;
+    if (!moved && !held) toggle();
+  };
+  const onPointerCancel = (): void => {
+    stopTimer();
+    start = null;
+    moved = false;
+  };
+  const onContextMenu = (event: Event): void => {
+    if (deps.selection() === undefined) return;
+    event.preventDefault();
+    if (deps.coarse() && start !== null && !moved && !held) hold();
+  };
+  const onClick = (event: Event): void => {
+    if (deps.selection() === undefined) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (swallowClick) {
+      swallowClick = false;
+      return;
+    }
+    toggle();
+  };
+
+  const listeners: [string, (event: Event) => void][] = [
+    ['pointerdown', onPointerDown],
+    ['pointermove', onPointerMove],
+    ['pointerup', onPointerUp],
+    ['pointercancel', onPointerCancel],
+    ['contextmenu', onContextMenu],
+    ['click', onClick],
+  ];
+  return {
+    attach: (row) => {
+      // One abort removes every listener (capture phase, before anything inside).
+      const controller = new AbortController();
+      for (const [type, listener] of listeners) {
+        row.addEventListener(type, listener, { capture: true, signal: controller.signal });
+      }
+      return () => {
+        controller.abort();
+        stopTimer();
+        start = null;
+        held = false;
+        swallowClick = false;
+      };
     },
   };
 }
@@ -2056,6 +2219,24 @@ function ThreadBody(
       el.scrollTop = el.scrollHeight;
     });
   }, [programScroll]);
+  // Selection entry: the pressed row keeps its screen Y while the check column
+  // rewraps the bubbles (taken when the menu entry runs, restored before paint).
+  const selectionAnchorRef = useRef<RowAnchor | null>(null);
+  const anchorSelection = (message: ThreadMessage): void => {
+    const el = listRef.current;
+    selectionAnchorRef.current = el !== null ? captureRowAnchor(el, message.id) : null;
+  };
+  const selectingNow = props.selection !== undefined;
+  useLayoutEffect(() => {
+    const anchor = selectionAnchorRef.current;
+    selectionAnchorRef.current = null;
+    if (!selectingNow || anchor === null) return;
+    // The anchored row wins over stick-to-bottom until the reader scrolls.
+    stickRef.current = false;
+    programScroll((el) => {
+      restoreRowAnchor(el, anchor);
+    });
+  }, [selectingNow, programScroll]);
   /** A user gesture on the list: the next scroll events are the reader's. */
   const userGesture = (): void => {
     sourceRef.current = 'user';
@@ -2385,7 +2566,7 @@ function ThreadBody(
                 : {})}
               {...(props.selection !== undefined
                 ? {
-                    selection: rowSelection(row.message, props.selection, props.marks),
+                    selection: rowSelection(row.message, props.selection),
                   }
                 : {})}
               {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
@@ -2419,7 +2600,9 @@ function ThreadBody(
         }}
         canDelete={props.onDeleteMessage !== undefined && menuOwn.canDelete}
         onDelete={() => {
-          if (menu) props.onDeleteMessage?.(menu.message);
+          if (!menu) return;
+          anchorSelection(menu.message);
+          props.onDeleteMessage?.(menu.message);
         }}
         lockedByMark={menuOwn.lockedByMark}
         currentReaction={menu ? (menu.message.reactions.find((r) => r.mine)?.emoji ?? null) : null}
@@ -2436,11 +2619,15 @@ function ThreadBody(
           menu !== null && props.onForwardMessage !== undefined && canForward(menu.message)
         }
         onForward={() => {
-          if (menu) props.onForwardMessage?.(menu.message);
+          if (!menu) return;
+          anchorSelection(menu.message);
+          props.onForwardMessage?.(menu.message);
         }}
         canSelect={props.onStartSelect !== undefined}
         onSelect={() => {
-          if (menu) props.onStartSelect?.(menu.message);
+          if (!menu) return;
+          anchorSelection(menu.message);
+          props.onStartSelect?.(menu.message);
         }}
         onReact={(emoji) => {
           if (menu && menu.message.state === 'sent')
@@ -2520,43 +2707,184 @@ export function threadSkeleton(): ReactElement {
 }
 
 /**
- * Selection-mode state for one row: an own marked message shows the lock, any
- * other recorded, live message can be checked, deleted and pending ones nothing.
+ * Selection-mode state for one row: any recorded, live message can be checked
+ * (a mark blocks only Delete, never the selection); deleted and pending ones
+ * show nothing.
  */
 export function rowSelection(
   message: ThreadMessage,
   selection: { selected: ReadonlySet<string>; onToggle: (id: string) => void },
-  marks: Map<string, ChatMark>,
 ): RowSelection {
   return {
-    role: threadSelectionRole(message, marks),
+    role: threadSelectionRole(message),
     checked: selection.selected.has(message.id),
     onToggle: () => selection.onToggle(message.id),
   };
 }
 
-/**
- * The selection a menu Select, Forward or Delete opens with: that message
- * ticked, or nothing when it cannot be (an own marked message keeps its lock).
- */
-export function selectionOnEntry(
-  message: ThreadMessage,
-  marks: Map<string, ChatMark>,
-): Set<string> {
-  return threadSelectable(message, marks) ? new Set([message.id]) : new Set();
+/** The selection a menu Select, Forward or Delete opens with: that message ticked when it can be. */
+export function selectionOnEntry(message: ThreadMessage): Set<string> {
+  return threadSelectable(message) ? new Set([message.id]) : new Set();
 }
 
 /**
  * Whether the menu's Forward enters selection mode (the message ticked) rather
  * than opening the picker for it alone: always, where selection mode exists,
- * except for an own marked message, whose lock keeps it out of the selection.
+ * marked messages included.
  */
 export function forwardEntersSelection(
   message: ThreadMessage,
-  marks: Map<string, ChatMark>,
   selectionAvailable: boolean,
 ): boolean {
-  return selectionAvailable && threadSelectable(message, marks);
+  return selectionAvailable && threadSelectable(message);
+}
+
+/** The slice of the thread list selection anchoring reads (the <ul>, or a test fake). */
+export interface AnchorList {
+  scrollTop: number;
+  querySelector: (selectors: string) => { getBoundingClientRect: () => { top: number } } | null;
+}
+
+/** A row's on-screen Y, taken before the selection column appears. */
+export interface RowAnchor {
+  id: string;
+  top: number;
+}
+
+function rowSelector(id: string): string {
+  return `[data-msg-id="${id.replace(/["\\]/g, '\\$&')}"]`;
+}
+
+/** The row's current screen Y, or null when it is not rendered. */
+export function captureRowAnchor(list: AnchorList, id: string): RowAnchor | null {
+  const row = list.querySelector(rowSelector(id));
+  return row === null ? null : { id, top: row.getBoundingClientRect().top };
+}
+
+/**
+ * After the 60px check column rewraps the bubbles, scroll (instantly) so the
+ * anchored row is back at its screen Y. Returns the scroll change.
+ */
+export function restoreRowAnchor(list: AnchorList, anchor: RowAnchor): number {
+  const row = list.querySelector(rowSelector(anchor.id));
+  if (row === null) return 0;
+  const delta = row.getBoundingClientRect().top - anchor.top;
+  if (delta !== 0) list.scrollTop += delta;
+  return delta;
+}
+
+/** The toast for a mark outcome: fixed copy on failure (the raw text is logged), none on success. */
+export function markOutcomeCopy(result: WriteResult): string | null {
+  if (result.ok) return null;
+  logger.warn('chat: mark failed', { error: result.message });
+  return MARK_FAILED_COPY;
+}
+
+/** The history.state key that marks the entry selection mode pushed. */
+export const SELECTION_HISTORY_KEY = 'chatSelection';
+
+/** The slice of window selection history needs (the real window, or a test fake). */
+export interface SelectionHistoryWindow {
+  history: {
+    readonly state: unknown;
+    pushState: (data: unknown, unused: string, url?: string | null) => void;
+    back: () => void;
+  };
+  location: { href: string };
+  addEventListener: (type: 'popstate', listener: () => void) => void;
+  removeEventListener: (type: 'popstate', listener: () => void) => void;
+}
+
+/** One selection mode's history entry; see enterSelectionHistory. */
+export interface SelectionHistory {
+  /** Cancel, Escape, the header chevron: pop the marker; its popstate exits. */
+  cancel: () => void;
+  /** Selection ended another way (delete, forward) or the thread unmounts. */
+  dispose: () => void;
+}
+
+let selectionMarkerSeq = 0;
+// Markers buried under a later navigation (the chat was left while selecting):
+// landing on one skips it, so no stale entry ever shows the chat twice.
+const buriedMarkers = new Set<number>();
+let buriedGuard: (() => void) | null = null;
+
+function selectionMarkerOf(state: unknown): number | null {
+  if (typeof state !== 'object' || state === null) return null;
+  const marker = (state as Record<string, unknown>)[SELECTION_HISTORY_KEY];
+  return typeof marker === 'number' ? marker : null;
+}
+
+function buryMarker(win: SelectionHistoryWindow, marker: number): void {
+  buriedMarkers.add(marker);
+  if (buriedGuard !== null) return;
+  const guard = (): void => {
+    const landed = selectionMarkerOf(win.history.state);
+    if (landed === null || !buriedMarkers.has(landed)) return;
+    buriedMarkers.delete(landed);
+    win.history.back();
+  };
+  win.addEventListener('popstate', guard);
+  buriedGuard = () => win.removeEventListener('popstate', guard);
+}
+
+/**
+ * Selection mode's history entry (WhatsApp: system back and the iOS swipe-back
+ * leave selection first). Entering pushes one entry at the same URL (the
+ * ?channel= included) whose state carries a marker; a popstate off it exits
+ * selection and stays in the chat. cancel() leaves through history.back(), so
+ * the marker never lingers; dispose() pops it too when selection ended some
+ * other way, and a marker buried under a navigation is skipped if ever
+ * landed on.
+ */
+export function enterSelectionHistory(
+  win: SelectionHistoryWindow,
+  onExit: () => void,
+): SelectionHistory {
+  selectionMarkerSeq += 1;
+  const marker = selectionMarkerSeq;
+  const base = win.history.state;
+  win.history.pushState(
+    { ...(typeof base === 'object' && base !== null ? base : {}), [SELECTION_HISTORY_KEY]: marker },
+    '',
+    win.location.href,
+  );
+  let active = true;
+  const onTop = (): boolean => selectionMarkerOf(win.history.state) === marker;
+  const onPop = (): void => {
+    if (!active || onTop()) return;
+    active = false;
+    win.removeEventListener('popstate', onPop);
+    onExit();
+  };
+  win.addEventListener('popstate', onPop);
+  return {
+    cancel: () => {
+      if (!active) return;
+      if (onTop()) {
+        win.history.back();
+        return;
+      }
+      active = false;
+      win.removeEventListener('popstate', onPop);
+      buryMarker(win, marker);
+      onExit();
+    },
+    dispose: () => {
+      win.removeEventListener('popstate', onPop);
+      if (!active) return;
+      active = false;
+      if (onTop()) win.history.back();
+      else buryMarker(win, marker);
+    },
+  };
+}
+
+/** Test seam: forget buried markers and the guard. */
+export function resetSelectionHistory(): void {
+  buriedMarkers.clear();
+  buriedGuard?.();
+  buriedGuard = null;
 }
 
 /** The thread pane: header (+ optional back), message list, and composer. */
@@ -2602,6 +2930,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const openPosts = useOpenPosts(workspaceId, channelKey);
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Bumped when the selection's Delete window boundary passes (a re-render).
+  const [selectionTick, setSelectionTick] = useState(0);
   const [marksOpen, setMarksOpen] = useState(false);
   const [contactOpen, setContactOpen] = useState(false);
   const [priorityFor, setPriorityFor] = useState<{
@@ -2640,8 +2970,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     priority: MarkPriority,
   ): Promise<void> => {
     if (onSetMark === undefined) return;
-    const result = await onSetMark(messageId, type, priority);
-    if (!result.ok) toast.show({ title: result.message });
+    const copy = markOutcomeCopy(await onSetMark(messageId, type, priority));
+    if (copy !== null) toast.show({ title: copy });
   };
 
   const onDeleteMessages = props.onDeleteMessages;
@@ -2663,14 +2993,34 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setSelecting(false);
     setSelected(new Set());
   };
+  // Selection mode owns one history entry: back exits it and stays in the chat.
+  const selectionHistoryRef = useRef<SelectionHistory | null>(null);
+  useEffect(() => {
+    if (!selecting) return;
+    const entry = enterSelectionHistory(window, () => {
+      setSelecting(false);
+      setSelected(new Set());
+    });
+    selectionHistoryRef.current = entry;
+    return () => {
+      selectionHistoryRef.current = null;
+      entry.dispose();
+    };
+  }, [selecting]);
+  /** Cancel, Escape and the header chevron: through history.back(). */
+  const cancelSelection = (): void => {
+    const entry = selectionHistoryRef.current;
+    if (entry !== null) entry.cancel();
+    else exitSelection();
+  };
   /**
    * Menu Select, Forward or Delete: selection mode opens with that message
-   * ticked (when it can be; an own marked message keeps its lock).
+   * ticked (when it can be).
    */
   const enterSelection = (message: ThreadMessage): void => {
     setEditing(null);
     setSelecting(true);
-    setSelected(selectionOnEntry(message, marks));
+    setSelected(selectionOnEntry(message));
   };
   // Escape leaves selection mode (the laptop's Cancel).
   useEffect(() => {
@@ -2678,8 +3028,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     const onKeyDown = (event: globalThis.KeyboardEvent): void => {
       if (event.key !== 'Escape' || document.querySelector('[aria-modal="true"], [role="menu"]'))
         return;
-      setSelecting(false);
-      setSelected(new Set());
+      selectionHistoryRef.current?.cancel();
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
@@ -2787,10 +3136,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // Selection, jumps and the forward source read the list that is on screen.
   useEffect(() => {
     setSelected((prev) => {
-      const next = pruneThreadSelection(prev, shownMessages, marks);
+      const next = pruneThreadSelection(prev, shownMessages);
       return next.size === prev.size ? prev : next;
     });
-  }, [shownMessages, marks]);
+  }, [shownMessages]);
   const messagesById = useMemo(() => new Map(shownMessages.map((m) => [m.id, m])), [shownMessages]);
   const markedMessages = props.markedMessages;
   const messageFor = useCallback(
@@ -2886,6 +3235,16 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   };
   const filterPost = filterPostId !== null ? postRef(filterPostId) : undefined;
   // Delete follows the 30 minute window on server time; the bar says why not.
+  // One timeout re-computes it when the earliest selected own message ages out.
+  useEffect(() => {
+    if (!selecting) return;
+    return scheduleSelectionBoundary({
+      selected,
+      messages: shownMessages,
+      now: serverNow,
+      onBoundary: () => setSelectionTick((t) => t + 1),
+    });
+  }, [selecting, selected, shownMessages, serverNow, selectionTick]);
   const deleteBlock = selecting
     ? deleteSelectionBlock(selected, shownMessages, marks, serverNow())
     : null;
@@ -2905,11 +3264,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         {selecting ? (
           <>
             {props.onBack !== undefined ? (
-              <IconButton label="Cancel selection" onClick={exitSelection}>
+              <IconButton label="Cancel selection" onClick={cancelSelection}>
                 <IconChevronLeft size={20} />
               </IconButton>
             ) : null}
-            <SelectionHeader count={selected.size} onCancel={exitSelection} layout={layout} />
+            <SelectionHeader count={selected.size} onCancel={cancelSelection} layout={layout} />
           </>
         ) : (
           <>
@@ -2978,9 +3337,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         {...(canForwardHere && !selecting
           ? {
               onForwardMessage: (message: ThreadMessage) => {
-                // An own marked message keeps its lock (never ticked), so its
-                // Forward goes straight to the picker; any other enters selection.
-                if (forwardEntersSelection(message, marks, onDeleteMessages !== undefined)) {
+                // Where selection exists, Forward enters it with the message ticked.
+                if (forwardEntersSelection(message, onDeleteMessages !== undefined)) {
                   enterSelection(message);
                   return;
                 }

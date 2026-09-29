@@ -47,13 +47,14 @@ import { sendMessageRecord } from '@/lib/chat/record';
 import { createOutboxSender, runSend, type OutboxSender } from '@/lib/chat/send-flow';
 import {
   mapLiveTextMessage,
+  parseLiveEvent,
   sendText,
   targetFromSummary,
   type ChannelTarget,
   type ThreadConnection,
 } from '@/lib/chat/thread';
 import { liveVerifierFor } from '@/lib/chat/live-verify';
-import { subscribeGlobalMessages } from '@/lib/chat/controller';
+import { subscribeGlobalCmds, subscribeGlobalMessages } from '@/lib/chat/controller';
 import {
   loadConversationPreviews,
   loadUnreadCounts,
@@ -188,6 +189,18 @@ export function handleMessagesDeleted(
   if (channels.length > 0) deps.rereadPreviews(channels);
 }
 
+/**
+ * A live command for any channel (the global fan-out): a delete signal's ids go
+ * to the tombstone handler; every other command is the open thread's business.
+ */
+export function routeGlobalCmd(
+  ext: unknown,
+  onDeleted: (messageIds: readonly string[]) => void,
+): void {
+  const event = parseLiveEvent(ext);
+  if (event.kind === 'delete') onDeleted(event.messageIds);
+}
+
 /** The four reads the chat list's first paint waits on. */
 export interface ChatListReaders {
   roster: () => Promise<Result<ChannelSummary[]>>;
@@ -260,6 +273,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   // Deleted ids whose quotes queued sends must not persist (bounded FIFO).
   const deletedIdsRef = useRef<Set<string>>(new Set());
   const onMessagesDeletedRef = useRef<(messageIds: readonly string[]) => void>(() => {});
+  // Which record attempts may sample the server clock (session-wide).
+  const clockSamplerRef = useRef<store.ClockSampler>(store.createClockSampler());
   // Stable facade over the current sender, which is replaced per workspace/user.
   const outbox = useMemo<ChannelOutbox>(
     () => ({
@@ -345,7 +360,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
 
   // Messages became tombstones: drafts, the queued outbox and the list lines
   // that showed one. The re-read is one preview scan for every hit channel.
-  onMessagesDeletedRef.current = (messageIds) => {
+  // The open thread and the global cmd fan-out both report a live delete; ids
+  // already handled are skipped so the line is re-read once.
+  onMessagesDeletedRef.current = (reported) => {
+    const messageIds = reported.filter((id) => !deletedIdsRef.current.has(id));
     handleMessagesDeleted(
       {
         channelsShowing: (ids) => store.channelsShowingDeleted(stateRef.current, ids),
@@ -422,6 +440,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     if (!workspaceId || currentUserId === null) return;
     const scopeKey = { workspaceId, userId: currentUserId };
     const storage = browserStorage();
+    // Persisted sends are replays: their acks carry the original created_at.
+    const persisted = store.readPersistedOutbox(storage, scopeKey);
+    const clockSampler = clockSamplerRef.current;
+    clockSampler.replayed(store.outboxIds(persisted));
     const sender = createOutboxSender(
       {
         deliver: (channelId, entry, traceId, onRecorded) => {
@@ -431,10 +453,11 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
             {
               // The ack's server created_at against the device time of the
               // send sets the server clock offset (the edit / delete windows).
+              // Only the first attempt of an id in this session samples it.
               recordMessage: (input) => {
-                const sentAt = Date.now();
+                const sentAt = clockSampler.begin(input.id);
                 return sendMessageRecord({ client: supabase, ...input }).then((result) => {
-                  if (result.ok) {
+                  if (result.ok && sentAt !== null) {
                     const createdAt = result.row.created_at;
                     setState((prev) => store.applyServerClock(prev, createdAt, sentAt));
                   }
@@ -498,7 +521,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           ),
         onAttemptFailed: (context) => logger.warn('chat: message record attempt failed', context),
       },
-      store.readPersistedOutbox(storage, scopeKey),
+      persisted,
     );
     senderRef.current = sender;
     const kick = (): void => sender.kick();
@@ -603,6 +626,15 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   };
 
   useEffect(() => subscribeGlobalMessages((message) => onIncomingRef.current(message)), []);
+  // A delete signal for any chat, open or not, strips its drafts, queued quotes
+  // and list line (the open thread also turns the rows into tombstones itself).
+  useEffect(
+    () =>
+      subscribeGlobalCmds((message) =>
+        routeGlobalCmd(message.ext, (ids) => onMessagesDeletedRef.current(ids)),
+      ),
+    [],
+  );
 
   const loadStatus = store.selectLoadStatus(state, scope);
   const roster = loadStatus === 'ready' ? state.roster : EMPTY_ROSTER;

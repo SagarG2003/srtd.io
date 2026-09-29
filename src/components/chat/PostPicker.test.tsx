@@ -22,6 +22,8 @@ import {
   SearchResultsView,
   loadPickerSections,
   loadSearchPage,
+  briefsLoadError,
+  POSTS_LOAD_FAILED,
   type PostRowContext,
 } from '@/components/chat/PostPicker';
 import { isAgencySide } from '@/components/pages/pcs/roles';
@@ -132,14 +134,30 @@ describe('loadPickerSections', () => {
     expect(result.ok && result.data.sections.map((s) => s.key)).toEqual(['review', 'approved']);
   });
 
-  it('surfaces a failed read as an error', async () => {
+  it('F14: a failed read surfaces fixed copy, never the raw error text', async () => {
     const { client } = makeClient(() => ({ data: null, error: { message: 'boom' } }));
     const result = await loadPickerSections(client, {
       workspaceId: WS,
       role: agency,
       now: new Date(),
     });
-    expect(result).toEqual({ ok: false, message: 'boom' });
+    expect(result).toEqual({ ok: false, message: POSTS_LOAD_FAILED });
+    expect(POSTS_LOAD_FAILED).toBe("Couldn't load posts, try again");
+  });
+
+  it('F14: a failed search page and a failed briefs read show mapped copy', async () => {
+    const { client } = makeClient(() => ({ data: null, error: { message: 'relation boom' } }));
+    const page = await loadSearchPage(client, {
+      workspaceId: WS,
+      role: agency,
+      query: { text: 'x', number: null },
+      cursor: null,
+    });
+    expect(page).toEqual({ ok: false, message: POSTS_LOAD_FAILED });
+    expect(briefsLoadError({ ok: false, error: { message: 'relation boom' } })).toBe(
+      "Couldn't load briefs, try again",
+    );
+    expect(briefsLoadError({ ok: true })).toBeNull();
   });
 });
 

@@ -17,6 +17,7 @@ import {
   metaPlacement,
   MetaSpacer,
   FAILED_RETRY_CLASS,
+  FailedLine,
   REACTION_BADGE_CLASS,
   REACTION_ROW_SPACE,
   bubbleStatus,
@@ -43,6 +44,17 @@ import {
   messageTimeSource,
   rowSelection,
   createRowHold,
+  createSelectionGesture,
+  markOutcomeCopy,
+  captureRowAnchor,
+  restoreRowAnchor,
+  type AnchorList,
+  type RowAnchor,
+  enterSelectionHistory,
+  resetSelectionHistory,
+  SELECTION_HISTORY_KEY,
+  type SelectionHistoryWindow,
+  cardRefsFor,
   forwardEntersSelection,
   selectionOnEntry,
   SELECTION_ROW_OFFSET,
@@ -488,6 +500,26 @@ describe('in-bubble meta and ticks', () => {
       stopPropagation: () => {},
     });
     expect(onRetry).toHaveBeenCalledWith('m-f');
+  });
+
+  it('F13: the retry keeps button semantics; the status text is its own role="status" element', () => {
+    const root = renderBubble(own({ id: 'm-f', state: 'failed' }), {
+      showTicks: true,
+      onRetry: vi.fn(),
+    });
+    let retry: ReactElement<Record<string, unknown>> | null = null;
+    walk(root, (el) => {
+      if ((el.props as Record<string, unknown>)['data-failed-retry'] !== undefined) {
+        retry = el as ReactElement<Record<string, unknown>>;
+      }
+    });
+    const button = retry as unknown as ReactElement<Record<string, unknown>>;
+    expect(button.type).toBe('button');
+    expect(button.props.role).toBeUndefined();
+    expect(renderStrip(button as ReactElement)).not.toContain('role="status"');
+    const html = renderStrip(root);
+    expect(html).toMatch(/<span role="status" data-failed="failed"[^>]*>Not sent<\/span>/);
+    expect(renderStrip(<FailedLine status="files-missing" />)).toContain('role="status"');
   });
 
   it('text bubbles end with an invisible spacer the width of the meta', () => {
@@ -2400,39 +2432,17 @@ describe('tombstones, edited label and the neutral selection', () => {
     expect(all(unchecked).some((el) => el.props['data-selected-tint'] !== undefined)).toBe(false);
   });
 
-  it('rowSelection: own marked shows the lock, deleted is not selectable', () => {
-    const marks = new Map<string, ChatMark>([
-      [
-        'marked',
-        {
-          messageId: 'marked',
-          channelId: 'c',
-          type: 'commitment',
-          priority: null,
-          markedAt: 't',
-          resolved: false,
-          resolvedBy: null,
-          resolvedAt: null,
-        },
-      ],
-    ]);
-    const selection = { selected: new Set<string>(), onToggle: noop };
-    expect(rowSelection(makeMessage({ id: 'marked', mine: true }), selection, marks).role).toBe(
-      'locked',
-    );
-    expect(rowSelection(makeMessage({ id: 'x', mine: true }), selection, marks).role).toBe(
-      'selectable',
-    );
-    expect(rowSelection(makeMessage({ id: 'p', mine: false }), selection, marks).role).toBe(
-      'selectable',
-    );
-    expect(
-      rowSelection(makeMessage({ id: 'd', mine: true, deleted: true }), selection, marks).role,
-    ).toBe('none');
-    const lockedRow = render(makeMessage({ id: 'marked', mine: true }), {
-      selection: { role: 'locked', checked: false, onToggle: noop },
+  it('F8 rowSelection: a marked own message is selectable, deleted is not', () => {
+    const selection = { selected: new Set<string>(['marked']), onToggle: noop };
+    expect(rowSelection(makeMessage({ id: 'marked', mine: true }), selection)).toMatchObject({
+      role: 'selectable',
+      checked: true,
     });
-    expect(renderStrip(lockedRow)).toContain('data-select-lock');
+    expect(rowSelection(makeMessage({ id: 'x', mine: true }), selection).role).toBe('selectable');
+    expect(rowSelection(makeMessage({ id: 'p', mine: false }), selection).role).toBe('selectable');
+    expect(rowSelection(makeMessage({ id: 'd', mine: true, deleted: true }), selection).role).toBe(
+      'none',
+    );
   });
 });
 
@@ -2539,7 +2549,6 @@ describe('D8: WhatsApp multi-select', () => {
   function row(
     message: ThreadMessage,
     selection: RowSelection | undefined,
-    consumeSelectHold: () => boolean = () => false,
   ): ReactElement<Record<string, unknown>> {
     return MessageBubble({
       message,
@@ -2562,7 +2571,6 @@ describe('D8: WhatsApp multi-select', () => {
         },
         onContextMenu: noop,
         consumeClick: () => false,
-        consumeSelectHold,
         onKeyOpen: noop,
         coarse: true,
       },
@@ -2575,138 +2583,221 @@ describe('D8: WhatsApp multi-select', () => {
     walk(root, (el) => out.push(el as ReactElement<Record<string, unknown>>));
     return out;
   }
-  function tap(root: ReactElement<Record<string, unknown>>): {
-    prevented: boolean;
-    stopped: boolean;
-  } {
-    const event = { prevented: false, stopped: false };
-    (root.props.onClickCapture as (e: unknown) => void)({
-      preventDefault: () => {
-        event.prevented = true;
-      },
-      stopPropagation: () => {
-        event.stopped = true;
-      },
-    });
-    return event;
-  }
   const selectable = (onToggle: () => void, checked = false): RowSelection => ({
     role: 'selectable',
     checked,
     onToggle,
   });
 
-  it('menu Select, Forward and Delete enter the mode with that message ticked', () => {
-    const marks = new Map<string, ChatMark>();
+  // A row in selection mode as the browser sees it: an event target carrying
+  // the rendered row's own React handlers (if any) plus the row's selection
+  // gesture, driven by dispatched pointer, contextmenu and click events.
+  const REACT_EVENTS: Record<string, [string, boolean]> = {
+    onPointerDown: ['pointerdown', false],
+    onPointerMove: ['pointermove', false],
+    onPointerUp: ['pointerup', false],
+    onPointerCancel: ['pointercancel', false],
+    onContextMenu: ['contextmenu', false],
+    onClick: ['click', false],
+    onClickCapture: ['click', true],
+  };
+  function liveRow(
+    selection: RowSelection,
+    coarse = true,
+  ): { target: EventTarget; detach: () => void } {
+    const target = new EventTarget();
+    const rendered = row(makeMessage({}), selection);
+    for (const [prop, [type, capture]] of Object.entries(REACT_EVENTS)) {
+      const handler = rendered.props[prop];
+      if (typeof handler === 'function') {
+        target.addEventListener(type, (e) => (handler as (e: Event) => void)(e), capture);
+      }
+    }
+    const detach = createSelectionGesture({
+      selection: () => selection,
+      coarse: () => coarse,
+    }).attach(target);
+    return { target, detach };
+  }
+  function fire(
+    target: EventTarget,
+    type: string,
+    at: { x?: number; y?: number; pointerType?: string; button?: number } = {},
+  ): Event {
+    const event = Object.assign(new Event(type, { bubbles: true, cancelable: true }), {
+      clientX: at.x ?? 0,
+      clientY: at.y ?? 0,
+      pointerType: at.pointerType ?? 'touch',
+      button: at.button ?? 0,
+    });
+    target.dispatchEvent(event);
+    return event;
+  }
+  /** A finger (or mouse) down, optionally moved, and up, then the click the browser sends. */
+  function press(target: EventTarget, moveTo?: { x: number; y: number }, pointerType = 'touch') {
+    fire(target, 'pointerdown', { x: 100, y: 100, pointerType });
+    if (moveTo !== undefined) fire(target, 'pointermove', { ...moveTo, pointerType });
+    fire(target, 'pointerup', { ...(moveTo ?? { x: 100, y: 100 }), pointerType });
+    return fire(target, 'click');
+  }
+
+  it('menu Select, Forward and Delete enter the mode with that message ticked, marked ones too', () => {
     const own = makeMessage({ id: 'own', mine: true });
     const peer = makeMessage({ id: 'peer', mine: false });
-    expect([...selectionOnEntry(own, marks)]).toEqual(['own']);
-    expect([...selectionOnEntry(peer, marks)]).toEqual(['peer']);
-    expect(forwardEntersSelection(peer, marks, true)).toBe(true);
-    // An own marked message keeps its lock: never ticked; its Forward goes to the picker.
-    const lockedMarks = new Map<string, ChatMark>([
-      [
-        'own',
-        {
-          messageId: 'own',
-          channelId: 'c',
-          type: 'decision',
-          priority: null,
-          markedAt: 'x',
-          resolved: false,
-          resolvedBy: null,
-          resolvedAt: null,
-        },
-      ],
-    ]);
-    expect([...selectionOnEntry(own, lockedMarks)]).toEqual([]);
-    expect(forwardEntersSelection(own, lockedMarks, true)).toBe(false);
+    expect([...selectionOnEntry(own)]).toEqual(['own']);
+    expect([...selectionOnEntry(peer)]).toEqual(['peer']);
+    expect(forwardEntersSelection(peer, true)).toBe(true);
+    // F8: a marked own message is ticked like any other (the mark blocks Delete only).
+    expect(forwardEntersSelection(own, true)).toBe(true);
+    expect(forwardEntersSelection(own, false)).toBe(false);
   });
 
-  it('a tap anywhere on the row (bubble, blank space, circle) toggles it; one handler on the row', () => {
+  it('F12: pointerdown + pointerup with no move toggles once; the trailing click is swallowed', () => {
     const onToggle = vi.fn();
-    const root = row(makeMessage({ mine: false }), selectable(onToggle));
-    // The row owns the tap in capture, so a tap on the bubble, the blank row
-    // space or the circle all land here first.
-    const event = tap(root);
+    const { target } = liveRow(selectable(onToggle));
+    const click = press(target);
     expect(onToggle).toHaveBeenCalledOnce();
-    expect(event.stopped).toBe(true);
-    // The circle is a 44x44 check in the left column.
-    const circle = nodes(root).find((el) => el.type === SelectCheckbox);
-    expect(circle).toBeDefined();
-    const html = renderStrip(root);
-    expect(html).toContain('h-11 w-11');
-    expect(String(root.props.className)).toContain(SELECTION_ROW_OFFSET);
-  });
-
-  it('a link, media, card or voice tap in the mode toggles and does not open', () => {
-    const onToggle = vi.fn();
-    const message = makeMessage({
-      body: 'see https://example.com',
-      attachments: [{ assetId: 'v1', name: 'a.png', mime: 'image/png' }],
-      sharedPostIds: ['post-1'],
-    });
-    const root = row(message, selectable(onToggle));
-    const event = tap(root);
-    // Default (the link's navigation) cancelled and propagation stopped before
-    // it reaches the link, the album, the card or the voice player.
-    expect(event.prevented).toBe(true);
-    expect(event.stopped).toBe(true);
-    expect(onToggle).toHaveBeenCalledOnce();
-  });
-
-  it('a long-press in the mode toggles and opens no menu; its trailing click does not toggle back', () => {
-    const onToggle = vi.fn();
-    const openMenu = vi.fn();
-    const hold = createRowHold({
-      selection: () => selectable(onToggle),
-      coarse: () => true,
-      openMenu,
-      cancelTimer: noop,
-      cancelSwipe: noop,
-      swiping: () => false,
-      clearClickSuppression: noop,
-    });
-    hold.pointerDown();
-    hold.hold();
-    expect(onToggle).toHaveBeenCalledOnce();
-    expect(openMenu).not.toHaveBeenCalled();
-    // Android: the native contextmenu after the hold neither opens nor toggles again.
-    hold.contextMenu({ preventDefault: noop });
-    expect(onToggle).toHaveBeenCalledOnce();
-    // The click that may trail the hold is swallowed once by the row.
-    const root = row(makeMessage({}), selectable(onToggle), hold.consumeSelectHold);
-    tap(root);
-    expect(onToggle).toHaveBeenCalledOnce();
-    // The next plain tap toggles again.
-    hold.pointerDown();
-    tap(row(makeMessage({}), selectable(onToggle), hold.consumeSelectHold));
+    // Nothing inside opens: the click is cancelled in capture.
+    expect(click.defaultPrevented).toBe(true);
+    // A mouse tap toggles once too.
+    press(target, undefined, 'mouse');
     expect(onToggle).toHaveBeenCalledTimes(2);
   });
 
-  it('Step 0 regression: a hold in the mode used to do nothing (menu open bailed); now it toggles', () => {
+  it('F12: pointerdown + a move over 10px (a scroll or drag) never toggles, even when a click follows', () => {
     const onToggle = vi.fn();
-    const hold = createRowHold({
-      selection: () => selectable(onToggle),
-      coarse: () => false,
-      openMenu: () => {
-        throw new Error('no menu while selecting');
-      },
-      cancelTimer: noop,
-      cancelSwipe: noop,
-      swiping: () => false,
-      clearClickSuppression: noop,
-    });
-    hold.hold();
+    const { target } = liveRow(selectable(onToggle));
+    press(target, { x: 100, y: 111 });
+    press(target, { x: 111, y: 100 }, 'mouse');
+    expect(onToggle).not.toHaveBeenCalled();
+    // Within 10px is still a tap.
+    press(target, { x: 106, y: 106 });
     expect(onToggle).toHaveBeenCalledOnce();
-    // And the blank row space is a target (the row, not only the bubble).
-    const root = row(makeMessage({}), selectable(onToggle));
+  });
+
+  it('F12: pointercancel never toggles and leaves nothing armed (no freeze)', () => {
+    vi.useFakeTimers();
+    try {
+      const onToggle = vi.fn();
+      const { target } = liveRow(selectable(onToggle));
+      fire(target, 'pointerdown', { x: 100, y: 100 });
+      fire(target, 'pointercancel');
+      // The hold timer is gone: time passing toggles nothing.
+      vi.advanceTimersByTime(2000);
+      expect(onToggle).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      // The next tap works at once.
+      press(target);
+      expect(onToggle).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('F12: contextmenu during a hold on a coarse pointer is prevented, toggles once, and the click is swallowed once', () => {
+    vi.useFakeTimers();
+    try {
+      const onToggle = vi.fn();
+      const { target } = liveRow(selectable(onToggle), true);
+      fire(target, 'pointerdown', { x: 100, y: 100 });
+      const menu = fire(target, 'contextmenu');
+      expect(menu.defaultPrevented).toBe(true);
+      expect(onToggle).toHaveBeenCalledOnce();
+      // The hold timer no longer fires a second toggle; release and click do nothing.
+      vi.advanceTimersByTime(1000);
+      fire(target, 'pointerup', { x: 100, y: 100 });
+      const click = fire(target, 'click');
+      expect(click.defaultPrevented).toBe(true);
+      expect(onToggle).toHaveBeenCalledOnce();
+      // Swallowed once only: a keyboard click on the circle (no press) toggles.
+      fire(target, 'click');
+      expect(onToggle).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a touch hold toggles once and opens no menu; its release and click do not toggle back', () => {
+    vi.useFakeTimers();
+    try {
+      const onToggle = vi.fn();
+      const { target } = liveRow(selectable(onToggle));
+      fire(target, 'pointerdown', { x: 100, y: 100 });
+      vi.advanceTimersByTime(450);
+      expect(onToggle).toHaveBeenCalledOnce();
+      fire(target, 'pointerup', { x: 100, y: 100 });
+      fire(target, 'click');
+      expect(onToggle).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the row, not only the bubble, is the target; the bubble carries no selection handlers', () => {
+    const root = row(makeMessage({}), selectable(noop));
     expect(root.type).toBe('li');
-    expect(typeof root.props.onClickCapture).toBe('function');
-    // The bubble no longer owns the selection tap (no double toggle from bubble + row).
     const bubbleEl = nodes(root).find((el) => el.props['data-bubble'] !== undefined);
     expect(bubbleEl?.props.onPointerDown).toBeUndefined();
-    expect(root.props.onPointerDown).toBeDefined();
+    // The circle is a 44x44 check in the left column.
+    expect(nodes(root).find((el) => el.type === SelectCheckbox)).toBeDefined();
+    expect(renderStrip(root)).toContain('h-11 w-11');
+    expect(String(root.props.className)).toContain(SELECTION_ROW_OFFSET);
+  });
+
+  it('detach removes every listener and stops the hold timer', () => {
+    vi.useFakeTimers();
+    try {
+      const onToggle = vi.fn();
+      const { target, detach } = liveRow(selectable(onToggle));
+      fire(target, 'pointerdown', { x: 100, y: 100 });
+      detach();
+      expect(vi.getTimerCount()).toBe(0);
+      press(target);
+      expect(onToggle).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('F6: while selecting, cards get no talkAbout, so a hold on a card only toggles the row', () => {
+    const talk = vi.fn();
+    const refs = { onTalkAbout: talk, onShowPost: noop };
+    expect(cardRefsFor('m1', selectable(noop), refs).onTalkAbout).toBeUndefined();
+    expect(cardRefsFor('m1', undefined, refs).onTalkAbout).toBe(talk);
+    // The card inside the row renders without its own hold handlers.
+    const onToggle = vi.fn();
+    const card = makeMessage({ sharedPostIds: ['post-1'] });
+    const rendered = MessageBubble({
+      message: card,
+      profiles: PROFILES,
+      cache,
+      presignEnabled: false,
+      showTicks: true,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      layout: 'touch',
+      onBadgeClick: noop,
+      selection: selectable(onToggle),
+      postRefs: refs,
+    });
+    const cards = nodes(rendered).filter((el) => 'onTalkAbout' in el.props);
+    expect(cards.length).toBeGreaterThan(0);
+    for (const el of cards) expect(el.props.onTalkAbout).toBeUndefined();
+    // The row's hold toggles it (and talks about nothing).
+    vi.useFakeTimers();
+    try {
+      const { target } = liveRow(selectable(onToggle));
+      fire(target, 'pointerdown', { x: 100, y: 100 });
+      vi.advanceTimersByTime(450);
+      fire(target, 'pointerup', { x: 100, y: 100 });
+      fire(target, 'click');
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(onToggle).toHaveBeenCalledOnce();
+    expect(talk).not.toHaveBeenCalled();
   });
 
   it('swipe-to-reply is off in the mode', () => {
@@ -2722,15 +2813,15 @@ describe('D8: WhatsApp multi-select', () => {
     expect(nodes(root).some((el) => el.type === SelectCheckbox)).toBe(false);
     expect(String(root.props.className)).toContain(SELECTION_ROW_OFFSET);
     expect(root.props.onClickCapture).toBeUndefined();
+    // Its gesture never toggles (role none), yet the click is still swallowed.
+    const { target } = liveRow({ role: 'none', checked: false, onToggle });
+    expect(press(target).defaultPrevented).toBe(true);
+    expect(onToggle).not.toHaveBeenCalled();
   });
 
   it('zero selected stays in the mode: pruning empties the set but never ends selection', () => {
     const list = [makeMessage({ id: 'a', mine: true })];
-    const pruned = rowSelection(
-      list[0] as ThreadMessage,
-      { selected: new Set(), onToggle: noop },
-      new Map(),
-    );
+    const pruned = rowSelection(list[0] as ThreadMessage, { selected: new Set(), onToggle: noop });
     expect(pruned).toMatchObject({ role: 'selectable', checked: false });
   });
 
@@ -2741,5 +2832,159 @@ describe('D8: WhatsApp multi-select', () => {
     expect(html).toContain('transition-opacity');
     expect(html).toContain('[@starting-style]:opacity-0');
     expect(String(root.props.className)).not.toMatch(/transition|translate-x|animate/);
+  });
+});
+
+describe('F7: system back and iOS swipe-back exit selection first', () => {
+  // A browser history stack: pushState adds, back() pops then fires popstate.
+  function fakeWindow(url: string): SelectionHistoryWindow & {
+    stack: { state: unknown; url: string }[];
+    index: () => number;
+    navigate: (to: string) => void;
+    listeners: () => number;
+  } {
+    const stack = [{ state: { idx: 0 } as unknown, url }];
+    let i = 0;
+    const listeners = new Set<() => void>();
+    const pop = (): void => {
+      for (const l of [...listeners]) l();
+    };
+    return {
+      stack,
+      index: () => i,
+      listeners: () => listeners.size,
+      navigate: (to) => {
+        stack.splice(i + 1);
+        stack.push({ state: { idx: i + 1 }, url: to });
+        i += 1;
+      },
+      history: {
+        get state() {
+          return stack[i]?.state;
+        },
+        pushState: (data, _unused, next) => {
+          stack.splice(i + 1);
+          stack.push({ state: data, url: next ?? stack[i]?.url ?? url });
+          i += 1;
+        },
+        back: () => {
+          if (i === 0) return;
+          i -= 1;
+          pop();
+        },
+      },
+      location: {
+        get href() {
+          return stack[i]?.url ?? url;
+        },
+      },
+      addEventListener: (_type, l) => listeners.add(l),
+      removeEventListener: (_type, l) => listeners.delete(l),
+    };
+  }
+  const CHAT = 'https://v2.srtd.io/chat?channel=c1';
+
+  it('entering pushes one marker at the same URL (with ?channel=); back exits and stays in the chat', () => {
+    resetSelectionHistory();
+    const win = fakeWindow(CHAT);
+    const onExit = vi.fn();
+    enterSelectionHistory(win, onExit);
+    expect(win.stack).toHaveLength(2);
+    expect(win.stack[1]?.url).toBe(CHAT);
+    expect(win.stack[1]?.state).toMatchObject({
+      idx: 0,
+      [SELECTION_HISTORY_KEY]: expect.any(Number),
+    });
+    win.history.back();
+    expect(onExit).toHaveBeenCalledOnce();
+    expect(win.location.href).toBe(CHAT);
+    expect(win.index()).toBe(0);
+    expect(win.listeners()).toBe(0);
+  });
+
+  it('Cancel (and Escape, the chevron) pops the marker through history.back()', () => {
+    resetSelectionHistory();
+    const win = fakeWindow(CHAT);
+    const onExit = vi.fn();
+    const entry = enterSelectionHistory(win, onExit);
+    const back = vi.spyOn(win.history, 'back');
+    entry.cancel();
+    expect(back).toHaveBeenCalledOnce();
+    expect(onExit).toHaveBeenCalledOnce();
+    expect(win.index()).toBe(0);
+    // The effect cleanup after the exit does nothing more.
+    entry.dispose();
+    expect(back).toHaveBeenCalledOnce();
+  });
+
+  it('selection ending another way (delete, forward, unmount) pops its marker', () => {
+    resetSelectionHistory();
+    const win = fakeWindow(CHAT);
+    const onExit = vi.fn();
+    enterSelectionHistory(win, onExit).dispose();
+    expect(win.index()).toBe(0);
+    expect(onExit).not.toHaveBeenCalled();
+    expect(win.listeners()).toBe(0);
+  });
+
+  it('leaving the chat while selecting leaves no stale entry: a buried marker is skipped', () => {
+    resetSelectionHistory();
+    const win = fakeWindow(CHAT);
+    const entry = enterSelectionHistory(win, vi.fn());
+    win.navigate('https://v2.srtd.io/pipeline');
+    entry.dispose();
+    // Back from the new page lands on the chat once, never on the dead marker.
+    win.history.back();
+    expect(win.index()).toBe(0);
+    expect(win.location.href).toBe(CHAT);
+    resetSelectionHistory();
+    expect(win.listeners()).toBe(0);
+  });
+});
+
+describe('F11: selection entry keeps the pressed row at its screen Y', () => {
+  // A list whose rows sit at a layout offset minus the scroll; the check
+  // column rewraps the bubbles above the pressed row, moving it down.
+  function fakeList(): AnchorList & { rewrap: (px: number) => void; rowTop: () => number } {
+    let layoutShift = 0;
+    const list = {
+      scrollTop: 400,
+      rewrap: (px: number) => {
+        layoutShift += px;
+      },
+      rowTop: () => 900 + layoutShift - list.scrollTop,
+      querySelector: (selector: string) =>
+        selector === '[data-msg-id="pressed"]'
+          ? { getBoundingClientRect: () => ({ top: list.rowTop() }) }
+          : null,
+    };
+    return list;
+  }
+
+  it('the anchored row keeps its Y, instantly, after the bubbles rewrap', () => {
+    const list = fakeList();
+    const anchor = captureRowAnchor(list, 'pressed');
+    expect(anchor).toEqual({ id: 'pressed', top: 500 });
+    list.rewrap(37);
+    expect(list.rowTop()).toBe(537);
+    expect(restoreRowAnchor(list, anchor as RowAnchor)).toBe(37);
+    expect(list.rowTop()).toBe(500);
+    expect(list.scrollTop).toBe(437);
+  });
+
+  it('a row that is not rendered anchors nothing', () => {
+    const list = fakeList();
+    expect(captureRowAnchor(list, 'other')).toBeNull();
+    expect(restoreRowAnchor(list, { id: 'other', top: 10 })).toBe(0);
+    expect(list.scrollTop).toBe(400);
+  });
+});
+
+describe('F14: a failed mark never shows raw error text', () => {
+  it('maps any failure to the fixed mark copy; success shows nothing', () => {
+    expect(markOutcomeCopy({ ok: false, message: 'new row violates row-level security' })).toBe(
+      "Couldn't mark, try again",
+    );
+    expect(markOutcomeCopy({ ok: true })).toBeNull();
   });
 });

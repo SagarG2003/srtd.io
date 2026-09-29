@@ -5,6 +5,7 @@ import {
   BACKOFF_CAP_MS,
   RECONNECT_GRACE_MS,
   runChatConnection,
+  subscribeGlobalCmds,
   type RunChatConnectionParams,
 } from '@/lib/chat/controller';
 import type { ChatConnection, ChatStatus, ChatTokenResult } from '@/lib/chat/types';
@@ -138,6 +139,22 @@ describe('runChatConnection open path', () => {
     expect(h.latest().open).toHaveBeenCalledWith({ user: 'u_abc', accessToken: 'agora-token' });
     expect(h.statuses()).toEqual(['connecting', 'connected']);
     expect(h.setClient).toHaveBeenCalledWith(h.latest());
+  });
+
+  it('fans every incoming command out to the global cmd subscribers, for any channel', async () => {
+    const h = harness(() => Promise.resolve(token));
+    runChatConnection(h.params);
+    await flush();
+    const seen: string[] = [];
+    const unsubscribe = subscribeGlobalCmds((msg) => seen.push(msg.id));
+    const cmd = (id: string): AgoraChat.CmdMsgBody =>
+      ({ id, type: 'cmd', action: 'sorted', ext: { channelId: 'not-open' } }) as never;
+
+    h.latest().handler()?.onCmdMessage?.(cmd('a'));
+    unsubscribe();
+    h.latest().handler()?.onCmdMessage?.(cmd('b'));
+
+    expect(seen).toEqual(['a']);
   });
 
   it('retries a failed token fetch with backoff instead of going unavailable', async () => {
