@@ -128,6 +128,17 @@ describe('ContactSheetView page', () => {
     (back?.props.onClick as () => void)();
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('heading defaults to Contact info and drives the title, aria-label and back label', () => {
+    const tree = view(props());
+    expect(tree.props['aria-label']).toBe('Contact info');
+    const custom = view(props({ heading: 'Group info' }));
+    expect(custom.props['aria-label']).toBe('Group info');
+    const [back] = findAll(custom, (el) => el.type === IconButton);
+    expect(back?.props.label).toBe('Close group info');
+    const titles = findAll(custom, (el) => el.type === 'h2').map((el) => el.props.children);
+    expect(titles).toEqual(['Group info']);
+  });
 });
 
 describe('ContactSheetView tabs', () => {

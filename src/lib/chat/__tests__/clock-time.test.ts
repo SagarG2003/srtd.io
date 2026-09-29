@@ -37,7 +37,7 @@ describe('formatClockTime', () => {
 // R1: the chat sheets' clock times use the device hour cycle, never a forced 24h.
 describe('R1: chat surfaces format clock time with formatClockTime', () => {
   const surfaces = [
-    'src/components/chat/ContactSheet.tsx',
+    'src/components/chat/ChatInfoTabs.tsx',
     'src/components/chat/MarksSheet.tsx',
     'src/components/chat/post-sheet.ts',
   ];
