@@ -1,62 +1,37 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`ChannelList dense row > checked in select mode: accent tint and the on select circle 1`] = `
+exports[`chat home tile > square DM: 170 tall column, 48px disc, 2-line preview, pill capped at 99+ 1`] = `
 {
   "classes": [
-    "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 transition-colors border-accent bg-accent text-accent-fg",
+    "flex items-start justify-between gap-2",
+    "shrink-0",
     "rounded-full inline-flex items-center justify-center select-none text-white font-medium text-sm",
-    "flex min-w-0 flex-1 flex-col gap-1",
-    "flex items-baseline gap-2",
-    "min-w-0 flex-1 truncate text-fg text-[17px] leading-[22px] font-semibold",
-    "shrink-0 font-sans text-[14px] leading-[18px] font-normal tabular-nums text-fg-3",
     "flex items-center gap-2",
-    "min-w-0 flex-1 truncate text-[15px] leading-[20px] font-normal text-fg-2",
+    "inline-flex h-[22px] min-w-[22px] shrink-0 items-center justify-center rounded-[11px] bg-accent px-1.5 text-xs font-bold leading-none tabular-nums text-accent-fg",
+    "mt-2 flex min-w-0",
+    "min-w-0 truncate text-fg text-[16px] leading-[20px] font-semibold",
+    "mt-0.5 flex min-w-0",
+    "min-w-0 break-words line-clamp-2 text-[14px] leading-[19px] font-normal text-fg-2",
+    "mt-auto flex",
+    "shrink-0 text-fg-2 font-sans text-xs font-normal tabular-nums",
   ],
-  "row": "group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2 select-none [-webkit-touch-callout:none] bg-accent-soft",
+  "tile": "flex w-full rounded-[14px] border p-3 h-[170px] flex-col items-stretch min-w-0 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent select-none [-webkit-touch-callout:none] border-border bg-panel hover:bg-panel-2",
 }
 `;
 
-exports[`ChannelList dense row > empty preview: "No messages yet" in tertiary ink, not italic; group initials avatar 1`] = `
+exports[`chat home tile > wide group: 120 tall row, 72px rounded-square photo, 3-line preview, pill after time 1`] = `
 {
   "classes": [
+    "flex h-[72px] w-[72px] shrink-0 [&amp;&gt;*]:!h-[72px] [&amp;&gt;*]:!w-[72px] [&amp;&gt;*]:!rounded-[14px] [&amp;&gt;*]:!text-xl",
     "rounded-full inline-flex items-center justify-center select-none text-white font-medium text-sm",
     "flex min-w-0 flex-1 flex-col gap-1",
-    "flex items-baseline gap-2",
-    "min-w-0 flex-1 truncate text-fg text-[17px] leading-[22px] font-semibold",
-    "flex items-center gap-2",
-    "min-w-0 flex-1 truncate text-[15px] leading-[20px] font-normal text-fg-3",
+    "flex min-w-0 items-center gap-2",
+    "flex min-w-0 flex-1",
+    "min-w-0 truncate text-fg text-[16px] leading-[20px] font-semibold",
+    "shrink-0 text-fg-2 font-sans text-xs font-normal tabular-nums",
+    "inline-flex h-[22px] min-w-[22px] shrink-0 items-center justify-center rounded-[11px] bg-accent px-1.5 text-xs font-bold leading-none tabular-nums text-accent-fg",
+    "min-w-0 break-words line-clamp-3 text-[14px] leading-[19px] font-normal text-fg-2",
   ],
-  "row": "group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2 select-none [-webkit-touch-callout:none]",
-}
-`;
-
-exports[`ChannelList dense row > selected (desktop active): panel-2, medium name, no badge 1`] = `
-{
-  "classes": [
-    "rounded-full inline-flex items-center justify-center select-none text-white font-medium text-sm",
-    "flex min-w-0 flex-1 flex-col gap-1",
-    "flex items-baseline gap-2",
-    "min-w-0 flex-1 truncate text-fg text-[17px] leading-[22px] font-semibold",
-    "shrink-0 font-sans text-[14px] leading-[18px] font-normal tabular-nums text-fg-3",
-    "flex items-center gap-2",
-    "min-w-0 flex-1 truncate text-[15px] leading-[20px] font-normal text-fg-2",
-  ],
-  "row": "group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2 select-none [-webkit-touch-callout:none] bg-panel-2",
-}
-`;
-
-exports[`ChannelList dense row > unread: accent tint, bold name, accent time, count badge 1`] = `
-{
-  "classes": [
-    "rounded-full inline-flex items-center justify-center select-none text-white font-medium text-sm",
-    "flex min-w-0 flex-1 flex-col gap-1",
-    "flex items-baseline gap-2",
-    "min-w-0 flex-1 truncate text-fg text-[17px] leading-[22px] font-semibold",
-    "shrink-0 font-sans text-[14px] leading-[18px] font-normal tabular-nums text-accent",
-    "flex items-center gap-2",
-    "min-w-0 flex-1 truncate text-[15px] leading-[20px] font-normal text-fg-2",
-    "inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold leading-none text-accent-fg shrink-0",
-  ],
-  "row": "group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2 select-none [-webkit-touch-callout:none] bg-accent-soft",
+  "tile": "flex w-full rounded-[14px] border p-3 h-[120px] items-center gap-3 min-w-0 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent select-none [-webkit-touch-callout:none] border-border bg-panel hover:bg-panel-2",
 }
 `;

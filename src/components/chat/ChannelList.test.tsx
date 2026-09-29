@@ -360,21 +360,31 @@ describe('load status', () => {
     expect(texts(tree)).not.toContain('No conversations yet');
   });
 
-  it('skeleton rows match the real dense row box and 48px avatar', () => {
-    const [row] = findAll(
+  it('skeleton tiles match the real tile boxes (wide 120 + 72px photo, square 170 + 48px disc)', () => {
+    const tiles = findAll(
       withStatus('loading'),
       (el) => (el.props as Record<string, unknown>)['data-skeleton-row'] !== undefined,
     );
-    const cls = (row!.props as { className: string }).className;
-    for (const token of ['px-4', 'py-2.5', 'min-h-[72px]', 'border-b', 'animate-pulse']) {
-      expect(cls).toContain(token);
+    const kinds = tiles.map((t) => (t.props as Record<string, unknown>)['data-skeleton-row']);
+    expect(kinds.filter((k) => k === 'wide')).toHaveLength(2);
+    expect(kinds.filter((k) => k === 'square')).toHaveLength(4);
+    for (const tile of tiles) {
+      const cls = (tile.props as { className: string }).className;
+      for (const token of ['rounded-[14px]', 'border', 'border-border', 'p-3', 'animate-pulse']) {
+        expect(cls).toContain(token);
+      }
+      const wide = (tile.props as Record<string, unknown>)['data-skeleton-row'] === 'wide';
+      expect(cls).toContain(wide ? 'h-[120px]' : 'h-[170px]');
+      const [photo] = findAll(
+        tile,
+        (el) =>
+          el !== tile &&
+          /rounded-(full|\[14px\])/.test((el.props as { className?: string }).className ?? ''),
+      );
+      expect((photo!.props as { className: string }).className).toContain(
+        wide ? 'h-[72px] w-[72px]' : 'h-12 w-12',
+      );
     }
-    expect(cls).not.toContain('border-l-');
-    expect(cls).not.toContain('rounded-xl');
-    const avatar = findAll(row!, (el) =>
-      ((el.props as { className?: string }).className ?? '').includes('rounded-full'),
-    );
-    expect((avatar[0]!.props as { className: string }).className).toContain('h-12 w-12');
   });
 
   it('error renders Retry (44px tall) and no rows or Select', () => {

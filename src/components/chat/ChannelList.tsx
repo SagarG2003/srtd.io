@@ -12,7 +12,7 @@ import { createPortal } from 'react-dom';
 import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
-import { CountBadge } from '@/components/ui/CountBadge';
+import { countBadgeText } from '@/components/ui/CountBadge';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { SelectCheck } from '@/components/ui/SelectCheck';
 import { popoverClass } from '@/components/ui/popover-classes';
@@ -43,13 +43,9 @@ import { draftText, draftsVersion, subscribeDrafts } from '@/lib/chat/drafts';
 import { mentionNamesIn, resolveMentionPreview, splitAllMentions } from '@/lib/chat/mentions';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import {
-  CHAT_LIST_NAME_TYPE,
-  CHAT_LIST_PREVIEW_TYPE,
-  CHAT_LIST_TIME_TYPE,
   COARSE_POINTER_QUERY,
   DRAFT_PREFIX_TYPE,
   NO_TOUCH_SELECT,
-  sized,
   useChatLayout,
   type ChatLayout,
 } from '@/components/chat/chat-type';
@@ -210,9 +206,12 @@ export function channelListView(props: ChannelListBodyProps): ReactElement {
   const nowMs = props.nowMs ?? 0;
   const timeZone = workspaceTimeZone(props.timeZone);
   return (
-    <ul className="flex flex-col">
+    <ul className={CHANNEL_TILE_GRID}>
       {props.channels.map((channel) => (
-        <li key={channel.channelId}>
+        <li
+          key={channel.channelId}
+          className={tileKind(channel) === 'wide' ? 'col-span-2 min-w-0' : 'min-w-0'}
+        >
           <ChannelCard
             channel={channel}
             selected={channel.channelId === props.selectedChannelId}
@@ -239,28 +238,49 @@ export function channelListView(props: ChannelListBodyProps): ReactElement {
   );
 }
 
-/** Skeleton rows shown while the list loads; enough to fill a phone screen. */
+/** Skeleton tiles shown while the list loads; enough to fill a phone screen. */
 export const SKELETON_ROWS = 6;
 
+/** The skeleton's tile kinds: two wide group tiles and four square DM tiles. */
+const SKELETON_KINDS: readonly TileKind[] = [
+  'wide',
+  'square',
+  'square',
+  'wide',
+  'square',
+  'square',
+];
+
 /**
- * The loading body: placeholder rows with the real row's box (padding, min
- * height, bottom rule) and a 48px avatar disc, so swapping in the list shifts
- * nothing. Reuses the repo's animate-pulse + bg-panel-2 skeleton pattern.
+ * The loading body: placeholder tiles with the real tiles' boxes (wide 120px
+ * with a 72px rounded-square photo, square 170px with a 48px disc), so swapping
+ * in the list shifts nothing. Reuses the repo's animate-pulse + bg-panel-2
+ * skeleton pattern.
  */
 export function channelListSkeleton(): ReactElement {
   return (
-    <ul className="flex flex-col" aria-busy="true" aria-label="Loading conversations">
-      {Array.from({ length: SKELETON_ROWS }).map((_, i) => (
-        <li key={i}>
+    <ul className={CHANNEL_TILE_GRID} aria-busy="true" aria-label="Loading conversations">
+      {SKELETON_KINDS.slice(0, SKELETON_ROWS).map((kind, i) => (
+        <li key={i} className={kind === 'wide' ? 'col-span-2 min-w-0' : 'min-w-0'}>
           <div
-            data-skeleton-row
-            className="flex w-full items-center gap-3.5 border-b border-border px-4 py-2.5 min-h-[72px] animate-pulse"
+            data-skeleton-row={kind}
+            className={cn(tileBoxClass(kind), 'border-border bg-panel animate-pulse')}
           >
-            <div className="h-12 w-12 shrink-0 rounded-full bg-panel-2" />
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
-              <div className="h-3.5 w-1/2 rounded bg-panel-2" />
-              <div className="h-3 w-3/4 rounded bg-panel-2" />
-            </div>
+            {kind === 'wide' ? (
+              <>
+                <div className="h-[72px] w-[72px] shrink-0 rounded-[14px] bg-panel-2" />
+                <div className="flex min-w-0 flex-1 flex-col gap-2">
+                  <div className="h-3.5 w-1/2 rounded bg-panel-2" />
+                  <div className="h-3 w-3/4 rounded bg-panel-2" />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="h-12 w-12 shrink-0 rounded-full bg-panel-2" />
+                <div className="mt-2 h-3.5 w-2/3 rounded bg-panel-2" />
+                <div className="mt-2 h-3 w-full rounded bg-panel-2" />
+              </>
+            )}
           </div>
         </li>
       ))}
@@ -303,39 +323,82 @@ export function rowMenuKey(event: { key: string; shiftKey: boolean }): boolean {
   return event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10');
 }
 
-/** Row state that picks the row tint. */
+/** A home tile's shape: a group channel is wide (both columns), a DM is square. */
+export type TileKind = 'wide' | 'square';
+
+/** The tile a channel renders as: group -> wide, DM -> square. Pure. */
+export function tileKind(channel: Pick<ChannelSummary, 'channelType'>): TileKind {
+  return channel.channelType === 'group' ? 'wide' : 'square';
+}
+
+/** The unread pill's text, or null when there is nothing unread (no pill). Pure. */
+export function unreadPillText(unread: number): string | null {
+  return unread > 0 ? countBadgeText(unread) : null;
+}
+
+/** The home grid: two fluid columns, 8px gaps, 12px side padding. */
+export const CHANNEL_TILE_GRID =
+  'grid grid-flow-row-dense grid-cols-[repeat(2,minmax(0,1fr))] gap-2 px-3';
+
+/** Tile type: name 16/600, preview 14/19, time 12 (same on touch and laptop). */
+export const TILE_NAME_TYPE = 'text-[16px] leading-[20px] font-semibold';
+export const TILE_PREVIEW_TYPE = 'text-[14px] leading-[19px] font-normal';
+export const TILE_TIME_TYPE = 'font-sans text-xs font-normal tabular-nums';
+
+/**
+ * The wide tile's 72px rounded-square (radius 14) group photo: the shared
+ * Avatar (photo or initials fallback, unchanged) resized in place, so the box
+ * is final on first paint.
+ */
+export const GROUP_TILE_PHOTO =
+  'flex h-[72px] w-[72px] shrink-0 [&>*]:!h-[72px] [&>*]:!w-[72px] [&>*]:!rounded-[14px] [&>*]:!text-xl';
+
+/** The unread pill: 22px min, radius 11, accent fill, 12/700. */
+export const TILE_PILL =
+  'inline-flex h-[22px] min-w-[22px] shrink-0 items-center justify-center rounded-[11px] bg-accent px-1.5 text-xs font-bold leading-none tabular-nums text-accent-fg';
+
+/**
+ * A tile's box: hairline border, radius 14, padding 12 and its fixed height
+ * (wide 120 as a row, square 170 as a column). Shared by the skeleton so
+ * swapping in the list shifts nothing.
+ */
+export function tileBoxClass(kind: TileKind): string {
+  return cn(
+    'flex w-full rounded-[14px] border p-3',
+    kind === 'wide' ? 'h-[120px] items-center gap-3' : 'h-[170px] flex-col items-stretch',
+  );
+}
+
+/** Tile state that picks the tile fill. */
 export interface ChannelRowState {
+  kind: TileKind;
   /** Desktop: this chat is open in the thread pane. */
   selected: boolean;
-  unread: boolean;
   /** Select mode is on. */
   selecting: boolean;
-  /** Select mode: this row is checked. */
+  /** Select mode: this tile is checked. */
   checked: boolean;
 }
 
 /**
- * The dense row's container classes: full width, no card, a hairline rule under
- * each row. Checked and unread rows take the accent tint; the open chat on
+ * The tile's tap target classes: the whole tile is one button. Panel fill with
+ * a hairline border; a checked tile takes the accent tint, the open chat on
  * desktop takes panel-2. Token classes only, so light and dark stay at parity.
  */
 export function channelRowClass(state: ChannelRowState): string {
+  const checked = state.selecting && state.checked;
+  const open = state.selected && !state.selecting;
   return cn(
-    'group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2',
-    NO_TOUCH_SELECT,
-    state.selecting && state.checked
-      ? 'bg-accent-soft'
-      : state.unread
-        ? 'bg-accent-soft'
-        : state.selected && !state.selecting
-          ? 'bg-panel-2'
-          : undefined,
+    tileBoxClass(state.kind),
+    CHANNEL_ROW_BUTTON,
+    checked ? 'border-accent-line bg-accent-soft' : 'border-border',
+    checked ? undefined : open ? 'bg-panel-2' : 'bg-panel hover:bg-panel-2',
   );
 }
 
 /**
- * The row's contextmenu on a touch-first pointer: the native menu and callout
- * never show (the long-press opens the row menu). A laptop's right-click is
+ * The tile's contextmenu on a touch-first pointer: the native menu and callout
+ * never show (the long-press opens the tile menu). A laptop's right-click is
  * left alone here. Pure.
  */
 export function chatRowContextMenu(
@@ -344,29 +407,29 @@ export function chatRowContextMenu(
   return coarsePointer ? (event) => event.preventDefault() : undefined;
 }
 
-/** The row's tap target: avatar, two text lines, full row height. */
-export const CHANNEL_ROW_BUTTON =
-  'flex min-w-0 flex-1 select-none items-center gap-3.5 px-4 min-h-[72px] py-2.5 text-left [-webkit-touch-callout:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent';
+/** The tile button's behaviour: no text selection, no iOS callout, focus ring. */
+export const CHANNEL_ROW_BUTTON = cn(
+  'min-w-0 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+  NO_TOUCH_SELECT,
+);
 
-/**
- * The 48px row avatar: the DM peer's or the group's photo, else the shared
- * initials fallback. The URL is on the summary before the row mounts (one
- * batched list read), so a row with a photo paints the photo first, never the
- * initials. The box is reserved at 48px either way.
- */
-function channelAvatar(channel: ChannelSummary): ReactElement {
-  return (
-    <Avatar
-      name={channel.title}
-      {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
-      size="row"
-    />
+/** The unread pill, or nothing when the count is 0. */
+function unreadPill(unread: number): ReactElement | null {
+  const text = unreadPillText(unread);
+  return text === null ? null : (
+    <span data-unread-pill="" className={TILE_PILL}>
+      {text}
+    </span>
   );
 }
 
 /**
- * The inside of one dense row: optional select circle, avatar, then name + time
- * over preview + unread count. Hook-free so the row's states are snapshot tested.
+ * The inside of one tile. Wide (group): 72px rounded-square photo, then name +
+ * time + pill over a 3-line preview. Square (DM): 48px disc + pill, name, a
+ * 2-line preview, time pinned to the bottom. The avatar URL is on the summary
+ * before the tile mounts (one batched list read), so a tile with a photo paints
+ * the photo first, never the initials. Hook-free so the tile's states are
+ * snapshot tested.
  */
 export function channelRowBody(props: {
   channel: ChannelSummary;
@@ -377,77 +440,94 @@ export function channelRowBody(props: {
   timeZone: string;
   selecting: boolean;
   checked: boolean;
-  /** The size table (input-based, as the thread). */
-  layout: ChatLayout;
 }): ReactElement {
-  const { channel, summary, layout } = props;
+  const { channel, summary } = props;
+  const kind = tileKind(channel);
   const hasMessage = summary !== undefined && summary.lastMessageTs > 0;
   const unread = summary?.unread ?? 0;
-  const isUnread = unread > 0;
   const preview = hasMessage ? previewLine(summary) : 'No messages yet';
   const draft = props.draft ?? null;
   const time = hasMessage
     ? formatRelativeTime(summary.lastMessageTs, props.nowMs, props.timeZone)
     : '';
+  const clamp = kind === 'wide' ? 'line-clamp-3' : 'line-clamp-2';
+  const name = (
+    <span className={cn('min-w-0 truncate text-fg', TILE_NAME_TYPE)}>{channel.title}</span>
+  );
+  const timeNode =
+    time !== '' ? <span className={cn('shrink-0 text-fg-2', TILE_TIME_TYPE)}>{time}</span> : null;
+  const check = props.selecting ? <SelectCheck checked={props.checked} /> : null;
+  const previewNode =
+    draft !== null ? (
+      <span
+        data-draft-preview=""
+        className={cn('min-w-0 break-words text-fg-2', clamp, TILE_PREVIEW_TYPE)}
+      >
+        <span className={cn('text-accent', DRAFT_PREFIX_TYPE)}>{DRAFT_PREFIX}</span>
+        {boldAllMentions(draft)}
+      </span>
+    ) : (
+      <span
+        className={cn(
+          'min-w-0 break-words',
+          clamp,
+          TILE_PREVIEW_TYPE,
+          hasMessage ? 'text-fg-2' : 'text-fg-3',
+        )}
+      >
+        {boldAllMentions(preview)}
+      </span>
+    );
+  if (kind === 'wide') {
+    return (
+      <>
+        <span data-group-photo="" className={GROUP_TILE_PHOTO}>
+          <Avatar
+            name={channel.title}
+            {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
+            size="row"
+          />
+        </span>
+        <span className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="flex min-w-0 flex-1">{name}</span>
+            {timeNode}
+            {unreadPill(unread)}
+            {check}
+          </span>
+          {previewNode}
+        </span>
+      </>
+    );
+  }
   return (
     <>
-      {props.selecting ? <SelectCheck checked={props.checked} /> : null}
-      {channelAvatar(channel)}
-      <span className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="flex items-baseline gap-2">
-          <span
-            className={cn('min-w-0 flex-1 truncate text-fg', sized(CHAT_LIST_NAME_TYPE, layout))}
-          >
-            {channel.title}
-          </span>
-          {time !== '' ? (
-            <span
-              className={cn(
-                'shrink-0',
-                sized(CHAT_LIST_TIME_TYPE, layout),
-                isUnread ? 'text-accent' : 'text-fg-3',
-              )}
-            >
-              {time}
-            </span>
-          ) : null}
+      <span className="flex items-start justify-between gap-2">
+        <span className="shrink-0">
+          <Avatar
+            name={channel.title}
+            {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
+            size="row"
+          />
         </span>
         <span className="flex items-center gap-2">
-          {draft !== null ? (
-            <span
-              data-draft-preview=""
-              className={cn(
-                'min-w-0 flex-1 truncate text-fg-2',
-                sized(CHAT_LIST_PREVIEW_TYPE, layout),
-              )}
-            >
-              <span className={cn('text-accent', DRAFT_PREFIX_TYPE)}>{DRAFT_PREFIX}</span>
-              {boldAllMentions(draft)}
-            </span>
-          ) : (
-            <span
-              className={cn(
-                'min-w-0 flex-1 truncate',
-                sized(CHAT_LIST_PREVIEW_TYPE, layout),
-                hasMessage ? 'text-fg-2' : 'text-fg-3',
-              )}
-            >
-              {boldAllMentions(preview)}
-            </span>
-          )}
-          {isUnread ? <CountBadge count={unread} className="shrink-0" /> : null}
+          {unreadPill(unread)}
+          {check}
         </span>
       </span>
+      <span className="mt-2 flex min-w-0">{name}</span>
+      <span className="mt-0.5 flex min-w-0">{previewNode}</span>
+      {timeNode !== null ? <span className="mt-auto flex">{timeNode}</span> : null}
     </>
   );
 }
 
 /**
- * A dense, full-width conversation row. A touch long-press (moving or
- * scrolling cancels it), right-click, Shift+F10, or the hover ⋯ at the row's
- * end (pointer devices only) opens the row menu; the trailing click is
- * swallowed so a long-press never also opens the chat. In select mode a
- * leading check circle shows and a tap toggles.
+ * One conversation tile; the whole tile is one button ("Open <name>"). A touch
+ * long-press (moving or scrolling cancels it), right-click, Shift+F10, or the
+ * hover ⋯ in the tile's corner (pointer devices only) opens the tile menu; the
+ * trailing click is swallowed so a long-press never also opens the chat. In
+ * select mode a check circle shows and a tap toggles.
  */
 export function ChannelCard(props: {
   channel: ChannelSummary;
@@ -458,9 +538,9 @@ export function ChannelCard(props: {
   nowMs: number;
   timeZone: string;
   onSelect: (channel: ChannelSummary) => void;
-  /** The list's input (layout, hover, coarse), read once by the list. */
+  /** The list's input (hover, coarse), read once by the list. */
   input: ChannelListInput;
-  /** Present in select mode: whether this row is checked. */
+  /** Present in select mode: whether this tile is checked. */
   checked?: boolean;
   onToggle?: (channelId: string) => void;
   onLongPress?: (channel: ChannelSummary, rect: DOMRect | null) => void;
@@ -468,7 +548,7 @@ export function ChannelCard(props: {
   const { channel, summary } = props;
   const rowRef = useRef<HTMLButtonElement>(null);
   const selecting = props.onToggle !== undefined;
-  const { layout, hoverMenu, coarsePointer } = props.input;
+  const { hoverMenu, coarsePointer } = props.input;
   const menuEnabled = !selecting && props.onLongPress !== undefined;
   // This gesture's hold already opened the menu; reset on every pointerdown.
   const holdFiredRef = useRef(false);
@@ -489,13 +569,8 @@ export function ChannelCard(props: {
   const checked = props.checked === true;
   return (
     <div
-      className={channelRowClass({
-        selected: props.selected,
-        unread: (summary?.unread ?? 0) > 0,
-        selecting,
-        checked,
-      })}
-      // Touch-first: the native menu and callout never show on a row.
+      className={cn('group relative', NO_TOUCH_SELECT)}
+      // Touch-first: the native menu and callout never show on a tile.
       onContextMenu={chatRowContextMenu(coarsePointer)}
     >
       <button
@@ -534,9 +609,14 @@ export function ChannelCard(props: {
           // A thread selecting messages exits that first (history.back()).
           leaveSelectionThen(() => props.onSelect(channel));
         }}
-        aria-label={channel.title}
+        aria-label={`Open ${channel.title}`}
         {...(selecting ? { 'aria-pressed': checked } : {})}
-        className={CHANNEL_ROW_BUTTON}
+        className={channelRowClass({
+          kind: tileKind(channel),
+          selected: props.selected,
+          selecting,
+          checked,
+        })}
       >
         {channelRowBody({
           channel,
@@ -546,7 +626,6 @@ export function ChannelCard(props: {
           timeZone: props.timeZone,
           selecting,
           checked,
-          layout,
         })}
       </button>
       {menuEnabled && hoverMenu ? (
@@ -556,7 +635,7 @@ export function ChannelCard(props: {
           aria-label={`Actions for ${channel.title}`}
           aria-haspopup="menu"
           onClick={(e) => openMenu(e.currentTarget.getBoundingClientRect())}
-          className="mr-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-fg-3 opacity-0 hover:bg-panel-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100 group-focus-within:opacity-100"
+          className="absolute bottom-1 right-1 flex h-11 w-11 items-center justify-center rounded-md bg-panel text-fg-3 opacity-0 hover:bg-panel-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100 group-focus-within:opacity-100"
         >
           <IconEllipsis size={20} />
         </button>
