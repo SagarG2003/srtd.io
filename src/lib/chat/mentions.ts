@@ -353,21 +353,50 @@ export function displayCaret(body: string, caret: number, nameOf: NameOf): numbe
 // --- name registry -----------------------------------------------------------
 
 const names = new Map<string, string>();
+// Ids a successful read found without an active workspace membership: their
+// mentions read "@Unknown member" (inert) even though their profile resolves.
+const former = new Set<string>();
 
-/** Remember display names from any batched profile read (or a pick). */
+/** Remember current members' display names (a member read, or a pick). */
 export function rememberMentionNames(
   entries: Iterable<{ userId: string; displayName: string }>,
 ): void {
   for (const entry of entries) {
-    if (entry.displayName !== '' && entry.userId !== ALL_MENTION)
+    if (entry.displayName !== '' && entry.userId !== ALL_MENTION) {
       names.set(entry.userId.toLowerCase(), entry.displayName);
+      former.delete(entry.userId.toLowerCase());
+    }
   }
 }
 
-/** A remembered display name, or undefined. */
-export const knownMentionName: NameOf = (userId) => names.get(userId.toLowerCase());
+/**
+ * Remember a mention profile read: a current member's name is kept; anyone
+ * else is marked a former member, so their mentions read "@Unknown member".
+ */
+export function rememberMentionProfiles(
+  entries: Iterable<{ userId: string; displayName: string; member: boolean }>,
+): void {
+  for (const entry of entries) {
+    if (entry.member) {
+      rememberMentionNames([entry]);
+    } else {
+      names.delete(entry.userId.toLowerCase());
+      former.add(entry.userId.toLowerCase());
+    }
+  }
+}
+
+/** Whether a successful read found this id without an active membership. */
+export function isFormerMember(userId: string): boolean {
+  return former.has(userId.toLowerCase());
+}
+
+/** A remembered current member's display name, or undefined. */
+export const knownMentionName: NameOf = (userId) =>
+  isFormerMember(userId) ? undefined : names.get(userId.toLowerCase());
 
 /** Test-only: forget every remembered name. */
 export function resetMentionNames(): void {
   names.clear();
+  former.clear();
 }

@@ -641,6 +641,7 @@ describe('fetchActivityEntries enrichment', () => {
         { id: 'u-bob', display_name: 'Bob', avatar_url: null },
         { id: ANA, display_name: 'Ana', avatar_url: null },
       ]),
+      workspace_members: ok([{ user_id: ANA, role: 'client' }]),
     });
     const res = await fetchActivityEntries(client, 'w1');
     expect(res.ok).toBe(true);
@@ -651,6 +652,41 @@ describe('fetchActivityEntries enrichment', () => {
     expect(activityLine(chat)).toBe('Bob mentioned you in Launch crew');
     expect(chat.body).toBe('hey @Ana see this');
     expect(entityHref(chat)).toBe('/chat?channel=chan-g&message=msg-1');
+  });
+
+  it('B1 a removed member with a readable profile reads "@Unknown member" in Activity; an active one is unchanged', async () => {
+    const ANA = '11111111-1111-4111-8111-111111111111';
+    const EX = '22222222-2222-4222-8222-222222222222';
+    const client = fakeClient({
+      inbox_entries: ok([
+        inboxRow({
+          id: 'e-chat',
+          event_type: 'mention',
+          entity_type: 'chat_channel',
+          entity_id: 'chan-g',
+          scope: 'groups',
+          actor_user_id: 'u-bob',
+          payload: { message_id: 'msg-1' },
+        }),
+      ]),
+      chat_channels: ok([{ channel_id: 'chan-g', channel_type: 'group', entity_id: 'g1' }]),
+      chat_messages: ok([{ id: 'msg-1', body: `hey @[${ANA}] and @[${EX}]` }]),
+      groups: ok([{ id: 'g1', name: 'Launch crew' }]),
+      // users RLS still returns the ex-member's profile...
+      users: ok([
+        { id: 'u-bob', display_name: 'Bob', avatar_url: null },
+        { id: ANA, display_name: 'Ana', avatar_url: null },
+        { id: EX, display_name: 'Eve', avatar_url: null },
+      ]),
+      // ...but only Ana has an active, non-removed membership.
+      workspace_members: ok([{ user_id: ANA, role: 'client' }]),
+    });
+    const res = await fetchActivityEntries(client, 'w1');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const chat = res.data[0] ?? item({});
+    expect(chat.body).toBe('hey @Ana and @Unknown member');
+    expect(chat.body).not.toContain('Eve');
   });
 
   it('resolves a comment actorName via comments -> users and the title via posts', async () => {

@@ -211,6 +211,53 @@ export async function readProfiles(
   };
 }
 
+/** A mentioned person's profile, and whether they are a current workspace member. */
+export interface MentionProfile extends ChatProfile {
+  /** An active, non-removed workspace_members row in this workspace. */
+  member: boolean;
+}
+
+/**
+ * The ids among `userIds` with an active, non-removed membership in this
+ * workspace: one batched workspace_members IN read (readChatMembers' filter).
+ */
+export async function readActiveMemberIds(
+  client: Client,
+  params: { workspaceId: string; userIds: string[]; signal?: AbortSignal },
+): Promise<Result<string[]>> {
+  const res = await readMemberRoles(
+    client,
+    params.workspaceId,
+    unique(params.userIds),
+    params.signal,
+  );
+  if (!res.ok) return res;
+  return { ok: true, data: res.data.map((m) => m.user_id) };
+}
+
+/**
+ * Profiles for mentioned ids, each marked with current membership: the users
+ * IN read and the workspace_members IN read run in the same pass (users RLS
+ * lets an ex-member's profile be read, so a name alone proves nothing). Either
+ * read failing fails the whole read.
+ */
+export async function readMentionProfiles(
+  client: Client,
+  params: { workspaceId: string; userIds: string[]; signal?: AbortSignal },
+): Promise<Result<MentionProfile[]>> {
+  const [profiles, active] = await Promise.all([
+    readProfiles(client, params.userIds, params.signal),
+    readActiveMemberIds(client, params),
+  ]);
+  if (!profiles.ok) return profiles;
+  if (!active.ok) return active;
+  const members = new Set(active.data);
+  return {
+    ok: true,
+    data: profiles.data.map((p) => ({ ...p, member: members.has(p.userId) })),
+  };
+}
+
 /**
  * The Sorted user ids of one group's current members. A single RLS-scoped read
  * of group_members (no per-member round-trip); callers enrich with readProfiles

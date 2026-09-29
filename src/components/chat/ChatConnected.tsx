@@ -7,7 +7,7 @@ import { useMediaQuery } from '@/lib/use-media-query';
 import { useWorkspace } from '@/lib/workspace-context';
 import {
   listGroupMemberIds,
-  readProfiles,
+  readMentionProfiles,
   withReadTimeout,
   type ChannelSummary,
   type ChatProfile,
@@ -33,7 +33,7 @@ import { GroupInfoSheet } from '@/components/chat/GroupInfoSheet';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import { startDmChannel } from '@/components/chat/chat-actions';
 import { mentionGone, useChannelMembersState } from '@/components/chat/use-channel-members';
-import { knownMentionName, mentionIds, rememberMentionNames } from '@/lib/chat/mentions';
+import { knownMentionName, mentionIds, rememberMentionProfiles } from '@/lib/chat/mentions';
 import { useToast } from '@/components/ui/toast';
 import type { Result } from '@srtdio/rpc';
 
@@ -686,14 +686,17 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     if (ids.length === 0) return;
     for (const id of ids) inFlight.current.add(id);
     // A hang is a failed read after 5s (and a rejection is one at once), so a
-    // held row, the first page and the initial jump always go on.
-    void withReadTimeout((signal) => readProfiles(supabase, ids, signal)).then((result) => {
+    // held row, the first page and the initial jump always go on. Membership
+    // comes in the same pass: a readable profile is not proof of membership.
+    void withReadTimeout((signal) =>
+      readMentionProfiles(supabase, { workspaceId, userIds: ids, signal }),
+    ).then((result) => {
       for (const id of ids) inFlight.current.delete(id);
       if (!mounted.current) return;
       if (!result.ok) {
         logger.warn('chat: profile read failed', { error: result.error.message });
       } else {
-        rememberMentionNames(result.data);
+        rememberMentionProfiles(result.data);
         setProfiles((prev) => {
           const next = new Map(prev);
           for (const profile of result.data) next.set(profile.userId, profile);
@@ -702,7 +705,15 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       }
       setNameReads((prev) => applyProfileRead(prev, ids, result));
     });
-  }, [thread.messages, selected, profiles, nameReads, retryFailedFor, selectedChannelId]);
+  }, [
+    thread.messages,
+    selected,
+    profiles,
+    nameReads,
+    retryFailedFor,
+    selectedChannelId,
+    workspaceId,
+  ]);
   const firstPageSettled = firstPageIn && unsettled.length === 0;
   useEffect(() => {
     if (firstPageSettled) setNamesSettled(selectedChannelId);

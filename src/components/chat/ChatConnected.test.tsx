@@ -34,14 +34,27 @@ import {
 } from '@/components/chat/MessageThread';
 import {
   READ_TIMEOUT_MS,
+  readMentionProfiles,
   withReadTimeout,
   type ChannelSummary,
   type ChatProfile,
 } from '@/lib/chat-reads';
 import { findInOlderPages } from '@/lib/chat/marks';
-import { knownMentionName, resetMentionNames } from '@/lib/chat/mentions';
+import {
+  isFormerMember,
+  knownMentionName,
+  rememberMentionProfiles,
+  resetMentionNames,
+  resolveMentionText,
+  serializeMentions,
+} from '@/lib/chat/mentions';
+import { previewMentionText } from '@/components/chat/ChatStoreProvider';
+import { draftLine } from '@/components/chat/ChannelList';
+import { composerBodyFor } from '@/components/chat/Composer';
+import { mentionGone } from '@/components/chat/use-channel-members';
+import { runEdit } from '@/lib/chat/delete-flow';
 import type { ChatMessageRow, ThreadMessage } from '@/lib/chat/thread';
-import type { Result } from '@srtdio/rpc';
+import type { Client, Result } from '@srtdio/rpc';
 
 const ANA = '11111111-1111-4111-8111-111111111111';
 const BEN = '22222222-2222-4222-8222-222222222222';
@@ -605,5 +618,118 @@ describe('J5 a deep-link refresh applies only on the same page', () => {
     // Unchanged: opens when found, toasts when absent.
     expect(deepLinkRefreshOutcome(found, started, started)).toBe('open');
     expect(deepLinkRefreshOutcome(absent, started, started)).toBe('toast');
+  });
+});
+
+// --- fix round 4 -------------------------------------------------------------
+
+describe('B1 a readable profile is not membership', () => {
+  beforeEach(() => resetMentionNames());
+
+  /** users returns every profile (RLS lets ex-members be read); workspace_members only the active. */
+  function membersClient(active: string[]): { client: Client; reads: string[] } {
+    const reads: string[] = [];
+    const users = [profileRow(ANA, 'Ana'), profileRow(EX, 'Eve')];
+    const client = {
+      from: (table: string) => {
+        const calls: string[] = [];
+        const query = {
+          select: () => query,
+          eq: () => query,
+          is: () => query,
+          in: (col: string, ids: string[]) => {
+            calls.push(`${col} IN ${ids.join(',')}`);
+            return query;
+          },
+          abortSignal: () => query,
+          then: (resolve: (value: unknown) => unknown) => {
+            reads.push(`${table}: ${calls.join(' ')}`);
+            const data =
+              table === 'users' ? users : active.map((id) => ({ user_id: id, role: 'client' }));
+            return Promise.resolve({ data, error: null }).then(resolve);
+          },
+        };
+        return query;
+      },
+    };
+    return { client: client as unknown as Client, reads };
+  }
+
+  function profileRow(id: string, name: string): Record<string, unknown> {
+    return { id, display_name: name, avatar_url: null };
+  }
+
+  it('B1 removed member with a readable profile renders "@Unknown member", is not tappable and drops from p_mentions on edit; active member unchanged', async () => {
+    const { client, reads } = membersClient([ANA]);
+    const result = await readMentionProfiles(client, { workspaceId: 'w1', userIds: [ANA, EX] });
+    // One batched pass: one users IN and one workspace_members IN, no per-id read.
+    expect(reads).toEqual([
+      `users: id IN ${ANA},${EX}`,
+      `workspace_members: user_id IN ${ANA},${EX}`,
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.map((p) => [p.displayName, p.member])).toEqual([
+      ['Ana', true],
+      ['Eve', false],
+    ]);
+    // What ChatConnected's profile effect does with the read.
+    rememberMentionProfiles(result.data);
+    const profiles: Profiles = new Map(result.data.map((p) => [p.userId, p]));
+    expect(isFormerMember(EX)).toBe(true);
+
+    const body = `hi @[${ANA}] and @[${EX}]`;
+    const row = message({ id: 'm2', body });
+    // Paints at once (settled), never held.
+    expect(paint([row], profiles, applyProfileRead(NO_NAME_READS, [ANA, EX], result))).toEqual([
+      row,
+    ]);
+    // Bubble: Ana is a tappable "@Ana"; the ex-member is inert "@Unknown member".
+    const html = bubbleHtml(row, profiles);
+    expect(html).toContain('@Ana');
+    expect(html).toContain('@Unknown member');
+    expect(html).not.toContain('Eve');
+    expect(html.match(/<button/g)).toHaveLength(1);
+    // Copy, list preview, draft line.
+    expect(resolveMentionText(body, profileNameOf(profiles))).toBe('hi @Ana and @Unknown member');
+    expect(previewMentionText(body)).toBe('hi @Ana and @Unknown member');
+    expect(draftLine(body)).toBe('hi @Ana and @Unknown member');
+
+    // Edit box: the ex-member shows "@Unknown member" and drops on save, even
+    // when the chat's member read failed (the profile read already settled it).
+    for (const load of [{ ok: true as const, members: [] }, { ok: false as const }]) {
+      const gone = mentionGone(load, 'me');
+      const shown = composerBodyFor(
+        { text: body, caret: body.length },
+        true,
+        profileNameOf(profiles),
+        gone,
+      );
+      expect(shown.text).toBe('hi @Ana and @Unknown member');
+      const saved = serializeMentions(shown.text, shown.picks);
+      const rpc = vi.fn(() => ({
+        abortSignal: () =>
+          Promise.resolve({ data: { id: 'm2', body: saved, edited_at: 'now' }, error: null }),
+      }));
+      const edited = await runEdit(
+        {
+          client: { rpc } as unknown as Client,
+          applyLocal: () => undefined,
+          signal: undefined,
+          onSignalFailed: () => undefined,
+        },
+        { channelId: 'c1', messageId: 'm2', body: saved, traceId: 't', channelType: 'group' },
+      );
+      expect(edited.ok).toBe(true);
+      const args = (rpc.mock.calls[0] as unknown as [string, Record<string, unknown>])[1];
+      expect(args.p_mentions).toEqual([ANA]);
+    }
+  });
+
+  it('B1 a failed profile read keeps the existing behaviour: kept, inert, not marked former', async () => {
+    const reads = applyProfileRead(NO_NAME_READS, [EX], failed);
+    expect(reads.failed.has(EX)).toBe(true);
+    expect(isFormerMember(EX)).toBe(false);
+    expect(mentionGone({ ok: false }, 'me')(EX)).toBe(false);
   });
 });

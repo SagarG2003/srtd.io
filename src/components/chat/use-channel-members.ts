@@ -18,7 +18,7 @@ import {
   type ChatMember,
 } from '@/lib/chat-reads';
 import type { Result } from '@srtdio/rpc';
-import { rememberMentionNames, type MentionMember } from '@/lib/chat/mentions';
+import { isFormerMember, rememberMentionNames, type MentionMember } from '@/lib/chat/mentions';
 
 /** Which chat to list: a group by its Sorted group id, or a DM by its peer. */
 export interface ChannelMembersInput {
@@ -126,16 +126,17 @@ export async function loadChannelMembers(
 
 /**
  * Whether a stored mention's person is confirmed gone from this chat: only a
- * SUCCESSFUL member read that does not list them says so. Loading or a failed
- * read confirms nothing, so their mention is kept. Pure.
+ * SUCCESSFUL read says so, the member read not listing them or a mention
+ * profile read finding them without an active membership (isFormerMember).
+ * Loading or a failed read confirms nothing, so their mention is kept.
  */
 export function mentionGone(
   load: ChannelMembersLoad | null,
   selfId: string | null,
 ): (userId: string) => boolean {
-  if (load === null || !load.ok) return () => false;
+  if (load === null || !load.ok) return (userId) => userId !== selfId && isFormerMember(userId);
   const ids = new Set(load.members.map((m) => m.userId));
-  return (userId) => userId !== selfId && !ids.has(userId);
+  return (userId) => userId !== selfId && (!ids.has(userId) || isFormerMember(userId));
 }
 
 const READERS: ChannelMemberReaders = {

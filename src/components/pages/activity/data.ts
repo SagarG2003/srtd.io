@@ -10,7 +10,7 @@ import { inboxMarkAllRead, inboxMarkRead, inboxSnooze } from '@srtdio/rpc';
 import type { Database, InboxEventTypeValue, Json } from '@srtdio/schemas';
 import { INBOX_EVENT_TYPES } from '@srtdio/schemas';
 import { parseMentions } from '@srtdio/comments';
-import { readProfiles } from '@/lib/chat-reads';
+import { readActiveMemberIds, readProfiles } from '@/lib/chat-reads';
 import { entityUrlPath } from '@/lib/entityRef';
 import { logger } from '@/lib/logger';
 import { EX_MEMBER_LABEL } from '@/components/comments/commentProfiles';
@@ -852,10 +852,20 @@ export async function fetchActivityEntries(
   const groupIds = unique(
     [...chatRes.channels.values()].flatMap((c) => (c.groupId !== null ? [c.groupId] : [])),
   );
-  const [profiles, groupNames] = await Promise.all([
+  // Chat mentions name only current members: their active memberships are read
+  // in the same pass as the profiles (a readable profile is not membership).
+  const chatMentionIds = unique(
+    [...chatRes.bodies.values()].flatMap((body) => parseMentions(body)),
+  );
+  const [profiles, groupNames, activeRes] = await Promise.all([
     userIds.length > 0 ? readProfiles(client, userIds) : Promise.resolve(null),
     readGroupNames(client, groupIds),
+    chatMentionIds.length > 0
+      ? readActiveMemberIds(client, { workspaceId, userIds: chatMentionIds })
+      : Promise.resolve(null),
   ]);
+  // A failed membership read keeps the names (unchanged behaviour on failure).
+  const activeMentioned = activeRes !== null && activeRes.ok ? new Set(activeRes.data) : null;
   if (profiles !== null && profiles.ok) {
     for (const p of profiles.data) {
       userNames.set(p.userId, p.displayName);
@@ -878,7 +888,9 @@ export async function fetchActivityEntries(
       item.channelType = channel?.type ?? null;
       item.title = channel?.groupId != null ? (groupNames.get(channel.groupId) ?? null) : null;
       const body = item.messageId !== null ? (chatRes.bodies.get(item.messageId) ?? null) : null;
-      item.body = chatMentionPreview(body, (id) => userNames.get(id));
+      item.body = chatMentionPreview(body, (id) =>
+        activeMentioned === null || activeMentioned.has(id) ? userNames.get(id) : undefined,
+      );
     } else if (COMMENT_EVENTS.includes(item.eventType)) {
       actorUserId = item.commentId !== null ? (commentAuthors.get(item.commentId) ?? null) : null;
     } else if (item.eventType === 'brief_created' || item.eventType === 'brief_closed') {

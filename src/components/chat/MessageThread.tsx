@@ -17,6 +17,7 @@ import { Link } from 'react-router-dom';
 import { isNearBottom } from '@/lib/chat/scroll';
 import {
   ALL_MENTION,
+  isFormerMember,
   knownMentionName,
   mentionIds,
   mentionLabel,
@@ -1177,9 +1178,16 @@ export function mentionClass(mine: boolean, self: boolean): string {
 const MENTION_HIT =
   "relative before:absolute before:left-1/2 before:top-1/2 before:h-[44px] before:w-full before:min-w-[44px] before:-translate-x-1/2 before:-translate-y-1/2 before:content-['']";
 
-/** The thread's name lookup: the batched profiles, then the mention registry. */
+/**
+ * The thread's mention name lookup: the batched profiles, then the mention
+ * registry. A former member (read without an active membership) resolves to
+ * nothing, so their mention reads "@Unknown member" and is inert.
+ */
 export function profileNameOf(profiles: Map<string, ChatProfile>): NameOf {
-  return (userId) => profiles.get(userId)?.displayName ?? knownMentionName(userId);
+  return (userId) =>
+    isFormerMember(userId)
+      ? undefined
+      : (profiles.get(userId)?.displayName ?? knownMentionName(userId));
 }
 
 /**

@@ -470,7 +470,7 @@ describe('chat list mentions', () => {
       ok: true as const,
       data: ids
         .filter((id) => id === ANA)
-        .map((id) => ({ userId: id, displayName: 'Ana', avatarUrl: null })),
+        .map((id) => ({ userId: id, displayName: 'Ana', avatarUrl: null, member: true })),
     }));
     const result = await resolvePreviewMentions(
       { ok: true, data: [preview(`hi @[${ANA}]`), preview(`and @[${GONE}] @[${ANA}]`)] },
