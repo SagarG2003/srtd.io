@@ -54,6 +54,13 @@
 //      chat_reactions, chat_read_cursors and chat_channel_clears directly
 //      (no permission-denied error); a non-member still reads zero rows.
 //
+// Mentions (20260929160000_chat_mentions.sql):
+//
+//  15. chat_message_send / chat_message_edit validate p_mentions through
+//      chat_mentions_resolve (members only, max 50, self stripped, duplicates
+//      collapsed) and fan out one urgent 'mention' inbox_entries row per
+//      mentioned user; edit and delete soft-delete the entries they drop.
+//
 // Seeding goes through the service role (the privileged path), following the
 // rationale in packages/test-utils/rls.ts.
 
@@ -84,7 +91,7 @@ import {
   type SeededWorkspace,
 } from '../../packages/test-utils/rls';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { Database } from '../../packages/schemas/src/supabase.generated';
+import type { Database, Json } from '../../packages/schemas/src/supabase.generated';
 
 const RLS_SUITE = process.env.RLS_SUITE === '1';
 
@@ -98,6 +105,7 @@ type MarkResolveArgs = Database['public']['Functions']['chat_mark_resolve']['Arg
 type DeleteArgs = Database['public']['Functions']['chat_message_delete']['Args'];
 type EditArgs = Database['public']['Functions']['chat_message_edit']['Args'];
 type ClearArgs = Database['public']['Functions']['chat_channel_clear']['Args'];
+type ResolveArgs = Database['public']['Functions']['chat_mentions_resolve']['Args'];
 
 // Proc arguments are built here (not inline at the .rpc() call) so each call
 // carries a fresh trace id the way the app's callRpc() wrapper does.
@@ -138,13 +146,16 @@ function deleteArgs(messageIds: string[], channelId: string): DeleteArgs {
   return { p_message_ids: messageIds, p_channel_id: channelId, p_trace_id: generateTraceId() };
 }
 
-function editArgs(messageId: string, channelId: string, body: string): EditArgs {
-  return {
+/** Build chat_message_edit args; `mentions` undefined omits p_mentions (the 4-arg call). */
+function editArgs(messageId: string, channelId: string, body: string, mentions?: Json): EditArgs {
+  const args: EditArgs = {
     p_message_id: messageId,
     p_channel_id: channelId,
     p_body: body,
     p_trace_id: generateTraceId(),
   };
+  if (mentions !== undefined) args.p_mentions = mentions;
+  return args;
 }
 
 /** ISO timestamp `minutes` before now (for the edit / delete windows). */
@@ -167,6 +178,7 @@ function sendArgs(
     sharedBriefs?: string[];
     replyTo?: string;
     forwardedFrom?: string;
+    mentions?: Json;
   } = {},
 ): SendArgs {
   const args: SendArgs = {
@@ -180,6 +192,7 @@ function sendArgs(
   if (extra.sharedBriefs) args.p_shared_brief_ids = extra.sharedBriefs;
   if (extra.replyTo) args.p_reply_to_message_id = extra.replyTo;
   if (extra.forwardedFrom) args.p_forwarded_from_message_id = extra.forwardedFrom;
+  if (extra.mentions !== undefined) args.p_mentions = extra.mentions;
   return args;
 }
 
@@ -1534,6 +1547,245 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
       expect(await memberSelect(ownerClient, 'chat_channel_clears', match)).toHaveLength(1);
       expect(await visibleRowCount(cClient, 'chat_channel_clears', match)).toBe(0);
       expect(await visibleRowCount(outsiderClient, 'chat_channel_clears', match)).toBe(0);
+    });
+  });
+  // -------------------------------------------------------------------------
+  // 15. Mentions
+  // -------------------------------------------------------------------------
+
+  describe('chat mentions', () => {
+    interface MentionEntry {
+      user_id: string;
+      workspace_id: string;
+      event_type: string;
+      entity_type: string | null;
+      entity_id: string | null;
+      scope: string;
+      scope_key: string | null;
+      tier: string;
+      payload: { message_id?: string } | null;
+      actor_user_id: string | null;
+      deleted_at: string | null;
+    }
+
+    /** Every 'mention' inbox row for `messageId`, live or soft-deleted, via the service role. */
+    async function mentionEntries(messageId: string): Promise<MentionEntry[]> {
+      const res = await adminGeneric
+        .from('inbox_entries')
+        .select('*')
+        .eq('event_type', 'mention')
+        .eq('payload->>message_id', messageId);
+      if (res.error) throw new Error(`inbox_entries read failed: ${res.error.message}`);
+      return (res.data as MentionEntry[] | null) ?? [];
+    }
+
+    async function storedMentions(messageId: string): Promise<unknown> {
+      const res = await adminGeneric.from('chat_messages').select('mentions').eq('id', messageId);
+      if (res.error) throw new Error(`chat_messages read failed: ${res.error.message}`);
+      const rows = (res.data as { mentions: unknown }[] | null) ?? [];
+      if (rows.length !== 1) throw new Error(`expected one chat_messages row for ${messageId}`);
+      return rows[0]?.mentions ?? null;
+    }
+
+    function live(entries: MentionEntry[], userId: string): MentionEntry[] {
+      return entries.filter((e) => e.user_id === userId && e.deleted_at === null);
+    }
+
+    it('T1 group send mentioning a member stores the mention and one urgent groups entry', async () => {
+      const args = sendArgs(ctx.channelId, 'hi @b', { mentions: [userB.id] });
+      const res = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(res.error).toBeNull();
+      expect(res.data?.mentions).toEqual([userB.id]);
+      expect(await storedMentions(args.p_id)).toEqual([userB.id]);
+
+      const entries = await mentionEntries(args.p_id);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        user_id: userB.id,
+        workspace_id: wsA.id,
+        event_type: 'mention',
+        entity_type: 'chat_channel',
+        entity_id: ctx.channelId,
+        scope: 'groups',
+        scope_key: ctx.channelId,
+        tier: 'urgent',
+        payload: { message_id: args.p_id },
+        actor_user_id: owner.id,
+        deleted_at: null,
+      });
+    });
+
+    it('T2 DM send mentioning the other party uses scope people', async () => {
+      const args = sendArgs(dmChannelId, 'hi @b', { mentions: [userB.id] });
+      const res = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(res.error).toBeNull();
+      const entries = await mentionEntries(args.p_id);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        user_id: userB.id,
+        entity_id: dmChannelId,
+        scope: 'people',
+        scope_key: dmChannelId,
+        tier: 'urgent',
+      });
+    });
+
+    it('T3 mentioning a same-workspace non-member raises and writes nothing', async () => {
+      const args = sendArgs(ctx.channelId, 'hi @c', { mentions: [userC.id] });
+      const res = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(res.error?.message).toBe('mentioned people must be in this chat');
+      expect(await countWhere(adminGeneric, 'chat_messages', [['id', args.p_id]])).toBe(0);
+      expect(await mentionEntries(args.p_id)).toHaveLength(0);
+    });
+
+    it('T4 mentioning a user from another workspace raises and writes nothing', async () => {
+      const args = sendArgs(ctx.channelId, 'hi @o', { mentions: [outsider.id] });
+      const res = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(res.error?.message).toBe('mentioned people must be in this chat');
+      expect(await countWhere(adminGeneric, 'chat_messages', [['id', args.p_id]])).toBe(0);
+      expect(await mentionEntries(args.p_id)).toHaveLength(0);
+    });
+
+    it('T5 strips a self mention and collapses duplicates; self-only stores null', async () => {
+      const args = sendArgs(ctx.channelId, 'dupes', {
+        mentions: [owner.id, userB.id, userB.id],
+      });
+      const res = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(res.error).toBeNull();
+      expect(await storedMentions(args.p_id)).toEqual([userB.id]);
+      const entries = await mentionEntries(args.p_id);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.user_id).toBe(userB.id);
+
+      const self = sendArgs(ctx.channelId, 'me', { mentions: [owner.id] });
+      const selfRes = await clientFor(owner.id).rpc('chat_message_send', self);
+      expect(selfRes.error).toBeNull();
+      expect(selfRes.data?.mentions).toBeNull();
+      expect(await storedMentions(self.p_id)).toBeNull();
+      expect(await mentionEntries(self.p_id)).toHaveLength(0);
+    });
+
+    it('T6 rejects a non-array p_mentions and more than 50 mentions', async () => {
+      const obj = sendArgs(ctx.channelId, 'bad', { mentions: { user: userB.id } });
+      const objRes = await clientFor(owner.id).rpc('chat_message_send', obj);
+      expect(objRes.error?.message).toBe('mentions must be a list of people');
+      expect(await countWhere(adminGeneric, 'chat_messages', [['id', obj.p_id]])).toBe(0);
+
+      const many = Array.from({ length: 51 }, () => crypto.randomUUID());
+      const big = sendArgs(ctx.channelId, 'many', { mentions: many });
+      const bigRes = await clientFor(owner.id).rpc('chat_message_send', big);
+      expect(bigRes.error?.message).toBe('too many mentions');
+      expect(await countWhere(adminGeneric, 'chat_messages', [['id', big.p_id]])).toBe(0);
+    });
+
+    it('T7 a resend with the same p_id keeps exactly one entry per mentioned user', async () => {
+      const args = sendArgs(ctx.channelId, 'once', { mentions: [userB.id] });
+      const first = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(first.error).toBeNull();
+      const retry: SendArgs = { ...args, p_trace_id: generateTraceId() };
+      const again = await clientFor(owner.id).rpc('chat_message_send', retry);
+      expect(again.error).toBeNull();
+      expect(again.data?.id).toBe(args.p_id);
+      const entries = await mentionEntries(args.p_id);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.user_id).toBe(userB.id);
+    });
+
+    it('T8 edit drops removed mentions, adds new ones, and keeps unchanged ones single', async () => {
+      const args = sendArgs(ctx.channelId, 'hi @b', { mentions: [userB.id] });
+      const sent = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(sent.error).toBeNull();
+      expect(live(await mentionEntries(args.p_id), userB.id)).toHaveLength(1);
+
+      // Remove: the entry is soft-deleted and the stored mentions go null.
+      const removed = await clientFor(owner.id).rpc(
+        'chat_message_edit',
+        editArgs(args.p_id, ctx.channelId, 'hi', []),
+      );
+      expect(removed.error).toBeNull();
+      expect(removed.data?.mentions).toBeNull();
+      const afterRemove = await mentionEntries(args.p_id);
+      expect(afterRemove).toHaveLength(1);
+      expect(afterRemove[0]?.deleted_at).not.toBeNull();
+
+      // Add: a new live entry alongside the soft-deleted one.
+      const added = await clientFor(owner.id).rpc(
+        'chat_message_edit',
+        editArgs(args.p_id, ctx.channelId, 'hi again @b', [userB.id]),
+      );
+      expect(added.error).toBeNull();
+      expect(added.data?.mentions).toEqual([userB.id]);
+      const afterAdd = await mentionEntries(args.p_id);
+      expect(afterAdd).toHaveLength(2);
+      expect(live(afterAdd, userB.id)).toHaveLength(1);
+
+      // Unchanged: the live entry is kept as is, nothing new is written.
+      const liveBefore = live(afterAdd, userB.id);
+      const same = await clientFor(owner.id).rpc(
+        'chat_message_edit',
+        editArgs(args.p_id, ctx.channelId, 'still @b', [userB.id]),
+      );
+      expect(same.error).toBeNull();
+      const afterSame = await mentionEntries(args.p_id);
+      expect(afterSame).toHaveLength(2);
+      expect(live(afterSame, userB.id)).toEqual(liveBefore);
+    });
+
+    it('T9 delete soft-deletes every mention entry for the message', async () => {
+      const args = sendArgs(ctx.channelId, 'hi @b', { mentions: [userB.id] });
+      const sent = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(sent.error).toBeNull();
+      expect(live(await mentionEntries(args.p_id), userB.id)).toHaveLength(1);
+
+      const del = await clientFor(owner.id).rpc(
+        'chat_message_delete',
+        deleteArgs([args.p_id], ctx.channelId),
+      );
+      expect(del.error).toBeNull();
+      const entries = await mentionEntries(args.p_id);
+      expect(entries.length).toBeGreaterThanOrEqual(1);
+      expect(entries.every((e) => e.deleted_at !== null)).toBe(true);
+    });
+
+    it('T10 only the mentioned user reads the entry through RLS', async () => {
+      const args = sendArgs(ctx.channelId, 'hi @b', { mentions: [userB.id] });
+      const sent = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(sent.error).toBeNull();
+      const match: MatchSpec = [
+        ['event_type', 'mention'],
+        ['payload->>message_id', args.p_id],
+      ];
+      expect(await countWhere(adminGeneric, 'inbox_entries', match)).toBe(1);
+      expect(await ownReadCount(bClient, 'inbox_entries', match)).toBe(1);
+      expect(await visibleRowCount(ownerClient, 'inbox_entries', match)).toBe(0);
+      expect(await visibleRowCount(cClient, 'inbox_entries', match)).toBe(0);
+    });
+
+    it('T11 authenticated cannot execute chat_mentions_resolve', async () => {
+      const args: ResolveArgs = {
+        p_channel_id: ctx.channelId,
+        p_actor: owner.id,
+        p_mentions: [userB.id],
+      };
+      const res = await clientFor(owner.id).rpc('chat_mentions_resolve', args);
+      expect(res.data).toBeNull();
+      expect(res.error?.message).toMatch(/permission denied/);
+    });
+
+    it('T12 the 4-arg chat_message_edit call (no p_mentions) still works', async () => {
+      const id = await seedMessage(adminGeneric, ctx.channelId, wsA.id, userB.id, minutesAgo(1));
+      const args = editArgs(id, ctx.channelId, 'four args');
+      expect(Object.keys(args).sort()).toEqual([
+        'p_body',
+        'p_channel_id',
+        'p_message_id',
+        'p_trace_id',
+      ]);
+      const res = await clientFor(userB.id).rpc('chat_message_edit', args);
+      expect(res.error).toBeNull();
+      expect(res.data?.body).toBe('four args');
+      expect(res.data?.mentions).toBeNull();
+      expect(res.data?.edited_at).not.toBeNull();
     });
   });
 });
