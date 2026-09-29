@@ -110,8 +110,9 @@ function ownSend(message: ThreadMessage): boolean {
  * row queues every later row behind it (they release together, in order), so
  * a row never lands above a newer one already on screen. Never held: a row
  * already painted (`painted`, so a switch or a retry never takes one away) and
- * my own sends (their unresolved names draw inert until they arrive). The
- * same array comes back when nothing is held. Pure.
+ * my own sends (their unresolved names draw inert until they arrive). An own
+ * send releases every row held ahead of it in the same pass, so it always
+ * paints below them. The same array comes back when nothing is held. Pure.
  */
 export function paintableMessages(
   messages: ThreadMessage[],
@@ -121,14 +122,20 @@ export function paintableMessages(
 ): ThreadMessage[] {
   const settled = (id: string): boolean =>
     isKnown(id) || reads.unknown.has(id) || reads.failed.has(id);
-  const out: ThreadMessage[] = [];
-  let queued = false;
+  const shown = new Set<string>();
+  let held: string[] = [];
   for (const m of messages) {
-    if (painted.has(m.id) || ownSend(m)) out.push(m);
-    else if (!queued && rowNameIds(m).every(settled)) out.push(m);
-    else queued = true;
+    if (ownSend(m)) {
+      // My own send never paints above rows held ahead of it: they release
+      // now, in order (unresolved names draw inert), and my row paints last.
+      for (const id of held) shown.add(id);
+      held = [];
+      shown.add(m.id);
+    } else if (painted.has(m.id)) shown.add(m.id);
+    else if (held.length === 0 && rowNameIds(m).every(settled)) shown.add(m.id);
+    else held.push(m.id);
   }
-  return out.length === messages.length ? messages : out;
+  return shown.size === messages.length ? messages : messages.filter((m) => shown.has(m.id));
 }
 
 /**

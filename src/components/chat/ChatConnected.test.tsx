@@ -400,6 +400,32 @@ describe('H3 own sends are never held', () => {
   });
 });
 
+describe('J1 an own send releases the rows held ahead of it', () => {
+  beforeEach(() => resetMentionNames());
+
+  it('J1 peer row N held, own send N+1: rendered order is N then N+1 on first paint of N+1', () => {
+    const known: Profiles = new Map([['sender', profile('sender', 'Sam')]]);
+    const n = message({ id: 'n', body: `for @[${ANA}]` });
+    const onScreen = new Set<string>();
+    expect(paint([n], known, NO_NAME_READS, onScreen).map((m) => m.id)).toEqual([]);
+    const own = message({
+      id: 'local-1',
+      senderUserId: 'me',
+      mine: true,
+      state: 'sending',
+      body: 'mine',
+    });
+    expect(paint([n, own], known, NO_NAME_READS, onScreen).map((m) => m.id)).toEqual([
+      'n',
+      'local-1',
+    ]);
+    // The released row draws its unresolved name inert.
+    const html = bubbleHtml(n, known);
+    expect(html).toContain('@Unknown member');
+    expect(html).not.toContain('<button');
+  });
+});
+
 describe('H4 a held row keeps later rows behind it', () => {
   beforeEach(() => resetMentionNames());
 
