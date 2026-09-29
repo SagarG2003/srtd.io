@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import type { Client, Result } from '@srtdio/rpc';
 
@@ -10,6 +12,7 @@ vi.mock('agora-chat', () => ({
 import { runDelete, runEdit } from '@/lib/chat/delete-flow';
 import {
   applyRevalidatedRows,
+  editChannelType,
   newlyTombstoned,
   recheckLoaded,
   REVALIDATE_WINDOW_MS,
@@ -501,6 +504,35 @@ describe('H2 / A4 edit mentions', () => {
     });
     expect(argsOf(dm, 0).p_body).toBe(body);
     expect(argsOf(dm, 0).p_mentions).toEqual([ANA]);
+  });
+
+  it('B3 DM edit with "@[all]" plus a peer mention sends only the peer uuid', async () => {
+    const body = `@[all] and @[${ANA}]`;
+    // What use-chat-thread's editMessage derives from the open chat's target.
+    const channelType = editChannelType({ targetId: 'peer', chatType: 'singleChat' });
+    expect(channelType).toBe('dm');
+    const dm = rpcSequence([{ data: { id: 'm1', body, edited_at: 'now' }, error: null }]);
+    const result = await runEdit(editDeps(dm), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body,
+      traceId: 't',
+      ...(channelType !== undefined ? { channelType } : {}),
+    });
+    expect(result.ok).toBe(true);
+    expect(dm).toHaveBeenCalledTimes(1);
+    expect(argsOf(dm, 0).p_body).toBe(body);
+    expect(argsOf(dm, 0).p_mentions).toEqual([ANA]);
+    // A group keeps "all"; an unknown target leaves the type unset.
+    expect(editChannelType({ targetId: 'g', chatType: 'groupChat' })).toBe('group');
+    expect(editChannelType(null)).toBeUndefined();
+    // editMessage passes it to runEdit.
+    const source = readFileSync(
+      fileURLToPath(new URL('./use-chat-thread.ts', import.meta.url)),
+      'utf8',
+    );
+    expect(source).toContain('const channelType = editChannelType(liveTarget);');
+    expect(source).toContain('...(channelType !== undefined ? { channelType } : {}),');
   });
 
   it('A4 edit passes "all" while the token is present and omits it once removed', async () => {

@@ -92,6 +92,12 @@ import type { ChatConnection, ChatStatus } from '@/lib/chat/types';
 /** The whole jump-to (every older page it reads) ends within this. */
 export const JUMP_BUDGET_MS = 5_000;
 
+/** The chat's type for an edit, so a DM edit never sends "all" in p_mentions. */
+export function editChannelType(target: ChannelTarget | null): 'dm' | 'group' | undefined {
+  if (target === null) return undefined;
+  return target.chatType === 'groupChat' ? 'group' : 'dm';
+}
+
 /**
  * Page older history for a jump under one budget: when it runs out, the page
  * read in flight is aborted (its signal), no later page is handed to `onPage`,
@@ -938,6 +944,7 @@ export function useChatThread(params: {
       const traceId = generateTraceId();
       const connection = clientRef.current;
       const liveTarget = targetRef.current;
+      const channelType = editChannelType(liveTarget);
       const result = await runEdit(
         {
           client: db,
@@ -964,7 +971,13 @@ export function useChatThread(params: {
           onSignalFailed: (error) =>
             logger.warn('chat: edit signal failed', { trace_id: traceId, error: String(error) }),
         },
-        { channelId: forChannel, messageId, body, traceId },
+        {
+          channelId: forChannel,
+          messageId,
+          body,
+          traceId,
+          ...(channelType !== undefined ? { channelType } : {}),
+        },
       );
       if (result.ok) return { ok: true };
       logger.warn('chat: edit failed', {

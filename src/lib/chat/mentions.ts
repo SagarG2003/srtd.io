@@ -36,6 +36,11 @@ export function isMentionRefusal(message: string): boolean {
   );
 }
 
+/** Whether the server refused the everyone mention because the chat is not a group. */
+export function isEveryoneRefusal(message: string): boolean {
+  return /everyone mention works only in groups/i.test(message);
+}
+
 /**
  * The mention list for the one retry after the server refused one: with a
  * fresh member list, every id no longer in it drops ("all" stays); when that

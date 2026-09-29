@@ -781,6 +781,49 @@ describe('H2 a refused mention never fails the send', () => {
     );
   });
 
+  it('B3 send with unknown channel type and the everyone refusal keeps the peer mention', async () => {
+    const recordMessage = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce({
+        ok: false,
+        reason: 'error',
+        message: 'everyone mention works only in groups',
+      })
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const recheckMentions = vi.fn(async () => ({ ok: true as const, data: [ME, ANA] }));
+    // No channelType: the summary was missing at send.
+    const outcome = await runSend(
+      deps({ recordMessage, recheckMentions }),
+      input({ text: `@[all] and @[${ANA}]` }),
+    );
+    expect(outcome.ok).toBe(true);
+    expect(recordMessage).toHaveBeenCalledTimes(2);
+    expect(recordMessage.mock.calls[0]?.[0].mentions).toEqual([ANA, 'all']);
+    // Only "all" drops; the peer mention is kept and no re-read was needed.
+    expect(recordMessage.mock.calls[1]?.[0].mentions).toEqual([ANA]);
+    expect(recheckMentions).not.toHaveBeenCalled();
+
+    // A further refusal takes the existing ladder: re-read, then [].
+    const further = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce({
+        ok: false,
+        reason: 'error',
+        message: 'everyone mention works only in groups',
+      })
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const reread = vi.fn(async () => ({ ok: true as const, data: [ME, ANA] }));
+    const again = await runSend(
+      deps({ recordMessage: further, recheckMentions: reread }),
+      input({ text: `@[all] and @[${ANA}]` }),
+    );
+    expect(again.ok).toBe(true);
+    expect(reread).toHaveBeenCalledTimes(1);
+    expect(further.mock.calls.map((c) => c[0].mentions)).toEqual([[ANA, 'all'], [ANA], [ANA], []]);
+  });
+
   it('A2 p_mentions carries "all" alongside uuids', async () => {
     const d = deps();
     await runSend(d, input({ text: `@[all] and @[${ANA}]` }));

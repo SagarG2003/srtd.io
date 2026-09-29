@@ -48,7 +48,13 @@ import {
   type ChatAttachmentUpload,
   type MessageAttachment,
 } from '@/lib/chat/attachments';
-import { isMentionRefusal, mentionTargets, mentionsAfterRefusal } from '@/lib/chat/mentions';
+import {
+  ALL_MENTION,
+  isEveryoneRefusal,
+  isMentionRefusal,
+  mentionTargets,
+  mentionsAfterRefusal,
+} from '@/lib/chat/mentions';
 import type { Result } from '@srtdio/rpc';
 import {
   rowToThreadMessage,
@@ -169,8 +175,19 @@ export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<Sen
       replyToMessageId: input.local.reply?.id ?? null,
       attachmentMeta: buildAttachmentMeta(input.local.attachments),
     });
-  const mentions = mentionTargets(input.text, input.channelType);
+  let mentions = mentionTargets(input.text, input.channelType);
   let recorded = await record(mentions);
+  // The chat's type was unknown and "all" went out in a DM: drop only "all"
+  // and send the people first; a further refusal takes the ladder below.
+  if (
+    !recorded.ok &&
+    input.channelType === undefined &&
+    mentions.includes(ALL_MENTION) &&
+    isEveryoneRefusal(recorded.message)
+  ) {
+    mentions = mentions.filter((id) => id !== ALL_MENTION);
+    recorded = await record(mentions);
+  }
   if (!recorded.ok && mentions.length > 0 && isMentionRefusal(recorded.message)) {
     const fresh = await recheck(deps.recheckMentions, input.channelId);
     const retry = mentionsAfterRefusal(mentions, fresh);
