@@ -44,7 +44,7 @@ import { APP_ENTITY_ROUTES, classify, currentOrigin, tokenize } from '@/lib/chat
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { clearDraft, EMPTY_DRAFT, getDraft, setDraft, type DraftFile } from '@/lib/chat/drafts';
-import { COMPOSER_INPUT_TYPE } from '@/components/chat/chat-type';
+import { COMPOSER_INPUT_TYPE, sized, useChatLayout } from '@/components/chat/chat-type';
 
 interface ComposerProps {
   /**
@@ -549,6 +549,8 @@ export function Composer(props: ComposerProps): ReactElement {
   const { workspaceId, workspaceKey } = useWorkspace();
   const recorder = useAudioRecorder();
   const toast = useToast();
+  // 17px on every touch device (never under 16, so iOS never zooms), 15px on a laptop.
+  const layout = useChatLayout();
 
   const formRef = useRef<HTMLFormElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -732,28 +734,6 @@ export function Composer(props: ComposerProps): ReactElement {
       });
   }
 
-  // Laptop: the cursor sits in the composer when a chat opens (once, on mount).
-  const focusOnMount = props.focusOnMount === true;
-  useEffect(() => {
-    if (
-      !shouldFocusComposer({
-        finePointer: focusOnMount,
-        editing: editingNow,
-        hashOpen: false,
-        overlayOpen: overlayOpen(),
-      })
-    ) {
-      return;
-    }
-    const el = textareaRef.current;
-    if (el === null) return;
-    el.focus({ preventScroll: true });
-    const end = el.value.length;
-    el.setSelectionRange(end, end);
-    // Once per mount (a chat open or switch); later focus is the user's.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   function send(draft: LinkCardDraft): void {
     const taken = dispatchSend(props.onSend, {
       text: draft.text,
@@ -843,6 +823,30 @@ export function Composer(props: ComposerProps): ReactElement {
     text,
     caret,
   });
+
+  // Laptop: the cursor sits in the composer when a chat opens (once, on mount),
+  // unless a restored draft reopened the hash picker.
+  const focusOnMount = props.focusOnMount === true;
+  const hashOpenOnMount = hashQuery !== null;
+  useEffect(() => {
+    if (
+      !shouldFocusComposer({
+        finePointer: focusOnMount,
+        editing: editingNow,
+        hashOpen: hashOpenOnMount,
+        overlayOpen: overlayOpen(),
+      })
+    ) {
+      return;
+    }
+    const el = textareaRef.current;
+    if (el === null) return;
+    el.focus({ preventScroll: true });
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
+    // Once per mount (a chat open or switch); later focus is the user's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // A pick drops the hash token from the text and brings the post in.
   function pickHashPost(post: PostCardFields): void {
@@ -1038,7 +1042,7 @@ export function Composer(props: ComposerProps): ReactElement {
               )}
               rows={1}
               compact
-              className={COMPOSER_INPUT_TYPE}
+              className={sized(COMPOSER_INPUT_TYPE, layout)}
             />
             {showMic ? (
               <Button

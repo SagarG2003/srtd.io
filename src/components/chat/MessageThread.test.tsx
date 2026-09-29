@@ -10,13 +10,15 @@ vi.mock('agora-chat', () => ({
 
 import { Avatar } from '@/components/ui/Avatar';
 import {
-  BODY_TEXT,
+  bodyText,
   bubbleClass,
   bubbleMeta,
   BubbleMetaView,
   metaPlacement,
   MetaSpacer,
-  TOMBSTONE_LABEL,
+  FAILED_RETRY_CLASS,
+  REACTION_BADGE_CLASS,
+  REACTION_ROW_SPACE,
   bubbleStatus,
   bubbleTimeLabel,
   DayPill,
@@ -66,12 +68,20 @@ import {
   DATE_PILL_TYPE,
   QUOTE_AUTHOR_TYPE,
   QUOTE_TEXT_TYPE,
+  sized,
+  type ChatLayout,
 } from '@/components/chat/chat-type';
+import { formatClockTime } from '@/lib/chat/time-format';
 import { Link } from 'react-router-dom';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
 import { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
-import { markMessagesDeleted, type ThreadMessage } from '@/lib/chat/thread';
+import {
+  DELETED_OTHER_LABEL,
+  DELETED_OWN_LABEL,
+  markMessagesDeleted,
+  type ThreadMessage,
+} from '@/lib/chat/thread';
 import { PostRefChip } from '@/components/chat/PostRefChip';
 import { SharedPostCards } from '@/components/chat/PostCard';
 import {
@@ -104,6 +114,16 @@ const PROFILES: Map<string, ChatProfile> = new Map([
 
 const CREATED_AT = '2026-09-22T18:45:00.123456+00:00';
 
+// The clock time follows the device locale's hour cycle, so expectations read
+// the same formatter the bubble does.
+const T_UTC = formatClockTime(CREATED_AT, 'UTC');
+const T_KOLKATA = formatClockTime(CREATED_AT, 'Asia/Kolkata');
+
+/** A string as a literal regex source. */
+function escapeRe(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function makeMessage(over: Partial<ThreadMessage>): ThreadMessage {
   return {
     id: 'm1',
@@ -134,6 +154,8 @@ function renderBubble(
     showTicks?: boolean;
     timeZone?: string;
     onRetry?: (id: string) => void;
+    layout?: ChatLayout;
+    viewerUserId?: string;
   },
 ): ReactElement {
   return MessageBubble({
@@ -147,6 +169,8 @@ function renderBubble(
     tail: opts?.tail ?? true,
     ...(opts?.afterLabel !== undefined ? { afterLabel: opts.afterLabel } : {}),
     timeZone: opts?.timeZone ?? 'UTC',
+    layout: opts?.layout ?? 'touch',
+    ...(opts?.viewerUserId !== undefined ? { viewerUserId: opts.viewerUserId } : {}),
     onBadgeClick: () => {},
     ...(opts?.onRetry !== undefined ? { onRetry: opts.onRetry } : {}),
   });
@@ -225,6 +249,11 @@ function metaOf(root: ReactElement): Parameters<typeof BubbleMetaView>[0] | null
   return meta;
 }
 
+/** The failed send's Retry: the 44px alert beside the bubble. */
+function isRetry(el: ReactElement): boolean {
+  return (el.props as Record<string, unknown>)['aria-label'] === 'Retry sending';
+}
+
 /** The line under a failed bubble, rendered to markup. */
 function failedLine(root: ReactElement): string {
   const html = renderStrip(root);
@@ -236,15 +265,15 @@ describe('MessageBubble time and state', () => {
   it('shows the time inside the bubble, h:mm am/pm on the workspace clock', () => {
     const message = makeMessage({});
     const root = renderBubble(message, { timeZone: 'Asia/Kolkata' });
-    expect(metaOf(root)?.meta.time).toBe('12:15 am');
+    expect(metaOf(root)?.meta.time).toBe(T_KOLKATA);
     let aria = '';
     walk(root, (el) => {
       const props = el.props as Record<string, unknown>;
       if (props['data-bubble'] !== undefined) aria = String(props['aria-label']);
     });
-    expect(aria).toContain('12:15 am');
-    expect(bubbleTimeLabel(message, 'UTC')).toBe('6:45 pm');
-    expect(renderStrip(root)).toContain('12:15 am');
+    expect(aria).toContain(T_KOLKATA);
+    expect(bubbleTimeLabel(message, 'UTC')).toBe(T_UTC);
+    expect(renderStrip(root)).toContain(T_KOLKATA);
   });
 
   it('labels a sending bubble and a failed bubble instead of a time', () => {
@@ -266,10 +295,12 @@ describe('MessageBubble time and state', () => {
     );
     let retry: ReactElement | null = null;
     walk(root, (el) => {
-      if ((el.props as { label?: string }).label === 'Retry sending') retry = el;
+      if (isRetry(el)) retry = el;
     });
     expect(retry).not.toBeNull();
-    (retry as unknown as { props: { onClick: () => void } }).props.onClick();
+    (
+      retry as unknown as { props: { onClick: (e: { stopPropagation: () => void }) => void } }
+    ).props.onClick({ stopPropagation: () => {} });
     expect(onRetry).toHaveBeenCalledWith('m-fail');
     expect((root.props as { 'data-state': string })['data-state']).toBe('failed');
   });
@@ -294,6 +325,11 @@ describe('MessageBubble time and state', () => {
       if (label === 'Remove message') remove = el;
     });
     expect(labels).not.toContain('Retry sending');
+    let retry = false;
+    walk(root, (el) => {
+      if (isRetry(el)) retry = true;
+    });
+    expect(retry).toBe(false);
     expect(remove).not.toBeNull();
     expect(failedLine(root)).toBe('Photos not sent');
     (remove as unknown as { props: { onClick: () => void } }).props.onClick();
@@ -307,7 +343,7 @@ describe('MessageBubble time and state', () => {
     ]) {
       let retry: ReactElement | null = null;
       walk(renderBubble(message, { onRetry: vi.fn() }), (el) => {
-        if ((el.props as { label?: string }).label === 'Retry sending') retry = el;
+        if (isRetry(el)) retry = el;
       });
       expect(retry).toBeNull();
     }
@@ -315,7 +351,7 @@ describe('MessageBubble time and state', () => {
 });
 
 describe('bubble shell', () => {
-  const base = { sending: false, failed: false, voiceOnly: false };
+  const base = { head: false, failed: false, voiceOnly: false, layout: 'touch' as const };
 
   it('own is the bubble-own fill with accent-fg ink, peer is panel-2; no border', () => {
     const own = bubbleClass({ ...base, mine: true, tail: true });
@@ -334,6 +370,22 @@ describe('bubble shell', () => {
     expect(bubbleClass({ ...base, mine: false, tail: true })).toContain('rounded-bl-[4px]');
     expect(bubbleClass({ ...base, mine: true, tail: false })).not.toContain('rounded-br-[4px]');
     expect(bubbleClass({ ...base, mine: false, tail: false })).not.toContain('rounded-bl-[4px]');
+  });
+
+  it('F6 laptop: the first bubble of a run keeps its tail corner, later ones are fully 7.5px', () => {
+    const laptop = { ...base, layout: 'laptop' as const };
+    for (const mine of [true, false]) {
+      const corner = mine ? 'rounded-tr-none' : 'rounded-tl-none';
+      const first = bubbleClass({ ...laptop, mine, head: true, tail: false }).split(' ');
+      const later = bubbleClass({ ...laptop, mine, head: false, tail: true }).split(' ');
+      expect(first).toEqual(expect.arrayContaining(['rounded-[7.5px]', corner]));
+      expect(later).toContain('rounded-[7.5px]');
+      expect(later.filter((c) => c.startsWith('rounded-'))).toEqual(['rounded-[7.5px]']);
+      expect(first).not.toContain('rounded-[18px]');
+    }
+    // Touch is unchanged: 18px, the 4px tail on the last bubble, nothing on the head.
+    const touchHead = bubbleClass({ ...base, mine: true, head: true, tail: false }).split(' ');
+    expect(touchHead.filter((c) => c.startsWith('rounded-'))).toEqual(['rounded-[18px]']);
   });
 
   it('caps rows at 76% and spaces rows 2px in a run, 10px between runs', () => {
@@ -383,28 +435,54 @@ describe('in-bubble meta and ticks', () => {
     expect(html).not.toContain('data-tick');
   });
 
-  it('sending: a clock inside the bubble, and the bubble at 70% opacity', () => {
+  it('F4 sending: a clock in the meta ink at full strength; no opacity anywhere', () => {
     const root = renderBubble(own({ state: 'sending' }), { showTicks: true });
     expect(metaOf(root)?.meta.status).toBe('sending');
-    expect(renderStrip(root)).toContain('data-tick="sending"');
-    let cls = '';
+    const html = renderStrip(root);
+    expect(html).toContain('data-tick="sending"');
+    expect(html).toContain('text-[color:var(--bubble-meta-own)]');
+    let bubble = '';
     walk(root, (el) => {
       const props = el.props as Record<string, unknown>;
-      if (props['data-bubble'] !== undefined) cls = String(props.className);
+      if (props['data-bubble'] !== undefined) bubble = String(props.className);
     });
-    expect(cls).toContain('opacity-70');
+    expect(bubble).not.toContain('opacity');
+    expect(html).toMatch(/data-meta="inline" data-status="sending" class="(?![^"]*opacity)[^"]*"/);
   });
 
-  it('failed: a red alert inside the bubble, Not sent under it, plus Retry', () => {
-    const root = renderBubble(own({ state: 'failed' }), { showTicks: true, onRetry: vi.fn() });
+  it('F4 failed: a red "!" outside the bubble (44x44, left, centred) that retries; no in-bubble glyph', () => {
+    const onRetry = vi.fn();
+    const root = renderBubble(own({ id: 'm-f', state: 'failed' }), { showTicks: true, onRetry });
     const html = renderStrip(root);
-    expect(html).toMatch(/data-tick="failed"[^>]*text-bad|text-bad[^>]*data-tick="failed"/);
+    expect(html).not.toContain('data-tick=');
     expect(failedLine(root)).toBe('Not sent');
-    let retry = false;
+    let retry: ReactElement<Record<string, unknown>> | null = null;
     walk(root, (el) => {
-      if ((el.props as { label?: string }).label === 'Retry sending') retry = true;
+      if ((el.props as Record<string, unknown>)['data-failed-retry'] !== undefined) {
+        retry = el as ReactElement<Record<string, unknown>>;
+      }
     });
-    expect(retry).toBe(true);
+    expect(retry).not.toBeNull();
+    const button = retry as unknown as ReactElement<Record<string, unknown>>;
+    expect(button.props['aria-label']).toBe('Retry sending');
+    const cls = String(button.props.className).split(' ');
+    expect(cls).toEqual(
+      expect.arrayContaining([
+        'absolute',
+        'right-full',
+        'top-1/2',
+        '-translate-y-1/2',
+        'h-11',
+        'w-11',
+        'text-bad',
+      ]),
+    );
+    expect(FAILED_RETRY_CLASS).not.toContain('bg-bad ');
+    expect(renderStrip(button as ReactElement)).toContain('data-failed-glyph');
+    (button.props.onClick as (e: { stopPropagation: () => void }) => void)({
+      stopPropagation: () => {},
+    });
+    expect(onRetry).toHaveBeenCalledWith('m-f');
   });
 
   it('text bubbles end with an invisible spacer the width of the meta', () => {
@@ -420,11 +498,11 @@ describe('in-bubble meta and ticks', () => {
     expect(html).toContain('aria-hidden="true"');
     // Same parts as the meta, so the same width.
     expect(html).toContain('edited');
-    expect(html).toContain('6:45 pm');
+    expect(html).toContain(T_UTC);
     let bodySpacer = false;
     walk(root, (el) => {
       const props = el.props as { className?: string; children?: ReactNode };
-      if (props.className !== BODY_TEXT) return;
+      if (props.className !== bodyText('touch')) return;
       walk(props.children, (child) => {
         if (child.type === MetaSpacer) bodySpacer = true;
       });
@@ -432,7 +510,7 @@ describe('in-bubble meta and ticks', () => {
     expect(bodySpacer).toBe(true);
   });
 
-  it('media bubbles put the meta on the translucent pill, with no spacer', () => {
+  it('F3: only a bare image album gets the pill; everything else a row below the content', () => {
     const image = makeMessage({
       body: '',
       attachments: [{ assetId: 'i1', name: 'a.png', mime: 'image/png' }],
@@ -441,17 +519,50 @@ describe('in-bubble meta and ticks', () => {
       body: '',
       attachments: [{ assetId: 'v1', name: 'n.webm', mime: 'audio/webm', durationMs: 1000 }],
     });
+    const file = makeMessage({
+      body: '',
+      attachments: [{ assetId: 'f1', name: 'a.pdf', mime: 'application/pdf' }],
+    });
+    const video = makeMessage({
+      body: '',
+      attachments: [{ assetId: 'm1', name: 'a.mp4', mime: 'video/mp4' }],
+    });
     const card = makeMessage({ body: '', sharedPostIds: ['p1'] });
-    for (const message of [image, voice, card]) {
-      expect(metaPlacement(message)).toBe('pill');
+    const brief = makeMessage({ body: '', sharedBriefIds: ['b1'] });
+    const expected: Array<[ThreadMessage, string]> = [
+      [image, 'pill'],
+      [{ ...image, body: 'look' }, 'row'],
+      [voice, 'row'],
+      [file, 'row'],
+      [video, 'row'],
+      [card, 'row'],
+      [brief, 'row'],
+      [makeMessage({ body: 'hi' }), 'inline'],
+    ];
+    for (const [message, placement] of expected) {
+      expect(metaPlacement(message)).toBe(placement);
       const root = renderBubble(message);
-      expect(metaOf(root)?.placement).toBe('pill');
+      expect(metaOf(root)?.placement).toBe(placement);
       let spacers = 0;
       walk(root, (el) => {
         if (el.type === MetaSpacer) spacers += 1;
       });
-      expect(spacers).toBe(0);
+      expect(spacers).toBe(placement === 'inline' ? 1 : 0);
     }
+    // The row is in flow (never absolute), right-aligned, after the content.
+    const row = renderStrip(
+      BubbleMetaView({
+        meta: bubbleMeta(voice, 'UTC', { showTicks: false }),
+        mine: false,
+        placement: 'row',
+      }),
+    );
+    expect(row).toMatch(/data-meta="row"[^>]*class="[^"]*flex justify-end/);
+    expect(row).not.toContain('absolute');
+    const voiceHtml = renderStrip(renderBubble(voice));
+    expect(voiceHtml.indexOf('data-meta="row"')).toBeGreaterThan(
+      voiceHtml.indexOf('data-bubble-content'),
+    );
     const pill = renderStrip(
       BubbleMetaView({
         meta: bubbleMeta(image, 'UTC', { showTicks: false }),
@@ -461,9 +572,11 @@ describe('in-bubble meta and ticks', () => {
     );
     expect(pill).toContain('bg-[color:var(--media-meta-bg)]');
     expect(pill).toContain('text-[color:var(--media-meta-fg)]');
-    // An album whose caption ends the bubble keeps the inline meta.
-    expect(metaPlacement({ ...image, body: 'look' })).toBe('inline');
-    expect(metaPlacement({ ...image, body: 'look', sharedPostIds: ['p'] })).toBe('pill');
+    // Media with a caption, or with cards or other files, takes the row.
+    expect(metaPlacement({ ...image, body: 'look', sharedPostIds: ['p'] })).toBe('row');
+    expect(
+      metaPlacement({ ...image, attachments: [...image.attachments, ...file.attachments] }),
+    ).toBe('row');
   });
 });
 
@@ -507,7 +620,7 @@ describe('threadRows', () => {
     for (const row of withTicks) {
       if (row.kind !== 'message') continue;
       expect(row.meta).toEqual({
-        time: expect.stringMatching(/^\d{1,2}:\d{2} (am|pm)$/),
+        time: formatClockTime(row.message.createdAt, 'UTC'),
         edited: false,
         status: row.message.mine ? 'delivered' : null,
       });
@@ -521,7 +634,7 @@ describe('threadRows', () => {
       'Asia/Kolkata',
     );
     expect(kolkata.find((r) => r.kind === 'message')).toMatchObject({
-      meta: { time: '3:30 pm' },
+      meta: { time: formatClockTime(msgs[0]?.createdAt ?? '', 'Asia/Kolkata') },
     });
   });
 });
@@ -534,7 +647,9 @@ describe('lastSeenLabel', () => {
     expect(lastSeenLabel(now - 5 * 60_000, now, 'UTC')).toBe('last seen 5m ago');
     expect(lastSeenLabel(now - 3 * 3_600_000, now, 'UTC')).toBe('last seen 3h ago');
     const twoDaysAgo = Date.parse('2026-09-21T18:45:00Z');
-    expect(lastSeenLabel(twoDaysAgo, now, 'Asia/Kolkata')).toBe('last seen 1d ago at 00:15');
+    expect(lastSeenLabel(twoDaysAgo, now, 'Asia/Kolkata')).toBe(
+      `last seen 1d ago at ${formatClockTime(twoDaysAgo, 'Asia/Kolkata')}`,
+    );
   });
 });
 
@@ -593,6 +708,7 @@ describe('MessageBubble reply quote', () => {
       head: true,
       tail: true,
       timeZone: 'UTC',
+      layout: 'touch',
       onBadgeClick: () => {},
       onJumpToMessage,
     });
@@ -680,6 +796,7 @@ describe('MessageBubble keyboard and hover actions', () => {
       head: true,
       tail: true,
       timeZone: 'UTC',
+      layout: 'touch',
       onBadgeClick: noop,
       press,
     });
@@ -689,7 +806,7 @@ describe('MessageBubble keyboard and hover actions', () => {
     const bubble = bubbleOf(render(pressed()));
     expect(bubble.props.role).toBe('group');
     expect(bubble.props.tabIndex).toBe(0);
-    expect(bubble.props['aria-label']).toBe('Message from Alice, 6:45 pm');
+    expect(bubble.props['aria-label']).toBe(`Message from Alice, ${T_UTC}`);
   });
 
   it('Enter, Space and Shift+F10 on the bubble open the menu; other keys do not', () => {
@@ -818,7 +935,7 @@ describe('voice-only bubble', () => {
     ).toBe(false);
   });
 
-  it('uses the text-bubble shell with its time on the media pill', () => {
+  it('uses the text-bubble shell with its time in the row under the note', () => {
     const root = renderBubble(voice);
     let cls = '';
     walk(root, (el) => {
@@ -827,7 +944,7 @@ describe('voice-only bubble', () => {
     });
     expect(cls).toContain('rounded-[18px]');
     expect(cls).toContain('min-w-[220px]');
-    expect(metaOf(root)).toMatchObject({ placement: 'pill', meta: { time: '6:45 pm' } });
+    expect(metaOf(root)).toMatchObject({ placement: 'row', meta: { time: T_UTC } });
   });
 });
 
@@ -919,7 +1036,7 @@ describe('label spacing', () => {
 
   it('the day pill carries the 6px gap below it', () => {
     let pill = '';
-    walk(DayPill({ label: 'Today' }), (el) => {
+    walk(DayPill({ label: 'Today', layout: 'touch' }), (el) => {
       const cls = (el.props as { className?: string }).className ?? '';
       if (cls.includes('rounded-full')) pill = cls;
     });
@@ -980,6 +1097,39 @@ describe('own-bubble inner content', () => {
     expect(cls).toBe('contents');
   });
 
+  it('F5: the badge hangs under the bubble, over its bottom edge by 3px, clear of the meta and the next row', () => {
+    const reactions = [{ emoji: '👍', count: 1, mine: false }];
+    for (const message of [
+      makeMessage({ body: 'ok', reactions }),
+      makeMessage({ body: 'a much longer message body', mine: true, reactions }),
+      makeMessage({
+        body: '',
+        attachments: [{ assetId: 'f1', name: 'a.pdf', mime: 'application/pdf' }],
+        reactions,
+      }),
+    ]) {
+      const root = renderBubble(message);
+      let badge = '';
+      let meta = '';
+      walk(root, (el) => {
+        const props = el.props as Record<string, unknown>;
+        if (props['data-reaction-badge'] !== undefined) badge = String(props.className);
+      });
+      const view = metaOf(root);
+      const html = view !== null ? renderStrip(BubbleMetaView(view)) : '';
+      meta = /class="([^"]*)"/.exec(html)?.[1] ?? '';
+      expect(badge).toBe(REACTION_BADGE_CLASS);
+      // Top edge 3px above the bubble's bottom; nothing anchors it to the bottom.
+      expect(badge.split(' ')).toContain('top-[calc(100%-3px)]');
+      expect(badge).not.toMatch(/(^| )-?bottom-/);
+      // The meta starts 3px or more above the bubble's bottom (or sits in flow above it).
+      expect(meta).toMatch(/bottom-\[3px\]|bottom-2|mt-1 flex justify-end/);
+      expect(rootClass(root).split(' ')).toContain(REACTION_ROW_SPACE);
+    }
+    // 20px of room below: the ~17px overhang never touches the next bubble.
+    expect(REACTION_ROW_SPACE).toBe('mb-5');
+  });
+
   it('the reaction count on an own bubble reads on its panel badge', () => {
     const reactions = [
       { emoji: '👍', count: 2, mine: false },
@@ -1004,8 +1154,8 @@ describe('time source', () => {
     const row = rows.find(
       (r): r is Extract<ThreadRow, { kind: 'message' }> => r.kind === 'message',
     );
-    expect(row?.meta.time).toBe('6:45 pm');
-    const aria = (findByAriaLabel(renderBubble(message), 'Message from Alice, 6:45 pm') ??
+    expect(row?.meta.time).toBe(T_UTC);
+    const aria = (findByAriaLabel(renderBubble(message), `Message from Alice, ${T_UTC}`) ??
       null) as ReactElement | null;
     expect(aria).not.toBeNull();
     expect(bubbleTimeLabel(message, 'UTC')).toBe(row?.meta.time);
@@ -1043,8 +1193,9 @@ describe('image album and viewer', () => {
     expect(props.caption).toBeDefined();
     const cls = bubbleClass({
       mine: false,
+      head: true,
       tail: true,
-      sending: false,
+      layout: 'touch',
       failed: false,
       voiceOnly: false,
       album: true,
@@ -1066,6 +1217,7 @@ describe('image album and viewer', () => {
       head: true,
       tail: true,
       timeZone: 'UTC',
+      layout: 'touch',
       onBadgeClick: () => {},
       onOpenImage,
     });
@@ -1076,14 +1228,17 @@ describe('image album and viewer', () => {
     expect(onOpenImage).toHaveBeenCalledWith(2);
   });
 
-  it('the viewer gets the image list only, with sender and HH:mm', () => {
+  it('the viewer gets the image list only, with sender and the clock time', () => {
     const { images, details } = threadLightbox(albumMessage, PROFILES, 'Asia/Kolkata');
     expect(images).toEqual([
       { assetId: 'v-1', name: 'p1.png' },
       { assetId: 'v-2', name: 'p2.png' },
       { assetId: 'v-3', name: 'p3.png' },
     ]);
-    expect(details).toEqual({ sender: 'Alice', time: '00:15' });
+    expect(details).toEqual({
+      sender: 'Alice',
+      time: formatClockTime(albumMessage.createdAt, 'Asia/Kolkata'),
+    });
   });
 
   it('an own upload still in flight opens from its local preview', () => {
@@ -1137,6 +1292,7 @@ describe('swipe to reply', () => {
       head: true,
       tail: true,
       timeZone: 'UTC',
+      layout: 'touch',
       onBadgeClick: noop,
       press,
       swipe: {},
@@ -1181,7 +1337,7 @@ describe('swipe to reply', () => {
   });
 
   it('day pills are never swipeable', () => {
-    for (const root of [DayPill({ label: 'Today' })]) {
+    for (const root of [DayPill({ label: 'Today', layout: 'touch' })]) {
       expect(find(root, 'onPointerDown')).toHaveLength(0);
       expect(find(root, 'data-swipe-reply')).toHaveLength(0);
     }
@@ -1216,52 +1372,57 @@ describe('swipe to reply', () => {
 });
 
 describe('bubble text sizes', () => {
-  it('body text comes from chat-type: 17/22 mobile, 14.2/19 laptop', () => {
-    expect(BODY_TEXT).toContain(BUBBLE_BODY_TYPE);
-    expect(BUBBLE_BODY_TYPE).toContain('text-[17px] leading-[22px]');
-    expect(BUBBLE_BODY_TYPE).toContain('md:text-[14.2px] md:leading-[19px]');
+  it('body text comes from chat-type: 17/22 touch, 14.2/19 laptop', () => {
+    expect(bodyText('touch')).toContain(BUBBLE_BODY_TYPE.touch);
+    expect(bodyText('laptop')).toContain(BUBBLE_BODY_TYPE.laptop);
+    expect(BUBBLE_BODY_TYPE.touch).toContain('text-[17px] leading-[22px]');
+    expect(BUBBLE_BODY_TYPE.laptop).toContain('text-[14.2px] leading-[19px]');
   });
 
   it('the in-bubble quote uses the chat-type quote sizes; the composer bar keeps its own', () => {
-    const inBubble = renderStrip(ReplyQuoteBox({ author: 'A', preview: 'p', inBubble: true }));
-    expect(inBubble).toContain(QUOTE_AUTHOR_TYPE);
-    expect(inBubble).toContain(QUOTE_TEXT_TYPE);
+    for (const layout of ['touch', 'laptop'] as const) {
+      const inBubble = renderStrip(ReplyQuoteBox({ author: 'A', preview: 'p', inBubble: layout }));
+      expect(inBubble).toContain(sized(QUOTE_AUTHOR_TYPE, layout));
+      expect(inBubble).toContain(sized(QUOTE_TEXT_TYPE, layout));
+    }
     const bar = renderStrip(ReplyQuoteBox({ author: 'A', preview: 'p' }));
-    expect(bar).not.toContain(QUOTE_TEXT_TYPE);
+    expect(bar).not.toContain(QUOTE_TEXT_TYPE.touch);
   });
 
-  it('bubble shape: mobile unchanged; md+ 7.5px radius, 6/7/8/9 padding, 65% max width', () => {
-    const cls = bubbleClass({
-      mine: false,
-      tail: false,
-      sending: false,
-      failed: false,
-      voiceOnly: false,
-    });
-    expect(cls).toContain('px-3 py-2');
-    expect(cls).toContain('rounded-[18px]');
-    expect(cls).toContain('md:rounded-[7.5px]');
-    expect(cls).toContain('md:pb-[8px] md:pl-[9px] md:pr-[7px] md:pt-[6px]');
-    let column = '';
-    walk(renderBubble(makeMessage({})), (el) => {
-      const c = (el.props as { className?: string }).className ?? '';
-      if (c.includes('max-w-[76%]')) column = c;
-    });
-    expect(column).toContain('md:max-w-[65%]');
+  it('F12 bubble shape by layout: touch 18px, 12/8 padding, 76%; laptop 7.5px, 6/7/8/9, 65%', () => {
+    const shape = { mine: false, head: false, tail: false, failed: false, voiceOnly: false };
+    const touch = bubbleClass({ ...shape, layout: 'touch' });
+    expect(touch).toContain('px-3 py-2');
+    expect(touch).toContain('rounded-[18px]');
+    const laptop = bubbleClass({ ...shape, layout: 'laptop' });
+    expect(laptop).toContain('rounded-[7.5px]');
+    expect(laptop).toContain('pb-[8px] pl-[9px] pr-[7px] pt-[6px]');
+    for (const cls of [touch, laptop]) expect(cls).not.toContain('md:');
+    const columnOf = (layout: ChatLayout): string => {
+      let column = '';
+      walk(renderBubble(makeMessage({}), { layout }), (el) => {
+        const c = (el.props as { className?: string }).className ?? '';
+        if (c.includes('max-w-')) column = c;
+      });
+      return column;
+    };
+    expect(columnOf('touch')).toContain('max-w-[76%]');
+    expect(columnOf('laptop')).toContain('max-w-[65%]');
+    expect(renderStrip(renderBubble(makeMessage({}), { layout: 'laptop' }))).not.toContain('md:');
   });
 
   it('meta, day pill and typing row sizes come from chat-type', () => {
     expect(renderStrip(renderBubble(makeMessage({})))).toContain(BUBBLE_META_TYPE);
     expect(BUBBLE_META_TYPE).toContain('text-[11px] leading-[15px]');
     let pill = '';
-    walk(DayPill({ label: 'Today' }), (el) => {
+    walk(DayPill({ label: 'Today', layout: 'touch' }), (el) => {
       const c = (el.props as { className?: string }).className ?? '';
       if (c.includes('rounded-full')) pill = c;
     });
-    expect(pill).toContain(DATE_PILL_TYPE);
+    expect(pill).toContain(DATE_PILL_TYPE.touch);
     expect(pill).not.toContain('font-mono');
-    expect(DATE_PILL_TYPE).toContain('tabular-nums');
-    expect(DATE_PILL_TYPE).toContain('md:uppercase');
+    expect(DATE_PILL_TYPE.touch).toContain('tabular-nums');
+    expect(DATE_PILL_TYPE.laptop).toContain('uppercase');
   });
 });
 
@@ -1358,6 +1519,7 @@ describe('ThreadHeaderIdentity', () => {
     avatarUrl: null,
     presence: undefined,
     headerLine: 'Client · Acme',
+    layout: 'touch' as const,
   };
   function buttons(root: ReactElement): ReactElement<Record<string, unknown>>[] {
     const out: ReactElement<Record<string, unknown>>[] = [];
@@ -1410,6 +1572,7 @@ describe('post references', () => {
       head: true,
       tail: true,
       timeZone: 'UTC',
+      layout: 'touch',
       onBadgeClick: () => {},
       postRefs: { chip },
     });
@@ -1447,7 +1610,7 @@ describe('post references', () => {
     let body: unknown;
     walk(root, (el) => {
       const props = el.props as { className?: string; children?: unknown };
-      if (props.className === BODY_TEXT) body = props.children;
+      if (props.className === bodyText('touch')) body = props.children;
     });
     // The rendered body, then the meta spacer.
     expect((body as unknown[])[0]).toEqual(['Can we swap the cover?']);
@@ -1473,6 +1636,7 @@ describe('post references', () => {
       head: true,
       tail: true,
       timeZone: 'UTC',
+      layout: 'touch',
       onBadgeClick: () => {},
       postRefs: { onTalkAbout },
     });
@@ -1664,6 +1828,7 @@ describe('post references after audit', () => {
             head: true,
             tail: true,
             timeZone: 'UTC',
+            layout: 'touch',
             onBadgeClick: () => {},
             postRefs: { chip },
           }),
@@ -2101,6 +2266,7 @@ describe('tombstones, edited label and the neutral selection', () => {
       head: true,
       tail: true,
       timeZone: 'UTC',
+      layout: 'touch',
       onBadgeClick: noop,
       press,
       swipe: {},
@@ -2120,18 +2286,20 @@ describe('tombstones, edited label and the neutral selection', () => {
     reactions: [{ emoji: '👍', count: 2, mine: false }],
   });
 
-  it('a deleted message is a bordered, muted, italic bubble: ban glyph, "This message was deleted" and its time', () => {
+  it('F8: a tombstone reads "You deleted this message" (own) or "This message was deleted", with its time', () => {
+    expect(DELETED_OWN_LABEL).toBe('You deleted this message');
+    expect(DELETED_OTHER_LABEL).toBe('This message was deleted');
     for (const mine of [false, true]) {
       const root = render({ ...tomb, mine });
       const html = renderStrip(root);
-      expect(TOMBSTONE_LABEL).toBe('This message was deleted');
-      expect(html).toContain(TOMBSTONE_LABEL);
-      expect(html).toContain('6:45 pm');
+      expect(html).toContain(mine ? DELETED_OWN_LABEL : DELETED_OTHER_LABEL);
+      expect(html).not.toContain(mine ? DELETED_OTHER_LABEL : DELETED_OWN_LABEL);
+      expect(html).toContain(T_UTC);
       expect(html).toContain('data-meta-spacer');
       expect(html).toContain('data-tombstone');
       expect(html).toContain('<circle');
       expect(root.props).toMatchObject({ 'data-deleted': '' });
-      const cls = tombstoneClass({ mine, tail: true });
+      const cls = tombstoneClass({ mine, head: false, tail: true, layout: 'touch' });
       expect(cls).toContain('border border-border');
       expect(cls).toContain('italic');
       expect(cls).toContain('text-fg-3');
@@ -2163,7 +2331,7 @@ describe('tombstones, edited label and the neutral selection', () => {
     expect(all(root).some((el) => el.type === SharedPostCards)).toBe(false);
     const html = renderStrip(root);
     expect(html).toContain('data-tombstone');
-    expect(html).toContain(TOMBSTONE_LABEL);
+    expect(html).toContain(DELETED_OTHER_LABEL);
   });
 
   it('a tombstone keeps its run slot: grouping is unchanged', () => {
@@ -2183,25 +2351,32 @@ describe('tombstones, edited label and the neutral selection', () => {
     ]);
   });
 
-  it('a reply to a deleted message quotes "Message deleted", italic and muted', () => {
-    const reply = makeMessage({
-      id: 'r',
-      reply: { id: 'gone', authorUserId: 'peer-1', preview: 'Message deleted' },
-      parentDeleted: true,
-    });
-    const quote = all(render(reply)).find((el) => el.type === ReplyQuoteBox);
-    expect(quote?.props).toMatchObject({ preview: 'Message deleted', deleted: true });
-    const html = renderStrip(quote as ReactElement);
-    expect(html).toMatch(/italic text-fg-3[^>]*>Message deleted</);
+  it('F8: a quote of a deleted message reads the same pair, italic and muted', () => {
+    const quoteOf = (authorUserId: string): ReactElement<Record<string, unknown>> | undefined => {
+      const reply = makeMessage({
+        id: 'r',
+        reply: { id: 'gone', authorUserId, preview: 'Message deleted' },
+        parentDeleted: true,
+      });
+      return all(render(reply, { viewerUserId: 'me' })).find((el) => el.type === ReplyQuoteBox);
+    };
+    const other = quoteOf('peer-1');
+    expect(other?.props).toMatchObject({ preview: DELETED_OTHER_LABEL, deleted: true });
+    expect(renderStrip(other as ReactElement)).toMatch(
+      new RegExp(`italic text-fg-3[^>]*>${DELETED_OTHER_LABEL}<`),
+    );
+    expect(quoteOf('me')?.props).toMatchObject({ preview: DELETED_OWN_LABEL, deleted: true });
   });
 
   it('an edited message shows "edited" before the time inside the bubble, also read aloud', () => {
     const edited = makeMessage({ editedAt: '2026-09-22T18:50:00Z' });
     const html = renderStrip(render(edited));
     expect(html).toMatch(
-      /data-meta="inline"[^>]*><span data-edited="">edited<\/span><span[^>]*>6:45 pm/,
+      new RegExp(
+        `data-meta="inline"[^>]*><span data-edited="">edited</span><span[^>]*>${escapeRe(T_UTC)}`,
+      ),
     );
-    expect(bubbleTimeLabel(edited, 'UTC')).toBe(`${EDITED_LABEL}, 6:45 pm`);
+    expect(bubbleTimeLabel(edited, 'UTC')).toBe(`${EDITED_LABEL}, ${T_UTC}`);
     expect(renderStrip(render(makeMessage({})))).not.toContain('data-edited');
     expect(renderStrip(render({ ...tomb, editedAt: 'x' }))).not.toContain('data-edited');
   });

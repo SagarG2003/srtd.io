@@ -110,7 +110,7 @@ export interface ThreadMessage {
   /** Server edited_at when the body was edited; absent is the same as null. */
   editedAt?: string | null;
   /**
-   * Deleted for everyone: renders as a tombstone ("Message deleted") with no
+   * Deleted for everyone: renders as a tombstone (deletedMessageLabel) with no
    * content, reactions, menu, swipe-reply or selection. Absent is the same as false.
    */
   deleted?: boolean;
@@ -118,8 +118,22 @@ export interface ThreadMessage {
   parentDeleted?: boolean;
 }
 
-/** The label a tombstone and a quote of a deleted message read. */
+/**
+ * The preview a quote of a deleted message carries in the data. Never shown:
+ * every surface reads {@link deletedMessageLabel} instead.
+ */
 export const DELETED_MESSAGE_LABEL = 'Message deleted';
+
+/** What your own deleted message (its tombstone, or a quote of it) reads. */
+export const DELETED_OWN_LABEL = 'You deleted this message';
+
+/** What someone else's deleted message (its tombstone, or a quote of it) reads. */
+export const DELETED_OTHER_LABEL = 'This message was deleted';
+
+/** The deleted-message line for a message by the viewer (own) or anyone else. Pure. */
+export function deletedMessageLabel(author: { mine: boolean }): string {
+  return author.mine ? DELETED_OWN_LABEL : DELETED_OTHER_LABEL;
+}
 
 /**
  * The connection surface the thread drives: the Foundation ChatConnection plus

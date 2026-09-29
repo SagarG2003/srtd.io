@@ -26,12 +26,22 @@ import {
 import { useWorkspaceMembers } from '@/components/chat/use-workspace-members';
 import { isOwnerOrAdmin } from '@/components/pages/pcs/roles';
 import { fetchMemberRole } from '@/lib/assets';
+import { SHEET_NOTICE_TYPE } from '@/components/chat/chat-type';
 
 /** The inline line a member who cannot rename the group sees (WhatsApp's wording). */
 export const GROUP_INFO_ADMIN_ONLY = "Only admins can edit this group's info";
 
-/** The proc's refusal when the caller is neither the creator nor a workspace owner / admin. */
-const GROUP_MANAGE_DENIED = 'group_manage_denied';
+/** Any failure without a sentence of its own. */
+export const GROUP_ACTION_FALLBACK = 'Something went wrong. Try again.';
+
+/** Every group proc refusal the sheet can meet, as the sentence shown. */
+export const GROUP_ACTION_MESSAGES: Readonly<Record<string, string>> = {
+  group_name_taken: 'A group with this name already exists',
+  group_name_invalid: 'Enter a valid group name',
+  group_not_found: 'This group no longer exists',
+  member_not_in_workspace: "This person isn't in the workspace",
+  group_manage_denied: GROUP_INFO_ADMIN_ONLY,
+};
 
 /**
  * Whether the viewer may edit the group's info, mirroring group_rename: the
@@ -48,11 +58,65 @@ export function canEditGroupInfo(input: {
   );
 }
 
-/** A group action's failure as shown: the denial reads the admin line, never the code. */
+/**
+ * Whether the viewer may edit, from the role and creator reads: null (unknown)
+ * when either read failed (no role row, or the creator read erred), so a
+ * failed read never blocks. Pure.
+ */
+export function canEditFromReads(input: {
+  currentUserId: string;
+  role: string | null;
+  creator: { data: unknown; error: unknown };
+}): boolean | null {
+  if (input.role === null || input.creator.error !== null) return null;
+  const creatorId =
+    (input.creator.data as { created_by: string | null } | null)?.created_by ?? null;
+  return canEditGroupInfo({ currentUserId: input.currentUserId, creatorId, role: input.role });
+}
+
+/** What a rename came to: refused before the call, done, or a failure sentence. */
+export type RenameOutcome =
+  | { kind: 'blocked' }
+  | { kind: 'done' }
+  | { kind: 'failed'; message: string };
+
+/**
+ * Run a rename. It is refused client-side only when both reads succeeded and
+ * the viewer is neither the creator nor an owner / admin (canEditInfo false);
+ * a pending or failed read (null) calls the proc and lets the server decide,
+ * its denial mapped like any other refusal.
+ */
+export async function requestRename(input: {
+  canEditInfo: boolean | null;
+  rename: () => Promise<{ code: string; message: string } | null>;
+}): Promise<RenameOutcome> {
+  if (input.canEditInfo === false) return { kind: 'blocked' };
+  const failure = await input.rename();
+  return failure === null
+    ? { kind: 'done' }
+    : { kind: 'failed', message: groupActionMessage(failure) };
+}
+
+/**
+ * A group action's failure as shown: a readable sentence for every known code
+ * (matched on the code, or a message that is a bare code), the fallback for
+ * anything else. Never the raw code or error message.
+ */
 export function groupActionMessage(error: { code: string; message: string }): string {
-  return error.code === GROUP_MANAGE_DENIED || error.message === GROUP_MANAGE_DENIED
-    ? GROUP_INFO_ADMIN_ONLY
-    : error.message;
+  return (
+    GROUP_ACTION_MESSAGES[error.code] ??
+    GROUP_ACTION_MESSAGES[error.message] ??
+    GROUP_ACTION_FALLBACK
+  );
+}
+
+/** The inline notice under the group name (a member who cannot rename). */
+export function GroupInfoNotice(): ReactElement {
+  return (
+    <p id="group-rename-note" role="status" className={`mt-1.5 text-fg-2 ${SHEET_NOTICE_TYPE}`}>
+      {GROUP_INFO_ADMIN_ONLY}
+    </p>
+  );
 }
 
 interface GroupInfoSheetProps {
@@ -104,9 +168,11 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
 
   const loadMembers = useCallback(async (): Promise<MembersState> => {
     const ids = await listGroupMemberIds(supabase, { groupId: props.groupId });
-    if (!ids.ok) return { options: [], loading: false, error: ids.error.message };
+    if (!ids.ok) return { options: [], loading: false, error: groupActionMessage(ids.error) };
     const profiles = await readProfiles(supabase, ids.data);
-    if (!profiles.ok) return { options: [], loading: false, error: profiles.error.message };
+    if (!profiles.ok) {
+      return { options: [], loading: false, error: groupActionMessage(profiles.error) };
+    }
     return { options: toMemberOptions(profiles.data), loading: false, error: null };
   }, [props.groupId]);
 
@@ -121,9 +187,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     ])
       .then(([role, creator]) => {
         if (cancelled) return;
-        const creatorId =
-          (creator.data as { created_by: string | null } | null)?.created_by ?? null;
-        setCanEditInfo(canEditGroupInfo({ currentUserId: props.currentUserId, creatorId, role }));
+        setCanEditInfo(canEditFromReads({ currentUserId: props.currentUserId, role, creator }));
       })
       .catch(() => undefined);
     return () => {
@@ -160,22 +224,24 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
   const showAdminOnly = (): void => setInfoNotice(true);
 
   async function submitRename(): Promise<void> {
-    if (infoLocked) {
-      showAdminOnly();
-      return;
-    }
-    if (!nameChanged || busy) return;
+    if (!infoLocked && (!nameChanged || busy)) return;
     setBusy(true);
     setError(null);
-    const failure = await renameGroupChannel(
-      supabase,
-      { groupId: props.groupId, name: name.trim(), traceId: newTrace() },
-      props.onChanged,
-    );
+    const outcome = await requestRename({
+      canEditInfo,
+      rename: () =>
+        renameGroupChannel(
+          supabase,
+          { groupId: props.groupId, name: name.trim(), traceId: newTrace() },
+          props.onChanged,
+        ),
+    });
     setBusy(false);
-    if (failure === null) return;
-    if (groupActionMessage(failure) === GROUP_INFO_ADMIN_ONLY) setInfoNotice(true);
-    else setError(failure.message);
+    if (outcome.kind === 'blocked') showAdminOnly();
+    else if (outcome.kind === 'failed') {
+      if (outcome.message === GROUP_INFO_ADMIN_ONLY) setInfoNotice(true);
+      else setError(outcome.message);
+    }
   }
 
   async function submitAdd(): Promise<void> {
@@ -263,11 +329,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
                   Save
                 </Button>
               </div>
-              {infoNotice ? (
-                <p id="group-rename-note" role="status" className="mt-1.5 text-sm text-fg-2">
-                  {GROUP_INFO_ADMIN_ONLY}
-                </p>
-              ) : null}
+              {infoNotice ? <GroupInfoNotice /> : null}
             </Field>
           ) : (
             <div>
@@ -324,7 +386,11 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
                 selectedIds={addId !== null ? [addId] : []}
                 onToggle={(id) => setAddId((prev) => (prev === id ? null : id))}
                 loading={workspaceMembers.loading}
-                error={workspaceMembers.error}
+                error={
+                  workspaceMembers.error !== null
+                    ? groupActionMessage({ code: '', message: workspaceMembers.error })
+                    : null
+                }
                 emptyLabel="Everyone in this workspace is already a member."
               />
               <Button
