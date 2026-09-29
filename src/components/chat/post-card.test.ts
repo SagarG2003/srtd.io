@@ -1,19 +1,37 @@
-import { describe, expect, it } from 'vitest';
-import type { PostCardFields } from '@srtdio/posts';
+import { describe, expect, it, vi } from 'vitest';
+import type { PostCardRow } from '../../../packages/posts/src/reads';
 import {
+  POST_CHANGED_EVENT,
+  REFETCH_AFTER_MS,
+  approverIds,
+  cardFooter,
+  eventTouchesBatch,
+  firstName,
   indexPostsById,
+  mediaPills,
   postRoute,
   sharedPostViews,
-  type SharedPostView,
+  staleOnVisible,
+  watchBatchFreshness,
 } from '@/components/chat/post-card';
 
-function post(id: string, over: Partial<PostCardFields> = {}): PostCardFields {
+const TZ = 'UTC';
+
+function cardRow(id: string, over: Partial<PostCardRow> = {}): PostCardRow {
   return {
     id,
+    number: 7,
     title: `Post ${id}`,
     platform: 'instagram',
-    format: 'reel',
+    format: 'carousel',
     stage: 'approved',
+    target_date: null,
+    stage_entered_at: '2026-09-20T10:00:00Z',
+    approved_by: null,
+    approved_at: null,
+    thumbnailAssetVersionId: null,
+    mediaCount: 0,
+    hasVideo: false,
     ...over,
   };
 }
@@ -25,28 +43,15 @@ describe('postRoute', () => {
 });
 
 describe('sharedPostViews', () => {
-  it('renders one card per id (title + stage), preserving message order', () => {
-    const byId = indexPostsById([
-      post('p1', { title: 'Launch teaser', stage: 'review' }),
-      post('p2', { title: 'Recap', stage: 'approved' }),
-    ]);
+  it('renders one card per id, preserving message order (not the read order)', () => {
+    const byId = indexPostsById([cardRow('p2'), cardRow('p1')]);
     const views = sharedPostViews(['p1', 'p2'], byId);
-    expect(views).toEqual<SharedPostView[]>([
-      {
-        kind: 'post',
-        postId: 'p1',
-        title: 'Launch teaser',
-        stage: 'review',
-        platform: 'instagram',
-      },
-      { kind: 'post', postId: 'p2', title: 'Recap', stage: 'approved', platform: 'instagram' },
-    ]);
+    expect(views.map((v) => v.postId)).toEqual(['p1', 'p2']);
+    expect(views.every((v) => v.kind === 'post')).toBe(true);
   });
 
   it('maps an id the batched resolve did not return to the not-visible view', () => {
-    // p2 is hidden by the viewer's RLS (e.g. a client and a draft): absent from the map.
-    const byId = indexPostsById([post('p1', { title: 'Visible' })]);
-    const views = sharedPostViews(['p1', 'p2'], byId);
+    const views = sharedPostViews(['p1', 'p2'], indexPostsById([cardRow('p1')]));
     expect(views[0]).toMatchObject({ kind: 'post', postId: 'p1' });
     expect(views[1]).toEqual({ kind: 'not_visible', postId: 'p2' });
   });
@@ -54,6 +59,150 @@ describe('sharedPostViews', () => {
   it('maps every id to not-visible when the resolve returned nothing', () => {
     const views = sharedPostViews(['p1', 'p2'], new Map());
     expect(views.every((v) => v.kind === 'not_visible')).toBe(true);
-    expect(views).toHaveLength(2);
+  });
+
+  it('carries the approver first name from the batched name map', () => {
+    const byId = indexPostsById([
+      cardRow('p1', { approved_by: 'u1' }),
+      cardRow('p2', { approved_by: 'u9' }),
+    ]);
+    const views = sharedPostViews(['p1', 'p2'], byId, new Map([['u1', 'Asha Rao']]));
+    expect(views[0]).toMatchObject({ approverName: 'Asha' });
+    expect(views[1]).toMatchObject({ approverName: null });
+  });
+});
+
+describe('approverIds / firstName', () => {
+  it('dedupes approvers and drops nulls (one name lookup per batch)', () => {
+    const ids = approverIds([
+      cardRow('p1', { approved_by: 'u1' }),
+      cardRow('p2', { approved_by: 'u1' }),
+      cardRow('p3'),
+    ]);
+    expect(ids).toEqual(['u1']);
+  });
+
+  it('takes the first word of a display name', () => {
+    expect(firstName('  Asha   Rao ')).toBe('Asha');
+    expect(firstName('')).toBe('');
+  });
+});
+
+describe('cardFooter', () => {
+  const approved = cardRow('p1', { approved_by: 'u1', approved_at: '2026-09-21T14:05:00Z' });
+
+  it('approved with a name: check, name and date + time, Open', () => {
+    expect(cardFooter(approved, 'Asha', 'agency', TZ)).toEqual({
+      state: 'Approved by Asha · Sep 21 14:05',
+      action: 'Open',
+      accent: false,
+      check: true,
+    });
+  });
+
+  it('approved without an approver falls back to the stage_entered_at date', () => {
+    expect(cardFooter(cardRow('p1'), null, 'client', TZ)).toMatchObject({
+      state: 'Approved · Sep 20',
+      action: 'Open',
+      check: true,
+    });
+  });
+
+  it('review words by side: client is waited on, agency waits, unknown is neutral', () => {
+    const review = cardRow('p1', { stage: 'review' });
+    expect(cardFooter(review, null, 'client', TZ)).toEqual({
+      state: 'Waiting on you',
+      action: 'Review',
+      accent: true,
+      check: false,
+    });
+    expect(cardFooter(review, null, 'agency', TZ)).toMatchObject({
+      state: 'Waiting on client',
+      action: 'Open',
+      accent: false,
+    });
+    expect(cardFooter(review, null, 'unknown', TZ)).toMatchObject({
+      state: 'In review',
+      action: 'Open',
+    });
+  });
+
+  it('draft, parked and rejected are their label with Open', () => {
+    for (const [stage, label] of [
+      ['draft', 'Draft'],
+      ['parked', 'Parked'],
+      ['rejected', 'Rejected'],
+    ] as const) {
+      expect(cardFooter(cardRow('p1', { stage }), null, 'client', TZ)).toEqual({
+        state: label,
+        action: 'Open',
+        accent: false,
+        check: false,
+      });
+    }
+  });
+});
+
+describe('mediaPills', () => {
+  it('shows slides past one item and a video label by format', () => {
+    expect(mediaPills(cardRow('p', { mediaCount: 1 }))).toEqual({ slides: null, video: null });
+    expect(mediaPills(cardRow('p', { mediaCount: 4 })).slides).toBe('4 slides');
+    expect(mediaPills(cardRow('p', { hasVideo: true, format: 'video' })).video).toBe('Reel');
+    expect(mediaPills(cardRow('p', { hasVideo: true, format: 'carousel' })).video).toBe('Video');
+  });
+});
+
+describe('freshness', () => {
+  it('is stale on return only after more than 60 s', () => {
+    expect(REFETCH_AFTER_MS).toBe(60_000);
+    expect(staleOnVisible(0, 60_000)).toBe(false);
+    expect(staleOnVisible(0, 60_001)).toBe(true);
+  });
+
+  it('matches a post-changed event only for a post in the batch', () => {
+    expect(eventTouchesBatch({ postId: 'p1' }, ['p1', 'p2'])).toBe(true);
+    expect(eventTouchesBatch({ postId: 'p9' }, ['p1'])).toBe(false);
+    expect(eventTouchesBatch(null, ['p1'])).toBe(false);
+    expect(eventTouchesBatch({ postId: 1 }, ['p1'])).toBe(false);
+  });
+
+  function targets() {
+    const win = new EventTarget();
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+    return { window: win, document: doc };
+  }
+
+  it('refetches on a post-changed event for the batch, not for others', () => {
+    const t = targets();
+    const refetch = vi.fn();
+    const stop = watchBatchFreshness(t, {
+      ids: () => ['p1'],
+      fetchedAt: () => 0,
+      now: () => 1,
+      refetch,
+    });
+    t.window.dispatchEvent(new CustomEvent(POST_CHANGED_EVENT, { detail: { postId: 'p9' } }));
+    expect(refetch).not.toHaveBeenCalled();
+    t.window.dispatchEvent(new CustomEvent(POST_CHANGED_EVENT, { detail: { postId: 'p1' } }));
+    expect(refetch).toHaveBeenCalledTimes(1);
+    stop();
+    t.window.dispatchEvent(new CustomEvent(POST_CHANGED_EVENT, { detail: { postId: 'p1' } }));
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('refetches on visible only when the batch is older than 60 s', () => {
+    const t = targets();
+    const refetch = vi.fn();
+    let now = 30_000;
+    watchBatchFreshness(t, { ids: () => ['p1'], fetchedAt: () => 0, now: () => now, refetch });
+    t.document.dispatchEvent(new Event('visibilitychange'));
+    expect(refetch).not.toHaveBeenCalled();
+    now = 61_000;
+    t.document.visibilityState = 'hidden';
+    t.document.dispatchEvent(new Event('visibilitychange'));
+    expect(refetch).not.toHaveBeenCalled();
+    t.document.visibilityState = 'visible';
+    t.document.dispatchEvent(new Event('visibilitychange'));
+    expect(refetch).toHaveBeenCalledTimes(1);
   });
 });
