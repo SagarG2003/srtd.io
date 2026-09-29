@@ -98,16 +98,18 @@ import {
 import type { WriteResult } from '@/lib/chat/record';
 import {
   aboutState,
+  admitRows,
   chipPostIds,
   chipTargetFor,
-  chipsResolved,
   createCardExpectation,
   filterRows,
-  gateRows,
+  holdingFirstPage,
+  hydrationDeadline,
   newestCardFor,
   parentIndexOf,
   replyForSend,
-  type ThreadGate,
+  rowReady,
+  type PageGate,
 } from '@/lib/chat/post-refs';
 import { useWorkspace } from '@/lib/workspace-context';
 
@@ -292,13 +294,17 @@ export function threadLightbox(
 }
 
 /**
- * A bubble's KEY chip when its reply target is a card message: 'chip' once the
- * post is in the thread's batch, 'pending' (no quote, no chip) until then. A
- * reply without a chip keeps its quote.
+ * A bubble's KEY chip when its reply target is a card message and the post is
+ * in the thread's batch. A reply without a chip keeps its quote: a plain
+ * parent, a post the viewer cannot see, or (a live row only; page rows wait
+ * for their chips) a post still being read.
  */
-export type BubbleChip =
-  | { kind: 'chip'; post: PostRefPost; workspaceKey: string | null; onTap: () => void }
-  | { kind: 'pending' };
+export type BubbleChip = {
+  kind: 'chip';
+  post: PostRefPost;
+  workspaceKey: string | null;
+  onTap: () => void;
+};
 
 /** What a bubble's cards and chip hand back to the thread. */
 export interface BubblePostRefs {
@@ -318,8 +324,7 @@ export function bubbleChip(
     onShowPost: (postId: string, cardMessageId?: string) => void;
   },
 ): BubbleChip | undefined {
-  if (target === null || post === null) return undefined;
-  if (post === undefined) return { kind: 'pending' };
+  if (target === null || post == null) return undefined;
   return {
     kind: 'chip',
     post,
@@ -1718,8 +1723,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // A share just sent: its card message becomes the About once the outbox bubble lands.
   const cardWaitRef = useRef(createCardExpectation());
   const cardWait = cardWaitRef.current;
-  // The rows on screen: they advance only once every chip in them is resolved.
-  const gateRef = useRef<ThreadGate<ThreadMessage> | null>(null);
+  // Which rows are on screen: page rows wait for their chips, arrivals never do.
+  const gateRef = useRef<PageGate | null>(null);
+  // Bumped when a page row's hydration wait runs out, so it goes on without it.
+  const [hydrationTick, setHydrationTick] = useState(0);
   const { workspaceKey } = useWorkspace();
   const toast = useToast();
   const marks = props.marks ?? NO_MARKS;
@@ -1757,24 +1764,6 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     const found = cardWait.resolve(props.messages);
     if (found !== null) setAboutDraft(found);
   }, [props.messages, cardWait]);
-
-  // A delete or a new mark landing meanwhile drops ids that are no longer selectable.
-  useEffect(() => {
-    setSelected((prev) => {
-      const next = pruneThreadSelection(prev, props.messages);
-      return next.size === prev.size ? prev : next;
-    });
-  }, [props.messages]);
-
-  const messagesById = useMemo(
-    () => new Map(props.messages.map((m) => [m.id, m])),
-    [props.messages],
-  );
-  const markedMessages = props.markedMessages;
-  const messageFor = useCallback(
-    (id: string): ThreadMessage | undefined => messagesById.get(id) ?? markedMessages?.get(id),
-    [messagesById, markedMessages],
-  );
 
   const onSetMark = props.onSetMark;
   const applyMark = async (
@@ -1842,27 +1831,62 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       ),
     [chipIds, aboutDraft?.postId, filterPostId],
   );
-  const postRef = useChipBatch(batchIds);
+  const { postRef, chipSettled } = useChipBatch(batchIds);
   const sharedInChat = useMemo(
     () => new Set(props.messages.flatMap((m) => m.sharedPostIds)),
     [props.messages],
   );
-  // First paint final: rows (a first page, an older page) render only once
-  // their chips are resolved, so a chip or its fallback quote paints with them
-  // and the bottom snap happens after. Until then the last resolved list stays
-  // (or the skeleton, on open).
-  const chipsReady = useMemo(
-    () => chipsResolved(props.messages, parentIndex, postRef),
-    [props.messages, parentIndex, postRef],
+  // First paint final, page by page: the rows of a page being loaded (the first
+  // page, an older one) go on screen together once each is hydrated and its
+  // chip post is settled, so a chip or its fallback quote paints with them and
+  // the bottom snap happens after. Anything that arrives after a page is in
+  // (own sends, live rows, state changes on shown rows) is never held. The
+  // filter reads the full list: its rows are the post's own, whose chip post
+  // is already known.
+  const title = props.title;
+  const admitted = useMemo(() => {
+    const nowMs = Date.now();
+    const next = admitRows(
+      gateRef.current,
+      title,
+      props.messages,
+      (row, since) => rowReady(row, since, { parentIndex, chipSettled, nowMs }),
+      nowMs,
+    );
+    gateRef.current = next.gate;
+    return next;
+    // hydrationTick re-runs the cut once a hydration wait has run out.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, props.messages, parentIndex, chipSettled, hydrationTick]);
+  const onScreen = admitted.rows;
+  const gatedIndex = useMemo(() => parentIndexOf(onScreen), [onScreen]);
+  const shownMessages = useMemo(
+    () => (filterPostId !== null ? filterRows(props.messages, filterPostId) : onScreen),
+    [props.messages, onScreen, filterPostId],
   );
-  const gate = gateRows(gateRef.current, props.title, props.messages, chipsReady);
-  gateRef.current = gate;
-  const gatedMessages = gate.rows;
-  const gatedIndex = useMemo(() => parentIndexOf(gatedMessages ?? []), [gatedMessages]);
-  const shownMessages = useMemo(() => {
-    const rows = gatedMessages ?? [];
-    return filterPostId !== null ? filterRows(rows, filterPostId) : rows;
-  }, [gatedMessages, filterPostId]);
+  useEffect(() => {
+    const deadline = hydrationDeadline(admitted.gate, props.messages, parentIndex);
+    if (deadline === null) return;
+    const handle = setTimeout(
+      () => setHydrationTick((t) => t + 1),
+      Math.max(0, deadline - Date.now()),
+    );
+    return () => clearTimeout(handle);
+  }, [admitted, props.messages, parentIndex]);
+
+  // Selection, jumps and the forward source read the list that is on screen.
+  useEffect(() => {
+    setSelected((prev) => {
+      const next = pruneThreadSelection(prev, shownMessages);
+      return next.size === prev.size ? prev : next;
+    });
+  }, [shownMessages]);
+  const messagesById = useMemo(() => new Map(shownMessages.map((m) => [m.id, m])), [shownMessages]);
+  const markedMessages = props.markedMessages;
+  const messageFor = useCallback(
+    (id: string): ThreadMessage | undefined => messagesById.get(id) ?? markedMessages?.get(id),
+    [messagesById, markedMessages],
+  );
 
   // The About post resolved to nothing (RLS, failed read): drop it and say so.
   const aboutPost = aboutDraft !== null ? postRef(aboutDraft.postId) : undefined;
@@ -1904,7 +1928,6 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
    * Show one post's conversation; what is typed next stays about it. A chip
    * whose card is on an unloaded page pages it in first (or toasts).
    */
-  const title = props.title;
   const titleRef = useRef(title);
   titleRef.current = title;
   const showPost = (postId: string, cardMessageId?: string): void => {
@@ -2026,7 +2049,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         onShowPost={showPost}
         filtering={filterPostId !== null}
         filterRef={filterPost != null ? postRefKey(workspaceKey, filterPost.number) : null}
-        loading={props.loading || gatedMessages === null}
+        loading={props.loading || (filterPostId === null && holdingFirstPage(admitted.gate))}
         profiles={props.profiles}
         cache={presignCache}
         presignEnabled={presignEnabled}
@@ -2049,9 +2072,9 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       {selecting && onDeleteMessages !== undefined ? (
         <SelectionBar
           count={selected.size}
-          canDelete={canDeleteSelection(selected, props.messages, marks)}
+          canDelete={canDeleteSelection(selected, shownMessages, marks)}
           {...(canForwardHere
-            ? { onForward: () => setForwardFor(selectedForForward(selected, props.messages)) }
+            ? { onForward: () => setForwardFor(selectedForForward(selected, shownMessages)) }
             : {})}
           onCancel={exitSelection}
           onDelete={async () => {

@@ -57,13 +57,13 @@ import type { ThreadMessage } from '@/lib/chat/thread';
 import { PostRefChip } from '@/components/chat/PostRefChip';
 import { SharedPostCards } from '@/components/chat/PostCard';
 import {
+  admitRows,
   chipTargetFor,
-  chipsResolved,
   filterRows,
-  gateRows,
   parentIndexOf,
   replyForSend,
-  type ThreadGate,
+  rowReady,
+  type PageGate,
 } from '@/lib/chat/post-refs';
 import type { FindOlderOutcome } from '@/lib/chat/marks';
 import { runSend } from '@/lib/chat/send-flow';
@@ -1283,13 +1283,13 @@ describe('post references', () => {
     expect(onShowPost).toHaveBeenCalledWith('p1', 'card');
   });
 
-  it('renders plain text (no quote, no chip) until the chip data arrives', () => {
+  it('a live row whose chip post is still being read keeps the plain quote (the chip comes later)', () => {
     const target = chipTargetFor(reply, parentIndexOf([card]));
     const chip = bubbleChip(target, undefined, { workspaceKey: 'gbl', onShowPost: vi.fn() });
-    expect(chip).toEqual({ kind: 'pending' });
+    expect(chip).toBeUndefined();
     const root = bubbleWith(reply, chip);
     expect(types(root)).not.toContain(PostRefChip);
-    expect(types(root)).not.toContain(ReplyQuoteBox);
+    expect(types(root)).toContain(ReplyQuoteBox);
     let body: unknown;
     walk(root, (el) => {
       const props = el.props as { className?: string; children?: unknown };
@@ -1461,26 +1461,40 @@ describe('post references after audit', () => {
   /**
    * MessageThread's render pipeline, step by step: the batch lookup and the
    * rows go through the same gate, chip and bubble functions the component
-   * uses. Each distinct list the gate lets through is one list render.
+   * uses. Each distinct on-screen list is one list render. A lookup that has
+   * not settled a post (undefined) is the read in flight, never a timeout.
    */
   function renderSteps(steps: Array<{ rows: ThreadMessage[]; lookup: Lookup }>): {
     renders: Array<Map<string, ReactElement>>;
     snaps: number;
   } {
-    let gate: ThreadGate<ThreadMessage> | null = null;
+    let gate: PageGate | null = null;
     let shown: ThreadMessage[] | null = null;
     const renders: Array<Map<string, ReactElement>> = [];
     let snaps = 0;
+    let nowMs = 0;
     for (const step of steps) {
-      const ready = chipsResolved(step.rows, parentIndexOf(step.rows), step.lookup);
-      gate = gateRows(gate, 'thread', step.rows, ready);
-      if (gate.rows === null || gate.rows === shown) continue;
+      nowMs += 1;
+      const parentIndex = parentIndexOf(step.rows);
+      const chipSettled = (id: string): boolean => step.lookup(id) !== undefined;
+      const now = nowMs;
+      const cut: { gate: PageGate; rows: ThreadMessage[] } = admitRows(
+        gate,
+        'thread',
+        step.rows,
+        (row: ThreadMessage, since: number) =>
+          rowReady(row, since, { parentIndex, chipSettled, nowMs: now }),
+        now,
+      );
+      gate = cut.gate;
+      if (cut.rows.length === 0 || cut.rows === shown) continue;
       // ThreadBody's first snap: the first non-empty list it receives.
-      if (shown === null && gate.rows.length > 0) snaps += 1;
-      shown = gate.rows;
-      const index = parentIndexOf(shown);
+      if (shown === null) snaps += 1;
+      const onScreen: ThreadMessage[] = cut.rows;
+      shown = onScreen;
+      const index = parentIndexOf(onScreen);
       const list = new Map<string, ReactElement>();
-      for (const m of shown) {
+      for (const m of onScreen) {
         const target = chipTargetFor(m, index);
         const chip = bubbleChip(target, target !== null ? step.lookup(target.postId) : null, {
           workspaceKey: 'gbl',
@@ -1564,6 +1578,110 @@ describe('post references after audit', () => {
         if (list.has(id)) expect(has(list.get(id), PostRefChip)).toBe(true);
       }
     }
+  });
+
+  it('R3: a reply to a card on an unloaded page paints its chip on the first render of its page', () => {
+    const unloaded = makeMessage({
+      id: 'r9',
+      body: 'about the older card',
+      reply: { id: 'gone', authorUserId: null, preview: '' },
+    });
+    const hydrated = makeMessage({
+      id: 'r9',
+      body: 'about the older card',
+      reply: { id: 'gone', authorUserId: 'peer-1', preview: 'Shared post' },
+      parentSharedPostIds: ['p9'],
+    });
+    const p9 = { id: 'p9', number: 9, title: 'Older post', thumbnailAssetVersionId: null };
+    const { renders, snaps } = renderSteps([
+      { rows: [unloaded], lookup: () => undefined },
+      { rows: [hydrated], lookup: () => undefined },
+      { rows: [hydrated], lookup: (id) => (id === 'p9' ? p9 : undefined) },
+    ]);
+    expect(renders).toHaveLength(1);
+    expect(snaps).toBe(1);
+    expect(has(renders[0]?.get('r9'), PostRefChip)).toBe(true);
+    expect(has(renders[0]?.get('r9'), ReplyQuoteBox)).toBe(false);
+  });
+
+  it('R4: an own send during a pending older-page chip read shows on the next render', () => {
+    const t0 = Date.parse(CREATED_AT);
+    const at = (min: number): Pick<ThreadMessage, 'time' | 'createdAt'> => ({
+      time: t0 + min * 60_000,
+      createdAt: new Date(t0 + min * 60_000).toISOString(),
+    });
+    const first = [
+      { ...card, ...at(10) },
+      { ...chipRow, ...at(11) },
+    ];
+    const older = [
+      makeMessage({ id: 'c0', body: '', sharedPostIds: ['p0'], ...at(0) }),
+      makeMessage({
+        id: 'r0',
+        body: 'old',
+        reply: { id: 'c0', authorUserId: null, preview: 'Shared post' },
+        ...at(1),
+      }),
+    ];
+    const own = makeMessage({ id: 'own', body: 'hi', mine: true, state: 'sending', ...at(12) });
+    const known: Lookup = (id) => (id === 'p1' ? POST : undefined);
+    const { renders } = renderSteps([
+      { rows: first, lookup: known },
+      { rows: [...older, ...first, own], lookup: known },
+      { rows: [...older, ...first, { ...own, state: 'sent' }], lookup: known },
+    ]);
+    expect(renders).toHaveLength(3);
+    expect([...(renders[1]?.keys() ?? [])]).toEqual(['card', 'r1', 'own']);
+    expect([...(renders[2]?.keys() ?? [])]).toEqual(['card', 'r1', 'own']);
+    let state: unknown;
+    walk(renders[2]?.get('own') as ReactElement, (el) => {
+      const p = el.props as { 'data-msg-id'?: string; 'data-state'?: string };
+      if (p['data-msg-id'] === 'own') state = p['data-state'];
+    });
+    expect(state).toBe('sent');
+  });
+
+  it('F8: after found, the filter shows the card row at once while its page is still held', () => {
+    const t0 = Date.parse(CREATED_AT);
+    const at = (min: number): Pick<ThreadMessage, 'time' | 'createdAt'> => ({
+      time: t0 + min * 60_000,
+      createdAt: new Date(t0 + min * 60_000).toISOString(),
+    });
+    const shownReply = { ...chipRow, ...at(11) };
+    const first = [shownReply];
+    const olderCard = { ...card, ...at(1) };
+    const otherChip = makeMessage({
+      id: 'r0',
+      body: 'about another post',
+      reply: { id: 'c0', authorUserId: null, preview: 'Shared post' },
+      parentSharedPostIds: ['p0'],
+      ...at(2),
+    });
+    const all = [olderCard, otherChip, ...first];
+    const known: Lookup = (id) => (id === 'p1' ? POST : undefined);
+    let gate: PageGate | null = null;
+    const cut = (rows: ThreadMessage[], nowMs: number) => {
+      const parentIndex = parentIndexOf(rows);
+      const next = admitRows(
+        gate,
+        'thread',
+        rows,
+        (row, since) =>
+          rowReady(row, since, {
+            parentIndex,
+            chipSettled: (id) => known(id) !== undefined,
+            nowMs,
+          }),
+        nowMs,
+      );
+      gate = next.gate;
+      return next.rows;
+    };
+    cut(first, 1);
+    const onScreen = cut(all, 2);
+    expect(onScreen.map((m) => m.id)).toEqual(['r1']);
+    // The filter reads the full list: the card and its reply, right away.
+    expect(filterRows(all, 'p1').map((m) => m.id)).toEqual(['card', 'r1']);
   });
 
   it('F14: About pending or gone attaches no reply_to on send', async () => {

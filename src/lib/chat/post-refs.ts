@@ -162,43 +162,137 @@ export function createCardExpectation(
   };
 }
 
-/**
- * Whether every chip in the rows has its post resolved in the batch (a row, or
- * null for a post the viewer cannot see). Rows render only once this holds, so
- * a chip or its fallback quote is part of the first paint.
- */
-export function chipsResolved(
-  rows: readonly RefFields[],
-  parentIndex: ParentIndex,
-  lookup: (postId: string) => unknown,
-): boolean {
-  return chipPostIds(rows, parentIndex).every((id) => lookup(id) !== undefined);
+/** A reply read from a row whose quote (and its parent's post ids) is not resolved yet. */
+export function isUnhydratedReply(row: Pick<ThreadMessage, 'reply'>): boolean {
+  return row.reply !== null && row.reply.preview === '';
 }
 
-/** The rows the thread renders: the newest rows whose chips are resolved, per conversation. */
-export interface ThreadGate<T> {
+/**
+ * How long a page row waits for its reply hydration (the resolveReplies IN
+ * read) before it goes on screen with the blank quote it has today. A failed
+ * read never settles the quote, so the wait must be bounded.
+ */
+export const PAGE_HYDRATION_WAIT_MS = 4_000;
+
+type GateFields = RefFields & Pick<ThreadMessage, 'time'>;
+
+/**
+ * Which rows of a conversation are on screen. Page rows (the first page, an
+ * older page) wait until every one of them is ready and then go on together,
+ * so a page appears whole, with its chips; a row that arrives after the page
+ * (an own send, a live message) is newer than everything shown and never
+ * waits. Kept per conversation; the shown list is always cut from the latest
+ * rows, so a state change on a shown row is never delayed.
+ */
+export interface PageGate {
   key: string;
-  /** Null until a first list with every chip resolved; the thread shows its skeleton. */
-  rows: T[] | null;
+  shown: Set<string>;
+  /** The newest time on screen; anything newer is an arrival, not a page row. */
+  newestShown: number;
+  /** Page rows not on screen yet, with when they were first seen (ms). */
+  pending: Map<string, number>;
+  /** The last cut, returned again while the on-screen rows are unchanged. */
+  last: readonly GateFields[];
+}
+
+export interface RowReadiness {
+  parentIndex: ParentIndex;
+  /** The chip post is in the batch (a row or null) or its read was attempted. */
+  chipSettled: (postId: string) => boolean;
+  nowMs: number;
 }
 
 /**
- * Advance the rendered rows only when every chip is resolved; otherwise keep
- * the last resolved list of the same conversation (same array, so nothing
- * re-renders or re-snaps), or nothing for a new conversation. An older page
- * therefore appears whole, with its chips, in one render.
+ * Whether a page row can go on screen: its chip post is settled when it has a
+ * chip; an unhydrated reply whose parent is not loaded waits for hydration
+ * (capped); anything else is ready at once.
  */
-export function gateRows<T>(
-  prev: ThreadGate<T> | null,
+export function rowReady(row: GateFields, since: number, r: RowReadiness): boolean {
+  const target = chipTargetFor(row, r.parentIndex);
+  if (target !== null) return r.chipSettled(target.postId);
+  if (isUnhydratedReply(row)) return r.nowMs - since >= PAGE_HYDRATION_WAIT_MS;
+  return true;
+}
+
+/**
+ * Cut the on-screen rows from the latest list. Rows never seen before are
+ * arrivals (newer than everything shown: on at once) or page rows (pending);
+ * pending rows go on together once every one is ready. The gate is updated in
+ * place and returned. With nothing pending the input array is returned as is;
+ * otherwise the previous cut is returned while its rows are unchanged.
+ */
+export function admitRows<T extends GateFields>(
+  prev: PageGate | null,
   key: string,
-  rows: T[],
-  ready: boolean,
-): ThreadGate<T> {
-  if (ready) return prev !== null && prev.key === key && prev.rows === rows ? prev : { key, rows };
-  // A shown list stays until the new one is ready; an empty or missing one
-  // (the conversation is still loading) shows the skeleton instead.
-  if (prev !== null && prev.key === key && prev.rows !== null && prev.rows.length > 0) return prev;
-  return { key, rows: null };
+  rows: readonly T[],
+  ready: (row: T, since: number) => boolean,
+  nowMs: number,
+): { gate: PageGate; rows: T[] } {
+  const gate: PageGate =
+    prev !== null && prev.key === key
+      ? prev
+      : {
+          key,
+          shown: new Set(),
+          newestShown: Number.NEGATIVE_INFINITY,
+          pending: new Map(),
+          last: [],
+        };
+  const ids = new Set(rows.map((r) => r.id));
+  for (const id of gate.shown) if (!ids.has(id)) gate.shown.delete(id);
+  for (const id of gate.pending.keys()) if (!ids.has(id)) gate.pending.delete(id);
+  for (const row of rows) {
+    if (gate.shown.has(row.id) || gate.pending.has(row.id)) continue;
+    if (gate.shown.size > 0 && row.time > gate.newestShown) gate.shown.add(row.id);
+    else gate.pending.set(row.id, nowMs);
+  }
+  if (gate.pending.size > 0) {
+    let all = true;
+    for (const row of rows) {
+      const since = gate.pending.get(row.id);
+      if (since !== undefined && !ready(row, since)) {
+        all = false;
+        break;
+      }
+    }
+    if (all) {
+      for (const id of gate.pending.keys()) gate.shown.add(id);
+      gate.pending.clear();
+    }
+  }
+  let out = gate.pending.size === 0 ? (rows as T[]) : rows.filter((r) => gate.shown.has(r.id));
+  const last = gate.last as readonly T[];
+  if (out !== rows && out.length === last.length && out.every((r, i) => r === last[i]))
+    out = last as T[];
+  gate.last = out;
+  for (const r of out) if (r.time > gate.newestShown) gate.newestShown = r.time;
+  return { gate, rows: out };
+}
+
+/** The first page is still held: nothing on screen while page rows wait. */
+export function holdingFirstPage(gate: PageGate): boolean {
+  return gate.shown.size === 0 && gate.pending.size > 0;
+}
+
+/**
+ * When the earliest pending row waiting on hydration may go on screen without
+ * it (ms), or null when no pending row waits on hydration. The thread sets a
+ * timer for it so the wait ends without a list change.
+ */
+export function hydrationDeadline(
+  gate: PageGate,
+  rows: readonly GateFields[],
+  parentIndex: ParentIndex,
+): number | null {
+  let deadline: number | null = null;
+  for (const row of rows) {
+    const since = gate.pending.get(row.id);
+    if (since === undefined || !isUnhydratedReply(row)) continue;
+    if (chipTargetFor(row, parentIndex) !== null) continue;
+    const at = since + PAGE_HYDRATION_WAIT_MS;
+    if (deadline === null || at < deadline) deadline = at;
+  }
+  return deadline;
 }
 
 /**

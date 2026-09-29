@@ -8,7 +8,7 @@ import {
   postRefKey,
 } from '@/components/chat/PostRefChip';
 import { FilterStrip } from '@/components/chat/FilterStrip';
-import { chipPostIds, parentIndexOf } from '@/lib/chat/post-refs';
+import { aboutState, chipPostIds, parentIndexOf } from '@/lib/chat/post-refs';
 import type { ThreadMessage } from '@/lib/chat/thread';
 
 function cardRow(id: string, number: number): PostCardRow {
@@ -153,15 +153,30 @@ describe('FilterStrip', () => {
   });
 });
 
-describe('createChipBatch timeout', () => {
-  it('a read slower than the timeout resolves its ids to null (plain quote), never holding rows', async () => {
+describe('createChipBatch timeout (R5)', () => {
+  it('a timed-out read leaves its ids unknown and retryable, never null; About stays pending', async () => {
     vi.useFakeTimers();
-    const batch = createChipBatch(() => new Promise(() => {}));
+    const load = vi.fn(() => new Promise<never>(() => {}));
+    const batch = createChipBatch(load);
     const done = batch.request(['slow']);
     expect(batch.get('slow')).toBeUndefined();
+    expect(batch.attempted('slow')).toBe(false);
     vi.advanceTimersByTime(CHIP_BATCH_TIMEOUT_MS);
     await done;
-    expect(batch.get('slow')).toBeNull();
+    expect(batch.get('slow')).toBeUndefined();
+    expect(batch.attempted('slow')).toBe(true);
+    expect(aboutState(batch.get('slow'))).toBe('pending');
+    // The next request retries it.
+    expect(batch.request(['slow'])).not.toBeNull();
+    expect(load).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
+  });
+
+  it('a completed read that returns nothing resolves null (About goes)', async () => {
+    const batch = createChipBatch(() => Promise.resolve({ ok: true as const, data: [] }));
+    await batch.request(['hidden']);
+    expect(batch.get('hidden')).toBeNull();
+    expect(aboutState(batch.get('hidden'))).toBe('gone');
+    expect(batch.request(['hidden'])).toBeNull();
   });
 });

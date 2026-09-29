@@ -28,16 +28,20 @@ export type PostRefLookup = (postId: string) => PostCardRow | null | undefined;
 /** One thread's chip batch: a memo of resolved posts and the reads that fill it. */
 export interface ChipBatch {
   get: PostRefLookup;
+  /** A read for the post has finished or timed out at least once. */
+  attempted: (postId: string) => boolean;
   /**
    * Read the ids not yet requested, in one call. Null when every id was already
-   * requested (no read); otherwise resolves once the new ids are in.
+   * requested (no read); otherwise resolves once the new ids are in, or once
+   * the read has timed out.
    */
   request: (ids: readonly string[]) => Promise<void> | null;
 }
 
 /**
- * A read slower than this resolves its ids to null (the plain quote), so a hung
- * request never holds the thread's rows back.
+ * A read slower than this is given up on: its ids go back to unknown (the next
+ * request retries them, rows show the plain quote meanwhile, About stays
+ * pending), never to null. Only a completed read decides a post is not visible.
  */
 export const CHIP_BATCH_TIMEOUT_MS = 4_000;
 
@@ -47,38 +51,51 @@ export function createChipBatch(
 ): ChipBatch {
   const requested = new Set<string>();
   const resolved = new Map<string, PostCardRow | null>();
+  const attempted = new Set<string>();
   return {
     get: (postId) => resolved.get(postId),
+    attempted: (postId) => attempted.has(postId),
     request: (ids) => {
       const fresh = [...new Set(ids)].filter((id) => !requested.has(id)).sort();
       if (fresh.length === 0) return null;
       for (const id of fresh) requested.add(id);
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), timeoutMs);
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), timeoutMs);
       });
-      return Promise.race([load(fresh), timeout]).then(
-        (result) => {
-          clearTimeout(timer);
-          const rows = result !== null && result.ok ? result.data : [];
-          for (const id of fresh) resolved.set(id, null);
-          for (const row of rows) resolved.set(row.id, row);
-        },
-        () => {
-          clearTimeout(timer);
-          for (const id of fresh) resolved.set(id, null);
-        },
+      const read = load(fresh).then(
+        (result): PostCardRow[] => (result.ok ? result.data : []),
+        (): PostCardRow[] => [],
       );
+      return Promise.race([read, timeout]).then((outcome) => {
+        clearTimeout(timer);
+        for (const id of fresh) attempted.add(id);
+        if (outcome === 'timeout') {
+          // Back to unknown; the late result, if any, is dropped.
+          for (const id of fresh) requested.delete(id);
+          return;
+        }
+        for (const id of fresh) resolved.set(id, null);
+        for (const row of outcome) resolved.set(row.id, row);
+      });
     },
   };
 }
 
+/** What the thread reads from its chip batch. */
+export interface ChipLookup {
+  postRef: PostRefLookup;
+  /** The post is resolved (a row or null) or a read for it has been attempted. */
+  chipSettled: (postId: string) => boolean;
+}
+
 /**
  * The thread's chip batch over `ids` (chip posts plus the About and filter
- * posts). A new batch per workspace; re-renders once each read lands. With no
- * workspace there is nothing to read: every post is null (the plain quote).
+ * posts). A new batch per workspace; re-renders once each read lands or times
+ * out, and a timed-out id is requested again on that render. With no workspace
+ * there is nothing to read: every post is null (the plain quote).
  */
-export function useChipBatch(ids: readonly string[]): PostRefLookup {
+export function useChipBatch(ids: readonly string[]): ChipLookup {
   const { workspaceId } = useWorkspace();
   const [version, setVersion] = useState(0);
   const batchRef = useRef<{ workspaceId: string; batch: ChipBatch } | null>(null);
@@ -93,9 +110,14 @@ export function useChipBatch(ids: readonly string[]): PostRefLookup {
   useEffect(() => {
     if (batch === null || key === '') return;
     void batch.request(key.split(','))?.then(() => setVersion((v) => v + 1));
-  }, [batch, key]);
-  return useMemo<PostRefLookup>(
-    () => (postId) => (batch !== null ? batch.get(postId) : null),
+    // version re-runs the request after a timeout put ids back to unknown.
+  }, [batch, key, version]);
+  return useMemo<ChipLookup>(
+    () => ({
+      postRef: (postId) => (batch !== null ? batch.get(postId) : null),
+      chipSettled: (postId) =>
+        batch === null || batch.get(postId) !== undefined || batch.attempted(postId),
+    }),
     // version re-derives the lookup so consumers re-render with the new posts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [batch, version],

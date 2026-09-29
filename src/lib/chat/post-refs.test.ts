@@ -1,13 +1,15 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   EXPECT_CARD_MS,
+  PAGE_HYDRATION_WAIT_MS,
   aboutState,
+  admitRows,
   caretHashQuery,
-  chipsResolved,
   createCardExpectation,
   expectedCard,
-  gateRows,
-  type ThreadGate,
+  holdingFirstPage,
+  hydrationDeadline,
+  rowReady,
   chipPostIds,
   chipTargetFor,
   filterRows,
@@ -166,37 +168,111 @@ describe('createCardExpectation', () => {
   });
 });
 
-describe('chipsResolved / gateRows (first paint final)', () => {
-  const card = msg('card', { sharedPostIds: ['p1'] });
-  const chip = replyTo('r', 'card');
+describe('admitRows (first paint final, page by page)', () => {
+  const settled = new Set<string>();
+  const readiness = (nowMs: number, rows: readonly Row[]) => {
+    const parentIndex = parentIndexOf(rows);
+    return (row: Row, since: number): boolean =>
+      rowReady(row, since, { parentIndex, chipSettled: (id) => settled.has(id), nowMs });
+  };
+  const card = msg('card', { sharedPostIds: ['p1'], time: 10 });
+  const chip = replyTo('r', 'card', { time: 11 });
 
-  it('holds until every chip post is resolved (a row or null)', () => {
-    const rows = [card, chip];
-    const index = parentIndexOf(rows);
-    expect(chipsResolved(rows, index, () => undefined)).toBe(false);
-    expect(chipsResolved(rows, index, () => null)).toBe(true);
-    expect(chipsResolved(rows, index, () => ({ id: 'p1' }))).toBe(true);
-    expect(chipsResolved([msg('plain')], new Map(), () => undefined)).toBe(true);
-  });
+  beforeEach(() => settled.clear());
 
-  it('a first page shows nothing, then everything with its chips; an older page appears whole', () => {
-    let gate: ThreadGate<Row> | null = null;
+  it('the first page shows nothing until every page row is ready, then everything', () => {
     const first = [card, chip];
-    gate = gateRows(gate, 't', first, false);
-    expect(gate.rows).toBeNull();
-    gate = gateRows(gate, 't', first, true);
-    expect(gate.rows).toBe(first);
-    const older = [msg('c0', { sharedPostIds: ['p0'] }), replyTo('r0', 'c0'), ...first];
-    const held = gateRows(gate, 't', older, false);
-    expect(held).toBe(gate);
-    expect(gateRows(held, 't', older, true).rows).toBe(older);
+    const a = admitRows(null, 't', first, readiness(0, first), 0);
+    expect(a.rows).toEqual([]);
+    expect(holdingFirstPage(a.gate)).toBe(true);
+    settled.add('p1');
+    const b = admitRows(a.gate, 't', first, readiness(1, first), 1);
+    expect(b.rows).toBe(first);
+    expect(holdingFirstPage(b.gate)).toBe(false);
   });
 
-  it('a conversation switch or an empty loading list never shows stale or empty rows', () => {
-    const shown = gateRows(null, 't1', [card], true);
-    expect(gateRows(shown, 't2', [card, chip], false).rows).toBeNull();
-    const empty = gateRows(null, 't', [], true);
-    expect(gateRows(empty, 't', [card, chip], false).rows).toBeNull();
+  it('R4: an own send during a pending older page shows on the next cut; sending to sent is not delayed', () => {
+    settled.add('p1');
+    const first = [card, chip];
+    let gate = admitRows(null, 't', first, readiness(0, first), 0).gate;
+    const older = [msg('c0', { sharedPostIds: ['p0'], time: 1 }), replyTo('r0', 'c0', { time: 2 })];
+    const own = msg('own', { time: 12, mine: true, state: 'sending' });
+    const withOlder = [...older, ...first, own];
+    const cut = admitRows(gate, 't', withOlder, readiness(1, withOlder), 1);
+    gate = cut.gate;
+    expect(cut.rows.map((r) => r.id)).toEqual(['card', 'r', 'own']);
+    const sent = { ...own, state: 'sent' as const };
+    const next = [...older, ...first, sent];
+    const cut2 = admitRows(gate, 't', next, readiness(2, next), 2);
+    expect(cut2.rows.find((r) => r.id === 'own')?.state).toBe('sent');
+    expect(cut2.rows.map((r) => r.id)).toEqual(['card', 'r', 'own']);
+    // A live reply with an unread chip post shows at once (its chip comes later).
+    const live = replyTo('live', 'c0', { time: 13 });
+    const cut3 = admitRows(cut2.gate, 't', [...next, live], readiness(3, next), 3);
+    expect(cut3.rows.map((r) => r.id)).toEqual(['card', 'r', 'own', 'live']);
+    // The older page appears whole once its chip post settles.
+    settled.add('p0');
+    const all = [...next, live];
+    const cut4 = admitRows(cut3.gate, 't', all, readiness(4, all), 4);
+    expect(cut4.rows).toBe(all);
+  });
+
+  it('R3: a reply to a card on an unloaded page waits for hydration, then for its chip', () => {
+    const raw: Row = {
+      ...replyTo('r9', 'gone', { time: 5 }),
+      reply: { id: 'gone', authorUserId: null, preview: '' },
+    };
+    let cut = admitRows(null, 't', [raw], readiness(0, [raw]), 0);
+    expect(cut.rows).toEqual([]);
+    expect(hydrationDeadline(cut.gate, [raw], parentIndexOf([raw]))).toBe(PAGE_HYDRATION_WAIT_MS);
+    const hydrated: Row = {
+      ...raw,
+      reply: { id: 'gone', authorUserId: null, preview: 'Shared post' },
+      parentSharedPostIds: ['p9'],
+    };
+    cut = admitRows(cut.gate, 't', [hydrated], readiness(1, [hydrated]), 1);
+    expect(cut.rows).toEqual([]);
+    expect(hydrationDeadline(cut.gate, [hydrated], parentIndexOf([hydrated]))).toBeNull();
+    settled.add('p9');
+    cut = admitRows(cut.gate, 't', [hydrated], readiness(2, [hydrated]), 2);
+    expect(cut.rows.map((r) => r.id)).toEqual(['r9']);
+  });
+
+  it('a hydration that never lands is waited on for PAGE_HYDRATION_WAIT_MS, then shown as is', () => {
+    const raw: Row = {
+      ...replyTo('r9', 'gone', { time: 5 }),
+      reply: { id: 'gone', authorUserId: null, preview: '' },
+    };
+    let cut = admitRows(null, 't', [raw], readiness(0, [raw]), 0);
+    expect(cut.rows).toEqual([]);
+    cut = admitRows(
+      cut.gate,
+      't',
+      [raw],
+      readiness(PAGE_HYDRATION_WAIT_MS - 1, [raw]),
+      PAGE_HYDRATION_WAIT_MS - 1,
+    );
+    expect(cut.rows).toEqual([]);
+    cut = admitRows(
+      cut.gate,
+      't',
+      [raw],
+      readiness(PAGE_HYDRATION_WAIT_MS, [raw]),
+      PAGE_HYDRATION_WAIT_MS,
+    );
+    expect(cut.rows.map((r) => r.id)).toEqual(['r9']);
+  });
+
+  it('a conversation switch starts a fresh gate; removed rows are forgotten', () => {
+    settled.add('p1');
+    const first = [card, chip];
+    const a = admitRows(null, 't1', first, readiness(0, first), 0);
+    expect(a.rows).toBe(first);
+    const b = admitRows(a.gate, 't2', [chip], readiness(1, [chip]), 1);
+    expect(b.gate).not.toBe(a.gate);
+    expect(b.rows.map((r) => r.id)).toEqual(['r']);
+    const c = admitRows(b.gate, 't2', [], readiness(2, []), 2);
+    expect(c.gate.shown.size).toBe(0);
   });
 });
 
