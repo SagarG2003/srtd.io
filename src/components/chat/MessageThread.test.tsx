@@ -78,10 +78,19 @@ import {
   threadStripSlot,
   type ThreadRow,
   mentionClass,
+  mentionsMe,
   profileNameOf,
   renderBodyWithMentions,
 } from '@/components/chat/MessageThread';
-import { mentionPickerRows, resolveMentionText, type MentionMember } from '@/lib/chat/mentions';
+import {
+  ALL_MARK,
+  mentionPickerRows,
+  resolveMentionText,
+  type MentionMember,
+} from '@/lib/chat/mentions';
+import { previewMentionText } from '@/components/chat/ChatStoreProvider';
+import { ActivityCard } from '@/components/pages/activity/ActivityCard';
+import { chatMentionPreview } from '@/components/pages/activity/data';
 import { boldAllMentions, draftLine } from '@/components/chat/ChannelList';
 import { MentionPicker } from '@/components/chat/MentionPicker';
 import { renderToStaticMarkup as renderStrip } from 'react-dom/server';
@@ -3403,6 +3412,8 @@ describe('A3 "@all" renders bold, as a mention of me for recipients, and inert',
           nameOf: profileNameOf(names),
           viewerUserId: 'me',
           mentions: { peerUserId: null, onOpen: vi.fn() },
+          // J8: the tint follows the stored mentions; a group recipient is in them.
+          mentionedMe: !mine,
         })}
       </p>,
     );
@@ -3455,5 +3466,130 @@ describe('A3 "@all" renders bold, as a mention of me for recipients, and inert',
     );
     expect(dm).not.toContain('data-mention-option="all"');
     expect(dm).not.toContain('Everyone in this group');
+  });
+});
+
+describe('J7 only a real "@[all]" token draws bold', () => {
+  const nameOf = profileNameOf(new Map());
+  const bubble = (body: string): string =>
+    renderStrip(
+      <p>
+        {renderBodyWithMentions(body, false, {
+          nameOf,
+          viewerUserId: 'me',
+          mentions: { peerUserId: null, onOpen: vi.fn() },
+          mentionedMe: true,
+        })}
+      </p>,
+    );
+  const activity = (raw: string): string =>
+    renderStrip(
+      <ActivityCard
+        group={[
+          {
+            id: 'e1',
+            workspaceId: 'w1',
+            number: null,
+            eventType: 'mention',
+            entityType: 'chat_channel',
+            entityId: 'chan-1',
+            scope: 'groups',
+            tier: 'active',
+            createdAt: '2026-06-14T00:00:00.000Z',
+            readAt: null,
+            snoozedUntil: null,
+            commentId: null,
+            assetId: null,
+            toStage: null,
+            fromStage: null,
+            title: 'Launch crew',
+            actorId: null,
+            actorName: 'Bob',
+            actorAvatarUrl: null,
+            body: chatMentionPreview(raw, () => undefined),
+            format: null,
+            caption: null,
+            thumbnailAssetVersionId: null,
+            pointsAdded: null,
+            checkpointTotal: null,
+            batchId: null,
+            messageId: null,
+            channelType: 'group',
+          },
+        ]}
+        nowMs={Date.parse('2026-06-14T00:05:00.000Z')}
+        cache={cache}
+        presignEnabled={false}
+        onOpenGroup={() => {}}
+        onOpenEntry={() => {}}
+        onSnooze={() => {}}
+        onMarkRead={() => {}}
+        selfName={null}
+      />,
+    );
+  const list = (raw: string): string =>
+    renderStrip(<span>{boldAllMentions(previewMentionText(raw))}</span>);
+  const draft = (raw: string): string =>
+    renderStrip(<span>{boldAllMentions(draftLine(raw))}</span>);
+
+  it('J7 plain "@all" not bold in list, draft line, Activity or bubble; the token is bold in all four', () => {
+    const plain = '@all standup';
+    const token = '@[all] standup';
+    for (const html of [list(plain), draft(plain), activity(plain), bubble(plain)]) {
+      expect(html).toContain('@all standup');
+      expect(html).not.toContain('data-mention-all');
+      expect(html).not.toContain('data-mention="all"');
+      expect(html).not.toContain('font-bold">@all');
+      expect(html).not.toContain(ALL_MARK);
+    }
+    for (const html of [list(token), draft(token), activity(token)]) {
+      expect(html).toMatch(/<span data-mention-all="" class="font-bold[^"]*">@all<\/span>/);
+      expect(html).not.toContain(ALL_MARK);
+      expect(html).not.toContain('@[');
+    }
+    expect(bubble(token)).toContain(`data-mention="all" class="${mentionClass(false, true)}">@all`);
+    expect(mentionClass(false, true)).toContain('font-bold');
+  });
+});
+
+describe('J8 the mention-of-me tint follows the stored mentions', () => {
+  const nameOf = profileNameOf(new Map());
+  const render = (
+    m: Pick<ThreadMessage, 'body' | 'mine' | 'mentions' | 'forwarded'>,
+    isGroup: boolean,
+  ): string =>
+    renderStrip(
+      <p>
+        {renderBodyWithMentions(m.body, m.mine, {
+          nameOf,
+          viewerUserId: 'me',
+          mentions: { peerUserId: null, onOpen: vi.fn() },
+          mentionedMe: mentionsMe(m, 'me', isGroup),
+        })}
+      </p>,
+    );
+
+  it('J8 forwarded @[all]: bold, no tint; real @all in group for recipient: tint', () => {
+    const forwarded = render(
+      { body: '@[all] standup', mine: false, mentions: null, forwarded: true },
+      true,
+    );
+    expect(forwarded).toContain(`class="${mentionClass(false, false)}">@all`);
+    expect(forwarded).toContain('font-bold');
+    expect(forwarded).not.toContain('bg-accent-soft');
+    // A DM with a stray @[all]: the server stored no mention of me.
+    const dm = render({ body: '@[all] hi', mine: false, mentions: [] }, false);
+    expect(dm).toContain('font-bold');
+    expect(dm).not.toContain('bg-accent-soft');
+    // A live DM row (not read yet) predicts the same: no tint.
+    expect(mentionsMe({ body: '@[all] hi', mine: false }, 'me', false)).toBe(false);
+    // Real @all in a group: the server expanded it to me.
+    const real = render({ body: '@[all] standup', mine: false, mentions: ['me', 'ana'] }, true);
+    expect(real).toContain(`class="${mentionClass(false, true)}">@all`);
+    expect(real).toContain('bg-accent-soft');
+    // Stored mentions drive it even when the live prediction would differ.
+    expect(mentionsMe({ body: 'no token', mine: false, mentions: ['me'] }, 'me', true)).toBe(true);
+    expect(mentionsMe({ body: '@[all]', mine: false }, 'me', true)).toBe(true);
+    expect(mentionsMe({ body: '@[all]', mine: true, mentions: ['me'] }, 'me', true)).toBe(false);
   });
 });

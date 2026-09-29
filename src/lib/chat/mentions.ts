@@ -278,19 +278,43 @@ export function mentionPickerRows(
 }
 
 /**
- * Plain text split around each "@all" (a resolved everyone mention), so a text
- * surface (list preview, draft line, Activity) can draw it bold. Pure.
+ * The invisible mark a text surface's line carries before a resolved `@[all]`
+ * token, so only a real token draws bold: text typed as "@all" has none (any
+ * mark already in a body is stripped first). splitAllMentions removes it.
+ */
+export const ALL_MARK = '\u2063';
+
+/**
+ * A body as a text surface's line (list preview, draft line, Activity): like
+ * resolveMentionText, but each `@[all]` token reads ALL_MARK + "@all" so
+ * splitAllMentions can tell it from typed text. Pure over nameOf.
+ */
+export function resolveMentionPreview(body: string, nameOf: NameOf): string {
+  return body
+    .replaceAll(ALL_MARK, '')
+    .replace(tokenPattern(), (_match, id: string) =>
+      id.toLowerCase() === ALL_MENTION ? `${ALL_MARK}@${ALL_MENTION}` : mentionLabel(id, nameOf),
+    );
+}
+
+/**
+ * A text surface's line (from resolveMentionPreview) split around each real
+ * everyone mention, so it can draw bold; typed "@all" stays plain. The marks
+ * never reach the runs. Pure.
  */
 export function splitAllMentions(text: string): Array<{ text: string; all: boolean }> {
   const runs: Array<{ text: string; all: boolean }> = [];
+  const token = `${ALL_MARK}@${ALL_MENTION}`;
   let last = 0;
-  for (const match of text.matchAll(/(^|\s)(@all)(?![\p{L}\p{N}_])/gu)) {
-    const at = (match.index ?? 0) + (match[1] ?? '').length;
-    if (at > last) runs.push({ text: text.slice(last, at), all: false });
-    runs.push({ text: '@all', all: true });
-    last = at + 4;
+  let at = text.indexOf(token);
+  while (at !== -1) {
+    if (at > last) runs.push({ text: text.slice(last, at).replaceAll(ALL_MARK, ''), all: false });
+    runs.push({ text: `@${ALL_MENTION}`, all: true });
+    last = at + token.length;
+    at = text.indexOf(token, last);
   }
-  if (last < text.length) runs.push({ text: text.slice(last), all: false });
+  if (last < text.length)
+    runs.push({ text: text.slice(last).replaceAll(ALL_MARK, ''), all: false });
   return runs;
 }
 

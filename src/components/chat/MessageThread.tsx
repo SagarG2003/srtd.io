@@ -18,7 +18,9 @@ import { isNearBottom } from '@/lib/chat/scroll';
 import {
   ALL_MENTION,
   knownMentionName,
+  mentionIds,
   mentionLabel,
+  mentionsAll,
   resolveMentionText,
   splitMentions,
   type MentionMember,
@@ -1131,6 +1133,30 @@ export interface MentionRenderContext {
   viewerUserId: string | null;
   /** Absent: every mention is inert (selection mode, previews). */
   mentions?: BubbleMentions | undefined;
+  /**
+   * Whether this message mentions me (mentionsMe): only then does a token of
+   * me or "@all" sit on the mention-of-me tint. Absent is the same as false.
+   */
+  mentionedMe?: boolean;
+}
+
+/**
+ * Whether a message mentions me, for the "mentioned you" tint: its stored
+ * mentions (server-expanded, "@all" recipients included) list my id. A forward
+ * (mentions null) never does. A live row not read from Postgres yet reads as
+ * the server will store it: not a forward, and my token, or "@all" in a group.
+ * My own messages never do. Pure.
+ */
+export function mentionsMe(
+  message: Pick<ThreadMessage, 'body' | 'mine' | 'mentions' | 'forwarded'>,
+  viewerUserId: string | null,
+  isGroup: boolean,
+): boolean {
+  if (viewerUserId === null || message.mine) return false;
+  const me = viewerUserId.toLowerCase();
+  if (message.mentions !== undefined) return message.mentions?.includes(me) === true;
+  if (message.forwarded === true) return false;
+  return mentionIds(message.body).includes(me) || (isGroup && mentionsAll(message.body));
 }
 
 /**
@@ -1175,16 +1201,18 @@ export function renderBodyWithMentions(
       return <Fragment key={i}>{renderMessageBody(segment.text, mine)}</Fragment>;
     }
     const id = segment.userId;
-    // "@all" names everyone but its sender: a recipient sees it as a mention of them.
     const everyone = id === ALL_MENTION;
-    const self = id === ctx.viewerUserId || (everyone && !mine);
+    const self = id === ctx.viewerUserId;
+    // The tint follows the stored mentions (mentionedMe), never the token alone:
+    // "@all" or my name is a mention of me only when the message mentions me.
+    const tint = !mine && ctx.mentionedMe === true && (self || everyone);
     const label = mentionLabel(id, ctx.nameOf);
     const open = ctx.mentions;
     // An unresolvable id ("@Unknown member") has no one to open a chat with.
     const known = ctx.nameOf(id) !== undefined;
     if (open === undefined || self || everyone || !known || id === open.peerUserId) {
       return (
-        <span key={i} data-mention={id} className={mentionClass(mine, self)}>
+        <span key={i} data-mention={id} className={mentionClass(mine, tint)}>
           {label}
         </span>
       );
@@ -1458,6 +1486,7 @@ export function MessageBubble(props: {
         nameOf: profileNameOf(profiles),
         viewerUserId: props.viewerUserId ?? null,
         mentions: selection === undefined ? props.mentions : undefined,
+        mentionedMe: mentionsMe(message, props.viewerUserId ?? null, isGroup),
       })}
       {spacer}
     </p>

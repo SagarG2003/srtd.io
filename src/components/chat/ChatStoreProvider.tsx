@@ -50,7 +50,7 @@ import {
   knownMentionName,
   mentionIds,
   rememberMentionNames,
-  resolveMentionText,
+  resolveMentionPreview,
 } from '@/lib/chat/mentions';
 import { SIGNOUT_EVENT } from '@/lib/events';
 import { stripDeletedReplies } from '@/lib/chat/drafts';
@@ -239,7 +239,7 @@ export async function routeGlobalCmd(ext: unknown, deps: GlobalCmdDeps): Promise
 
 /** A body with @[uuid] tokens as list text: "@Name" (the registry's names). */
 export function previewMentionText(text: string): string {
-  return resolveMentionText(text, knownMentionName);
+  return resolveMentionPreview(text, knownMentionName);
 }
 
 /**

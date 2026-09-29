@@ -14,7 +14,7 @@ import { readProfiles } from '@/lib/chat-reads';
 import { entityUrlPath } from '@/lib/entityRef';
 import { logger } from '@/lib/logger';
 import { EX_MEMBER_LABEL } from '@/components/comments/commentProfiles';
-import { resolveMentionText } from '@/lib/chat/mentions';
+import { resolveMentionPreview } from '@/lib/chat/mentions';
 
 type InboxEntryRow = Database['public']['Tables']['inbox_entries']['Row'];
 
@@ -170,7 +170,7 @@ export function chatMentionPreview(
   nameOf: (id: string) => string | undefined,
 ): string | null {
   if (body === null) return null;
-  const first = resolveMentionText(body, nameOf).trim().split('\n')[0]?.trim() ?? '';
+  const first = resolveMentionPreview(body, nameOf).trim().split('\n')[0]?.trim() ?? '';
   return first !== '' ? first : null;
 }
 

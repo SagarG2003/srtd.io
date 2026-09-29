@@ -4,7 +4,7 @@ import { isValidElement } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { ActivityCard } from '@/components/pages/activity/ActivityCard';
 import { AvatarStack } from '@/components/pages/activity/AvatarStack';
-import type { ActivityItem } from '@/components/pages/activity/data';
+import { chatMentionPreview, type ActivityItem } from '@/components/pages/activity/data';
 import type { PresignCache } from '@/lib/asset-presign';
 
 // The unit env is `node` with no DOM, so events cannot be dispatched. We mock
@@ -361,7 +361,8 @@ describe('A3 @all in the Activity preview', () => {
         channelType: 'group',
         title: 'Launch crew',
         actorName: 'Bob',
-        body: '@all standup in 5',
+        // J7: the body as data.ts resolves it from the "@[all]" token.
+        body: chatMentionPreview('@[all] standup in 5', () => undefined),
       }),
     ]);
     expect(html).toMatch(/<span data-mention-all="" class="font-bold text-accent">@all<\/span>/);

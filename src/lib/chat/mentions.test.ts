@@ -22,6 +22,7 @@ import {
   mentionTargets,
   mentionsAfterRefusal,
   splitAllMentions,
+  resolveMentionPreview,
 } from '@/lib/chat/mentions';
 
 const ANA = '11111111-1111-4111-8111-111111111111';
@@ -215,9 +216,11 @@ describe('@all', () => {
 
   it('A3 resolves to "@all" everywhere text is drawn (copy, previews), split for bold', () => {
     expect(resolveMentionText('@[all] ship it', nameOf)).toBe('@all ship it');
-    expect(splitAllMentions('@all ship it, @allison')).toEqual([
+    // J7: only a real token splits out bold; typed "@all" stays plain text.
+    expect(splitAllMentions(resolveMentionPreview('@[all] ship it, @allison', nameOf))).toEqual([
       { text: '@all', all: true },
       { text: ' ship it, @allison', all: false },
     ]);
+    expect(splitAllMentions('@all ship it')).toEqual([{ text: '@all ship it', all: false }]);
   });
 });

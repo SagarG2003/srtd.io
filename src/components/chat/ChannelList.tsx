@@ -40,7 +40,7 @@ import { sortChannelsByRecency } from '@/lib/chat/sort-conversations';
 import { formatRelativeTime } from '@/lib/chat/format-relative-time';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { draftText, draftsVersion, subscribeDrafts } from '@/lib/chat/drafts';
-import { knownMentionName, resolveMentionText, splitAllMentions } from '@/lib/chat/mentions';
+import { knownMentionName, resolveMentionPreview, splitAllMentions } from '@/lib/chat/mentions';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import {
   CHAT_LIST_NAME_TYPE,
@@ -70,10 +70,10 @@ export function rowDraft(draft: string, open: boolean): string | null {
 
 /** A stored draft as its list line: its @[uuid] tokens read "@Name". Pure over the registry. */
 export function draftLine(stored: string): string {
-  return resolveMentionText(stored, knownMentionName);
+  return resolveMentionPreview(stored, knownMentionName);
 }
 
-/** A list line with each "@all" drawn bold (the ink stays the line's own). */
+/** A list line with each real "@all" token drawn bold (the ink stays the line's own). */
 export function boldAllMentions(text: string): ReactNode {
   const runs = splitAllMentions(text);
   if (runs.every((run) => !run.all)) return text;
