@@ -12,7 +12,7 @@
 // with Jump (a card is in this chat) or Share here.
 
 import { useEffect, useMemo, useState } from 'react';
-import type { ReactElement } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -454,6 +454,11 @@ export interface MarksListProps {
   onReopen: (messageId: string) => Promise<WriteResult>;
   /** Posts waiting in review, listed first on the Open tab (the thread sheet only). */
   openPosts?: OpenPostsSection;
+  /**
+   * Cap each tab at the first `rows` rows (the chat info preview); `seeAll`
+   * shows under a tab that holds more. Absent lists every row.
+   */
+  preview?: { rows: number; seeAll: ReactNode };
 }
 
 /**
@@ -497,6 +502,7 @@ export function MarksList(props: MarksListProps): ReactElement {
     return list;
   }, [props.marks, messageFor]);
   const titles = useCardTitles(props.open, markedMessages);
+  const shownRows = props.preview !== undefined ? rows.slice(0, props.preview.rows) : rows;
   const tabCount = markTabCounts(props.marks.values());
   const body = marksListBody(tab, rows.length, props.openPosts?.posts?.length ?? 0);
   const displayNameOf = (userId: string): string | undefined => profiles.get(userId)?.displayName;
@@ -545,7 +551,7 @@ export function MarksList(props: MarksListProps): ReactElement {
         />
       ) : (
         <ul className="flex max-h-[55vh] flex-col overflow-y-auto">
-          {rows.map((mark) => {
+          {shownRows.map((mark) => {
             const message = messageFor(mark.messageId);
             const sender =
               message === undefined
@@ -588,6 +594,9 @@ export function MarksList(props: MarksListProps): ReactElement {
           })}
         </ul>
       )}
+      {props.preview !== undefined && rows.length > props.preview.rows
+        ? props.preview.seeAll
+        : null}
     </div>
   );
 }

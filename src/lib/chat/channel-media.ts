@@ -1,8 +1,9 @@
-// Reads behind the DM Contact sheet's Media, Files and Links tabs. Each tab is
-// ONE RLS-scoped chat_messages select per page (cleared windows and other
-// tenants never come back), keyset-paged on (created_at, id) exactly like
-// history.ts, so there is no per-row query. Rows are mapped to flat items here;
-// presigning and sender names are the caller's (PresignCache, profiles map).
+// Reads behind the chat info Media, Files and Links tabs (ChatInfoTabs), which
+// serve DMs and groups alike: the reads take a channel id only. Each tab is ONE
+// RLS-scoped chat_messages select per page (cleared windows and other tenants
+// never come back), keyset-paged on (created_at, id) exactly like history.ts,
+// so there is no per-row query. Rows are mapped to flat items here; presigning
+// and sender names are the caller's (PresignCache, profiles map).
 
 import type { Client, Result } from '@srtdio/rpc';
 import { olderThanFilter } from '@/lib/chat/history';
