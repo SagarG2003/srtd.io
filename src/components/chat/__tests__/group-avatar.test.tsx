@@ -9,8 +9,7 @@ vi.mock('@/lib/supabase', () => ({ supabase: {} }));
 
 import type { Database } from '@srtdio/schemas';
 import { shapeChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
-import { channelRowBody } from '@/components/chat/ChannelList';
-import { chatLayout } from '@/components/chat/chat-type';
+import { channelRowBody, GROUP_TILE_PHOTO } from '@/components/chat/ChannelList';
 import {
   groupInfoSections,
   groupInfoSubtitle,
@@ -70,12 +69,11 @@ function rowHtml(summary: ChannelSummary): string {
       timeZone: 'UTC',
       selecting: false,
       checked: false,
-      layout: chatLayout({ finePointer: false, widthPx: 390 }),
     }),
   );
 }
 
-describe('chat list row avatar resolution (one batched list read, no per-row fetch)', () => {
+describe('chat home tile avatar resolution (one batched list read, no per-row fetch)', () => {
   it('a group with avatar_url resolves entity_id -> groups.avatar_url and paints the photo first', () => {
     expect(withPhoto.avatarUrl).toBe(PHOTO);
     expect(withPhoto.createdBy).toBe(ME);
@@ -83,7 +81,10 @@ describe('chat list row avatar resolution (one batched list read, no per-row fet
     expect(html).toContain(`src="${PHOTO}"`);
     // First paint is the photo: no initials fallback rendered alongside it.
     expect(html).not.toContain('>LA<');
-    expect(html).toContain('width:48px;height:48px');
+    // A group is a wide tile: a 72px rounded-square photo.
+    expect(html).toContain(
+      `data-group-photo="" class="${GROUP_TILE_PHOTO.replaceAll('&', '&amp;').replaceAll('>', '&gt;')}"`,
+    );
   });
 
   it('a group without avatar_url falls back to the shared initials avatar', () => {
@@ -91,13 +92,19 @@ describe('chat list row avatar resolution (one batched list read, no per-row fet
     const html = rowHtml(withoutPhoto);
     expect(html).not.toContain('<img');
     expect(html).toContain('>O<');
-    expect(html).toContain('width:48px;height:48px');
+    expect(html).toContain(
+      `data-group-photo="" class="${GROUP_TILE_PHOTO.replaceAll('&', '&amp;').replaceAll('>', '&gt;')}"`,
+    );
   });
 
   it("a DM channel still resolves the peer's users.avatar_url", () => {
     expect(dm.channelType).toBe('dm');
     expect(dm.avatarUrl).toBe(PEER_PHOTO);
-    expect(rowHtml(dm)).toContain(`src="${PEER_PHOTO}"`);
+    const html = rowHtml(dm);
+    expect(html).toContain(`src="${PEER_PHOTO}"`);
+    // A DM is a square tile: a 48px circular avatar.
+    expect(html).toContain('width:48px;height:48px');
+    expect(html).toContain('rounded-full');
   });
 });
 
