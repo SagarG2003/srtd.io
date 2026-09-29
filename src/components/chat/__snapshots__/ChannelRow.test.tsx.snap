@@ -16,10 +16,10 @@ exports[`ChannelList dense row > checked in select mode: accent tint and the on 
 }
 `;
 
-exports[`ChannelList dense row > empty preview: "No messages yet" in tertiary ink, not italic; group glyph avatar 1`] = `
+exports[`ChannelList dense row > empty preview: "No messages yet" in tertiary ink, not italic; group initials avatar 1`] = `
 {
   "classes": [
-    "flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-panel-3 text-fg-2",
+    "rounded-full inline-flex items-center justify-center select-none text-white font-medium text-sm",
     "flex min-w-0 flex-1 flex-col gap-1",
     "flex items-baseline gap-2",
     "min-w-0 flex-1 truncate text-fg text-[17px] leading-[22px] font-semibold",

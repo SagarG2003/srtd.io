@@ -61,7 +61,6 @@ import {
   IconForward,
   IconSettings,
   IconTrash,
-  IconUsers,
 } from '@/components/ui/icons';
 import { useLongPress } from '@/components/ui';
 import { LONG_PRESS_MS, MOVE_CANCEL_PX } from '@/components/ui/useLongPress';
@@ -660,9 +659,10 @@ function TypingIndicator(props: {
 }
 
 /**
- * The header's photo and name block. In a DM with `onOpenContact` it is one
- * 44px-tall button spanning both that opens the Contact sheet; groups (and a
- * DM without the handler) keep the plain block. Hook-free.
+ * The header's photo and name block. With `onOpenContact` it is one 44px-tall
+ * button spanning both: a DM opens the Contact sheet, a group opens Group info.
+ * Without the handler it is the plain block. The group photo is 40px in the
+ * same slot as the DM photo, with the shared initials fallback. Hook-free.
  */
 export function ThreadHeaderIdentity(props: {
   isGroup: boolean;
@@ -674,12 +674,11 @@ export function ThreadHeaderIdentity(props: {
   onOpenContact?: () => void;
 }): ReactElement {
   const photo = props.isGroup ? (
-    <span
-      aria-hidden="true"
-      className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full bg-panel-3 text-fg-2"
-    >
-      <IconUsers size={14} />
-    </span>
+    <Avatar
+      name={props.title}
+      size="header"
+      {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
+    />
   ) : (
     <Avatar
       name={props.title}
@@ -703,12 +702,14 @@ export function ThreadHeaderIdentity(props: {
       ) : null}
     </span>
   );
-  if (!props.isGroup && props.onOpenContact !== undefined) {
+  if (props.onOpenContact !== undefined) {
     return (
       <button
         type="button"
-        data-contact-open=""
-        aria-label={`Contact info for ${props.title}`}
+        {...(props.isGroup ? { 'data-group-info-open': '' } : { 'data-contact-open': '' })}
+        aria-label={
+          props.isGroup ? `Group info for ${props.title}` : `Contact info for ${props.title}`
+        }
         onClick={props.onOpenContact}
         className="flex min-h-[44px] min-w-0 flex-1 items-center gap-2.5 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
@@ -3687,7 +3688,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
               presence={headerAvatarPresence(props.presence)}
               headerLine={headerLine}
               layout={layout}
-              {...(canOpenContact ? { onOpenContact: () => setContactOpen(true) } : {})}
+              {...(canOpenContact
+                ? { onOpenContact: () => setContactOpen(true) }
+                : props.isGroup === true && props.onOpenInfo !== undefined
+                  ? { onOpenContact: props.onOpenInfo }
+                  : {})}
             />
             {props.onOpenInfo !== undefined ? (
               <IconButton label="Group info" onClick={props.onOpenInfo}>

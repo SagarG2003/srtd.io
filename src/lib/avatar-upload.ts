@@ -14,6 +14,13 @@ export interface AvatarUploadConfig {
   token: string | null;
   /** Injected so tests pass a mock; the app passes fetchWithTrace. */
   fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  /**
+   * A group photo instead of the caller's own avatar. The worker authorises it
+   * (creator or workspace owner/admin) as the caller, so it also needs the public
+   * Supabase key (`apiKey`) to read PostgREST with the caller's token. Absent
+   * means the user avatar path, unchanged.
+   */
+  target?: { kind: 'group'; id: string; apiKey: string };
 }
 
 /** Collapse a transport / unexpected failure to the shared Result error shape. */
@@ -33,12 +40,18 @@ export async function uploadAvatarFile(
 ): Promise<Result<{ avatarUrl: string }>> {
   const form = new FormData();
   form.append('file', file, 'avatar.png');
+  const headers: Record<string, string> = { Authorization: `Bearer ${config.token}` };
+  if (config.target !== undefined) {
+    form.append('target_kind', config.target.kind);
+    form.append('target_id', config.target.id);
+    headers.apikey = config.target.apiKey;
+  }
 
   let response: Response;
   try {
     response = await config.fetcher(config.endpoint, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${config.token}` },
+      headers,
       body: form,
     });
   } catch {

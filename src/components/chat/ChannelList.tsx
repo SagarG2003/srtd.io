@@ -18,7 +18,7 @@ import { SelectCheck } from '@/components/ui/SelectCheck';
 import { popoverClass } from '@/components/ui/popover-classes';
 import { SectionHeader } from '@/components/shell/SectionHeader';
 import { ActionRow, useLongPress } from '@/components/ui';
-import { IconChat, IconEllipsis, IconPlus, IconTrash, IconUsers } from '@/components/ui/icons';
+import { IconChat, IconEllipsis, IconPlus, IconTrash } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
@@ -348,19 +348,13 @@ export function chatRowContextMenu(
 export const CHANNEL_ROW_BUTTON =
   'flex min-w-0 flex-1 select-none items-center gap-3.5 px-4 min-h-[72px] py-2.5 text-left [-webkit-touch-callout:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent';
 
-/** The 48px row avatar; a group with no picture shows the people glyph, not initials. */
+/**
+ * The 48px row avatar: the DM peer's or the group's photo, else the shared
+ * initials fallback. The URL is on the summary before the row mounts (one
+ * batched list read), so a row with a photo paints the photo first, never the
+ * initials. The box is reserved at 48px either way.
+ */
 function channelAvatar(channel: ChannelSummary): ReactElement {
-  if (channel.channelType === 'group' && channel.avatarUrl === null) {
-    return (
-      <span
-        data-group-avatar=""
-        aria-hidden="true"
-        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-panel-3 text-fg-2"
-      >
-        <IconUsers size={20} />
-      </span>
-    );
-  }
   return (
     <Avatar
       name={channel.title}
