@@ -9,6 +9,7 @@ import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import {
   AboutBar,
   composerBars,
+  composerBodyFor,
   composerCanSend,
   EDIT_EMPTY_TOAST,
   EDIT_PLACEHOLDER,
@@ -22,19 +23,31 @@ import {
   draftAttachments,
   hasLinkCards,
   isSendKeydown,
+  mentionKeyAction,
   replyBarPreview,
   ReplyBar,
+  restoreDraftText,
   attachRejectCopy,
   SEND_FAILED_COPY,
   shouldShowMic,
   withLinkCards,
 } from '@/components/chat/Composer';
 import { editFailureCopy } from '@/lib/chat/record';
-import { createOutboxSender, type SendOutcome } from '@/lib/chat/send-flow';
+import { createOutboxSender, runSend, type SendOutcome } from '@/lib/chat/send-flow';
 import { canSendAttachmentMessage } from '@/lib/chat/attachments';
 import { stripHashToken } from '@/lib/chat/post-refs';
 import { IconButton } from '@/components/ui/IconButton';
 import { postRefKey } from '@/components/chat/PostRefChip';
+import { getDraft, resetDrafts, setDraft } from '@/lib/chat/drafts';
+import { runEdit } from '@/lib/chat/delete-flow';
+import type { Client } from '@srtdio/rpc';
+import {
+  deserializeMentions,
+  mentionIds,
+  resolveMentionText,
+  serializedCaret,
+  serializeMentions,
+} from '@/lib/chat/mentions';
 
 // The repo's vitest runs in the node environment with no @testing-library/react,
 // so caret/DOM behaviour is not exercised here. Following the codebase pattern
@@ -552,5 +565,176 @@ describe('F14: composer toasts never show raw error text', () => {
 
   it('a voice upload failure reads the send copy', () => {
     expect(SEND_FAILED_COPY).toBe("Couldn't send, try again");
+  });
+});
+
+describe('@ mentions in the composer', () => {
+  const ANA = '11111111-1111-4111-8111-111111111111';
+  const BEN = '22222222-2222-4222-8222-222222222222';
+  const names = new Map([
+    [ANA, 'Ana Roy'],
+    [BEN, 'Ben'],
+  ]);
+  const nameOf = (id: string): string | undefined => names.get(id);
+
+  it('while the picker is open Enter and Tab pick (never send), arrows move, Esc closes', () => {
+    expect(mentionKeyAction('Enter', false)).toBe('pick');
+    expect(mentionKeyAction('Tab', false)).toBe('pick');
+    expect(mentionKeyAction('ArrowDown', false)).toBe('down');
+    expect(mentionKeyAction('ArrowUp', false)).toBe('up');
+    expect(mentionKeyAction('Escape', false)).toBe('close');
+    expect(mentionKeyAction('a', false)).toBeNull();
+    // Mid-IME composition the picker leaves the key alone.
+    expect(mentionKeyAction('Enter', true)).toBeNull();
+  });
+
+  it('a chat switch keeps each draft its own mention map', () => {
+    resetDrafts();
+    const picksA = [{ userId: ANA, name: 'Ana Roy' }];
+    const picksB = [{ userId: BEN, name: 'Ben' }];
+    const textA = 'hey @Ana Roy ';
+    const textB = '@Ben ok';
+    setDraft('chan-a', {
+      text: serializeMentions(textA, picksA),
+      caret: serializedCaret(textA, textA.length, picksA),
+    });
+    setDraft('chan-b', {
+      text: serializeMentions(textB, picksB),
+      caret: serializedCaret(textB, textB.length, picksB),
+    });
+    const a = restoreDraftText(getDraft('chan-a'), nameOf);
+    const b = restoreDraftText(getDraft('chan-b'), nameOf);
+    expect(a).toEqual({ text: textA, caret: textA.length, picks: picksA });
+    expect(b).toEqual({ text: textB, caret: textB.length, picks: picksB });
+    expect(mentionIds(serializeMentions(a.text, a.picks))).toEqual([ANA]);
+    resetDrafts();
+  });
+
+  it('the edit box shows "@Name" and an unchanged edit is still unchanged', () => {
+    const body = `ping @[${BEN}]`;
+    const shown = deserializeMentions(body, nameOf);
+    expect(shown.text).toBe('ping @Ben');
+    expect(
+      editSendDecision({
+        text: serializeMentions(shown.text, shown.picks),
+        initialText: body,
+        hasOtherContent: false,
+      }),
+    ).toBe('unchanged');
+    const bar = renderToStaticMarkup(
+      <EditingBar text={resolveMentionText(body, nameOf)} onCancel={() => undefined} />,
+    );
+    expect(bar).toContain('ping @Ben');
+    expect(bar).not.toContain('@[');
+  });
+});
+
+describe('F4 draft restore and edit keep mentions whose names are still loading', () => {
+  const ANA = '11111111-1111-4111-8111-111111111111';
+  const EX = '33333333-3333-4333-8333-333333333333';
+  const loading = (): string | undefined => undefined;
+  const loaded = (id: string): string | undefined => (id === ANA ? 'Ana' : undefined);
+
+  it('F4 restore draft before members load, then load: mention kept and sent', () => {
+    resetDrafts();
+    const stored = `hi @[${ANA}] `;
+    setDraft('chan-a', { text: stored, caret: stored.length });
+    // Members not settled: the stored body is held verbatim, nothing drops.
+    const held = composerBodyFor(getDraft('chan-a'), false, loading);
+    expect(held.held).toBe(true);
+    expect(held.picks).toEqual([]);
+    // What the composer writes back while held is the stored body, untouched.
+    expect(serializeMentions(held.text, held.picks)).toBe(stored);
+    expect(serializedCaret(held.text, held.caret, held.picks)).toBe(stored.length);
+    // Members settle: "@Ana" with its pick; the send carries the mention.
+    const shown = composerBodyFor({ text: held.text, caret: held.caret }, true, loaded);
+    expect(shown).toEqual({
+      text: 'hi @Ana ',
+      caret: 'hi @Ana '.length,
+      picks: [{ userId: ANA, name: 'Ana' }],
+      held: false,
+    });
+    expect(mentionIds(serializeMentions(shown.text, shown.picks))).toEqual([ANA]);
+    // After settle an id still unknown (ex-member) may drop.
+    const ex = composerBodyFor({ text: `x @[${EX}]`, caret: 0 }, true, loaded);
+    expect(ex.picks).toEqual([]);
+    resetDrafts();
+  });
+
+  it('F4 enter edit before members load: mention kept and sent in p_mentions', async () => {
+    const initialText = `fix @[${ANA}] please`;
+    const held = composerBodyFor({ text: initialText, caret: initialText.length }, false, loading);
+    expect(held.held).toBe(true);
+    expect(held.text).toBe(initialText);
+    const shown = composerBodyFor({ text: held.text, caret: held.caret }, true, loaded);
+    expect(shown.text).toBe('fix @Ana please');
+    const edited = `${shown.text} now`;
+    const body = serializeMentions(edited, shown.picks);
+    expect(editSendDecision({ text: body, initialText, hasOtherContent: false })).not.toBe(
+      'unchanged',
+    );
+    const rpc = vi.fn(() => ({
+      abortSignal: () =>
+        Promise.resolve({ data: { id: 'm1', body, edited_at: 'now' }, error: null }),
+    }));
+    await runEdit(
+      {
+        client: { rpc } as unknown as Client,
+        applyLocal: () => undefined,
+        signal: undefined,
+        onSignalFailed: () => undefined,
+      },
+      { channelId: 'c1', messageId: 'm1', body, traceId: 't' },
+    );
+    const args = (rpc.mock.calls[0] as unknown as [string, Record<string, unknown>])[1];
+    expect(args.p_mentions).toEqual([ANA]);
+  });
+});
+
+describe('H2 a failed member read never drops a mention', () => {
+  const ANA = '11111111-1111-4111-8111-111111111111';
+  const BEN = '22222222-2222-4222-8222-222222222222';
+  const EX = '33333333-3333-4333-8333-333333333333';
+
+  it('H2 failed read keeps the mention (shown "@Unknown member") and sends it', async () => {
+    const stored = `hi @[${ANA}] and @[${BEN}] `;
+    // The member read failed: nothing is confirmed gone, no names resolved.
+    const shown = composerBodyFor(
+      { text: stored, caret: stored.length },
+      true,
+      () => undefined,
+      () => false,
+    );
+    expect(shown.text).toBe('hi @Unknown member and @Unknown member ');
+    expect(shown.picks).toHaveLength(2);
+    const body = serializeMentions(shown.text, shown.picks);
+    expect(body).toBe(stored);
+    const recordMessage = vi.fn(async () => ({
+      ok: false as const,
+      reason: 'error' as const,
+      message: 'x',
+    }));
+    await runSend(
+      { recordMessage, publishLive: undefined, onLiveWarning: () => undefined },
+      {
+        id: 'id-1',
+        channelId: 'c1',
+        currentUserId: 'me',
+        traceId: 't',
+        text: body,
+        local: { attachments: [], sharedPostIds: [], reply: null },
+      },
+    );
+    expect(recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ body: stored, mentions: [ANA, BEN] }),
+    );
+    // Only an id a successful read confirmed gone drops.
+    const confirmed = composerBodyFor(
+      { text: `x @[${EX}] @[${ANA}]`, caret: 0 },
+      true,
+      () => undefined,
+      (id) => id === EX,
+    );
+    expect(mentionIds(serializeMentions(confirmed.text, confirmed.picks))).toEqual([ANA]);
   });
 });

@@ -10,10 +10,11 @@ import { inboxMarkAllRead, inboxMarkRead, inboxSnooze } from '@srtdio/rpc';
 import type { Database, InboxEventTypeValue, Json } from '@srtdio/schemas';
 import { INBOX_EVENT_TYPES } from '@srtdio/schemas';
 import { parseMentions } from '@srtdio/comments';
-import { readProfiles } from '@/lib/chat-reads';
+import { readActiveMemberIds, readProfiles } from '@/lib/chat-reads';
 import { entityUrlPath } from '@/lib/entityRef';
 import { logger } from '@/lib/logger';
 import { EX_MEMBER_LABEL } from '@/components/comments/commentProfiles';
+import { resolveMentionPreview } from '@/lib/chat/mentions';
 
 type InboxEntryRow = Database['public']['Tables']['inbox_entries']['Row'];
 
@@ -149,6 +150,28 @@ export interface ActivityItem {
   /** The feedback-point batch id (checkpoints_added only, payload.batch_id); links
    *  to comments.ledger_batch_id so the batch author + first point resolve by join. */
   batchId: string | null;
+  /** The chat message a chat mention points at (payload.message_id); null otherwise. */
+  messageId: string | null;
+  /** A chat mention's chat kind, resolved by the chat_channels join; null otherwise. */
+  channelType: 'group' | 'dm' | null;
+}
+
+/** The entity_type of a chat mention row (entity_id is the channel id). */
+export const CHAT_CHANNEL_ENTITY = 'chat_channel';
+
+/** An @mention in a chat message (not a comment): its own line, link and preview. */
+export function isChatMention(item: Pick<ActivityItem, 'eventType' | 'entityType'>): boolean {
+  return item.eventType === MENTION_EVENT_TYPE && item.entityType === CHAT_CHANNEL_ENTITY;
+}
+
+/** The first line of a chat message, mentions resolved; null when it has no text. */
+export function chatMentionPreview(
+  body: string | null,
+  nameOf: (id: string) => string | undefined,
+): string | null {
+  if (body === null) return null;
+  const first = resolveMentionPreview(body, nameOf).trim().split('\n')[0]?.trim() ?? '';
+  return first !== '' ? first : null;
 }
 
 /** Map a raw inbox_entries row into an ActivityItem. Pure; actorName stays null. */
@@ -170,7 +193,9 @@ export function mapEntry(row: InboxEntryRow): ActivityItem {
     toStage: payloadStr(payload, 'to_stage') ?? payloadStr(payload, 'to'),
     fromStage: payloadStr(payload, 'from_stage') ?? payloadStr(payload, 'from'),
     title: payloadStr(payload, 'title'),
-    actorId: payloadStr(payload, 'created_by') ?? payloadStr(payload, 'invited_by'),
+    actorId: isChatMention({ eventType: row.event_type, entityType: row.entity_type })
+      ? (row.actor_user_id ?? null)
+      : (payloadStr(payload, 'created_by') ?? payloadStr(payload, 'invited_by')),
     actorName: null,
     actorAvatarUrl: null,
     body: null,
@@ -181,6 +206,8 @@ export function mapEntry(row: InboxEntryRow): ActivityItem {
     pointsAdded: payloadNum(payload, 'count'),
     checkpointTotal: payloadNum(payload, 'checkpoints'),
     batchId: row.event_type === 'checkpoints_added' ? payloadStr(payload, 'batch_id') : null,
+    messageId: payloadStr(payload, 'message_id'),
+    channelType: null,
   };
 }
 
@@ -211,6 +238,16 @@ function pointsLabel(n: number): string {
 }
 
 /**
+ * A chat mention's line: "<actor> mentioned you in <group>" in a group, "<actor>
+ * mentioned you" in a DM. A missing actor or group name degrades, never blank.
+ */
+function chatMentionLine(item: ActivityItem): string {
+  const who = item.actorName;
+  const inGroup = item.channelType === 'group' && item.title !== null ? ` in ${item.title}` : '';
+  return who !== null ? `${who} mentioned you${inGroup}` : `New mention${inGroup}`;
+}
+
+/**
  * The human-readable line for a row. Null-safe: a missing actor name drops the
  * name entirely rather than printing a placeholder, and a missing title falls
  * back to "a post" / "a brief" by entity type.
@@ -218,6 +255,7 @@ function pointsLabel(n: number): string {
 export function activityLine(item: ActivityItem): string {
   const who = item.actorName;
   const target = entityTarget(item);
+  if (isChatMention(item)) return chatMentionLine(item);
   switch (item.eventType) {
     case 'comment':
       return who !== null ? `${who} commented on ${target}` : `New comment on ${target}`;
@@ -333,6 +371,13 @@ export function cardBodyLine(item: ActivityItem): string {
  * BriefDetailPage / AssetsPage already); a non-comment entry lands on the entity.
  */
 export function entityHref(item: ActivityItem, workspaceKey: string | null = null): string | null {
+  if (isChatMention(item)) {
+    if (item.entityId === null) return null;
+    const channel = `/chat?channel=${encodeURIComponent(item.entityId)}`;
+    return item.messageId !== null
+      ? `${channel}&message=${encodeURIComponent(item.messageId)}`
+      : channel;
+  }
   if (item.eventType === 'asset_uploaded' || item.eventType === 'asset_version_added') {
     return item.assetId !== null ? `/assets?asset=${item.assetId}` : null;
   }
@@ -567,7 +612,7 @@ export const ACTIVITY_PAGE_SIZE = 50;
 const COMMENT_EVENTS = ['comment', 'mention'];
 
 const SELECT_COLS =
-  'id, workspace_id, event_type, entity_type, entity_id, scope, tier, created_at, read_at, snoozed_until, payload';
+  'id, workspace_id, event_type, entity_type, entity_id, scope, tier, created_at, read_at, snoozed_until, payload, actor_user_id';
 
 // One row of the batched first-image lookup, mirroring the Pipeline loader's
 // firstImageByPost (packages/posts/src/reads.ts): an asset_attachments row with
@@ -578,6 +623,61 @@ interface FirstImageRow {
   entity_id: string;
   asset_version_id: string;
   asset_versions: { mime_type: string | null } | null;
+}
+
+/** A chat mention's chat: its kind, and the Sorted group id for a group. */
+interface ChatMentionChannel {
+  type: 'group' | 'dm';
+  groupId: string | null;
+}
+
+/**
+ * The chats and message bodies behind a page's chat mentions: one chat_channels
+ * IN read and one chat_messages IN read (RLS: members only), in parallel. Each
+ * is best-effort; a failure leaves its map empty (the row degrades, never fails).
+ */
+async function readChatMentionSources(
+  client: Client,
+  ids: { channelIds: string[]; messageIds: string[] },
+): Promise<{ channels: Map<string, ChatMentionChannel>; bodies: Map<string, string> }> {
+  const [channelsRes, messagesRes] = await Promise.all([
+    ids.channelIds.length > 0
+      ? client
+          .from('chat_channels')
+          .select('channel_id, channel_type, entity_id')
+          .in('channel_id', ids.channelIds)
+      : Promise.resolve(null),
+    ids.messageIds.length > 0
+      ? client
+          .from('chat_messages')
+          .select('id, body')
+          .in('id', ids.messageIds)
+          .is('deleted_at', null)
+      : Promise.resolve(null),
+  ]);
+  const channels = new Map<string, ChatMentionChannel>();
+  if (channelsRes !== null && channelsRes.error === null) {
+    for (const r of channelsRes.data ?? []) {
+      const type = r.channel_type === 'group' ? 'group' : 'dm';
+      channels.set(r.channel_id, { type, groupId: type === 'group' ? r.entity_id : null });
+    }
+  }
+  const bodies = new Map<string, string>();
+  if (messagesRes !== null && messagesRes.error === null) {
+    for (const r of messagesRes.data ?? []) {
+      if (typeof r.body === 'string') bodies.set(r.id, r.body);
+    }
+  }
+  return { channels, bodies };
+}
+
+/** Group names by id, one IN read; empty on failure or no ids. */
+async function readGroupNames(client: Client, groupIds: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (groupIds.length === 0) return names;
+  const res = await client.from('groups').select('id, name').in('id', groupIds);
+  if (res.error === null) for (const r of res.data ?? []) names.set(r.id, r.name);
+  return names;
 }
 
 /**
@@ -635,6 +735,13 @@ export async function fetchActivityEntries(
       item.eventType === 'checkpoints_added' && item.batchId !== null ? [item.batchId] : [],
     ),
   );
+  // Chat mentions: the chats (kind + group) and the messages, one IN read each.
+  const chatMentions = items.filter(isChatMention);
+  const channelIds = unique(chatMentions.flatMap((i) => (i.entityId !== null ? [i.entityId] : [])));
+  const messageIds = unique(
+    chatMentions.flatMap((i) => (i.messageId !== null ? [i.messageId] : [])),
+  );
+  const chatRes = await readChatMentionSources(client, { channelIds, messageIds });
 
   // WAVE 1: resolve comment authors and entity titles. Each sub-query is fired
   // only when it has ids; a failed one yields an empty map (never fails the feed).
@@ -738,16 +845,31 @@ export async function fetchActivityEntries(
     ...[...commentBodies.values()].flatMap((body) => parseMentions(body)),
     ...batchAuthors.values(),
     ...[...batchBodies.values()].flatMap((body) => parseMentions(body)),
+    ...[...chatRes.bodies.values()].flatMap((body) => parseMentions(body)),
   ]);
   const userNames = new Map<string, string>();
   const userAvatars = new Map<string, string>();
-  if (userIds.length > 0) {
-    const profiles = await readProfiles(client, userIds);
-    if (profiles.ok) {
-      for (const p of profiles.data) {
-        userNames.set(p.userId, p.displayName);
-        if (p.avatarUrl !== null) userAvatars.set(p.userId, p.avatarUrl);
-      }
+  const groupIds = unique(
+    [...chatRes.channels.values()].flatMap((c) => (c.groupId !== null ? [c.groupId] : [])),
+  );
+  // Chat mentions name only current members: their active memberships are read
+  // in the same pass as the profiles (a readable profile is not membership).
+  const chatMentionIds = unique(
+    [...chatRes.bodies.values()].flatMap((body) => parseMentions(body)),
+  );
+  const [profiles, groupNames, activeRes] = await Promise.all([
+    userIds.length > 0 ? readProfiles(client, userIds) : Promise.resolve(null),
+    readGroupNames(client, groupIds),
+    chatMentionIds.length > 0
+      ? readActiveMemberIds(client, { workspaceId, userIds: chatMentionIds })
+      : Promise.resolve(null),
+  ]);
+  // A failed membership read keeps the names (unchanged behaviour on failure).
+  const activeMentioned = activeRes !== null && activeRes.ok ? new Set(activeRes.data) : null;
+  if (profiles !== null && profiles.ok) {
+    for (const p of profiles.data) {
+      userNames.set(p.userId, p.displayName);
+      if (p.avatarUrl !== null) userAvatars.set(p.userId, p.avatarUrl);
     }
   }
 
@@ -759,7 +881,17 @@ export async function fetchActivityEntries(
     // place so both stay in sync. Comment events take the comment author; brief and
     // invite events take their payload-supplied id; everything else has no actor.
     let actorUserId: string | null = null;
-    if (COMMENT_EVENTS.includes(item.eventType)) {
+    if (isChatMention(item)) {
+      // The sender, carried on the row; the chat's kind and group name by join.
+      actorUserId = item.actorId;
+      const channel = item.entityId !== null ? chatRes.channels.get(item.entityId) : undefined;
+      item.channelType = channel?.type ?? null;
+      item.title = channel?.groupId != null ? (groupNames.get(channel.groupId) ?? null) : null;
+      const body = item.messageId !== null ? (chatRes.bodies.get(item.messageId) ?? null) : null;
+      item.body = chatMentionPreview(body, (id) =>
+        activeMentioned === null || activeMentioned.has(id) ? userNames.get(id) : undefined,
+      );
+    } else if (COMMENT_EVENTS.includes(item.eventType)) {
       actorUserId = item.commentId !== null ? (commentAuthors.get(item.commentId) ?? null) : null;
     } else if (item.eventType === 'brief_created' || item.eventType === 'brief_closed') {
       actorUserId = payloadStr(payload, 'created_by');
@@ -771,6 +903,7 @@ export async function fetchActivityEntries(
     }
     item.actorName = actorUserId !== null ? (userNames.get(actorUserId) ?? null) : null;
     item.actorAvatarUrl = actorUserId !== null ? (userAvatars.get(actorUserId) ?? null) : null;
+    if (isChatMention(item)) return;
 
     // The preview body: a comment OR mention event shows its comment text (the
     // mention's comment_id is already joined via COMMENT_EVENTS, so this adds no

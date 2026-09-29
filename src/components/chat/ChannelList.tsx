@@ -7,7 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import type { KeyboardEvent, MouseEvent, PointerEvent, ReactElement } from 'react';
+import type { KeyboardEvent, MouseEvent, PointerEvent, ReactElement, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/Button';
@@ -40,6 +40,7 @@ import { sortChannelsByRecency } from '@/lib/chat/sort-conversations';
 import { formatRelativeTime } from '@/lib/chat/format-relative-time';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { draftText, draftsVersion, subscribeDrafts } from '@/lib/chat/drafts';
+import { mentionNamesIn, resolveMentionPreview, splitAllMentions } from '@/lib/chat/mentions';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import {
   CHAT_LIST_NAME_TYPE,
@@ -65,6 +66,29 @@ export const DRAFT_PREFIX = 'Draft: ';
  */
 export function rowDraft(draft: string, open: boolean): string | null {
   return !open && draft.trim() !== '' ? draft : null;
+}
+
+/**
+ * A stored draft as its list line: its @[uuid] tokens read "@Name" from this
+ * workspace's registry only. Pure over the registry.
+ */
+export function draftLine(stored: string, workspaceId: string | null): string {
+  return resolveMentionPreview(stored, mentionNamesIn(workspaceId));
+}
+
+/** A list line with each real "@all" token drawn bold (the ink stays the line's own). */
+export function boldAllMentions(text: string): ReactNode {
+  const runs = splitAllMentions(text);
+  if (runs.every((run) => !run.all)) return text;
+  return runs.map((run, i) =>
+    run.all ? (
+      <span key={i} data-mention-all="" className="font-bold">
+        {run.text}
+      </span>
+    ) : (
+      run.text
+    ),
+  );
 }
 
 /** Per-channel store lookup the cards read (preview, time, unread). */
@@ -104,6 +128,8 @@ interface ChannelListProps {
    * absent hides long-press delete and the Select control.
    */
   onDeleteChats?: (channels: ChannelSummary[]) => Promise<ClearRunResult<ChannelSummary>>;
+  /** The open workspace: a Draft line resolves names from its registry only. */
+  workspaceId?: string | null;
 }
 
 interface ChannelListBodyProps extends Omit<ChannelListProps, 'status' | 'onRetry'> {
@@ -402,7 +428,7 @@ export function channelRowBody(props: {
               )}
             >
               <span className={cn('text-accent', DRAFT_PREFIX_TYPE)}>{DRAFT_PREFIX}</span>
-              {draft}
+              {boldAllMentions(draft)}
             </span>
           ) : (
             <span
@@ -412,7 +438,7 @@ export function channelRowBody(props: {
                 hasMessage ? 'text-fg-2' : 'text-fg-3',
               )}
             >
-              {preview}
+              {boldAllMentions(preview)}
             </span>
           )}
           {isUnread ? <CountBadge count={unread} className="shrink-0" /> : null}
@@ -832,6 +858,7 @@ export function deleteChatsConfirm(props: {
 
 /** Scrollable channel list pane with the shared search/create header. */
 export function ChannelList(props: ChannelListProps): ReactElement {
+  const listWorkspaceId = props.workspaceId ?? null;
   const [search, setSearch] = useState('');
   const [selecting, setSelecting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -851,9 +878,9 @@ export function ChannelList(props: ChannelListProps): ReactElement {
   // Drafts live outside React; re-read the rows whenever one changes.
   const drafts = useSyncExternalStore(subscribeDrafts, draftsVersion, draftsVersion);
   const draftFor = useCallback<DraftLookup>(
-    (channelId) => draftText(channelId),
+    (channelId) => draftLine(draftText(channelId), listWorkspaceId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [drafts],
+    [drafts, listWorkspaceId],
   );
   const onDeleteChats = props.onDeleteChats;
   const closeMenu = useCallback(() => setMenu(null), []);

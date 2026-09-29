@@ -10,6 +10,8 @@ vi.mock('agora-chat', () => ({
 import { runDelete, runEdit } from '@/lib/chat/delete-flow';
 import {
   applyRevalidatedRows,
+  editChannelType,
+  editRunInput,
   newlyTombstoned,
   recheckLoaded,
   REVALIDATE_WINDOW_MS,
@@ -372,5 +374,214 @@ describe('R2: catch-up rechecks loaded rows a missed delete or edit can touch', 
     const applied = applyRevalidatedRows(list, [dbRow('a')], 'c');
     expect(applied.messages).toBe(list);
     expect(applied.deleted).toEqual([]);
+  });
+});
+
+describe('runEdit mentions: every edit passes the complete current list', () => {
+  const X = '44444444-4444-4444-8444-444444444444';
+  const Y = '55555555-5555-4555-8555-555555555555';
+  const Z = '66666666-6666-4666-8666-666666666666';
+
+  async function editArgs(body: string): Promise<Record<string, unknown>> {
+    const rpc = vi.fn(() => ({
+      abortSignal: () =>
+        Promise.resolve({ data: { id: 'm1', body, edited_at: 'now' }, error: null }),
+    }));
+    await runEdit(
+      {
+        client: { rpc } as unknown as Client,
+        applyLocal: () => undefined,
+        signal: undefined,
+        onSignalFailed: () => undefined,
+      },
+      { channelId: 'c1', messageId: 'm1', body, traceId: 't' },
+    );
+    return (rpc.mock.calls[0] as unknown as [string, Record<string, unknown>])[1];
+  }
+
+  it('an edit with mentions passes all of them', async () => {
+    expect((await editArgs(`@[${X}] and @[${Y}]`)).p_mentions).toEqual([X, Y]);
+  });
+
+  it('removing every mention passes an empty array (never omitted)', async () => {
+    const args = await editArgs('no one now');
+    expect(args).toHaveProperty('p_mentions');
+    expect(args.p_mentions).toEqual([]);
+  });
+
+  it('adding a mention passes the union, removing one drops it', async () => {
+    expect((await editArgs(`@[${Y}] and @[${Z}]`)).p_mentions).toEqual([Y, Z]);
+  });
+});
+
+describe('H2 / A4 edit mentions', () => {
+  const ANA = '44444444-4444-4444-8444-444444444444';
+  const EX = '55555555-5555-4555-8555-555555555555';
+
+  function rpcSequence(results: Array<{ data: unknown; error: { message: string } | null }>) {
+    const queue = [...results];
+    return vi.fn(() => ({
+      abortSignal: () => Promise.resolve(queue.shift() ?? { data: null, error: null }),
+    }));
+  }
+
+  function editDeps(
+    rpc: ReturnType<typeof rpcSequence>,
+    recheck?: () => Promise<Result<string[]>>,
+  ) {
+    return {
+      client: { rpc } as unknown as Client,
+      applyLocal: () => undefined,
+      signal: undefined,
+      onSignalFailed: () => undefined,
+      ...(recheck !== undefined ? { recheckMentions: recheck } : {}),
+    };
+  }
+
+  const argsOf = (rpc: ReturnType<typeof rpcSequence>, n: number): Record<string, unknown> =>
+    (rpc.mock.calls[n] as unknown as [string, Record<string, unknown>])[1];
+
+  it('H2 edit refused for a non-member re-reads once, drops only them and succeeds', async () => {
+    const body = `@[${ANA}] @[${EX}]`;
+    const rpc = rpcSequence([
+      { data: null, error: { message: 'mentioned people must be in this chat' } },
+      { data: { id: 'm1', body, edited_at: 'now' }, error: null },
+    ]);
+    const recheck = vi.fn(async () => ({ ok: true as const, data: [ANA] }));
+    const result = await runEdit(editDeps(rpc, recheck), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body,
+      traceId: 't',
+    });
+    expect(result.ok).toBe(true);
+    expect(recheck).toHaveBeenCalledTimes(1);
+    expect(argsOf(rpc, 0).p_mentions).toEqual([ANA, EX]);
+    expect(argsOf(rpc, 1).p_mentions).toEqual([ANA]);
+  });
+
+  it('H2 edit refused and the re-read fails: edits without mentions, no failure', async () => {
+    const body = `@[${ANA}]`;
+    const rpc = rpcSequence([
+      { data: null, error: { message: 'mentioned people must be in this chat' } },
+      { data: { id: 'm1', body, edited_at: 'now' }, error: null },
+    ]);
+    const result = await runEdit(
+      editDeps(rpc, async () => ({ ok: false, error: { code: 'unknown', message: 'down' } })),
+      { channelId: 'c1', messageId: 'm1', body, traceId: 't' },
+    );
+    expect(result.ok).toBe(true);
+    expect(argsOf(rpc, 1).p_mentions).toEqual([]);
+  });
+
+  it('J2 edit: second refusal steps down to no mentions and succeeds; "@[all]" in a DM edits without "all"', async () => {
+    const body = `@[all] @[${ANA}]`;
+    const rpc = rpcSequence([
+      { data: null, error: { message: 'mentioned people must be in this chat' } },
+      { data: null, error: { message: 'everyone mention works only in groups' } },
+      { data: { id: 'm1', body, edited_at: 'now' }, error: null },
+    ]);
+    const recheck = vi.fn(async () => ({ ok: true as const, data: [ANA] }));
+    const result = await runEdit(editDeps(rpc, recheck), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body,
+      traceId: 't',
+    });
+    expect(result.ok).toBe(true);
+    expect(recheck).toHaveBeenCalledTimes(1);
+    expect(argsOf(rpc, 1).p_mentions).toEqual([ANA, 'all']);
+    expect(argsOf(rpc, 2).p_mentions).toEqual([]);
+
+    const dm = rpcSequence([{ data: { id: 'm1', body, edited_at: 'now' }, error: null }]);
+    await runEdit(editDeps(dm), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body,
+      traceId: 't',
+      channelType: 'dm',
+    });
+    expect(argsOf(dm, 0).p_body).toBe(body);
+    expect(argsOf(dm, 0).p_mentions).toEqual([ANA]);
+  });
+
+  it('B3 DM edit with "@[all]" plus a peer mention sends only the peer uuid', async () => {
+    const body = `@[all] and @[${ANA}]`;
+    // What use-chat-thread's editMessage derives from the open chat's target.
+    const channelType = editChannelType({ targetId: 'peer', chatType: 'singleChat' });
+    expect(channelType).toBe('dm');
+    const dm = rpcSequence([{ data: { id: 'm1', body, edited_at: 'now' }, error: null }]);
+    const result = await runEdit(editDeps(dm), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body,
+      traceId: 't',
+      ...(channelType !== undefined ? { channelType } : {}),
+    });
+    expect(result.ok).toBe(true);
+    expect(dm).toHaveBeenCalledTimes(1);
+    expect(argsOf(dm, 0).p_body).toBe(body);
+    expect(argsOf(dm, 0).p_mentions).toEqual([ANA]);
+    // A group keeps "all"; an unknown target leaves the type unset.
+    expect(editChannelType({ targetId: 'g', chatType: 'groupChat' })).toBe('group');
+    expect(editChannelType(null)).toBeUndefined();
+  });
+
+  it('W2 editRunInput (what editMessage hands runEdit): DM, group and null targets', async () => {
+    const base = { channelId: 'c1', messageId: 'm1', body: `@[all] and @[${ANA}]`, traceId: 't' };
+    const dmInput = editRunInput({ ...base, target: { targetId: 'peer', chatType: 'singleChat' } });
+    expect(dmInput).toEqual({ ...base, channelType: 'dm' });
+    expect(editRunInput({ ...base, target: { targetId: 'g', chatType: 'groupChat' } })).toEqual({
+      ...base,
+      channelType: 'group',
+    });
+    const none = editRunInput({ ...base, target: null });
+    expect(none).toEqual(base);
+    expect('channelType' in none).toBe(false);
+    // The DM input edits without "all", in one call.
+    const dm = rpcSequence([
+      { data: { id: 'm1', body: base.body, edited_at: 'now' }, error: null },
+    ]);
+    await runEdit(editDeps(dm), dmInput);
+    expect(dm).toHaveBeenCalledTimes(1);
+    expect(argsOf(dm, 0).p_mentions).toEqual([ANA]);
+  });
+
+  it('W3 DM edit with a null target, "@[all]" plus a peer mention: final p_mentions keeps the peer uuid', async () => {
+    const body = `@[all] and @[${ANA}]`;
+    const rpc = rpcSequence([
+      { data: null, error: { message: 'everyone mention works only in groups' } },
+      { data: { id: 'm1', body, edited_at: 'now' }, error: null },
+    ]);
+    const recheck = vi.fn(async () => ({ ok: true as const, data: [ANA] }));
+    const result = await runEdit(
+      editDeps(rpc, recheck),
+      editRunInput({ channelId: 'c1', messageId: 'm1', body, traceId: 't', target: null }),
+    );
+    expect(result.ok).toBe(true);
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(argsOf(rpc, 0).p_mentions).toEqual([ANA, 'all']);
+    // "all" drops first; the peer stays, with no re-read needed.
+    expect(argsOf(rpc, 1).p_mentions).toEqual([ANA]);
+    expect(recheck).not.toHaveBeenCalled();
+  });
+
+  it('A4 edit passes "all" while the token is present and omits it once removed', async () => {
+    const withAll = rpcSequence([{ data: { id: 'm1', body: 'x', edited_at: 'now' }, error: null }]);
+    await runEdit(editDeps(withAll), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body: `@[all] and @[${ANA}]`,
+      traceId: 't',
+    });
+    expect(argsOf(withAll, 0).p_mentions).toEqual([ANA, 'all']);
+    const removed = rpcSequence([{ data: { id: 'm1', body: 'x', edited_at: 'now' }, error: null }]);
+    await runEdit(editDeps(removed), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body: `just @[${ANA}]`,
+      traceId: 't',
+    });
+    expect(argsOf(removed, 0).p_mentions).toEqual([ANA]);
   });
 });

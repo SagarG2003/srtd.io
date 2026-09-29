@@ -14,7 +14,7 @@
 // trace parameter these procs declare is `p_trace_id`, carried explicitly.
 
 import type { Client } from '@srtdio/rpc';
-import type { Database, Json } from '@srtdio/schemas';
+import type { Database } from '@srtdio/schemas';
 import type { ChatMessageRow } from '@/lib/chat/thread';
 import type { AttachmentMetaMap } from '@/lib/chat/attachments';
 
@@ -31,7 +31,8 @@ export interface SendRecordParams {
   traceId: string;
   body: string;
   attachmentAssetIds: readonly string[];
-  mentions?: Json;
+  /** Mentioned user uuids; omitted when empty (a forward never carries any). */
+  mentions?: readonly string[];
   /** Post uuids shared into the message; persisted so history renders the cards. */
   sharedPostIds?: readonly string[];
   /** Brief uuids shared into the message; persisted so history renders the cards. */
@@ -71,7 +72,9 @@ export async function sendMessageRecord(params: SendRecordParams): Promise<SendR
     ...(params.attachmentAssetIds.length > 0
       ? { p_attachment_asset_ids: [...params.attachmentAssetIds] }
       : {}),
-    ...(params.mentions !== undefined ? { p_mentions: params.mentions } : {}),
+    ...(params.mentions !== undefined && params.mentions.length > 0
+      ? { p_mentions: [...params.mentions] }
+      : {}),
     ...(params.sharedPostIds !== undefined && params.sharedPostIds.length > 0
       ? { p_shared_post_ids: [...params.sharedPostIds] }
       : {}),
@@ -111,6 +114,11 @@ export interface EditRecordParams {
   messageId: string;
   /** The new body; sent as typed (the proc refuses an empty one on a text-only message). */
   body: string;
+  /**
+   * The COMPLETE current mention list (user uuids), empty when none. The proc
+   * treats an omitted or null list as "clear all", so every edit sends it.
+   */
+  mentions: readonly string[];
   traceId: string;
   /** Override for tests; defaults to SEND_TIMEOUT_MS. */
   timeoutMs?: number;
@@ -132,6 +140,7 @@ export async function editMessageRecord(params: EditRecordParams): Promise<EditR
     p_message_id: params.messageId,
     p_channel_id: params.channelId,
     p_body: params.body.trim(),
+    p_mentions: [...params.mentions],
     p_trace_id: params.traceId,
   };
   const reason = (): 'timeout' | 'error' => (controller.signal.aborted ? 'timeout' : 'error');

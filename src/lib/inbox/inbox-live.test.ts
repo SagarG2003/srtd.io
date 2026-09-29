@@ -153,3 +153,26 @@ describe('toastFromEnriched', () => {
     expect(toastFromEnriched(enriched({ count: 12, lead: null }))?.title).toBe('12 new updates');
   });
 });
+
+describe('chat mention rows in the live layer', () => {
+  it('a chat mention row counts as new and toasts as a mention', () => {
+    const since = Date.parse('2026-06-14T12:00:00.000Z');
+    const chat = row({
+      id: 'e-chat',
+      event_type: 'mention',
+      entity_type: 'chat_channel',
+      entity_id: 'chan-1',
+      scope: 'groups',
+      tier: 'urgent',
+      actor_user_id: 'u-bob',
+      payload: { message_id: 'msg-1' },
+      created_at: '2026-06-14T12:00:01.000Z',
+    });
+    const summary = summarizeNew([chat], since);
+    expect(summary.newRows).toEqual([chat]);
+    expect(pickNewest([chat])).toBe(chat);
+    expect(
+      toastFromEnriched(enriched({ lead: { ...enriched({}).lead!, eventType: 'mention' } }))?.title,
+    ).toBe('New mention');
+  });
+});

@@ -37,7 +37,22 @@ import { useSession } from '@/lib/session-context';
 import { useWorkspace } from '@/lib/workspace-context';
 import { useToast } from '@/components/ui/toast';
 import { Avatar } from '@/components/ui/Avatar';
-import { listChannelClears, listChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
+import {
+  listChannelClears,
+  listChannelSummaries,
+  readChannelMemberIds,
+  readMentionProfiles,
+  withReadTimeout,
+  type ChannelSummary,
+  type MentionProfile,
+} from '@/lib/chat-reads';
+import {
+  knownMentionName,
+  mentionIds,
+  mentionNamesIn,
+  rememberMentionProfiles,
+  resolveMentionPreview,
+} from '@/lib/chat/mentions';
 import { SIGNOUT_EVENT } from '@/lib/events';
 import { stripDeletedReplies } from '@/lib/chat/drafts';
 import { leaveSelectionThen } from '@/lib/chat/forward';
@@ -223,6 +238,73 @@ export async function routeGlobalCmd(ext: unknown, deps: GlobalCmdDeps): Promise
   if (deleted.length > 0) deps.onDeleted(deleted);
 }
 
+/** A body with @[uuid] tokens as list text: "@Name" (this workspace's registry names). */
+export function previewMentionText(text: string, workspaceId: string | null): string {
+  return resolveMentionPreview(text, mentionNamesIn(workspaceId));
+}
+
+/**
+ * Make sure every @mention in these bodies has a remembered name: one batched
+ * profile read (with membership, same pass) for the ids not known yet (none
+ * when all are). An id read without an active membership reads "@Unknown
+ * member". A failed read (an error, a rejection or the 5s timeout) is logged;
+ * those mentions then read "@Unknown member", never a raw token. Never throws.
+ */
+export async function rememberBodyNames(
+  bodies: readonly string[],
+  readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>>,
+  workspaceId: string,
+): Promise<void> {
+  // Unknown FOR THIS WORKSPACE: a name learned in another one never counts.
+  const ids = [...new Set(bodies.flatMap(mentionIds))].filter(
+    (id) => knownMentionName(workspaceId, id) === undefined,
+  );
+  if (ids.length === 0) return;
+  const result = await withReadTimeout((signal) => readNames(ids, signal));
+  if (!result.ok) {
+    logger.warn('chat store: mention names read failed', { error: result.error.message });
+    return;
+  }
+  rememberMentionProfiles(workspaceId, result.data);
+}
+
+/**
+ * The previews with their mentions resolved to "@Name", after one batched name
+ * read, so the list's first paint is final. A failed preview read passes through.
+ */
+export async function resolvePreviewMentions(
+  previews: Result<ConversationPreview[]>,
+  readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>>,
+  workspaceId: string,
+): Promise<Result<ConversationPreview[]>> {
+  if (!previews.ok) return previews;
+  await rememberBodyNames(
+    previews.data.map((p) => p.body),
+    readNames,
+    workspaceId,
+  );
+  return {
+    ok: true,
+    data: previews.data.map((p) => ({ ...p, body: previewMentionText(p.body, workspaceId) })),
+  };
+}
+
+/** The last-line previews with their mention names resolved. */
+function readPreviews(workspaceId: string): Promise<Result<ConversationPreview[]>> {
+  return loadConversationPreviews(supabase, workspaceId).then((result) =>
+    resolvePreviewMentions(
+      result,
+      (ids, signal) =>
+        readMentionProfiles(supabase, {
+          workspaceId,
+          userIds: ids,
+          ...(signal !== undefined ? { signal } : {}),
+        }),
+      workspaceId,
+    ),
+  );
+}
+
 /** The four reads the chat list's first paint waits on. */
 export interface ChatListReaders {
   roster: () => Promise<Result<ChannelSummary[]>>;
@@ -337,9 +419,13 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     setState((prev) => store.markRead(prev, channelId));
   }, []);
 
-  const updateOwnMessage = useCallback((channelId: string, text: string, ts: number) => {
-    setState((prev) => store.updateOwnMessage(prev, { channelId, text, ts }));
-  }, []);
+  const updateOwnMessage = useCallback(
+    (channelId: string, text: string, ts: number) => {
+      const line = previewMentionText(text, workspaceId);
+      setState((prev) => store.updateOwnMessage(prev, { channelId, text: line, ts }));
+    },
+    [workspaceId],
+  );
 
   const clearConversation = useCallback((channelId: string, clearedAtMs: number) => {
     senderRef.current?.dropChannel(channelId);
@@ -372,7 +458,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   const refreshPreviews = useCallback(() => {
     if (scope === null || workspaceId === null || currentUserId === null) return;
     const forUser = currentUserId;
-    void loadConversationPreviews(supabase, workspaceId).then((result) => {
+    void readPreviews(workspaceId).then((result) => {
       if (!result.ok) {
         logger.warn('chat store: previews load failed', { error: result.error.message });
         return;
@@ -395,7 +481,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         rereadPreviews: (channelIds) => {
           if (scope === null || workspaceId === null || currentUserId === null) return;
           const forUser = currentUserId;
-          void loadConversationPreviews(supabase, workspaceId).then((result) => {
+          void readPreviews(workspaceId).then((result) => {
             if (!result.ok) {
               logger.warn('chat store: previews load failed', { error: result.error.message });
               return;
@@ -431,7 +517,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       {
         roster: () => listChannelSummaries(supabase, { workspaceId, currentUserId }),
         clears: () => listChannelClears(supabase, { workspaceId }),
-        previews: () => loadConversationPreviews(supabase, workspaceId),
+        previews: () => readPreviews(workspaceId),
         counts: () => loadUnreadCounts(supabase, workspaceId),
       },
       scope,
@@ -473,7 +559,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       {
         deliver: (channelId, entry, traceId, onRecorded) => {
           const connection = clientRef.current;
-          const target = liveTarget(summariesRef.current.get(channelId));
+          const summary = summariesRef.current.get(channelId);
+          const target = liveTarget(summary);
           return runSend(
             {
               // The ack's server created_at against the device time of the
@@ -508,6 +595,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
                         },
                       })
                   : undefined,
+              // A refused mention re-reads the chat's members once (5s timeout).
+              recheckMentions: (id) => readChannelMemberIds(supabase, { channelId: id }),
               // The row exists; receivers catch up from Postgres.
               onLiveWarning: (context) =>
                 logger.warn('chat: live publish did not complete', context),
@@ -520,6 +609,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
               traceId,
               text: entry.text,
               local: entry.local,
+              ...(summary !== undefined ? { channelType: summary.channelType } : {}),
             },
           );
         },
@@ -532,7 +622,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
               store.updateOwnMessage(prev, {
                 channelId,
                 messageId: message.id,
-                text: message.body,
+                text: previewMentionText(message.body, scopeKey.workspaceId),
                 ts: message.time,
               }),
             );
@@ -608,14 +698,26 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     // from the verified row, never from the Agora payload.
     void liveVerifierFor(supabase)
       .verify(mapped.message.id)
-      .then((lookup) => {
+      .then(async (lookup) => {
         if (!lookup.found) return;
         const row = lookup.row;
         if (row.sender_user_id === forUser) return;
         const summary = summariesRef.current.get(row.channel_id);
         if (summary === undefined) return;
+        // Names first (one batched read for unknown ids), so the line and the
+        // toast read "@Name" from their first paint.
+        await rememberBodyNames(
+          [row.body ?? ''],
+          (ids, signal) =>
+            readMentionProfiles(supabase, {
+              workspaceId: row.workspace_id,
+              userIds: ids,
+              ...(signal !== undefined ? { signal } : {}),
+            }),
+          row.workspace_id,
+        );
         const text = store.previewText({
-          body: row.body ?? '',
+          body: previewMentionText(row.body ?? '', row.workspace_id),
           hasAttachments:
             (row.attachment_asset_ids ?? []).length > 0 ||
             (row.shared_post_ids ?? []).length > 0 ||

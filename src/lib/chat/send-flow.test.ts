@@ -86,6 +86,7 @@ describe('runSend', () => {
       channelId: CHANNEL,
       traceId: 'trace-1',
       body: 'hello',
+      mentions: [],
       attachmentAssetIds: [],
       sharedPostIds: [],
       sharedBriefIds: [],
@@ -645,5 +646,189 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
       sender.settle(CHANNEL, 'm1');
       expect(sender.entries(CHANNEL)).toEqual([]);
     });
+  });
+});
+
+describe('mentions on send', () => {
+  const ANA = '22222222-2222-4222-8222-222222222222';
+  const BEN = '33333333-3333-4333-8333-333333333333';
+  const body = `@[${ANA}] and @[${BEN}] and @[${ANA}] again`;
+
+  it('the body carries @[uuid] tokens and p_mentions carries the unique uuids', async () => {
+    const d = deps();
+    await runSend(d, input({ text: body }));
+    expect(d.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ body, mentions: [ANA, BEN] }),
+    );
+  });
+
+  it('a persisted outbox entry keeps its mentions, so every retry resends them', async () => {
+    const data = new Map<string, string>();
+    const storage: OutboxStorage = {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => {
+        data.set(key, value);
+      },
+      removeItem: (key) => {
+        data.delete(key);
+      },
+    };
+    const scope = { workspaceId: 'ws', userId: ME };
+    const queued: OutboxEntry = {
+      id: ID,
+      text: body,
+      local: { attachments: [], sharedPostIds: [], reply: null },
+      state: 'failed',
+    };
+    writePersistedOutbox(storage, scope, { [CHANNEL]: [queued] });
+    const restored = readPersistedOutbox(storage, scope)[CHANNEL]?.[0];
+    expect(restored?.text).toBe(body);
+    const failing = deps({
+      recordMessage: vi.fn(async () => ({
+        ok: false as const,
+        reason: 'error' as const,
+        message: 'x',
+      })),
+    });
+    const retry = input({ text: restored?.text ?? '' });
+    await runSend(failing, retry);
+    await runSend(failing, retry);
+    expect(failing.recordMessage).toHaveBeenCalledTimes(2);
+    for (const call of vi.mocked(failing.recordMessage).mock.calls) {
+      expect(call[0].mentions).toEqual([ANA, BEN]);
+    }
+  });
+});
+
+describe('H2 a refused mention never fails the send', () => {
+  const ANA = '22222222-2222-4222-8222-222222222222';
+  const EX = '44444444-4444-4444-8444-444444444444';
+  const body = `@[${ANA}] and @[${EX}]`;
+  const refused = {
+    ok: false as const,
+    reason: 'error' as const,
+    message: 'mentioned people must be in this chat',
+  };
+
+  it('H2 server rejection re-reads members once, drops only the non-member and succeeds', async () => {
+    const recordMessage = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const recheckMentions = vi.fn(async () => ({ ok: true as const, data: [ME, ANA] }));
+    const outcome = await runSend(deps({ recordMessage, recheckMentions }), input({ text: body }));
+    expect(outcome.ok).toBe(true);
+    expect(recheckMentions).toHaveBeenCalledTimes(1);
+    expect(recheckMentions).toHaveBeenCalledWith(CHANNEL);
+    expect(recordMessage).toHaveBeenCalledTimes(2);
+    expect(recordMessage.mock.calls[0]?.[0].mentions).toEqual([ANA, EX]);
+    expect(recordMessage.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ body, mentions: [ANA] }),
+    );
+  });
+
+  it('H2 double failure (refused, then the re-read fails) sends without mentions, no visible failure', async () => {
+    const recordMessage = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const recheckMentions = vi.fn(async () => ({
+      ok: false as const,
+      error: { code: 'unknown' as const, message: 'timed out' },
+    }));
+    const outcome = await runSend(deps({ recordMessage, recheckMentions }), input({ text: body }));
+    expect(outcome.ok).toBe(true);
+    expect(recordMessage).toHaveBeenCalledTimes(2);
+    expect(recordMessage.mock.calls[1]?.[0].mentions).toEqual([]);
+    // A throwing re-read counts as failed too.
+    const again = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const throwing = await runSend(
+      deps({ recordMessage: again, recheckMentions: () => Promise.reject(new Error('x')) }),
+      input({ text: body }),
+    );
+    expect(throwing.ok).toBe(true);
+    expect(again.mock.calls[1]?.[0].mentions).toEqual([]);
+  });
+
+  it('J2 second refusal steps down to no mentions and succeeds; "@[all]" typed in a DM sends without "all"', async () => {
+    const recordMessage = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({
+        ok: false,
+        reason: 'error',
+        message: 'everyone mention works only in groups',
+      })
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const recheckMentions = vi.fn(async () => ({ ok: true as const, data: [ANA, EX] }));
+    const outcome = await runSend(
+      deps({ recordMessage, recheckMentions }),
+      input({ text: `@[all] ${body}` }),
+    );
+    expect(outcome.ok).toBe(true);
+    expect(recheckMentions).toHaveBeenCalledTimes(1);
+    expect(recordMessage).toHaveBeenCalledTimes(3);
+    expect(recordMessage.mock.calls[1]?.[0].mentions).toEqual([ANA, EX, 'all']);
+    expect(recordMessage.mock.calls[2]?.[0].mentions).toEqual([]);
+
+    const dm = deps();
+    await runSend(dm, input({ text: `@[all] and @[${ANA}]`, channelType: 'dm' }));
+    expect(dm.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ body: `@[all] and @[${ANA}]`, mentions: [ANA] }),
+    );
+  });
+
+  it('B3 send with unknown channel type and the everyone refusal keeps the peer mention', async () => {
+    const recordMessage = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce({
+        ok: false,
+        reason: 'error',
+        message: 'everyone mention works only in groups',
+      })
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const recheckMentions = vi.fn(async () => ({ ok: true as const, data: [ME, ANA] }));
+    // No channelType: the summary was missing at send.
+    const outcome = await runSend(
+      deps({ recordMessage, recheckMentions }),
+      input({ text: `@[all] and @[${ANA}]` }),
+    );
+    expect(outcome.ok).toBe(true);
+    expect(recordMessage).toHaveBeenCalledTimes(2);
+    expect(recordMessage.mock.calls[0]?.[0].mentions).toEqual([ANA, 'all']);
+    // Only "all" drops; the peer mention is kept and no re-read was needed.
+    expect(recordMessage.mock.calls[1]?.[0].mentions).toEqual([ANA]);
+    expect(recheckMentions).not.toHaveBeenCalled();
+
+    // A further refusal takes the existing ladder: re-read, then [].
+    const further = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce({
+        ok: false,
+        reason: 'error',
+        message: 'everyone mention works only in groups',
+      })
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const reread = vi.fn(async () => ({ ok: true as const, data: [ME, ANA] }));
+    const again = await runSend(
+      deps({ recordMessage: further, recheckMentions: reread }),
+      input({ text: `@[all] and @[${ANA}]` }),
+    );
+    expect(again.ok).toBe(true);
+    expect(reread).toHaveBeenCalledTimes(1);
+    expect(further.mock.calls.map((c) => c[0].mentions)).toEqual([[ANA, 'all'], [ANA], [ANA], []]);
+  });
+
+  it('A2 p_mentions carries "all" alongside uuids', async () => {
+    const d = deps();
+    await runSend(d, input({ text: `@[all] and @[${ANA}]` }));
+    expect(d.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ mentions: [ANA, 'all'] }),
+    );
   });
 });

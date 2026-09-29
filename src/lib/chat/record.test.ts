@@ -419,6 +419,23 @@ describe('clearChannelRecord', () => {
 describe('editMessageRecord', () => {
   const edited = { ...row, body: 'fixed', edited_at: '2026-09-22T10:05:00+00:00' };
 
+  it('always sends the full mention list as p_mentions', async () => {
+    const X = '11111111-1111-4111-8111-111111111111';
+    const { client, rpc } = makeClient({ data: edited, error: null });
+    await editMessageRecord({
+      client,
+      channelId: CHANNEL,
+      messageId: ID,
+      body: `hi @[${X}]`,
+      mentions: [X],
+      traceId: 't',
+    });
+    expect(rpc).toHaveBeenCalledWith(
+      'chat_message_edit',
+      expect.objectContaining({ p_mentions: [X] }),
+    );
+  });
+
   it('calls chat_message_edit with typed args and the explicit trace id, returning the row', async () => {
     const { client, rpc, abortSignal } = makeClient({ data: edited, error: null });
     const result = await editMessageRecord({
@@ -426,12 +443,14 @@ describe('editMessageRecord', () => {
       channelId: CHANNEL,
       messageId: ID,
       body: '  fixed  ',
+      mentions: [],
       traceId: 'trace-1',
     });
     expect(rpc).toHaveBeenCalledWith('chat_message_edit', {
       p_message_id: ID,
       p_channel_id: CHANNEL,
       p_body: 'fixed',
+      p_mentions: [],
       p_trace_id: 'trace-1',
     });
     expect(abortSignal).toHaveBeenCalledOnce();
@@ -444,6 +463,7 @@ describe('editMessageRecord', () => {
       channelId: CHANNEL,
       messageId: ID,
       body: 'x',
+      mentions: [],
       traceId: 't',
     });
     expect(failed).toEqual({ ok: false, reason: 'error', message: 'edit window has closed' });
@@ -452,6 +472,7 @@ describe('editMessageRecord', () => {
       channelId: CHANNEL,
       messageId: ID,
       body: 'x',
+      mentions: [],
       traceId: 't',
     });
     expect(empty.ok).toBe(false);
@@ -465,6 +486,7 @@ describe('editMessageRecord', () => {
         channelId: CHANNEL,
         messageId: ID,
         body: 'x',
+        mentions: [],
         traceId: 't',
         timeoutMs: 50,
       });
@@ -506,5 +528,37 @@ describe('D2: deleteFailureCopy', () => {
     ]) {
       expect(deleteFailureCopy(raw)).toBe("Couldn't delete, try again");
     }
+  });
+});
+
+describe('sendMessageRecord mentions', () => {
+  const X = '11111111-1111-4111-8111-111111111111';
+
+  it('passes p_mentions when the body mentions someone, omits it when empty', async () => {
+    const withMention = makeClient({ data: row, error: null });
+    await sendMessageRecord({
+      client: withMention.client,
+      id: ID,
+      channelId: CHANNEL,
+      traceId: 't',
+      body: `hi @[${X}]`,
+      attachmentAssetIds: [],
+      mentions: [X],
+    });
+    expect(withMention.rpc).toHaveBeenCalledWith(
+      'chat_message_send',
+      expect.objectContaining({ p_body: `hi @[${X}]`, p_mentions: [X] }),
+    );
+    const none = makeClient({ data: row, error: null });
+    await sendMessageRecord({
+      client: none.client,
+      id: ID,
+      channelId: CHANNEL,
+      traceId: 't',
+      body: 'hi',
+      attachmentAssetIds: [],
+      mentions: [],
+    });
+    expect(none.rpc.mock.calls[0]?.[1]).not.toHaveProperty('p_mentions');
   });
 });

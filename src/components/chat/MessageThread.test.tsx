@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -75,7 +77,22 @@ import {
   stripLoops,
   threadStripSlot,
   type ThreadRow,
+  mentionClass,
+  mentionsMe,
+  profileNameOf,
+  renderBodyWithMentions,
 } from '@/components/chat/MessageThread';
+import {
+  ALL_MARK,
+  mentionPickerRows,
+  resolveMentionText,
+  type MentionMember,
+} from '@/lib/chat/mentions';
+import { previewMentionText } from '@/components/chat/ChatStoreProvider';
+import { ActivityCard } from '@/components/pages/activity/ActivityCard';
+import { chatMentionPreview } from '@/components/pages/activity/data';
+import { boldAllMentions, draftLine } from '@/components/chat/ChannelList';
+import { MentionPicker } from '@/components/chat/MentionPicker';
 import { renderToStaticMarkup as renderStrip } from 'react-dom/server';
 import { MarkStrip } from '@/components/chat/MarksSheet';
 import type { ChatMark } from '@/lib/chat/marks';
@@ -3197,5 +3214,382 @@ describe('F14: a failed mark never shows raw error text', () => {
       "Couldn't mark, try again",
     );
     expect(markOutcomeCopy({ ok: true })).toBeNull();
+  });
+});
+
+describe('@mentions in bubbles', () => {
+  const ME = '11111111-1111-4111-8111-111111111111';
+  const BEN = '22222222-2222-4222-8222-222222222222';
+  const GONE = '99999999-9999-4999-8999-999999999999';
+  const names: Map<string, ChatProfile> = new Map([
+    [ME, { userId: ME, displayName: 'Me Person', avatarUrl: null }],
+    [BEN, { userId: BEN, displayName: 'Ben', avatarUrl: null }],
+  ]);
+  const nameOf = profileNameOf(names, 'w1');
+  const body = `hi @[${BEN}], @[${ME}] and @[${GONE}]`;
+
+  function markup(mine: boolean, onOpen = vi.fn(), peerUserId: string | null = null): string {
+    return renderStrip(
+      <p>
+        {renderBodyWithMentions(body, mine, {
+          nameOf,
+          viewerUserId: ME,
+          mentions: { peerUserId, onOpen },
+        })}
+      </p>,
+    );
+  }
+
+  it('turns every token into "@Name", unknown into "@Unknown member", never a raw token', () => {
+    const html = markup(false);
+    expect(html).toContain('@Ben');
+    expect(html).toContain('@Me Person');
+    expect(html).toContain('@Unknown member');
+    expect(html).not.toContain('@[');
+  });
+
+  it('styles like the bubble link colour (own and peer) and bolds a mention of me', () => {
+    expect(mentionClass(true, false)).toContain('text-accent-fg');
+    expect(mentionClass(false, false)).toContain('text-accent');
+    expect(mentionClass(false, true)).toContain('font-bold');
+    const own = markup(true);
+    const peer = markup(false);
+    expect(own).toContain('text-accent-fg');
+    expect(peer).not.toContain('text-accent-fg');
+    expect(peer).toMatch(/data-mention="11111111[^"]*" class="[^"]*font-bold/);
+  });
+
+  it('tapping another person opens the DM via the opener; my own name is inert', () => {
+    const onOpen = vi.fn();
+    const nodes = renderBodyWithMentions(body, false, {
+      nameOf,
+      viewerUserId: ME,
+      mentions: { peerUserId: null, onOpen },
+    });
+    const els = nodes.filter(isValidElement) as ReactElement<Record<string, unknown>>[];
+    const ben = els.find((el) => el.props['data-mention'] === BEN);
+    const me = els.find((el) => el.props['data-mention'] === ME);
+    expect(ben?.type).toBe('button');
+    expect(String(ben?.props.className)).toContain('before:h-[44px]');
+    (ben?.props.onClick as () => void)();
+    expect(onOpen).toHaveBeenCalledWith(BEN);
+    expect(me?.type).toBe('span');
+    expect(me?.props.onClick).toBeUndefined();
+  });
+
+  it("inside our DM the other person's name is inert", () => {
+    const html = markup(false, vi.fn(), BEN);
+    expect(html).not.toContain('<button');
+  });
+
+  it('a bubble and its reply quote show names, never tokens', () => {
+    const message = makeMessage({
+      body,
+      reply: { id: 'q1', authorUserId: BEN, preview: `ask @[${ME}]` },
+    });
+    const root = MessageBubble({
+      message,
+      profiles: names,
+      cache,
+      presignEnabled: false,
+      showTicks: false,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      layout: 'touch',
+      viewerUserId: ME,
+      mentions: { peerUserId: null, onOpen: () => {} },
+      onBadgeClick: () => {},
+    });
+    const texts: string[] = [];
+    const labels: string[] = [];
+    walk(root, (el) => {
+      const props = el.props as Record<string, unknown>;
+      if (typeof props.children === 'string') texts.push(props.children);
+      if (typeof props.preview === 'string') labels.push(props.preview);
+      if (props['data-mention'] !== undefined) texts.push(String(props.children));
+    });
+    expect(texts).toContain('@Ben');
+    expect(labels).toContain('ask @Me Person');
+    expect([...texts, ...labels].join(' ')).not.toContain('@[');
+  });
+
+  it('copy to clipboard reads "@Name"', () => {
+    expect(resolveMentionText(body, nameOf)).toBe('hi @Ben, @Me Person and @Unknown member');
+  });
+
+  it('a body with no mention renders exactly as before', () => {
+    expect(renderBodyWithMentions('plain', false, { nameOf, viewerUserId: ME })).toEqual(
+      renderMessageBody('plain', false),
+    );
+  });
+});
+
+describe('F5 mentions are bold and the peer ink clears 4.5:1 in both themes', () => {
+  // Read the theme tokens straight from src/index.css (read only). The hex sign
+  // is built from its char code so this chat file stays hash-free.
+  const css = readFileSync(fileURLToPath(new URL('../../index.css', import.meta.url)), 'utf8');
+  const HASH = String.fromCharCode(35);
+
+  function tokens(selector: string): Map<string, string> {
+    const start = css.indexOf(`${selector} {`);
+    const body = css.slice(start, css.indexOf('}', start));
+    const out = new Map<string, string>();
+    const pattern = new RegExp(`--([\\w-]+):\\s*${HASH}([0-9a-f]{6});`, 'gi');
+    for (const match of body.matchAll(pattern)) out.set(match[1] ?? '', match[2] ?? '');
+    return out;
+  }
+
+  function rgb(hex: string): number[] {
+    return [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  }
+
+  function luminance(channels: number[]): number {
+    const [r = 0, g = 0, b = 0] = channels.map((v) => {
+      const c = v / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+
+  function ratio(a: number[], b: number[]): number {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return ((hi ?? 0) + 0.05) / ((lo ?? 0) + 0.05);
+  }
+
+  /** accent-soft: the accent at 10% (light) / 16% (dark) over the peer bubble. */
+  function tint(accent: number[], alpha: number, under: number[]): number[] {
+    return accent.map((v, i) => Math.round(alpha * v + (1 - alpha) * (under[i] ?? 0)));
+  }
+
+  const light = tokens(':root');
+  const dark = tokens('.dark');
+  const at = (theme: Map<string, string>, name: string): number[] => rgb(theme.get(name) ?? '');
+
+  it('F5 peer mention ink (accent-hover) on the peer bubble (panel-2) is at least 4.5:1, light and dark', () => {
+    expect(mentionClass(false, false)).toContain('text-accent-hover');
+    const lightRatio = ratio(at(light, 'accent-hover'), at(light, 'panel-2'));
+    const darkRatio = ratio(at(dark, 'accent-hover'), at(dark, 'panel-2'));
+    expect(lightRatio).toBeGreaterThanOrEqual(4.5);
+    expect(darkRatio).toBeGreaterThanOrEqual(4.5);
+    expect(lightRatio.toFixed(2)).toBe('5.32');
+    expect(darkRatio.toFixed(2)).toBe('5.58');
+    // The accent the peer mention used before fails (4.23 light, 4.48 dark).
+    expect(ratio(at(light, 'accent'), at(light, 'panel-2'))).toBeLessThan(4.5);
+    expect(ratio(at(dark, 'accent'), at(dark, 'panel-2'))).toBeLessThan(4.5);
+    // A mention of me also sits on accent-soft: the ink still clears 4.5:1 there.
+    const selfLight = ratio(
+      at(light, 'accent-hover'),
+      tint(at(light, 'accent'), 0.1, at(light, 'panel-2')),
+    );
+    const selfDark = ratio(
+      at(dark, 'accent-hover'),
+      tint(at(dark, 'accent'), 0.16, at(dark, 'panel-2')),
+    );
+    expect(selfLight).toBeGreaterThanOrEqual(4.5);
+    expect(selfDark).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('F5 every mention is font-bold in own and peer bubbles; a mention of me adds accent-soft', () => {
+    for (const mine of [true, false]) {
+      expect(mentionClass(mine, false)).toContain('font-bold');
+      expect(mentionClass(mine, true)).toContain('font-bold');
+      expect(mentionClass(mine, true)).toContain('bg-accent-soft');
+      expect(mentionClass(mine, false)).not.toContain('bg-accent-soft');
+    }
+    expect(mentionClass(true, false)).toContain('text-accent-fg');
+  });
+});
+
+describe('A3 "@all" renders bold, as a mention of me for recipients, and inert', () => {
+  const names = new Map<string, ChatProfile>();
+
+  function allMarkup(mine: boolean): string {
+    return renderStrip(
+      <p>
+        {renderBodyWithMentions('@[all] standup', mine, {
+          nameOf: profileNameOf(names, 'w1'),
+          viewerUserId: 'me',
+          mentions: { peerUserId: null, onOpen: vi.fn() },
+          // J8: the tint follows the stored mentions; a group recipient is in them.
+          mentionedMe: !mine,
+        })}
+      </p>,
+    );
+  }
+
+  it('A3 recipient: "@all" bold with the mention-of-me tint, never a button', () => {
+    const html = allMarkup(false);
+    expect(html).toContain('@all');
+    expect(html).not.toContain('@[');
+    expect(html).not.toContain('<button');
+    expect(html).toContain(mentionClass(false, true));
+    expect(mentionClass(false, true)).toContain('font-bold');
+    expect(mentionClass(false, true)).toContain('bg-accent-soft');
+  });
+
+  it('A3 sender: "@all" bold in own ink, no me tint', () => {
+    const html = allMarkup(true);
+    expect(html).toContain(mentionClass(true, false));
+    expect(html).not.toContain('bg-accent-soft');
+    expect(html).not.toContain('<button');
+  });
+
+  it('A3 list preview and draft line draw "@all" bold', () => {
+    const html = renderStrip(<span>{boldAllMentions(draftLine('@[all] ship it', 'w1'))}</span>);
+    expect(html).toContain('<span data-mention-all="" class="font-bold">@all</span> ship it');
+    expect(boldAllMentions('no everyone here')).toBe('no everyone here');
+  });
+
+  it('A1 picker in a group shows the "@all" row first; a DM does not', () => {
+    const members: MentionMember[] = [
+      { userId: 'u1', displayName: 'Ana', avatarUrl: null, role: 'agency' },
+    ];
+    const group = renderStrip(
+      <MentionPicker
+        members={mentionPickerRows(members, '', null, true)}
+        active={0}
+        onPick={() => undefined}
+      />,
+    );
+    expect(group).toContain('data-mention-option="all"');
+    expect(group).toContain('@all');
+    expect(group).toContain('Everyone in this group');
+    expect(group.match(/min-h-\[44px\]/g)).toHaveLength(2);
+    const dm = renderStrip(
+      <MentionPicker
+        members={mentionPickerRows(members, '', null, false)}
+        active={0}
+        onPick={() => undefined}
+      />,
+    );
+    expect(dm).not.toContain('data-mention-option="all"');
+    expect(dm).not.toContain('Everyone in this group');
+  });
+});
+
+describe('J7 only a real "@[all]" token draws bold', () => {
+  const nameOf = profileNameOf(new Map(), 'w1');
+  const bubble = (body: string): string =>
+    renderStrip(
+      <p>
+        {renderBodyWithMentions(body, false, {
+          nameOf,
+          viewerUserId: 'me',
+          mentions: { peerUserId: null, onOpen: vi.fn() },
+          mentionedMe: true,
+        })}
+      </p>,
+    );
+  const activity = (raw: string): string =>
+    renderStrip(
+      <ActivityCard
+        group={[
+          {
+            id: 'e1',
+            workspaceId: 'w1',
+            number: null,
+            eventType: 'mention',
+            entityType: 'chat_channel',
+            entityId: 'chan-1',
+            scope: 'groups',
+            tier: 'active',
+            createdAt: '2026-06-14T00:00:00.000Z',
+            readAt: null,
+            snoozedUntil: null,
+            commentId: null,
+            assetId: null,
+            toStage: null,
+            fromStage: null,
+            title: 'Launch crew',
+            actorId: null,
+            actorName: 'Bob',
+            actorAvatarUrl: null,
+            body: chatMentionPreview(raw, () => undefined),
+            format: null,
+            caption: null,
+            thumbnailAssetVersionId: null,
+            pointsAdded: null,
+            checkpointTotal: null,
+            batchId: null,
+            messageId: null,
+            channelType: 'group',
+          },
+        ]}
+        nowMs={Date.parse('2026-06-14T00:05:00.000Z')}
+        cache={cache}
+        presignEnabled={false}
+        onOpenGroup={() => {}}
+        onOpenEntry={() => {}}
+        onSnooze={() => {}}
+        onMarkRead={() => {}}
+        selfName={null}
+      />,
+    );
+  const list = (raw: string): string =>
+    renderStrip(<span>{boldAllMentions(previewMentionText(raw, 'w1'))}</span>);
+  const draft = (raw: string): string =>
+    renderStrip(<span>{boldAllMentions(draftLine(raw, 'w1'))}</span>);
+
+  it('J7 plain "@all" not bold in list, draft line, Activity or bubble; the token is bold in all four', () => {
+    const plain = '@all standup';
+    const token = '@[all] standup';
+    for (const html of [list(plain), draft(plain), activity(plain), bubble(plain)]) {
+      expect(html).toContain('@all standup');
+      expect(html).not.toContain('data-mention-all');
+      expect(html).not.toContain('data-mention="all"');
+      expect(html).not.toContain('font-bold">@all');
+      expect(html).not.toContain(ALL_MARK);
+    }
+    for (const html of [list(token), draft(token), activity(token)]) {
+      expect(html).toMatch(/<span data-mention-all="" class="font-bold[^"]*">@all<\/span>/);
+      expect(html).not.toContain(ALL_MARK);
+      expect(html).not.toContain('@[');
+    }
+    expect(bubble(token)).toContain(`data-mention="all" class="${mentionClass(false, true)}">@all`);
+    expect(mentionClass(false, true)).toContain('font-bold');
+  });
+});
+
+describe('J8 the mention-of-me tint follows the stored mentions', () => {
+  const nameOf = profileNameOf(new Map(), 'w1');
+  const render = (
+    m: Pick<ThreadMessage, 'body' | 'mine' | 'mentions' | 'forwarded'>,
+    isGroup: boolean,
+  ): string =>
+    renderStrip(
+      <p>
+        {renderBodyWithMentions(m.body, m.mine, {
+          nameOf,
+          viewerUserId: 'me',
+          mentions: { peerUserId: null, onOpen: vi.fn() },
+          mentionedMe: mentionsMe(m, 'me', isGroup),
+        })}
+      </p>,
+    );
+
+  it('J8 forwarded @[all]: bold, no tint; real @all in group for recipient: tint', () => {
+    const forwarded = render(
+      { body: '@[all] standup', mine: false, mentions: null, forwarded: true },
+      true,
+    );
+    expect(forwarded).toContain(`class="${mentionClass(false, false)}">@all`);
+    expect(forwarded).toContain('font-bold');
+    expect(forwarded).not.toContain('bg-accent-soft');
+    // A DM with a stray @[all]: the server stored no mention of me.
+    const dm = render({ body: '@[all] hi', mine: false, mentions: [] }, false);
+    expect(dm).toContain('font-bold');
+    expect(dm).not.toContain('bg-accent-soft');
+    // A live DM row (not read yet) predicts the same: no tint.
+    expect(mentionsMe({ body: '@[all] hi', mine: false }, 'me', false)).toBe(false);
+    // Real @all in a group: the server expanded it to me.
+    const real = render({ body: '@[all] standup', mine: false, mentions: ['me', 'ana'] }, true);
+    expect(real).toContain(`class="${mentionClass(false, true)}">@all`);
+    expect(real).toContain('bg-accent-soft');
+    // Stored mentions drive it even when the live prediction would differ.
+    expect(mentionsMe({ body: 'no token', mine: false, mentions: ['me'] }, 'me', true)).toBe(true);
+    expect(mentionsMe({ body: '@[all]', mine: false }, 'me', true)).toBe(true);
+    expect(mentionsMe({ body: '@[all]', mine: true, mentions: ['me'] }, 'me', true)).toBe(false);
   });
 });

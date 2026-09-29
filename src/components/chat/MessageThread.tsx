@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -14,6 +15,19 @@ import {
 } from 'react';
 import { Link } from 'react-router-dom';
 import { isNearBottom } from '@/lib/chat/scroll';
+import {
+  ALL_MENTION,
+  isFormerMember,
+  isUnconfirmedMember,
+  knownMentionName,
+  mentionIds,
+  mentionLabel,
+  mentionsAll,
+  resolveMentionText,
+  splitMentions,
+  type MentionMember,
+  type NameOf,
+} from '@/lib/chat/mentions';
 import { logger } from '@/lib/logger';
 import {
   distanceFromBottom,
@@ -253,6 +267,22 @@ interface MessageThreadProps {
     messages: readonly ThreadMessage[],
     targets: ChannelSummary[],
   ) => Promise<ForwardSendResult>;
+  /**
+   * The @ picker's people for this chat (never the viewer); absent turns @ off.
+   * Null while they load: the composer keeps a stored body's tokens untouched.
+   */
+  mentionMembers?: readonly MentionMember[] | null;
+  /**
+   * True for a stored mention's person a successful member read confirmed has
+   * left; only those drop from a restored draft or an edit. Absent: none.
+   */
+  mentionGone?: (userId: string) => boolean;
+  /** Bubble @mentions: tap opens a DM with that person (never me or our DM's peer). */
+  mentions?: BubbleMentions;
+  /** Open with this message in view (an Activity mention); a miss toasts, the chat stays at the bottom. */
+  initialMessageId?: string | null;
+  /** The thread took initialMessageId (its jump runs, found or miss): the caller drops it. */
+  onInitialJumpTaken?: () => void;
 }
 
 /** Users who asked for less motion: the swipe resets without a spring. */
@@ -506,6 +536,18 @@ const JUMP_HIGHLIGHT_MS = 2000;
 
 /** Toast when jump-to cannot bring the message into the loaded history. */
 export const JUMP_NOT_LOADED_TOAST = 'Message is older than loaded history';
+
+/**
+ * A jump that did not land (not loaded within its budget, failed, or not in
+ * history): the pending target clears, the stick-to-bottom intent goes back to
+ * what it was before the jump, and the not-loaded toast shows. Null on found. Pure.
+ */
+export function jumpMiss(
+  outcome: FindOlderOutcome,
+  stickBefore: boolean,
+): { stick: boolean; toast: string } | null {
+  return outcome === 'found' ? null : { stick: stickBefore, toast: JUMP_NOT_LOADED_TOAST };
+}
 
 const NO_MARKS: Map<string, ChatMark> = new Map();
 
@@ -1078,6 +1120,144 @@ export function renderMessageBody(
   });
 }
 
+/**
+ * Whether the thread takes its initial (Activity) jump now: there is one, it
+ * was not taken yet, and the rows are on screen (the skeleton has no row to
+ * reveal, so a jump then would be lost). Pure.
+ */
+export function initialJumpDue(input: {
+  messageId: string | null;
+  done: boolean;
+  bodyLoading: boolean;
+}): boolean {
+  return input.messageId !== null && !input.done && !input.bodyLoading;
+}
+
+/** What a bubble needs to make its @mentions tappable. */
+export interface BubbleMentions {
+  /** The DM's other person: a mention of them inside our DM does nothing. */
+  peerUserId: string | null;
+  /** Open (or create) my DM with the mentioned person. */
+  onOpen: (userId: string) => void;
+}
+
+/** How one body draws its mentions. */
+export interface MentionRenderContext {
+  nameOf: NameOf;
+  viewerUserId: string | null;
+  /** Absent: every mention is inert (selection mode, previews). */
+  mentions?: BubbleMentions | undefined;
+  /**
+   * Whether this message mentions me (mentionsMe): only then does a token of
+   * me or "@all" sit on the mention-of-me tint. Absent is the same as false.
+   */
+  mentionedMe?: boolean;
+}
+
+/**
+ * Whether a message mentions me, for the "mentioned you" tint: its stored
+ * mentions (server-expanded, "@all" recipients included) list my id. A forward
+ * (mentions null) never does. A live row not read from Postgres yet reads as
+ * the server will store it: not a forward, and my token, or "@all" in a group.
+ * My own messages never do. Pure.
+ */
+export function mentionsMe(
+  message: Pick<ThreadMessage, 'body' | 'mine' | 'mentions' | 'forwarded'>,
+  viewerUserId: string | null,
+  isGroup: boolean,
+): boolean {
+  if (viewerUserId === null || message.mine) return false;
+  const me = viewerUserId.toLowerCase();
+  if (message.mentions !== undefined) return message.mentions?.includes(me) === true;
+  if (message.forwarded === true) return false;
+  return mentionIds(message.body).includes(me) || (isGroup && mentionsAll(message.body));
+}
+
+/**
+ * A mention's ink inside a bubble, always bold: accent-fg on own, accent-hover
+ * on peer (the accent family token that clears 4.5:1 on panel-2 in both
+ * themes). A mention of me also sits on the accent-soft tint. Tokens only, so
+ * light and dark stay at parity.
+ */
+export function mentionClass(mine: boolean, self: boolean): string {
+  return cn(
+    'font-bold',
+    mine ? 'text-accent-fg' : 'text-accent-hover',
+    self && 'rounded-sm bg-accent-soft',
+  );
+}
+
+/** A 44x44 hit area centred on the inline name, without changing the line box. */
+const MENTION_HIT =
+  "relative before:absolute before:left-1/2 before:top-1/2 before:h-[44px] before:w-full before:min-w-[44px] before:-translate-x-1/2 before:-translate-y-1/2 before:content-['']";
+
+/**
+ * The thread's mention name lookup: the batched profiles, then this
+ * workspace's mention registry. A former member (read without an active
+ * membership) resolves to nothing, so their mention reads "@Unknown member"
+ * and is inert; so does one whose membership read failed (unconfirmed), the
+ * failed-read behaviour, until a read confirms them.
+ */
+export function profileNameOf(
+  profiles: Map<string, ChatProfile>,
+  workspaceId: string | null,
+): NameOf {
+  return (userId) =>
+    isFormerMember(workspaceId, userId) || isUnconfirmedMember(workspaceId, userId)
+      ? undefined
+      : (profiles.get(userId)?.displayName ?? knownMentionName(workspaceId, userId));
+}
+
+/**
+ * A message body with its @[uuid] tokens drawn as "@Name" (never the raw
+ * token); the text between keeps renderMessageBody's links. A mention of a known
+ * person other than me (and, in a DM, the other person) is a button that opens
+ * my DM with them.
+ */
+export function renderBodyWithMentions(
+  body: string,
+  mine: boolean,
+  ctx: MentionRenderContext,
+): ReactNode[] {
+  const segments = splitMentions(body);
+  // No mention: exactly the plain renderer's runs.
+  if (segments.every((segment) => segment.kind === 'text')) return renderMessageBody(body, mine);
+  return segments.map((segment, i) => {
+    if (segment.kind === 'text') {
+      return <Fragment key={i}>{renderMessageBody(segment.text, mine)}</Fragment>;
+    }
+    const id = segment.userId;
+    const everyone = id === ALL_MENTION;
+    const self = id === ctx.viewerUserId;
+    // The tint follows the stored mentions (mentionedMe), never the token alone:
+    // "@all" or my name is a mention of me only when the message mentions me.
+    const tint = !mine && ctx.mentionedMe === true && (self || everyone);
+    const label = mentionLabel(id, ctx.nameOf);
+    const open = ctx.mentions;
+    // An unresolvable id ("@Unknown member") has no one to open a chat with.
+    const known = ctx.nameOf(id) !== undefined;
+    if (open === undefined || self || everyone || !known || id === open.peerUserId) {
+      return (
+        <span key={i} data-mention={id} className={mentionClass(mine, tint)}>
+          {label}
+        </span>
+      );
+    }
+    return (
+      <button
+        key={i}
+        type="button"
+        data-mention={id}
+        data-msg-link=""
+        onClick={() => open.onOpen(id)}
+        className={cn(mentionClass(mine, false), MENTION_HIT)}
+      >
+        {label}
+      </button>
+    );
+  });
+}
+
 /** Whether a pointer went down on a link in the body: the link handles the tap. */
 export function isLinkTarget(target: unknown): boolean {
   return (
@@ -1202,6 +1382,10 @@ export function MessageBubble(props: {
   layout: ChatLayout;
   /** The viewer's user id: a quote of their own deleted message reads "You deleted". */
   viewerUserId?: string | undefined;
+  /** Tappable @mentions; absent draws them inert. */
+  mentions?: BubbleMentions | undefined;
+  /** The open workspace: mention names resolve from its registry only. */
+  workspaceId?: string | null | undefined;
   /** The in-bubble meta; computed from the message when absent. */
   meta?: BubbleMeta;
   onBadgeClick: () => void;
@@ -1326,7 +1510,12 @@ export function MessageBubble(props: {
     reply !== null && reply.authorUserId !== null && reply.authorUserId === props.viewerUserId;
   const body = (
     <p className={bodyText(layout)}>
-      {renderMessageBody(message.body, mine)}
+      {renderBodyWithMentions(message.body, mine, {
+        nameOf: profileNameOf(profiles, props.workspaceId ?? null),
+        viewerUserId: props.viewerUserId ?? null,
+        mentions: selection === undefined ? props.mentions : undefined,
+        mentionedMe: mentionsMe(message, props.viewerUserId ?? null, isGroup),
+      })}
       {spacer}
     </p>
   );
@@ -1416,7 +1605,14 @@ export function MessageBubble(props: {
                     ? (profiles.get(reply.authorUserId)?.displayName ?? 'Member')
                     : 'Member'
                 }
-                preview={parentDeleted ? deletedMessageLabel({ mine: quotedMine }) : reply.preview}
+                preview={
+                  parentDeleted
+                    ? deletedMessageLabel({ mine: quotedMine })
+                    : resolveMentionText(
+                        reply.preview,
+                        profileNameOf(profiles, props.workspaceId ?? null),
+                      )
+                }
                 deleted={parentDeleted}
                 inBubble={layout}
                 onJump={() => props.onJumpToMessage?.(reply.id)}
@@ -1712,6 +1908,9 @@ function MessageRow(props: {
   timeZone: string;
   layout: ChatLayout;
   viewerUserId?: string | undefined;
+  mentions?: BubbleMentions | undefined;
+  /** The open workspace: mention names resolve from its registry only. */
+  workspaceId?: string | null | undefined;
   meta: BubbleMeta;
   /**
    * Open the menu: its anchor rect and the pressed bubble (drawn above the dim);
@@ -1846,6 +2045,8 @@ function MessageRow(props: {
       timeZone={props.timeZone}
       layout={props.layout}
       viewerUserId={props.viewerUserId}
+      mentions={props.mentions}
+      workspaceId={props.workspaceId}
       meta={props.meta}
       bubbleRef={bubbleRef}
       rowRef={rowRef}
@@ -2107,6 +2308,10 @@ function ThreadBody(
     layout: ChatLayout;
     /** The viewer's user id, for quotes of their own deleted messages. */
     viewerUserId?: string | undefined;
+    /** Tappable @mentions in bubbles. */
+    mentions?: BubbleMentions | undefined;
+    /** The open workspace: mention names resolve from its registry only. */
+    workspaceId?: string | null | undefined;
     presignEnabled: boolean;
     showTicks: boolean;
     isGroup: boolean;
@@ -2187,6 +2392,8 @@ function ThreadBody(
   // The scroll height before an older page was requested, so the prepended rows
   // do not move what the reader was looking at.
   const anchorHeightRef = useRef<number | null>(null);
+  // The first row at the last new-rows pass: a change means an older page painted.
+  const firstIdRef = useRef<string | null>(props.messages[0]?.id ?? null);
   const newestIdRef = useRef<string | null>(null);
   // The newest message last seen by the pin, to tell an own send from a re-render.
   const lastIdRef = useRef<string | null>(null);
@@ -2318,19 +2525,22 @@ function ThreadBody(
       return;
     }
     pendingJumpRef.current = id;
+    // A jump that does not land gives the bottom back as it was.
+    const stickBefore = stickRef.current;
     stickRef.current = false;
     void ensure(id).then((outcome) => {
       if (pendingJumpRef.current !== id) return;
-      if (outcome !== 'found') {
+      const miss = jumpMiss(outcome, stickBefore);
+      if (miss !== null) {
         pendingJumpRef.current = null;
-        toastRef.current.show({
-          title: outcome === 'error' ? 'Could not load older messages' : JUMP_NOT_LOADED_TOAST,
-        });
+        stickRef.current = miss.stick;
+        if (miss.stick) pin();
+        toastRef.current.show({ title: miss.toast });
         return;
       }
       if (reveal(id, JUMP_HIGHLIGHT_MS)) pendingJumpRef.current = null;
     });
-  }, [jumpRequest, reveal]);
+  }, [jumpRequest, reveal, pin]);
   // New rows: a pending jump owns the position while its pages land; an older
   // page keeps the reader where they were; else an own send takes hold of the
   // bottom again and, while the intent holds, the list pins instantly before
@@ -2339,6 +2549,9 @@ function ThreadBody(
     const el = listRef.current;
     if (el === null || props.messages.length === 0) return;
     const last = props.messages[props.messages.length - 1];
+    const first = props.messages[0]?.id ?? null;
+    const prepended = first !== firstIdRef.current;
+    firstIdRef.current = first;
     if (pendingJumpRef.current !== null) {
       anchorHeightRef.current = null;
       if (reveal(pendingJumpRef.current, JUMP_HIGHLIGHT_MS)) pendingJumpRef.current = null;
@@ -2346,11 +2559,20 @@ function ThreadBody(
     }
     if (anchorHeightRef.current !== null) {
       const anchor = anchorHeightRef.current;
-      programScroll((list) => {
-        list.scrollTop += list.scrollHeight - anchor;
+      // The older page may still be held: the compensation waits for the
+      // render its rows paint in, so the viewport never moves.
+      const step = olderPageAnchorStep({
+        anchorHeight: anchor,
+        prepended,
+        scrollHeight: el.scrollHeight,
       });
-      anchorHeightRef.current = null;
-      return;
+      anchorHeightRef.current = step.anchorHeight;
+      if (step.scrollBy !== 0) {
+        programScroll((list) => {
+          list.scrollTop += step.scrollBy;
+        });
+      }
+      if (step.anchorHeight === null) return;
     }
     const newestChanged = last !== undefined && last.id !== lastIdRef.current;
     stickRef.current = intentAfterNewest({
@@ -2549,6 +2771,8 @@ function ThreadBody(
               timeZone={props.timeZone}
               layout={props.layout}
               viewerUserId={props.viewerUserId}
+              mentions={props.mentions}
+              workspaceId={props.workspaceId}
               meta={row.meta}
               onOpen={(m, rect, held, reactionsOnly) => {
                 if (m.deleted === true) return;
@@ -2654,7 +2878,12 @@ function ThreadBody(
         }}
         onCopy={() => {
           if (menu) {
-            void navigator.clipboard?.writeText(menu.message.body);
+            void navigator.clipboard?.writeText(
+              resolveMentionText(
+                menu.message.body,
+                profileNameOf(props.profiles, props.workspaceId ?? null),
+              ),
+            );
             toast.show({ title: 'Message copied' });
           }
         }}
@@ -2749,6 +2978,24 @@ export function forwardEntersSelection(
   selectionAvailable: boolean,
 ): boolean {
   return selectionAvailable && threadSelectable(message);
+}
+
+/**
+ * One new-rows pass while an older-page load holds its anchor (the list's
+ * scrollHeight when the load began). When the older rows painted (the first
+ * row changed) the list scrolls by the height they added and the anchor is
+ * done. Otherwise (the page is still held; rows changed below) nothing scrolls
+ * and the anchor re-bases on the current height, so later growth below never
+ * counts toward the compensation. Pure.
+ */
+export function olderPageAnchorStep(input: {
+  anchorHeight: number;
+  prepended: boolean;
+  scrollHeight: number;
+}): { scrollBy: number; anchorHeight: number | null } {
+  if (input.prepended)
+    return { scrollBy: input.scrollHeight - input.anchorHeight, anchorHeight: null };
+  return { scrollBy: 0, anchorHeight: input.scrollHeight };
 }
 
 /** The slice of the thread list selection anchoring reads (the <ul>, or a test fake). */
@@ -3248,6 +3495,23 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelKey, props.messages, parentIndex, chipSettled, hydrationTick]);
   const onScreen = admitted.rows;
+  // Opened from an Activity mention: once the first page is on screen (not the
+  // skeleton, so the row can be revealed), jump to that message through the
+  // same path (older pages load via ensureLoaded; a miss toasts and the chat
+  // stays at the bottom). Once per open; the caller then drops it, so reopening
+  // the chat later never jumps again.
+  const initialMessageId = props.initialMessageId ?? null;
+  const initialJumpDone = useRef(false);
+  const bodyLoading = props.loading || (filterPostId === null && holdingFirstPage(admitted.gate));
+  const onInitialJumpTaken = props.onInitialJumpTaken;
+  useEffect(() => {
+    const id = initialMessageId;
+    if (id === null) return;
+    if (!initialJumpDue({ messageId: id, done: initialJumpDone.current, bodyLoading })) return;
+    initialJumpDone.current = true;
+    setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
+    onInitialJumpTaken?.();
+  }, [initialMessageId, bodyLoading, onInitialJumpTaken]);
   const gatedIndex = useMemo(() => parentIndexOf(onScreen), [onScreen]);
   const shownMessages = useMemo(
     () => (filterPostId !== null ? filterRows(props.messages, filterPostId) : onScreen),
@@ -3272,9 +3536,18 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   }, [shownMessages]);
   const messagesById = useMemo(() => new Map(shownMessages.map((m) => [m.id, m])), [shownMessages]);
   const markedMessages = props.markedMessages;
+  // The pin board reads bodies as text: mentions resolve to "@Name" first.
+  const profiles = props.profiles;
   const messageFor = useCallback(
-    (id: string): ThreadMessage | undefined => messagesById.get(id) ?? markedMessages?.get(id),
-    [messagesById, markedMessages],
+    (id: string): ThreadMessage | undefined => {
+      const message = messagesById.get(id) ?? markedMessages?.get(id);
+      if (message === undefined) return undefined;
+      return {
+        ...message,
+        body: resolveMentionText(message.body, profileNameOf(profiles, workspaceId)),
+      };
+    },
+    [messagesById, markedMessages, profiles, workspaceId],
   );
 
   // The About post resolved to nothing (RLS, failed read): drop it and say so.
@@ -3444,6 +3717,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       <ThreadBody
         layout={layout}
         viewerUserId={props.currentUserId}
+        mentions={props.mentions}
+        workspaceId={workspaceId}
         marks={marks}
         jumpRequest={jumpRequest}
         {...(props.onEnsureLoaded !== undefined ? { onEnsureLoaded: props.onEnsureLoaded } : {})}
@@ -3491,7 +3766,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         onShowPost={showPost}
         filtering={filterPostId !== null}
         filterRef={filterPost != null ? postRefKey(workspaceKey, filterPost.number) : null}
-        loading={props.loading || (filterPostId === null && holdingFirstPage(admitted.gate))}
+        loading={bodyLoading}
         profiles={props.profiles}
         cache={presignCache}
         presignEnabled={presignEnabled}
@@ -3555,6 +3830,18 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
               }
             : {})}
           onCancelEdit={() => setEditing(null)}
+          {...(props.mentionMembers !== undefined
+            ? {
+                mentions: {
+                  members: props.mentionMembers ?? [],
+                  ready: props.mentionMembers !== null,
+                  isGroup: props.isGroup === true,
+                  ...(props.mentionGone !== undefined ? { gone: props.mentionGone } : {}),
+                  selfId: props.currentUserId ?? null,
+                  nameOf: profileNameOf(props.profiles, workspaceId),
+                },
+              }
+            : {})}
         />
       )}
       {props.marks !== undefined &&

@@ -55,6 +55,38 @@ function fail<T>(message: string): Result<T> {
   return { ok: false, error: { code: 'unknown', message } };
 }
 
+/** A member-list or name read that has not answered by now counts as failed. */
+export const READ_TIMEOUT_MS = 5_000;
+
+/**
+ * Run one read with an abort timeout: the signal goes down the fetch path
+ * (.abortSignal), and the read resolves to a failure once it fires even when
+ * the transport ignores it. A thrown rejection is a failure too. Never throws.
+ */
+export async function withReadTimeout<T>(
+  run: (signal: AbortSignal) => Promise<Result<T>>,
+  timeoutMs: number = READ_TIMEOUT_MS,
+): Promise<Result<T>> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<Result<T>>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(fail('read timed out'));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve()
+        .then(() => run(controller.signal))
+        .catch((error: unknown) => fail<T>(String(error))),
+      timedOut,
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** The DM peer is whichever participant is not the current user. */
 export function dmPeerId(
   channel: Pick<ChatChannelRow, 'dm_user_a' | 'dm_user_b'>,
@@ -165,8 +197,9 @@ export async function listChannelSummaries(
 export async function readProfiles(
   client: Client,
   userIds: string[],
+  signal?: AbortSignal,
 ): Promise<Result<ChatProfile[]>> {
-  const res = await readUsers(client, unique(userIds));
+  const res = await readUsers(client, unique(userIds), signal);
   if (!res.ok) return res;
   return {
     ok: true,
@@ -178,6 +211,67 @@ export async function readProfiles(
   };
 }
 
+/** A mentioned person's profile, and whether they are a current workspace member. */
+export interface MentionProfile extends ChatProfile {
+  /**
+   * An active, non-removed workspace_members row in this workspace; null when
+   * the membership read failed (unknown: nobody is marked former for it).
+   */
+  member: boolean | null;
+}
+
+/**
+ * The ids among `userIds` with an active, non-removed membership in this
+ * workspace: one batched workspace_members IN read (readChatMembers' filter).
+ */
+export async function readActiveMemberIds(
+  client: Client,
+  params: { workspaceId: string; userIds: string[]; signal?: AbortSignal },
+): Promise<Result<string[]>> {
+  const res = await readMemberRoles(
+    client,
+    params.workspaceId,
+    unique(params.userIds),
+    params.signal,
+  );
+  if (!res.ok) return res;
+  return { ok: true, data: res.data.map((m) => m.user_id) };
+}
+
+/**
+ * Profiles for mentioned ids, each marked with current membership: the users
+ * IN read and the workspace_members IN read run in the same pass (users RLS
+ * lets an ex-member's profile be read, so a name alone proves nothing). Only a
+ * failed users read fails the whole read; a failed membership read still
+ * returns the profiles, with membership unknown (null).
+ */
+export async function readMentionProfiles(
+  client: Client,
+  params: { workspaceId: string; userIds: string[]; signal?: AbortSignal; timeoutMs?: number },
+): Promise<Result<MentionProfile[]>> {
+  // With timeoutMs each read gets its own budget (in parallel), so a hung
+  // membership read cannot take the profiles down with it.
+  const bounded = <T>(run: (signal?: AbortSignal) => Promise<Result<T>>): Promise<Result<T>> =>
+    params.timeoutMs !== undefined ? withReadTimeout(run, params.timeoutMs) : run(params.signal);
+  const [profiles, active] = await Promise.all([
+    bounded((signal) => readProfiles(client, params.userIds, signal)),
+    bounded((signal) =>
+      readActiveMemberIds(client, {
+        workspaceId: params.workspaceId,
+        userIds: params.userIds,
+        ...(signal !== undefined ? { signal } : {}),
+      }),
+    ),
+  ]);
+  if (!profiles.ok) return profiles;
+  if (!active.ok) return { ok: true, data: profiles.data.map((p) => ({ ...p, member: null })) };
+  const members = new Set(active.data);
+  return {
+    ok: true,
+    data: profiles.data.map((p) => ({ ...p, member: members.has(p.userId) })),
+  };
+}
+
 /**
  * The Sorted user ids of one group's current members. A single RLS-scoped read
  * of group_members (no per-member round-trip); callers enrich with readProfiles
@@ -186,12 +280,86 @@ export async function readProfiles(
  */
 export async function listGroupMemberIds(
   client: Client,
-  params: { groupId: string },
+  params: { groupId: string; signal?: AbortSignal },
 ): Promise<Result<string[]>> {
-  const res = await client.from('group_members').select('user_id').eq('group_id', params.groupId);
+  const query = client.from('group_members').select('user_id').eq('group_id', params.groupId);
+  const res = await (params.signal !== undefined ? query.abortSignal(params.signal) : query);
   if (res.error) return fail(`listGroupMemberIds: ${res.error.message}`);
   const rows = (res.data ?? []) as Pick<GroupMemberRow, 'user_id'>[];
   return { ok: true, data: rows.map((r) => r.user_id) };
+}
+
+/** A chat member the mention picker offers: display info plus workspace role. */
+export interface ChatMember extends ChatProfile {
+  /** The raw workspace_members.role; labelled at render. */
+  role: string;
+}
+
+/**
+ * Resolve chat member ids to picker rows: one batched users read and one batched
+ * workspace_members read (active, not removed). An id with no active membership
+ * or no profile is left out, so a removed member is never offered.
+ */
+export async function readChatMembers(
+  client: Client,
+  params: { workspaceId: string; userIds: string[]; signal?: AbortSignal },
+): Promise<Result<ChatMember[]>> {
+  const ids = unique(params.userIds);
+  const [usersRes, rolesRes] = await Promise.all([
+    readUsers(client, ids, params.signal),
+    readMemberRoles(client, params.workspaceId, ids, params.signal),
+  ]);
+  if (!usersRes.ok) return usersRes;
+  if (!rolesRes.ok) return rolesRes;
+  const roleOf = new Map(rolesRes.data.map((m) => [m.user_id, m.role]));
+  const members: ChatMember[] = [];
+  for (const u of usersRes.data) {
+    const role = roleOf.get(u.id);
+    if (role === undefined) continue;
+    members.push({ userId: u.id, displayName: u.display_name, avatarUrl: u.avatar_url, role });
+  }
+  return { ok: true, data: members };
+}
+
+/**
+ * The ids a chat's mentions may name right now, the server's own membership
+ * rule: a group's members, or a DM's two people, with an active workspace
+ * membership. Three batched reads (the channel row, its members, their active
+ * memberships) under one 5s timeout. Used to re-check mentions after the
+ * server refused one; a failure is a failed Result, never a guess.
+ */
+export async function readChannelMemberIds(
+  client: Client,
+  params: { channelId: string },
+): Promise<Result<string[]>> {
+  return withReadTimeout(async (signal) => {
+    const channelRes = await client
+      .from('chat_channels')
+      .select('workspace_id, channel_type, entity_id, dm_user_a, dm_user_b')
+      .eq('channel_id', params.channelId)
+      .abortSignal(signal)
+      .maybeSingle();
+    if (channelRes.error) return fail(`readChannelMemberIds channel: ${channelRes.error.message}`);
+    const row = channelRes.data as Pick<
+      ChatChannelRow,
+      'workspace_id' | 'channel_type' | 'entity_id' | 'dm_user_a' | 'dm_user_b'
+    > | null;
+    if (row === null) return fail('readChannelMemberIds: channel not found');
+    let ids: string[];
+    if (row.channel_type === 'group') {
+      if (row.entity_id === null) return { ok: true, data: [] };
+      const members = await listGroupMemberIds(client, { groupId: row.entity_id, signal });
+      if (!members.ok) return members;
+      ids = unique(members.data);
+    } else if (row.channel_type === 'dm') {
+      ids = unique([row.dm_user_a, row.dm_user_b]);
+    } else {
+      return fail(`readChannelMemberIds: no mention rule for ${row.channel_type}`);
+    }
+    const active = await readMemberRoles(client, row.workspace_id, ids, signal);
+    if (!active.ok) return active;
+    return { ok: true, data: active.data.map((m) => m.user_id) };
+  });
 }
 
 /** One "delete chat for me" row: when the caller cleared a channel. */
@@ -228,9 +396,14 @@ async function readGroups(client: Client, ids: string[]): Promise<Result<GroupRo
   return { ok: true, data: (res.data ?? []) as GroupRow[] };
 }
 
-async function readUsers(client: Client, ids: string[]): Promise<Result<UserRow[]>> {
+async function readUsers(
+  client: Client,
+  ids: string[],
+  signal?: AbortSignal,
+): Promise<Result<UserRow[]>> {
   if (ids.length === 0) return { ok: true, data: [] };
-  const res = await client.from('users').select('id, display_name, avatar_url').in('id', ids);
+  const query = client.from('users').select('id, display_name, avatar_url').in('id', ids);
+  const res = await (signal !== undefined ? query.abortSignal(signal) : query);
   if (res.error) return fail(`readProfiles users: ${res.error.message}`);
   return { ok: true, data: (res.data ?? []) as UserRow[] };
 }
@@ -243,15 +416,17 @@ async function readMemberRoles(
   client: Client,
   workspaceId: string,
   userIds: string[],
+  signal?: AbortSignal,
 ): Promise<Result<Pick<WorkspaceMemberRow, 'user_id' | 'role'>[]>> {
   if (userIds.length === 0) return { ok: true, data: [] };
-  const res = await client
+  const query = client
     .from('workspace_members')
     .select('user_id, role')
     .eq('workspace_id', workspaceId)
     .eq('active', true)
     .is('removed_at', null)
     .in('user_id', userIds);
+  const res = await (signal !== undefined ? query.abortSignal(signal) : query);
   if (res.error) return fail(`listChannelSummaries members: ${res.error.message}`);
   return { ok: true, data: (res.data ?? []) as Pick<WorkspaceMemberRow, 'user_id' | 'role'>[] };
 }

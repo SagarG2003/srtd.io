@@ -13,6 +13,7 @@
 // incoming command messages on `onCmdMessage(CmdMsgBody)`.
 
 import type { AgoraChat } from 'agora-chat';
+import { truncateBody } from '@/lib/chat/mentions';
 import type { Database } from '@srtdio/schemas';
 import type { ChatConnection } from '@/lib/chat/types';
 import { toAgoraUsername, userIdFromAgoraUsername } from '@/lib/chat/agora-identity';
@@ -116,6 +117,18 @@ export interface ThreadMessage {
   deleted?: boolean;
   /** This is a reply whose quoted message was deleted; absent is the same as false. */
   parentDeleted?: boolean;
+  /**
+   * The stored chat_messages.mentions: the server-expanded user ids ("@all"
+   * already expanded to its recipients), null when the row has none (a
+   * forward). Absent while the row has not been read from Postgres (live).
+   */
+  mentions?: string[] | null;
+}
+
+/** A row's stored mentions as user ids (lowercase); null when it has none. */
+export function storedMentions(raw: ChatMessageRow['mentions']): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  return raw.filter((id): id is string => typeof id === 'string').map((id) => id.toLowerCase());
 }
 
 /**
@@ -354,6 +367,7 @@ export function rowToThreadMessage(
     reactions: [],
     editedAt: row.edited_at,
     deleted: false,
+    mentions: storedMentions(row.mentions),
     ...(row.forwarded_from_message_id != null && row.forwarded_from_message_id !== ''
       ? { forwarded: true }
       : {}),
@@ -414,9 +428,8 @@ export function replyPreview(
     Partial<Pick<ThreadMessage, 'sharedBriefIds'>>,
 ): string {
   const body = message.body.trim();
-  if (body !== '') {
-    return body.length > REPLY_PREVIEW_LIMIT ? `${body.slice(0, REPLY_PREVIEW_LIMIT)}…` : body;
-  }
+  // Never cut through an @[uuid] token: the quote resolves it to "@Name" at render.
+  if (body !== '') return truncateBody(body, REPLY_PREVIEW_LIMIT);
   if (message.attachments.length > 0) return 'Attachment';
   if (message.sharedPostIds.length > 0) return 'Shared post';
   if ((message.sharedBriefIds ?? []).length > 0) return 'Shared brief';
@@ -575,7 +588,12 @@ export function mergeFetched(messages: ThreadMessage[], fetched: ThreadMessage[]
         incoming.id,
         incoming.deleted === true
           ? asTombstone({ ...existing, editedAt: incoming.editedAt ?? null })
-          : { ...existing, body: incoming.body, editedAt: incoming.editedAt ?? null },
+          : {
+              ...existing,
+              body: incoming.body,
+              editedAt: incoming.editedAt ?? null,
+              ...(incoming.mentions !== undefined ? { mentions: incoming.mentions } : {}),
+            },
       );
       continue;
     }
@@ -637,11 +655,16 @@ export function markMessagesDeleted(
  */
 export function applyEdit(
   messages: ThreadMessage[],
-  input: { messageId: string; body: string; editedAt: string },
+  input: { messageId: string; body: string; editedAt: string; mentions?: string[] | null },
 ): ThreadMessage[] {
   const existing = messages.find((m) => m.id === input.messageId);
   if (existing === undefined || existing.deleted === true) return messages;
-  const edited: ThreadMessage = { ...existing, body: input.body, editedAt: input.editedAt };
+  const edited: ThreadMessage = {
+    ...existing,
+    body: input.body,
+    editedAt: input.editedAt,
+    ...(input.mentions !== undefined ? { mentions: input.mentions } : {}),
+  };
   return upsertMessage(messages, edited).map((m) =>
     m.reply !== null && m.reply.id === input.messageId && m.parentDeleted !== true
       ? { ...m, reply: { ...m.reply, preview: replyPreview(edited) } }
@@ -665,7 +688,12 @@ export function applyEditFromRow(messages: ThreadMessage[], row: ChatMessageRow)
     const rowMs = Date.parse(row.edited_at);
     if (!Number.isNaN(shownMs) && (Number.isNaN(rowMs) || rowMs <= shownMs)) return messages;
   }
-  return applyEdit(messages, { messageId: row.id, body: row.body ?? '', editedAt: row.edited_at });
+  return applyEdit(messages, {
+    messageId: row.id,
+    body: row.body ?? '',
+    editedAt: row.edited_at,
+    mentions: storedMentions(row.mentions),
+  });
 }
 
 /** Drop messages by id; the same list when none match. */
