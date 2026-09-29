@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import type { FormEvent, KeyboardEvent, ReactElement } from 'react';
+import type { FormEvent, KeyboardEvent, ReactElement, SyntheticEvent } from 'react';
 import { logger } from '@/lib/logger';
 import { Button } from '@/components/ui/Button';
 import { IconButton } from '@/components/ui/IconButton';
@@ -20,10 +20,12 @@ import type { TranscribeResult } from '@/lib/chat/transcribe';
 import { AttachmentMenu } from '@/components/chat/AttachmentMenu';
 import { PostPicker } from '@/components/chat/PostPicker';
 import { PendingChip } from '@/components/chat/PendingChip';
+import { PostRefThumb, postRefKey, type PostRefPost } from '@/components/chat/PostRefChip';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { briefStatusLabel, toggleBrief, type BriefCardFields } from '@/lib/chat/briefs';
 import { togglePost } from '@/components/chat/post-picker';
 import { attachmentMenuItems } from '@/lib/chat/attachment-menu';
+import { caretHashQuery, stripHashToken } from '@/lib/chat/post-refs';
 import { fileExtension } from '@/lib/assets';
 import { precheckFile } from '@/lib/asset-upload';
 import {
@@ -63,6 +65,62 @@ interface ComposerProps {
   reply?: { authorName: string; quote: ReplyQuote } | undefined;
   /** Clears the active reply draft (cancel button, and after a successful send). */
   onCancelReply?: (() => void) | undefined;
+  /** The post the conversation is about; renders the About bar above the reply bar. */
+  about?: PostRefPost | undefined;
+  /** Closes the About bar (its X); a send never clears it. */
+  onCancelAbout?: (() => void) | undefined;
+  /** Post ids already shared in this chat; picker rows say "in this chat". */
+  sharedPostIds?: ReadonlySet<string> | undefined;
+  /**
+   * Bring a post into the conversation (the hash picker's pick); absent turns
+   * the hash picker off.
+   */
+  onBringPost?: ((postId: string) => void) | undefined;
+}
+
+/** The composer placeholder: "Message about KEY-N" while About is up. */
+export function composerPlaceholder(aboutRef: string | null): string {
+  return aboutRef !== null ? `Message about ${aboutRef}` : 'Write a message';
+}
+
+/**
+ * The About bar: the reply bar's grammar (3px accent rule, panel-3 box) with a
+ * 32px thumbnail, "About KEY-N" in accent over the title, and a 44px close.
+ */
+export function AboutBar(props: {
+  post: PostRefPost;
+  refLabel: string | null;
+  onCancel: () => void;
+}): ReactElement {
+  return (
+    <div
+      data-about-bar={props.post.id}
+      className="flex min-w-0 items-center gap-2 overflow-hidden rounded-md bg-panel-3"
+    >
+      <span className="w-[3px] shrink-0 self-stretch rounded-full bg-accent" aria-hidden="true" />
+      <PostRefThumb assetVersionId={props.post.thumbnailAssetVersionId} size={32} />
+      <span className="flex min-w-0 flex-1 flex-col py-1">
+        <span className="truncate text-xs font-medium text-accent">
+          {props.refLabel !== null ? `About ${props.refLabel}` : 'About'}
+        </span>
+        <span className="truncate text-xs text-fg-2">{props.post.title}</span>
+      </span>
+      <IconButton label="Close about" className="shrink-0" onClick={props.onCancel}>
+        <IconX size={16} />
+      </IconButton>
+    </div>
+  );
+}
+
+/** The hash picker state for a text and caret: the query to search, or closed. */
+export function hashPickerQuery(input: {
+  enabled: boolean;
+  dismissed: boolean;
+  text: string;
+  caret: number;
+}): string | null {
+  if (!input.enabled || input.dismissed) return null;
+  return caretHashQuery(input.text, input.caret);
 }
 
 /** One accepted picked file, shown as a removable chip until Send. */
@@ -303,6 +361,11 @@ export function Composer(props: ComposerProps): ReactElement {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [resolvingLinks, setResolvingLinks] = useState(false);
+  // The caret, read on every change and selection, drives the hash picker.
+  const [caret, setCaret] = useState(0);
+  // Escape closes the hash picker until the caret leaves the token.
+  const [hashDismissed, setHashDismissed] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const { workspaceId, workspaceKey } = useWorkspace();
   const recorder = useAudioRecorder();
   const toast = useToast();
@@ -366,6 +429,11 @@ export function Composer(props: ComposerProps): ReactElement {
   // devices keep the default newline. Route through the form's submit so the
   // Send button's exact handler and guard run.
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    if (event.key === 'Escape' && hashQuery !== null) {
+      event.preventDefault();
+      setHashDismissed(true);
+      return;
+    }
     if (
       !isSendKeydown({
         key: event.key,
@@ -485,6 +553,38 @@ export function Composer(props: ComposerProps): ReactElement {
     setVoiceBusy(false);
   }
 
+  function trackCaret(event: SyntheticEvent<HTMLTextAreaElement>): void {
+    const el = event.currentTarget;
+    textareaRef.current = el;
+    const next = el.selectionStart ?? el.value.length;
+    setCaret(next);
+    if (caretHashQuery(el.value, next) === null) setHashDismissed(false);
+  }
+
+  const hashQuery = hashPickerQuery({
+    enabled: props.onBringPost !== undefined && !props.disabled,
+    dismissed: hashDismissed,
+    text,
+    caret,
+  });
+
+  // A pick drops the hash token from the text and brings the post in.
+  function pickHashPost(post: PostCardFields): void {
+    const next = stripHashToken(text, caret);
+    setText(next.text);
+    setCaret(next.caret);
+    const el = textareaRef.current;
+    if (el !== null) {
+      requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(next.caret, next.caret);
+      });
+    }
+    props.onBringPost?.(post.id);
+  }
+
+  const aboutRef = props.about !== undefined ? postRefKey(workspaceKey, props.about.number) : null;
+
   const showMic = shouldShowMic({
     hasUpload: props.uploadFile !== undefined,
     disabled: props.disabled,
@@ -499,8 +599,28 @@ export function Composer(props: ComposerProps): ReactElement {
     <form
       ref={formRef}
       onSubmit={submit}
-      className="flex flex-col gap-2 border-t border-border bg-panel px-3 py-2.5"
+      className="relative flex flex-col gap-2 border-t border-border bg-panel px-3 py-2.5"
     >
+      {hashQuery !== null ? (
+        <div data-hash-picker="" className="absolute inset-x-3 bottom-full z-20 mb-2">
+          <PostPicker
+            inline
+            open
+            query={hashQuery}
+            onClose={() => setHashDismissed(true)}
+            selected={[]}
+            onToggle={pickHashPost}
+            selectedBriefs={[]}
+            onToggleBrief={() => undefined}
+            sharedPostIds={props.sharedPostIds}
+          />
+        </div>
+      ) : null}
+
+      {props.about !== undefined ? (
+        <AboutBar post={props.about} refLabel={aboutRef} onCancel={() => props.onCancelAbout?.()} />
+      ) : null}
+
       {props.reply != null ? (
         <ReplyQuoteBox
           author={props.reply.authorName}
@@ -618,10 +738,12 @@ export function Composer(props: ComposerProps): ReactElement {
               value={text}
               onChange={(event) => {
                 setText(event.target.value);
+                trackCaret(event);
                 props.onTyping?.();
               }}
+              onSelect={trackCaret}
               onKeyDown={handleKeyDown}
-              placeholder="Write a message"
+              placeholder={composerPlaceholder(aboutRef)}
               rows={1}
               compact
             />
@@ -682,6 +804,7 @@ export function Composer(props: ComposerProps): ReactElement {
         onToggle={toggleSharedPost}
         selectedBriefs={sharedBriefs}
         onToggleBrief={toggleSharedBrief}
+        sharedPostIds={props.sharedPostIds}
       />
     </form>
   );

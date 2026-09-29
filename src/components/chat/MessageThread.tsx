@@ -62,6 +62,8 @@ import {
   type LightboxImage,
 } from '@/components/ui/ImageLightbox';
 import { SharedPostCards } from '@/components/chat/PostCard';
+import { PostRefChip, useChipBatch, type PostRefPost } from '@/components/chat/PostRefChip';
+import { FilterStrip } from '@/components/chat/FilterStrip';
 import { MessageActionMenu } from '@/components/chat/MessageActionMenu';
 import { SharedBriefCards } from '@/components/chat/BriefCard';
 import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
@@ -89,6 +91,16 @@ import {
   type SelectionRole,
 } from '@/lib/chat/marks';
 import type { WriteResult } from '@/lib/chat/record';
+import {
+  chipPostIds,
+  chipTargetFor,
+  filterRows,
+  newCardFor,
+  newestCardFor,
+  parentIndexOf,
+  replyForSend,
+} from '@/lib/chat/post-refs';
+import { useWorkspace } from '@/lib/workspace-context';
 
 interface MessageThreadProps {
   title: string;
@@ -267,6 +279,56 @@ export function threadLightbox(
       sender: senderName(message, profiles),
       time: formatMessageTime(messageTimeSource(message), timeZone),
     },
+  };
+}
+
+/**
+ * A bubble's KEY chip when its reply target is a card message: 'chip' once the
+ * post is in the thread's batch, 'pending' (no quote, no chip) until then. A
+ * reply without a chip keeps its quote.
+ */
+export type BubbleChip =
+  | { kind: 'chip'; post: PostRefPost; workspaceKey: string | null; onTap: () => void }
+  | { kind: 'pending' };
+
+/** What a bubble's cards and chip hand back to the thread. */
+export interface BubblePostRefs {
+  chip?: BubbleChip | undefined;
+  /** Hold on a card or the sheet's "Talk about". */
+  onTalkAbout?: ((postId: string, messageId: string) => void) | undefined;
+  /** Tap on a card's KEY: show only that post's conversation. */
+  onShowPost?: ((postId: string) => void) | undefined;
+}
+
+/** The chip for a message, from its target and the batch lookup; undefined keeps the quote. */
+export function bubbleChip(
+  target: { postId: string } | null,
+  post: PostRefPost | null | undefined,
+  context: { workspaceKey: string | null; onShowPost: (postId: string) => void },
+): BubbleChip | undefined {
+  if (target === null || post === null) return undefined;
+  if (post === undefined) return { kind: 'pending' };
+  return {
+    kind: 'chip',
+    post,
+    workspaceKey: context.workspaceKey,
+    onTap: () => context.onShowPost(target.postId),
+  };
+}
+
+/**
+ * The reply quote the About card stands for in a send: the card message's
+ * sender and preview when it is loaded, else a generic card label.
+ */
+export function aboutQuote(
+  about: { cardMessageId: string } | null,
+  card: ThreadMessage | undefined,
+): ReplyQuote | null {
+  if (about === null) return null;
+  return {
+    id: about.cardMessageId,
+    authorUserId: card?.senderUserId ?? null,
+    preview: card !== undefined ? replyPreview(card) : 'Shared post',
   };
 }
 
@@ -675,6 +737,8 @@ export function MessageBubble(props: {
   selection?: RowSelection;
   /** Tap on an album tile: open the thread's image viewer at that index. */
   onOpenImage?: (index: number) => void;
+  /** The KEY chip and the cards' talk-about / filter hooks. */
+  postRefs?: BubblePostRefs | undefined;
   bubbleRef?: Ref<HTMLDivElement>;
   /** Swipe right to reply (touch and pen); off while selecting. */
   swipe?: { iconRef?: Ref<HTMLSpanElement> };
@@ -716,6 +780,12 @@ export function MessageBubble(props: {
   const status = bubbleStatus(message, { showTicks, tail });
   const onMore = selection === undefined ? press?.onMore : undefined;
   const swipe = selection === undefined ? props.swipe : undefined;
+  const chip = props.postRefs?.chip;
+  const cardRefs = {
+    messageId: message.id,
+    onTalkAbout: props.postRefs?.onTalkAbout,
+    onShowPost: props.postRefs?.onShowPost,
+  };
   return (
     <li
       data-msg-id={message.id}
@@ -788,7 +858,14 @@ export function MessageBubble(props: {
             {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
           </div>
           <div data-bubble-content="" className={cn('contents', mine && OWN_BUBBLE_CONTENT)}>
-            {reply !== null ? (
+            {chip?.kind === 'chip' ? (
+              <PostRefChip
+                post={chip.post}
+                workspaceKey={chip.workspaceKey}
+                onTap={chip.onTap}
+                className={album ? 'mx-[9px]' : '-mb-1.5 -mt-2'}
+              />
+            ) : chip === undefined && reply !== null ? (
               <ReplyQuoteBox
                 author={
                   reply.authorUserId !== null
@@ -824,7 +901,7 @@ export function MessageBubble(props: {
                 />
                 {hasCards ? (
                   <div className="flex flex-col px-[9px] pb-[5px]">
-                    <SharedPostCards postIds={message.sharedPostIds} />
+                    <SharedPostCards postIds={message.sharedPostIds} {...cardRefs} />
                     <SharedBriefCards briefIds={message.sharedBriefIds} />
                   </div>
                 ) : null}
@@ -839,7 +916,7 @@ export function MessageBubble(props: {
                   cache={cache}
                   presignEnabled={presignEnabled}
                 />
-                <SharedPostCards postIds={message.sharedPostIds} />
+                <SharedPostCards postIds={message.sharedPostIds} {...cardRefs} />
                 <SharedBriefCards briefIds={message.sharedBriefIds} />
               </>
             )}
@@ -925,11 +1002,13 @@ export type ThreadRow =
  * first message is the head, its last the tail. A centred time label (workspace
  * clock) goes above a run that starts a new day or follows a 10-minute gap.
  * Pure, so the list is grouped in one pass and never re-groups after painting.
+ * With `times: false` (one post's conversation) the time labels drop.
  */
 export function threadRows(
   messages: readonly ThreadMessage[],
   nowMs: number,
   timeZone: string,
+  opts: { times?: boolean } = {},
 ): ThreadRow[] {
   const items = withDaySeparators(messages, nowMs, timeZone);
   const rows: ThreadRow[] = [];
@@ -945,7 +1024,7 @@ export function threadRows(
     const beforeDay = items[k + 1]?.kind === 'day';
     const head = afterDay || breaksRun(prev, message);
     const tail = next === undefined || beforeDay || breaksRun(message, next);
-    if (afterDay || (prev !== undefined && isTimeGap(prev, message))) {
+    if (opts.times !== false && (afterDay || (prev !== undefined && isTimeGap(prev, message)))) {
       const label = formatMessageTime(messageTimeSource(message), timeZone);
       if (label !== '') rows.push({ kind: 'time', key: `time-${message.id}`, label });
     }
@@ -973,7 +1052,9 @@ export const THREAD_LIST_CLASS = 'flex flex-1 flex-col overflow-y-auto py-2';
 /**
  * The list's children in order: the bottom-pin spacer, the older-page row, then
  * the grouped rows. A message row learns whether it sits directly under a time
- * label or day pill (afterLabel) so the label carries the gap. Pure.
+ * label or day pill (afterLabel) so the label carries the gap. With `loadOlder`
+ * (the per-post filter) a 44px "Load older" row sits at the top instead of the
+ * scroll-to-top request. Pure.
  */
 export function threadListItems(
   rows: readonly ThreadRow[],
@@ -982,10 +1063,25 @@ export function threadListItems(
     row: Extract<ThreadRow, { kind: 'message' }>,
     afterLabel: boolean,
   ) => ReactElement,
+  loadOlder?: () => void,
 ): ReactElement[] {
   const items: ReactElement[] = [
     <li key="thread-spacer" aria-hidden="true" data-thread-spacer="" className="mt-auto" />,
   ];
+  if (loadOlder !== undefined && !loadingOlder) {
+    items.push(
+      <li key="load-older" className="flex justify-center px-4">
+        <button
+          type="button"
+          data-load-older=""
+          onClick={loadOlder}
+          className="flex min-h-[44px] items-center rounded-md px-4 text-xs font-medium text-accent transition-colors hover:bg-panel-2"
+        >
+          Load older
+        </button>
+      </li>,
+    );
+  }
   if (loadingOlder) {
     items.push(
       <li key="loading-older" className="px-4 py-2 text-center text-xs text-fg-3">
@@ -1031,6 +1127,7 @@ function MessageRow(props: {
   /** Swiped past the threshold: the same reply path as the menu's Reply. */
   onSwipeReply: (message: ThreadMessage) => void;
   onOpenImage: (message: ThreadMessage, index: number) => void;
+  postRefs?: BubblePostRefs | undefined;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const iconRef = useRef<HTMLSpanElement>(null);
@@ -1139,6 +1236,7 @@ function MessageRow(props: {
         : {})}
       {...(props.selection !== undefined ? { selection: props.selection } : {})}
       onOpenImage={(index) => props.onOpenImage(props.message, index)}
+      postRefs={props.postRefs}
       onBadgeClick={() => props.onOpen(props.message, bubbleRect())}
     />
   );
@@ -1199,6 +1297,12 @@ function ThreadBody(
     /** A jump-to request (seq makes a repeat of the same id fire again). */
     jumpRequest: { id: string; seq: number } | null;
     onEnsureLoaded?: (messageId: string) => Promise<FindOlderOutcome>;
+    /** A message's KEY chip (undefined keeps its quote). */
+    chipFor?: (message: ThreadMessage) => BubbleChip | undefined;
+    onTalkAbout?: (postId: string, messageId: string) => void;
+    onShowPost?: (postId: string) => void;
+    /** One post's conversation: no time labels, a "Load older" row at the top. */
+    filtering?: boolean;
   },
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
@@ -1358,7 +1462,7 @@ function ThreadBody(
         className={THREAD_LIST_CLASS}
       >
         {threadListItems(
-          threadRows(props.messages, nowMs, props.timeZone),
+          threadRows(props.messages, nowMs, props.timeZone, { times: props.filtering !== true }),
           props.loadingOlder === true,
           (row, afterLabel) => (
             <MessageRow
@@ -1379,6 +1483,11 @@ function ThreadBody(
               reducedMotion={reducedMotion}
               onSwipeReply={props.onReply}
               onJumpToMessage={scrollToMessage}
+              postRefs={{
+                chip: props.chipFor?.(row.message),
+                onTalkAbout: props.onTalkAbout,
+                onShowPost: props.onShowPost,
+              }}
               mark={props.marks.get(row.message.id)}
               {...(props.onChangePriority !== undefined
                 ? { onChangePriority: props.onChangePriority }
@@ -1391,6 +1500,15 @@ function ThreadBody(
               {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
             />
           ),
+          props.filtering === true && props.hasMore === true
+            ? () => {
+                const el = listRef.current;
+                if (el === null || anchorHeightRef.current !== null) return;
+                // The prepended page keeps the reader where they were.
+                anchorHeightRef.current = el.scrollHeight;
+                props.onLoadOlder?.();
+              }
+            : undefined,
         )}
       </ul>
       <MessageActionMenu
@@ -1509,6 +1627,16 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const [replyDraft, setReplyDraft] = useState<{ authorName: string; quote: ReplyQuote } | null>(
     null,
   );
+  // The post the conversation is about: sends with no reply draft reply to its
+  // card message. Independent of the reply draft; only its X clears it.
+  const [aboutDraft, setAboutDraft] = useState<{ postId: string; cardMessageId: string } | null>(
+    null,
+  );
+  // One post's conversation (client-side over the loaded pages).
+  const [filterPostId, setFilterPostId] = useState<string | null>(null);
+  // A share just sent: its card message becomes the About once the outbox bubble lands.
+  const pendingCardRef = useRef<{ postId: string; known: ReadonlySet<string> } | null>(null);
+  const { workspaceKey } = useWorkspace();
   const toast = useToast();
   const marks = props.marks ?? NO_MARKS;
   const [selecting, setSelecting] = useState(false);
@@ -1532,7 +1660,20 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setPriorityFor(null);
     setJumpRequest(null);
     setForwardFor(null);
+    setAboutDraft(null);
+    setFilterPostId(null);
+    pendingCardRef.current = null;
   }, [props.title]);
+
+  // The card a share queued has landed in the list: it is what the chat is about now.
+  useEffect(() => {
+    const pending = pendingCardRef.current;
+    if (pending === null) return;
+    const card = newCardFor(props.messages, pending.known, pending.postId);
+    if (card === null) return;
+    pendingCardRef.current = null;
+    setAboutDraft({ postId: pending.postId, cardMessageId: card.id });
+  }, [props.messages]);
 
   // A delete or a new mark landing meanwhile drops ids that are no longer selectable.
   useEffect(() => {
@@ -1599,6 +1740,91 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   });
   const jumpTo = (id: string): void =>
     setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
+  // Jumps from the marks and contact sheets can land outside the filter.
+  const jumpToAll = (id: string): void => {
+    setFilterPostId(null);
+    jumpTo(id);
+  };
+
+  // Chips: one batch over every chip's post (plus the About and filter posts).
+  const parentIndex = useMemo(() => parentIndexOf(props.messages), [props.messages]);
+  const chipIds = useMemo(
+    () => chipPostIds(props.messages, parentIndex),
+    [props.messages, parentIndex],
+  );
+  const batchIds = useMemo(
+    () =>
+      [...chipIds, aboutDraft?.postId, filterPostId ?? undefined].filter(
+        (id): id is string => id !== undefined,
+      ),
+    [chipIds, aboutDraft?.postId, filterPostId],
+  );
+  const postRef = useChipBatch(batchIds);
+  const sharedInChat = useMemo(
+    () => new Set(props.messages.flatMap((m) => m.sharedPostIds)),
+    [props.messages],
+  );
+  const shownMessages = useMemo(
+    () => (filterPostId !== null ? filterRows(props.messages, filterPostId) : props.messages),
+    [props.messages, filterPostId],
+  );
+
+  /** Remember the share just queued so its card becomes the About. */
+  const expectCard = (postId: string): void => {
+    pendingCardRef.current = { postId, known: new Set(props.messages.map((m) => m.id)) };
+  };
+  /** Talk about a card already in the thread: it becomes the About and flashes. */
+  const talkAbout = (postId: string, cardMessageId: string): void => {
+    pendingCardRef.current = null;
+    setAboutDraft({ postId, cardMessageId });
+    jumpTo(cardMessageId);
+  };
+  /**
+   * Bring a post into the conversation: its newest loaded card becomes the
+   * About (and is jumped to); with none, a card message is sent now through the
+   * share path and becomes the About once the outbox assigns its id.
+   */
+  const bringPost = (postId: string): void => {
+    if (filterPostId !== null && filterPostId !== postId) setFilterPostId(null);
+    const card = newestCardFor(props.messages, postId);
+    if (card !== null) {
+      talkAbout(postId, card.id);
+      return;
+    }
+    expectCard(postId);
+    props.onSend('', [], [postId], null, []);
+  };
+  /** Show one post's conversation; what is typed next stays about it. */
+  const showPost = (postId: string): void => {
+    setFilterPostId(postId);
+    const card = newestCardFor(props.messages, postId);
+    if (card !== null) setAboutDraft({ postId, cardMessageId: card.id });
+  };
+  const chipFor = (message: ThreadMessage): BubbleChip | undefined => {
+    const target = chipTargetFor(message, parentIndex);
+    return bubbleChip(target, target !== null ? postRef(target.postId) : null, {
+      workspaceKey,
+      onShowPost: showPost,
+    });
+  };
+  // The composer's send: the reply draft wins, else the About card; a share
+  // (paperclip or pasted link) makes its new card the About.
+  const aboutReply = aboutQuote(
+    aboutDraft,
+    aboutDraft !== null ? messagesById.get(aboutDraft.cardMessageId) : undefined,
+  );
+  const composerSend: ComposerSend = (text, attachments, sharedPostIds, reply, sharedBriefIds) => {
+    const shared = sharedPostIds[0];
+    if (shared !== undefined) expectCard(shared);
+    props.onSend(
+      text,
+      attachments,
+      sharedPostIds,
+      replyForSend(reply, aboutReply, sharedPostIds.length > 0),
+      sharedBriefIds,
+    );
+  };
+  const aboutPost = aboutDraft !== null ? postRef(aboutDraft.postId) : undefined;
   return (
     <div className="flex h-full flex-col bg-bg">
       <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-2 md:px-4">
@@ -1621,7 +1847,13 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           </IconButton>
         ) : null}
       </div>
-      {props.marks !== undefined && !selecting ? (
+      {filterPostId !== null ? (
+        <FilterStrip
+          post={postRef(filterPostId) ?? null}
+          workspaceKey={workspaceKey}
+          onShowAll={() => setFilterPostId(null)}
+        />
+      ) : props.marks !== undefined && !selecting ? (
         <MarkStrip marks={marks} onOpen={() => setMarksOpen(true)} />
       ) : null}
       <ThreadBody
@@ -1661,7 +1893,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
               },
             }
           : {})}
-        messages={props.messages}
+        messages={shownMessages}
+        chipFor={chipFor}
+        onTalkAbout={talkAbout}
+        onShowPost={showPost}
+        filtering={filterPostId !== null}
         loading={props.loading}
         profiles={props.profiles}
         cache={presignCache}
@@ -1673,7 +1909,9 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         {...(props.loadingOlder !== undefined ? { loadingOlder: props.loadingOlder } : {})}
         {...(props.hasMore !== undefined ? { hasMore: props.hasMore } : {})}
         {...(props.onLoadOlder !== undefined ? { onLoadOlder: props.onLoadOlder } : {})}
-        {...(props.onNewestVisible !== undefined ? { onNewestVisible: props.onNewestVisible } : {})}
+        {...(props.onNewestVisible !== undefined && filterPostId === null
+          ? { onNewestVisible: props.onNewestVisible }
+          : {})}
         {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
         {...(props.onToggleReaction !== undefined
           ? { onToggleReaction: props.onToggleReaction }
@@ -1696,11 +1934,15 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         />
       ) : (
         <Composer
-          onSend={props.onSend}
+          onSend={composerSend}
           disabled={!props.canSend}
           onTyping={props.onTyping}
           onCancelReply={() => setReplyDraft(null)}
           {...(replyDraft !== null ? { reply: replyDraft } : {})}
+          about={aboutPost ?? undefined}
+          onCancelAbout={() => setAboutDraft(null)}
+          sharedPostIds={sharedInChat}
+          onBringPost={bringPost}
           {...(canAttach ? { uploadFile } : {})}
           {...(canTranscribe ? { transcribe } : {})}
         />
@@ -1718,7 +1960,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           timeZone={props.timeZone}
           onJump={(id) => {
             setMarksOpen(false);
-            jumpTo(id);
+            jumpToAll(id);
           }}
           onResolve={props.onResolveMark}
           onReopen={props.onReopenMark}
@@ -1753,7 +1995,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
                 }
               : null
           }
-          onJump={jumpTo}
+          onJump={jumpToAll}
         />
       ) : null}
       {onForward !== undefined && forwardChannels !== undefined ? (

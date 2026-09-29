@@ -26,6 +26,8 @@ import {
   isVoiceOnly,
   keyOpensMenu,
   lastSeenLabel,
+  aboutQuote,
+  bubbleChip,
   MessageBubble,
   messageTimeSource,
   OWN_BUBBLE_CONTENT,
@@ -47,6 +49,12 @@ import { MessageAttachments } from '@/components/chat/MessageAttachments';
 import { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
 import type { ThreadMessage } from '@/lib/chat/thread';
+import { PostRefChip } from '@/components/chat/PostRefChip';
+import { SharedPostCards } from '@/components/chat/PostCard';
+import { chipTargetFor, filterRows, parentIndexOf, replyForSend } from '@/lib/chat/post-refs';
+import { runSend } from '@/lib/chat/send-flow';
+import { sendMessageRecord } from '@/lib/chat/record';
+import type { Client } from '@srtdio/rpc';
 
 // MessageBubble is a pure, hook-free presentational component, so calling it
 // directly returns its element tree without invoking child components (Avatar,
@@ -1211,5 +1219,217 @@ describe('ThreadHeaderIdentity', () => {
 
   it('a DM without the handler renders no button', () => {
     expect(buttons(ThreadHeaderIdentity({ ...base, isGroup: false }))).toEqual([]);
+  });
+});
+
+describe('post references', () => {
+  const POST = { id: 'p1', number: 14, title: 'Launch teaser', thumbnailAssetVersionId: null };
+  const card = makeMessage({ id: 'card', body: '', sharedPostIds: ['p1'], mine: true });
+  const reply = makeMessage({
+    id: 'r1',
+    body: 'Can we swap the cover?',
+    reply: { id: 'card', authorUserId: 'me', preview: 'Shared post' },
+  });
+
+  function bubbleWith(message: ThreadMessage, chip: ReturnType<typeof bubbleChip>): ReactElement {
+    return MessageBubble({
+      message,
+      profiles: PROFILES,
+      cache,
+      presignEnabled: false,
+      showTicks: false,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      onBadgeClick: () => {},
+      postRefs: { chip },
+    });
+  }
+
+  function types(root: ReactElement): unknown[] {
+    const found: unknown[] = [];
+    walk(root, (el) => found.push(el.type));
+    return found;
+  }
+
+  it('a reply to a card message renders the KEY chip instead of the quote', () => {
+    const onShowPost = vi.fn();
+    const target = chipTargetFor(reply, parentIndexOf([card, reply]));
+    expect(target).toEqual({ cardMessageId: 'card', postId: 'p1' });
+    const chip = bubbleChip(target, POST, { workspaceKey: 'gbl', onShowPost });
+    const root = bubbleWith(reply, chip);
+    expect(types(root)).toContain(PostRefChip);
+    expect(types(root)).not.toContain(ReplyQuoteBox);
+    let onTap: (() => void) | undefined;
+    walk(root, (el) => {
+      if (el.type === PostRefChip) onTap = (el.props as { onTap: () => void }).onTap;
+    });
+    onTap?.();
+    expect(onShowPost).toHaveBeenCalledWith('p1');
+  });
+
+  it('renders plain text (no quote, no chip) until the chip data arrives', () => {
+    const target = chipTargetFor(reply, parentIndexOf([card]));
+    const chip = bubbleChip(target, undefined, { workspaceKey: 'gbl', onShowPost: vi.fn() });
+    expect(chip).toEqual({ kind: 'pending' });
+    const root = bubbleWith(reply, chip);
+    expect(types(root)).not.toContain(PostRefChip);
+    expect(types(root)).not.toContain(ReplyQuoteBox);
+    let body: unknown;
+    walk(root, (el) => {
+      const props = el.props as { className?: string; children?: unknown };
+      if (props.className === BODY_TEXT) body = props.children;
+    });
+    expect(body).toEqual(['Can we swap the cover?']);
+  });
+
+  it('keeps the quote for a plain parent or a post the viewer cannot see', () => {
+    const plain = bubbleChip(null, undefined, { workspaceKey: 'gbl', onShowPost: vi.fn() });
+    expect(plain).toBeUndefined();
+    expect(types(bubbleWith(reply, plain))).toContain(ReplyQuoteBox);
+    const hidden = bubbleChip({ postId: 'p1' }, null, { workspaceKey: null, onShowPost: vi.fn() });
+    expect(types(bubbleWith(reply, hidden))).toContain(ReplyQuoteBox);
+  });
+
+  it('hands the card message id and the talk-about hook to its cards', () => {
+    const onTalkAbout = vi.fn();
+    const root = MessageBubble({
+      message: card,
+      profiles: PROFILES,
+      cache,
+      presignEnabled: false,
+      showTicks: false,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      onBadgeClick: () => {},
+      postRefs: { onTalkAbout },
+    });
+    let props: { messageId?: string; onTalkAbout?: unknown } | undefined;
+    walk(root, (el) => {
+      if (el.type === SharedPostCards) props = el.props as typeof props;
+    });
+    expect(props?.messageId).toBe('card');
+    expect(props?.onTalkAbout).toBe(onTalkAbout);
+  });
+
+  it('the filter shows only that post: its cards and the replies to them, no time labels', () => {
+    const t0 = Date.parse(CREATED_AT);
+    const at = (min: number): Pick<ThreadMessage, 'time' | 'createdAt'> => ({
+      time: t0 + min * 60_000,
+      createdAt: new Date(t0 + min * 60_000).toISOString(),
+    });
+    const rows = [
+      makeMessage({ id: 'a', ...at(0) }),
+      makeMessage({ id: 'card', body: '', sharedPostIds: ['p1'], ...at(1) }),
+      makeMessage({ id: 'other', body: '', sharedPostIds: ['p2'], ...at(2) }),
+      makeMessage({
+        id: 'r1',
+        reply: { id: 'card', authorUserId: null, preview: '' },
+        ...at(30),
+      }),
+      makeMessage({
+        id: 'r2',
+        reply: { id: 'other', authorUserId: null, preview: '' },
+        ...at(31),
+      }),
+    ];
+    const shown = filterRows(rows, 'p1');
+    expect(shown.map((m) => m.id)).toEqual(['card', 'r1']);
+    const all = threadRows(shown, t0, 'UTC');
+    expect(all.some((r) => r.kind === 'time')).toBe(true);
+    const filtered = threadRows(shown, t0, 'UTC', { times: false });
+    expect(filtered.some((r) => r.kind === 'time')).toBe(false);
+    expect(filtered.filter((r) => r.kind === 'message')).toHaveLength(2);
+  });
+
+  it('the filter adds a 44px Load older row at the top that calls the loader', () => {
+    const loadOlder = vi.fn();
+    const items = threadListItems([], false, () => <li />, loadOlder);
+    const row = items[1] as ReactElement<{ children: ReactElement }>;
+    const button = row.props.children as ReactElement<{
+      onClick: () => void;
+      className: string;
+      children: string;
+    }>;
+    expect(button.props.children).toBe('Load older');
+    expect(button.props.className).toContain('min-h-[44px]');
+    button.props.onClick();
+    expect(loadOlder).toHaveBeenCalledTimes(1);
+    // Not while a page is loading, and never outside the filter.
+    expect(threadListItems([], true, () => <li />, loadOlder).map((i) => i.key)).not.toContain(
+      'load-older',
+    );
+    expect(threadListItems([], false, () => <li />).map((i) => i.key)).not.toContain('load-older');
+  });
+
+  it('a send with About set and no reply records p_reply_to_message_id = the card message', async () => {
+    const rpc = vi.fn(() => ({
+      abortSignal: () =>
+        Promise.resolve({
+          data: {
+            id: 'new',
+            channel_id: 'c1',
+            workspace_id: 'ws',
+            sender_user_id: 'me',
+            body: 'swap the cover',
+            mentions: null,
+            attachment_asset_ids: null,
+            shared_post_ids: null,
+            shared_brief_ids: null,
+            reply_to_message_id: 'card',
+            forwarded_from_message_id: null,
+            attachment_meta: null,
+            agora_event_id: null,
+            created_at: CREATED_AT,
+            edited_at: null,
+            deleted_at: null,
+          },
+          error: null,
+        }),
+    }));
+    const client = { rpc } as unknown as Client;
+    const about = aboutQuote({ cardMessageId: 'card' }, card);
+    expect(about).toEqual({ id: 'card', authorUserId: 'peer-1', preview: 'Shared post' });
+    const outcome = await runSend(
+      {
+        recordMessage: (input) => sendMessageRecord({ client, ...input }),
+        publishLive: undefined,
+        onLiveWarning: () => {},
+      },
+      {
+        id: 'new',
+        channelId: 'c1',
+        currentUserId: 'me',
+        traceId: 'trace',
+        text: 'swap the cover',
+        local: {
+          attachments: [],
+          sharedPostIds: [],
+          sharedBriefIds: [],
+          reply: replyForSend(null, about, false),
+        },
+      },
+    );
+    expect(outcome.ok).toBe(true);
+    expect(rpc).toHaveBeenCalledWith(
+      'chat_message_send',
+      expect.objectContaining({ p_reply_to_message_id: 'card' }),
+    );
+  });
+
+  it('a reply draft wins over About on send', () => {
+    const draft = { id: 'quoted', authorUserId: null, preview: 'hi' };
+    expect(replyForSend(draft, aboutQuote({ cardMessageId: 'card' }, card), false)?.id).toBe(
+      'quoted',
+    );
+    expect(aboutQuote(null, undefined)).toBeNull();
+    expect(aboutQuote({ cardMessageId: 'gone' }, undefined)).toEqual({
+      id: 'gone',
+      authorUserId: null,
+      preview: 'Shared post',
+    });
   });
 });

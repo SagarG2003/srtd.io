@@ -89,6 +89,12 @@ export interface ThreadMessage {
   sharedBriefIds: string[];
   /** The quoted message when this is a reply; null otherwise. */
   reply: ReplyQuote | null;
+  /**
+   * The quoted message's shared post ids, carried by reply hydration so a reply
+   * to a card message renders its KEY chip even when the card is not loaded.
+   * Absent when unknown or when the quoted message shares no posts.
+   */
+  parentSharedPostIds?: string[];
   state: MessageState;
   /** Read state; rendered as ticks for own DM messages only. */
   status: MessageStatus;
@@ -334,7 +340,8 @@ export function missingReplyIds(messages: readonly ThreadMessage[]): string[] {
  * Resolve unresolved reply quotes from the loaded list plus `sources` (quoted
  * rows fetched separately). With `settle`, a quote whose message cannot be
  * found (deleted, not visible) falls back to a generic label instead of staying
- * blank. Resolved quotes are left untouched.
+ * blank. Resolved quotes are left untouched. A quoted card message also hands
+ * its shared post ids to the reply (parentSharedPostIds).
  */
 export function hydrateReplies(
   messages: ThreadMessage[],
@@ -354,6 +361,9 @@ export function hydrateReplies(
     return {
       ...m,
       reply: { id: quoted.id, authorUserId: quoted.senderUserId, preview: replyPreview(quoted) },
+      ...(quoted.sharedPostIds.length > 0
+        ? { parentSharedPostIds: [...quoted.sharedPostIds] }
+        : {}),
     };
   });
 }

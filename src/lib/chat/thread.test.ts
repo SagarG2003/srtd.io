@@ -365,6 +365,22 @@ describe('rowToThreadMessage from the persisted columns', () => {
     expect(hydrateReplies([reply], [])[0]?.reply?.preview).toBe('');
     expect(hydrateReplies([reply], [], true)[0]?.reply?.preview).toBe('Message');
   });
+
+  it('carries a quoted card message’s shared post ids as parentSharedPostIds', () => {
+    const card = rowToThreadMessage(row({ id: 'card', body: null, shared_post_ids: ['p1'] }), ME);
+    const reply = rowToThreadMessage(row({ id: 'm2', reply_to_message_id: 'card' }), ME);
+    // From the IN read (the card is not loaded).
+    const [fromRead] = hydrateReplies([reply], [card]);
+    expect(fromRead?.parentSharedPostIds).toEqual(['p1']);
+    expect(fromRead?.reply?.preview).toBe('Shared post');
+    // From the loaded list.
+    const [, fromLoaded] = hydrateReplies([card, reply], []);
+    expect(fromLoaded?.parentSharedPostIds).toEqual(['p1']);
+    // A plain parent carries none; a missing one settles with none.
+    const plain = rowToThreadMessage(row({ id: 'card', body: 'hi' }), ME);
+    expect(hydrateReplies([reply], [plain])[0]).not.toHaveProperty('parentSharedPostIds');
+    expect(hydrateReplies([reply], [], true)[0]).not.toHaveProperty('parentSharedPostIds');
+  });
 });
 
 describe('withOutboxBubbles', () => {

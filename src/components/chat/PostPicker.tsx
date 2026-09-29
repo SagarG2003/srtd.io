@@ -17,6 +17,11 @@
 // The Briefs tab reads the workspace's briefs (title, objective, Open/Closed,
 // target and raised dates, live post count) through listBriefsForPicker,
 // filtered by status chips, and toggles brief chips the same way.
+//
+// Inline mode (the composer's hash picker): no sheet, no tabs and no search box;
+// the posts list alone, in a panel the composer anchors, with the search text
+// controlled by the composer (the text after the hash). Sections and search
+// behave exactly as in the sheet.
 
 import { useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
@@ -89,7 +94,11 @@ interface PostPickerProps {
   /** Toggle one brief in/out of the selection. */
   onToggleBrief: (brief: BriefCardFields) => void;
   /** Post ids already shared in this chat; those rows say "in this chat". */
-  sharedPostIds?: ReadonlySet<string>;
+  sharedPostIds?: ReadonlySet<string> | undefined;
+  /** Render the posts list alone (no sheet, tabs or search box), for the composer popover. */
+  inline?: boolean;
+  /** Controlled search text; the search box is not rendered when set inline. */
+  query?: string | undefined;
 }
 
 type ShareTab = 'posts' | 'briefs';
@@ -197,7 +206,8 @@ export function PostPicker(props: PostPickerProps): ReactElement {
   const [briefFilter, setBriefFilter] = useState<BriefFilter>(DEFAULT_BRIEF_FILTER);
   const [briefLoadedKey, setBriefLoadedKey] = useState<string | null>(null);
   const [briefError, setBriefError] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
+  const [localQuery, setQuery] = useState('');
+  const query = props.query ?? localQuery;
   const [debounced, setDebounced] = useState('');
   const [sections, setSections] = useState<PickerSectionsData | null>(null);
   const [search, setSearch] = useState<SearchState | null>(null);
@@ -354,6 +364,10 @@ export function PostPicker(props: PostPickerProps): ReactElement {
     );
   }
 
+  if (props.inline === true) {
+    return <InlinePickerPanel open={props.open}>{postBody}</InlinePickerPanel>;
+  }
+
   return (
     <Sheet
       open={props.open}
@@ -423,6 +437,27 @@ export function PostPicker(props: PostPickerProps): ReactElement {
         )}
       </div>
     </Sheet>
+  );
+}
+
+/**
+ * The inline picker's panel: the posts list in a bordered panel, full width of
+ * its anchor, capped in height. No motion; nothing renders while closed.
+ */
+export function InlinePickerPanel(props: {
+  open: boolean;
+  children: ReactElement;
+}): ReactElement | null {
+  if (!props.open) return null;
+  return (
+    <div
+      data-post-picker-inline=""
+      role="region"
+      aria-label="Bring a post into the conversation"
+      className="flex max-h-[45vh] flex-col overflow-y-auto rounded-lg border border-border bg-panel [&>ul]:mx-0 [&>ul]:max-h-none [&>ul]:border-t-0"
+    >
+      {props.children}
+    </div>
   );
 }
 

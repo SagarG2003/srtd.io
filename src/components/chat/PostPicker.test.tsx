@@ -5,10 +5,19 @@ import { renderToStaticMarkup } from 'react-dom/server';
 // views are hookless and rendered to static markup (node env, no DOM); the
 // loaders take a recording client, so query counts are asserted directly.
 vi.mock('@/lib/supabase', () => ({ supabase: {} }));
+// The inline picker renders the stateful component; its contexts are stubbed.
+vi.mock('@/lib/workspace-context', () => ({
+  useWorkspace: () => ({ workspaceId: 'ws-1', workspaceKey: 'GBL', workspaces: [] }),
+}));
+vi.mock('@/lib/session-context', () => ({
+  useSession: () => ({ session: { user: { id: 'u-1' } } }),
+}));
 
 import type { Client } from '@srtdio/rpc';
 import {
+  InlinePickerPanel,
   PickerSkeleton,
+  PostPicker,
   PostSectionsView,
   SearchResultsView,
   loadPickerSections,
@@ -265,5 +274,63 @@ describe('in this chat', () => {
       />,
     );
     expect(html).not.toContain('in this chat');
+  });
+});
+
+describe('inline mode (the composer hash picker)', () => {
+  function inline(open: boolean, query: string): string {
+    return renderToStaticMarkup(
+      <PostPicker
+        inline
+        open={open}
+        query={query}
+        onClose={() => undefined}
+        selected={[]}
+        onToggle={() => undefined}
+        selectedBriefs={[]}
+        onToggleBrief={() => undefined}
+      />,
+    );
+  }
+
+  it('renders the posts list alone in a panel: no sheet, tabs or search box', () => {
+    const html = inline(true, '');
+    expect(html).toContain('data-post-picker-inline');
+    expect(html).toContain('aria-label="Loading posts"');
+    expect(html).not.toContain('Share a post or brief');
+    expect(html).not.toContain('Briefs');
+    expect(html).not.toMatch(/<input\b/);
+  });
+
+  it('a controlled query goes straight to search (skeleton until the page lands)', () => {
+    const html = inline(true, 'launch');
+    expect(html).toContain('data-post-picker-inline');
+    expect(html).toContain('aria-label="Loading posts"');
+  });
+
+  it('renders nothing while closed', () => {
+    expect(inline(false, '')).toBe('');
+  });
+
+  it('the panel lays the sections flush (no sheet gutter) and scrolls', () => {
+    const el = InlinePickerPanel({ open: true, children: <PickerSkeleton /> });
+    const className = (el?.props as { className: string }).className;
+    expect(className).toContain('overflow-y-auto');
+    expect(className).toContain('[&>ul]:mx-0');
+    expect(InlinePickerPanel({ open: false, children: <PickerSkeleton /> })).toBeNull();
+    const html = renderToStaticMarkup(
+      <InlinePickerPanel open>
+        <PostSectionsView
+          data={{
+            sections: [{ key: 'review', label: 'Waiting on client', rows: [row(1)] }],
+            olderApprovedCount: 0,
+          }}
+          {...ctx}
+          sharedPostIds={new Set(['p1'])}
+        />
+      </InlinePickerPanel>,
+    );
+    expect(html).toContain('Waiting on client');
+    expect(html).toContain('in this chat');
   });
 });

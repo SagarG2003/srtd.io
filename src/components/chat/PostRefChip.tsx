@@ -1,0 +1,171 @@
+// The KEY chip a message carries when it replies to a card message, plus the
+// thread-level batch that feeds every chip, the About bar and the filter strip.
+// The batch is ONE readPostCards call per distinct set of new post ids per
+// thread (memoised; it only grows when new ids appear), never one per chip. A
+// chip paints only once its post is in the batch, so it never swaps after first
+// paint; a post the viewer's RLS hides (or a failed read) resolves to null and
+// the message keeps its plain quote. Tokens only; the own bubble's overrides
+// (OWN_BUBBLE_CONTENT) restyle the chip the way they restyle the quote.
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactElement } from 'react';
+import { IconPipeline } from '@/components/ui/icons';
+import { useThumbnail } from '@/components/media/use-thumbnail';
+import { PRESIGN_ENABLED, sharedCardPresignCache } from '@/components/chat/PostCard';
+import { cn } from '@/lib/cn';
+import { formatEntityRef } from '@/lib/entityRef';
+import { supabase } from '@/lib/supabase';
+import { useWorkspace } from '@/lib/workspace-context';
+import type { Result } from '@srtdio/posts';
+import { readPostCards, type PostCardRow } from '../../../packages/posts/src/reads';
+
+/** What a chip, the About bar and the filter strip show for one post. */
+export type PostRefPost = Pick<PostCardRow, 'id' | 'number' | 'title' | 'thumbnailAssetVersionId'>;
+
+/** A post in the batch: its row, null when not visible, undefined while unknown. */
+export type PostRefLookup = (postId: string) => PostCardRow | null | undefined;
+
+/** One thread's chip batch: a memo of resolved posts and the reads that fill it. */
+export interface ChipBatch {
+  get: PostRefLookup;
+  /**
+   * Read the ids not yet requested, in one call. Null when every id was already
+   * requested (no read); otherwise resolves once the new ids are in.
+   */
+  request: (ids: readonly string[]) => Promise<void> | null;
+}
+
+export function createChipBatch(
+  load: (ids: string[]) => Promise<Result<PostCardRow[]>>,
+): ChipBatch {
+  const requested = new Set<string>();
+  const resolved = new Map<string, PostCardRow | null>();
+  return {
+    get: (postId) => resolved.get(postId),
+    request: (ids) => {
+      const fresh = [...new Set(ids)].filter((id) => !requested.has(id)).sort();
+      if (fresh.length === 0) return null;
+      for (const id of fresh) requested.add(id);
+      return load(fresh).then(
+        (result) => {
+          const rows = result.ok ? result.data : [];
+          for (const id of fresh) resolved.set(id, null);
+          for (const row of rows) resolved.set(row.id, row);
+        },
+        () => {
+          for (const id of fresh) resolved.set(id, null);
+        },
+      );
+    },
+  };
+}
+
+/**
+ * The thread's chip batch over `ids` (chip posts plus the About and filter
+ * posts). A new batch per workspace; re-renders once each read lands.
+ */
+export function useChipBatch(ids: readonly string[]): PostRefLookup {
+  const { workspaceId } = useWorkspace();
+  const [version, setVersion] = useState(0);
+  const batchRef = useRef<{ workspaceId: string; batch: ChipBatch } | null>(null);
+  if (workspaceId !== null && batchRef.current?.workspaceId !== workspaceId) {
+    batchRef.current = {
+      workspaceId,
+      batch: createChipBatch((next) => readPostCards(supabase, { workspaceId, ids: next })),
+    };
+  }
+  const batch = workspaceId !== null ? (batchRef.current?.batch ?? null) : null;
+  const key = [...new Set(ids)].sort().join(',');
+  useEffect(() => {
+    if (batch === null || key === '') return;
+    void batch.request(key.split(','))?.then(() => setVersion((v) => v + 1));
+  }, [batch, key]);
+  return useMemo<PostRefLookup>(
+    () => (postId) => (batch !== null ? batch.get(postId) : undefined),
+    // version re-derives the lookup so consumers re-render with the new posts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [batch, version],
+  );
+}
+
+/** KEY-N, or null before the workspace key resolves. */
+export function postRefKey(workspaceKey: string | null, number: number): string | null {
+  return workspaceKey !== null && workspaceKey !== ''
+    ? formatEntityRef(workspaceKey, number)
+    : null;
+}
+
+/** A post's cover as a small thumbnail (round for chips, rounded for bars). */
+export function PostRefThumb(props: {
+  assetVersionId: string | null;
+  size: 18 | 24 | 32;
+  round?: boolean;
+}): ReactElement {
+  const thumb = useThumbnail<HTMLSpanElement>({
+    assetVersionId: props.assetVersionId,
+    cache: sharedCardPresignCache(),
+    enabled: PRESIGN_ENABLED,
+  });
+  const box = { 18: 'h-[18px] w-[18px]', 24: 'h-6 w-6', 32: 'h-8 w-8' }[props.size];
+  return (
+    <span
+      ref={thumb.ref}
+      aria-hidden="true"
+      data-post-ref-thumb=""
+      className={cn(
+        'flex shrink-0 items-center justify-center overflow-hidden bg-panel-3 text-fg-3',
+        box,
+        props.round === true ? 'rounded-full' : 'rounded-md',
+      )}
+    >
+      {thumb.url !== null && !thumb.failed ? (
+        <img
+          src={thumb.url}
+          alt=""
+          onError={thumb.onError}
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        <IconPipeline size={props.size === 18 ? 11 : 16} />
+      )}
+    </span>
+  );
+}
+
+/**
+ * The chip itself: a 24px pill (18px round thumb, KEY in mono accent, title
+ * truncated) inside a 44px-tall tap target. Tapping shows only that post's
+ * conversation. The own bubble's content overrides restyle it like the quote.
+ */
+export function PostRefChip(props: {
+  post: PostRefPost;
+  workspaceKey: string | null;
+  onTap: () => void;
+  className?: string;
+}): ReactElement {
+  const { post } = props;
+  const ref = postRefKey(props.workspaceKey, post.number);
+  return (
+    <button
+      type="button"
+      data-post-ref={post.id}
+      data-msg-link=""
+      aria-label={`Show the conversation about ${ref ?? post.title}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        props.onTap();
+      }}
+      className={cn('flex min-h-[44px] min-w-0 max-w-full items-center text-left', props.className)}
+    >
+      <span className="inline-flex h-6 min-w-0 max-w-full items-center gap-1.5 rounded-full bg-panel-3 pl-[3px] pr-2.5">
+        <PostRefThumb assetVersionId={post.thumbnailAssetVersionId} size={18} round />
+        {ref !== null ? (
+          <span data-post-ref-key="" className="shrink-0 font-mono text-xs font-medium text-accent">
+            {ref}
+          </span>
+        ) : null}
+        <span className="min-w-0 truncate text-xs text-fg-2">{post.title}</span>
+      </span>
+    </button>
+  );
+}

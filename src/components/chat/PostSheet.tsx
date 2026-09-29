@@ -81,6 +81,13 @@ export const ACTION_GOOD = `${ACTION_BASE} bg-good text-white hover:opacity-90`;
 export const ACTION_PRIMARY = `${ACTION_BASE} bg-accent text-accent-fg hover:bg-accent-hover`;
 export const ACTION_GHOST = `${ACTION_BASE} border border-border bg-panel text-fg hover:bg-panel-2`;
 export const ACTION_LINK = `${ACTION_BASE} text-accent hover:bg-panel-2`;
+/** Soft: the accent-soft fill with accent ink ("Talk about"). */
+export const ACTION_SOFT = `${ACTION_BASE} bg-accent-soft text-accent hover:bg-panel-2`;
+
+/** The sheet's talk-about label. */
+export function talkAboutLabel(refLabel: string): string {
+  return `Talk about ${refLabel}`;
+}
 
 /** The reference shown for the post: KEY-N, or a plain fallback before the key resolves. */
 export function sheetRef(workspaceKey: string | null, number: number): string {
@@ -285,6 +292,8 @@ export interface PostSheetActionsProps {
   onAction: (action: SheetAction) => void;
   onConfirm: () => void;
   onBack: () => void;
+  /** Bring the post into the chat's conversation; absent hides the button. */
+  onTalkAbout?: (() => void) | undefined;
 }
 
 /**
@@ -368,6 +377,16 @@ export function PostSheetActions(props: PostSheetActionsProps): ReactElement {
             {actionLabel(action, props.refLabel)}
           </button>
         ))}
+        {props.onTalkAbout !== undefined ? (
+          <button
+            type="button"
+            data-sheet-talk-about=""
+            onClick={props.onTalkAbout}
+            className={ACTION_SOFT}
+          >
+            {talkAboutLabel(props.refLabel)}
+          </button>
+        ) : null}
         {set.hint !== null ? (
           <p data-sheet-hint="" className="text-center text-xs text-fg-3">
             {set.hint}
@@ -396,6 +415,8 @@ export interface PostSheetProps {
   cache: PresignCache;
   deps: PresignDeps;
   presignEnabled: boolean;
+  /** "Talk about <KEY>": brings the post into the conversation, then the sheet closes. */
+  onTalkAbout?: () => void;
 }
 
 /** Read the gallery once per open; a closed sheet drops it so a reopen reads fresh. */
@@ -538,6 +559,14 @@ export function PostSheet(props: PostSheetProps): ReactElement {
             error={error}
             onAction={onAction}
             onConfirm={onConfirm}
+            onTalkAbout={
+              props.onTalkAbout !== undefined
+                ? () => {
+                    props.onTalkAbout?.();
+                    onClose();
+                  }
+                : undefined
+            }
             onBack={() => {
               setError(null);
               setMode({ kind: 'actions' });
