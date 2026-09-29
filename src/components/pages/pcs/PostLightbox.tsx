@@ -20,7 +20,7 @@ import {
 import type { IconProps } from '@/components/ui/icons';
 import { cn } from '@/lib/cn';
 import { requestPresignedUrl, type PresignCache, type PresignDeps } from '@/lib/asset-presign';
-import { wrapIndex, lightboxCounter } from '@/components/ui/ImageLightbox';
+import { wrapIndex, lightboxCounter, dragAxis, shouldDismiss } from '@/components/ui/ImageLightbox';
 import type { GalleryItem } from '@srtdio/posts';
 
 // wrapIndex / lightboxCounter live in the shared ImageLightbox now; re-exported
@@ -101,6 +101,74 @@ export function placePinFromEvent(
 export function slideFromScroll(scrollLeft: number, slideWidth: number, count: number): number {
   if (count <= 0 || slideWidth <= 0) return 0;
   return Math.min(count - 1, Math.max(0, Math.round(scrollLeft / slideWidth)));
+}
+
+/** One pointer sample for the swipe-down gesture. */
+export interface DismissPoint {
+  x: number;
+  y: number;
+  /** Milliseconds (Date.now()). */
+  t: number;
+}
+
+/** The swipe-down controller the stage gestures drive. */
+export interface SwipeDismiss {
+  /** A pointer went down; `eligible` is false while zoomed or multi-touch. */
+  down: (point: DismissPoint, eligible: boolean) => void;
+  /** Follow the pointer; returns the drag's axis once past the tap slop. */
+  move: (point: DismissPoint) => 'x' | 'y' | null;
+  /** Release: close past the distance or on a downward flick, else spring back. */
+  up: (point: DismissPoint) => void;
+  /** Abandon the drag and spring back. */
+  cancel: () => void;
+  /** Whether a downward (Y) dismiss drag is in progress. */
+  dragging: () => boolean;
+}
+
+/**
+ * Swipe-down dismiss, mirroring ImageLightbox: a single-pointer drag at 1x that
+ * leaves the tap slop dominantly downward follows the finger on Y only, and on
+ * release closes past DISMISS_DISTANCE (120px) or on a flick faster than
+ * DISMISS_FLICK_VELOCITY; anything shorter springs back. A horizontal drag stays
+ * the native carousel's. React-free so it is unit tested with plain points.
+ */
+export function createSwipeDismiss(opts: {
+  onDrag: (dy: number) => void;
+  onClose: () => void;
+}): SwipeDismiss {
+  let start: (DismissPoint & { axis: 'x' | 'y' | null }) | null = null;
+  const reset = (): void => {
+    const wasY = start?.axis === 'y';
+    start = null;
+    if (wasY) opts.onDrag(0);
+  };
+  return {
+    down: (point, eligible) => {
+      if (!eligible) {
+        reset();
+        return;
+      }
+      start = { ...point, axis: null };
+    },
+    move: (point) => {
+      if (start === null) return null;
+      if (start.axis === null) start.axis = dragAxis(point.x - start.x, point.y - start.y);
+      if (start.axis === 'y') opts.onDrag(Math.max(point.y - start.y, 0));
+      return start.axis;
+    },
+    up: (point) => {
+      if (start === null) return;
+      const drag = start;
+      start = null;
+      if (drag.axis !== 'y') return;
+      const dy = Math.max(point.y - drag.y, 0);
+      const velocity = dy / Math.max(point.t - drag.t, 1);
+      opts.onDrag(0);
+      if (shouldDismiss(dy, velocity)) opts.onClose();
+    },
+    cancel: reset,
+    dragging: () => start?.axis === 'y',
+  };
 }
 
 /** An item's intrinsic size: stored asset dimensions, else the measured fallback. */
@@ -226,6 +294,8 @@ export interface LightboxViewProps {
   onConfirmRemove?: (() => void) | undefined;
   /** F5 seam: overlay rendered over the sharp image; nothing when omitted. */
   pinOverlay?: ((item: GalleryItem, index: number) => ReactNode) | undefined;
+  /** Swipe-down offset in px (translateY only); 0 or omitted at rest. */
+  dragY?: number | undefined;
 }
 
 /** One slide's stage: the fully-visible sharp image, no letterbox filler. */
@@ -301,6 +371,7 @@ function fitSlide(props: LightboxViewProps, item: GalleryItem, i: number): React
  */
 export function lightboxView(props: LightboxViewProps): ReactElement {
   const { items, index, chrome, busy, zoom, manage } = props;
+  const dragY = props.dragY ?? 0;
   const count = items.length;
   const chromeVisible = chrome;
   const removeConfirming = props.removeConfirming === true;
@@ -328,7 +399,16 @@ export function lightboxView(props: LightboxViewProps): ReactElement {
     // In-flow, full-width block (no longer a modal): the viewer replaces the
     // ribbon in normal page flow, the post content continues below it. It carries
     // its own dark backdrop and stays dark in both app themes.
-    <div aria-label="Image viewer" className="relative w-full overflow-hidden bg-overlay">
+    // A swipe down moves the whole viewer on Y only; it springs back when released
+    // short of the dismiss distance.
+    <div
+      aria-label="Image viewer"
+      className={cn(
+        'relative w-full overflow-hidden bg-overlay',
+        dragY > 0 ? undefined : 'transition-transform duration-base',
+      )}
+      style={dragY > 0 ? { transform: `translateY(${dragY}px)` } : undefined}
+    >
       {/* Image region: the native scroll-snap carousel, one slide per width, in a
           full-width aspect-ratio box that follows the current image's ratio. The
           counter, close, and prev/next arrows overlay this region. */}
@@ -598,8 +678,27 @@ export function PostLightbox({
   const [zoom, setZoom] = useState({ scale: 1, x: 0, y: 0 });
   // The delete confirm row replaces the bottom-bar controls until resolved.
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [dragY, setDragY] = useState(0);
 
   const trackRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const dismiss = useMemo(
+    () => createSwipeDismiss({ onDrag: setDragY, onClose: () => onCloseRef.current() }),
+    [],
+  );
+
+  // A downward dismiss drag owns the touch: stop the browser from scrolling the
+  // page (or cancelling the pointer) under it. Any other drag stays native.
+  useEffect(() => {
+    const el = trackRef.current;
+    if (el === null) return;
+    const onTouchMove = (event: TouchEvent): void => {
+      if (dismiss.dragging() && event.cancelable) event.preventDefault();
+    };
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    return () => el.removeEventListener('touchmove', onTouchMove);
+  }, [dismiss, items.length]);
   const indexRef = useRef(index);
   indexRef.current = index;
 
@@ -733,11 +832,16 @@ export function PostLightbox({
             y: zoom.y,
           };
           panStart.current = null;
+          dismiss.cancel();
           event.currentTarget.setPointerCapture(event.pointerId);
         } else if (pts.length === 1 && zoom.scale > 1) {
           panStart.current = { px: event.clientX, py: event.clientY, x: zoom.x, y: zoom.y };
           event.currentTarget.setPointerCapture(event.pointerId);
         }
+        dismiss.down(
+          { x: event.clientX, y: event.clientY, t: Date.now() },
+          pts.length === 1 && zoom.scale <= 1,
+        );
       },
       onPointerMove: (event) => {
         if (!pointers.current.has(event.pointerId)) return;
@@ -763,10 +867,20 @@ export function PostLightbox({
             scale: z.scale,
             ...clampPan(z.scale, start.x + dx, start.y + dy, rect),
           }));
+        } else if (pts.length === 1) {
+          const axis = dismiss.move({ x: event.clientX, y: event.clientY, t: Date.now() });
+          if (axis === 'y') {
+            // A dismiss drag is never a tap, and keeps its pointer if it leaves the stage.
+            movedRef.current = true;
+            event.currentTarget.setPointerCapture?.(event.pointerId);
+          }
         }
       },
       onPointerUp: (event) => {
         pointers.current.delete(event.pointerId);
+        if (pointers.current.size === 0) {
+          dismiss.up({ x: event.clientX, y: event.clientY, t: Date.now() });
+        }
         if (pointers.current.size < 2) pinchStart.current = null;
         if (pointers.current.size === 0) {
           panStart.current = null;
@@ -776,6 +890,7 @@ export function PostLightbox({
       },
       onPointerCancel: (event) => {
         pointers.current.delete(event.pointerId);
+        dismiss.cancel();
         if (pointers.current.size < 2) pinchStart.current = null;
         if (pointers.current.size === 0) panStart.current = null;
       },
@@ -812,7 +927,7 @@ export function PostLightbox({
         }, DOUBLE_TAP_MS);
       },
     }),
-    [zoom, applyZoomAt, clampPan],
+    [zoom, applyZoomAt, clampPan, dismiss],
   );
 
   const item = items[index];
@@ -913,5 +1028,6 @@ export function PostLightbox({
       setConfirmingRemove(false);
     },
     pinOverlay,
+    dragY,
   });
 }
