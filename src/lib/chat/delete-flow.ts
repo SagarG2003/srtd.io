@@ -7,13 +7,16 @@
 // Edit own message: the same order. chat_message_edit first; only the
 // returned row updates the bubble (the new text never shows before the record
 // holds it), then peers get ext { sorted_event: 'edit', message_ids: [id],
-// body, edited_at }. A failed record returns the mapped user copy.
+// body, edited_at }. A failed record returns the mapped user copy. The edit
+// always carries the body's COMPLETE mention list (empty when none): the proc
+// reads an omitted list as "clear all mentions".
 //
 // Pure of React and the SDK so the ordering is unit-tested directly.
 
 import type { Client } from '@srtdio/rpc';
 import { deleteMessagesRecord, editFailureCopy, editMessageRecord } from '@/lib/chat/record';
 import { deleteEventExt, editEventExt, type ChatMessageRow } from '@/lib/chat/thread';
+import { mentionIds } from '@/lib/chat/mentions';
 
 export interface DeleteFlowDeps {
   client: Client;
@@ -69,6 +72,7 @@ export async function runEdit(
     channelId: input.channelId,
     messageId: input.messageId,
     body: input.body,
+    mentions: mentionIds(input.body),
     traceId: input.traceId,
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
   });

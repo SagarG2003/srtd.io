@@ -22,8 +22,10 @@ import {
   draftAttachments,
   hasLinkCards,
   isSendKeydown,
+  mentionKeyAction,
   replyBarPreview,
   ReplyBar,
+  restoreDraftText,
   attachRejectCopy,
   SEND_FAILED_COPY,
   shouldShowMic,
@@ -35,6 +37,14 @@ import { canSendAttachmentMessage } from '@/lib/chat/attachments';
 import { stripHashToken } from '@/lib/chat/post-refs';
 import { IconButton } from '@/components/ui/IconButton';
 import { postRefKey } from '@/components/chat/PostRefChip';
+import { getDraft, resetDrafts, setDraft } from '@/lib/chat/drafts';
+import {
+  deserializeMentions,
+  mentionIds,
+  resolveMentionText,
+  serializedCaret,
+  serializeMentions,
+} from '@/lib/chat/mentions';
 
 // The repo's vitest runs in the node environment with no @testing-library/react,
 // so caret/DOM behaviour is not exercised here. Following the codebase pattern
@@ -552,5 +562,66 @@ describe('F14: composer toasts never show raw error text', () => {
 
   it('a voice upload failure reads the send copy', () => {
     expect(SEND_FAILED_COPY).toBe("Couldn't send, try again");
+  });
+});
+
+describe('@ mentions in the composer', () => {
+  const ANA = '11111111-1111-4111-8111-111111111111';
+  const BEN = '22222222-2222-4222-8222-222222222222';
+  const names = new Map([
+    [ANA, 'Ana Roy'],
+    [BEN, 'Ben'],
+  ]);
+  const nameOf = (id: string): string | undefined => names.get(id);
+
+  it('while the picker is open Enter and Tab pick (never send), arrows move, Esc closes', () => {
+    expect(mentionKeyAction('Enter', false)).toBe('pick');
+    expect(mentionKeyAction('Tab', false)).toBe('pick');
+    expect(mentionKeyAction('ArrowDown', false)).toBe('down');
+    expect(mentionKeyAction('ArrowUp', false)).toBe('up');
+    expect(mentionKeyAction('Escape', false)).toBe('close');
+    expect(mentionKeyAction('a', false)).toBeNull();
+    // Mid-IME composition the picker leaves the key alone.
+    expect(mentionKeyAction('Enter', true)).toBeNull();
+  });
+
+  it('a chat switch keeps each draft its own mention map', () => {
+    resetDrafts();
+    const picksA = [{ userId: ANA, name: 'Ana Roy' }];
+    const picksB = [{ userId: BEN, name: 'Ben' }];
+    const textA = 'hey @Ana Roy ';
+    const textB = '@Ben ok';
+    setDraft('chan-a', {
+      text: serializeMentions(textA, picksA),
+      caret: serializedCaret(textA, textA.length, picksA),
+    });
+    setDraft('chan-b', {
+      text: serializeMentions(textB, picksB),
+      caret: serializedCaret(textB, textB.length, picksB),
+    });
+    const a = restoreDraftText(getDraft('chan-a'), nameOf);
+    const b = restoreDraftText(getDraft('chan-b'), nameOf);
+    expect(a).toEqual({ text: textA, caret: textA.length, picks: picksA });
+    expect(b).toEqual({ text: textB, caret: textB.length, picks: picksB });
+    expect(mentionIds(serializeMentions(a.text, a.picks))).toEqual([ANA]);
+    resetDrafts();
+  });
+
+  it('the edit box shows "@Name" and an unchanged edit is still unchanged', () => {
+    const body = `ping @[${BEN}]`;
+    const shown = deserializeMentions(body, nameOf);
+    expect(shown.text).toBe('ping @Ben');
+    expect(
+      editSendDecision({
+        text: serializeMentions(shown.text, shown.picks),
+        initialText: body,
+        hasOtherContent: false,
+      }),
+    ).toBe('unchanged');
+    const bar = renderToStaticMarkup(
+      <EditingBar text={resolveMentionText(body, nameOf)} onCancel={() => undefined} />,
+    );
+    expect(bar).toContain('ping @Ben');
+    expect(bar).not.toContain('@[');
   });
 });

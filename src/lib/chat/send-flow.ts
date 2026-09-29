@@ -21,6 +21,9 @@
 // upload failure is a failed attempt (same backoff and FAILED_AFTER_MS), and a
 // retry uploads only the files that still have no version id. An entry restored
 // with its files lost (filesMissing) never runs and does not hold up the queue.
+//
+// Mentions ride in the body as @[uuid] tokens; every attempt derives p_mentions
+// from the body, so a retry (or a send restored from storage) resends them.
 
 import type { SendRecordResult } from '@/lib/chat/record';
 import {
@@ -41,6 +44,7 @@ import {
   type ChatAttachmentUpload,
   type MessageAttachment,
 } from '@/lib/chat/attachments';
+import { mentionIds } from '@/lib/chat/mentions';
 import {
   rowToThreadMessage,
   type LocalMessageContent,
@@ -67,6 +71,8 @@ export interface SendFlowDeps {
     channelId: string;
     traceId: string;
     body: string;
+    /** The body's mentioned user ids (from its @[uuid] tokens); empty when none. */
+    mentions: string[];
     attachmentAssetIds: string[];
     sharedPostIds: string[];
     sharedBriefIds: string[];
@@ -126,6 +132,7 @@ export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<Sen
     channelId: input.channelId,
     traceId: input.traceId,
     body: input.text,
+    mentions: mentionIds(input.text),
     attachmentAssetIds: input.local.attachments.map((a) => a.assetId),
     sharedPostIds: [...input.local.sharedPostIds],
     sharedBriefIds: [...(input.local.sharedBriefIds ?? [])],

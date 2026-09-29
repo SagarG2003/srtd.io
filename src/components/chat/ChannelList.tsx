@@ -40,6 +40,7 @@ import { sortChannelsByRecency } from '@/lib/chat/sort-conversations';
 import { formatRelativeTime } from '@/lib/chat/format-relative-time';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { draftText, draftsVersion, subscribeDrafts } from '@/lib/chat/drafts';
+import { knownMentionName, resolveMentionText } from '@/lib/chat/mentions';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import {
   CHAT_LIST_NAME_TYPE,
@@ -65,6 +66,11 @@ export const DRAFT_PREFIX = 'Draft: ';
  */
 export function rowDraft(draft: string, open: boolean): string | null {
   return !open && draft.trim() !== '' ? draft : null;
+}
+
+/** A stored draft as its list line: its @[uuid] tokens read "@Name". Pure over the registry. */
+export function draftLine(stored: string): string {
+  return resolveMentionText(stored, knownMentionName);
 }
 
 /** Per-channel store lookup the cards read (preview, time, unread). */
@@ -851,7 +857,7 @@ export function ChannelList(props: ChannelListProps): ReactElement {
   // Drafts live outside React; re-read the rows whenever one changes.
   const drafts = useSyncExternalStore(subscribeDrafts, draftsVersion, draftsVersion);
   const draftFor = useCallback<DraftLookup>(
-    (channelId) => draftText(channelId),
+    (channelId) => draftLine(draftText(channelId)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [drafts],
   );

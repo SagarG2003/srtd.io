@@ -86,6 +86,7 @@ describe('runSend', () => {
       channelId: CHANNEL,
       traceId: 'trace-1',
       body: 'hello',
+      mentions: [],
       attachmentAssetIds: [],
       sharedPostIds: [],
       sharedBriefIds: [],
@@ -645,5 +646,56 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
       sender.settle(CHANNEL, 'm1');
       expect(sender.entries(CHANNEL)).toEqual([]);
     });
+  });
+});
+
+describe('mentions on send', () => {
+  const ANA = '22222222-2222-4222-8222-222222222222';
+  const BEN = '33333333-3333-4333-8333-333333333333';
+  const body = `@[${ANA}] and @[${BEN}] and @[${ANA}] again`;
+
+  it('the body carries @[uuid] tokens and p_mentions carries the unique uuids', async () => {
+    const d = deps();
+    await runSend(d, input({ text: body }));
+    expect(d.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ body, mentions: [ANA, BEN] }),
+    );
+  });
+
+  it('a persisted outbox entry keeps its mentions, so every retry resends them', async () => {
+    const data = new Map<string, string>();
+    const storage: OutboxStorage = {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => {
+        data.set(key, value);
+      },
+      removeItem: (key) => {
+        data.delete(key);
+      },
+    };
+    const scope = { workspaceId: 'ws', userId: ME };
+    const queued: OutboxEntry = {
+      id: ID,
+      text: body,
+      local: { attachments: [], sharedPostIds: [], reply: null },
+      state: 'failed',
+    };
+    writePersistedOutbox(storage, scope, { [CHANNEL]: [queued] });
+    const restored = readPersistedOutbox(storage, scope)[CHANNEL]?.[0];
+    expect(restored?.text).toBe(body);
+    const failing = deps({
+      recordMessage: vi.fn(async () => ({
+        ok: false as const,
+        reason: 'error' as const,
+        message: 'x',
+      })),
+    });
+    const retry = input({ text: restored?.text ?? '' });
+    await runSend(failing, retry);
+    await runSend(failing, retry);
+    expect(failing.recordMessage).toHaveBeenCalledTimes(2);
+    for (const call of vi.mocked(failing.recordMessage).mock.calls) {
+      expect(call[0].mentions).toEqual([ANA, BEN]);
+    }
   });
 });

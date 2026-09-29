@@ -374,3 +374,40 @@ describe('R2: catch-up rechecks loaded rows a missed delete or edit can touch', 
     expect(applied.deleted).toEqual([]);
   });
 });
+
+describe('runEdit mentions: every edit passes the complete current list', () => {
+  const X = '44444444-4444-4444-8444-444444444444';
+  const Y = '55555555-5555-4555-8555-555555555555';
+  const Z = '66666666-6666-4666-8666-666666666666';
+
+  async function editArgs(body: string): Promise<Record<string, unknown>> {
+    const rpc = vi.fn(() => ({
+      abortSignal: () =>
+        Promise.resolve({ data: { id: 'm1', body, edited_at: 'now' }, error: null }),
+    }));
+    await runEdit(
+      {
+        client: { rpc } as unknown as Client,
+        applyLocal: () => undefined,
+        signal: undefined,
+        onSignalFailed: () => undefined,
+      },
+      { channelId: 'c1', messageId: 'm1', body, traceId: 't' },
+    );
+    return (rpc.mock.calls[0] as unknown as [string, Record<string, unknown>])[1];
+  }
+
+  it('an edit with mentions passes all of them', async () => {
+    expect((await editArgs(`@[${X}] and @[${Y}]`)).p_mentions).toEqual([X, Y]);
+  });
+
+  it('removing every mention passes an empty array (never omitted)', async () => {
+    const args = await editArgs('no one now');
+    expect(args).toHaveProperty('p_mentions');
+    expect(args.p_mentions).toEqual([]);
+  });
+
+  it('adding a mention passes the union, removing one drops it', async () => {
+    expect((await editArgs(`@[${Y}] and @[${Z}]`)).p_mentions).toEqual([Y, Z]);
+  });
+});

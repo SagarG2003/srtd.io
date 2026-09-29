@@ -13,6 +13,7 @@
 // incoming command messages on `onCmdMessage(CmdMsgBody)`.
 
 import type { AgoraChat } from 'agora-chat';
+import { truncateBody } from '@/lib/chat/mentions';
 import type { Database } from '@srtdio/schemas';
 import type { ChatConnection } from '@/lib/chat/types';
 import { toAgoraUsername, userIdFromAgoraUsername } from '@/lib/chat/agora-identity';
@@ -414,9 +415,8 @@ export function replyPreview(
     Partial<Pick<ThreadMessage, 'sharedBriefIds'>>,
 ): string {
   const body = message.body.trim();
-  if (body !== '') {
-    return body.length > REPLY_PREVIEW_LIMIT ? `${body.slice(0, REPLY_PREVIEW_LIMIT)}…` : body;
-  }
+  // Never cut through an @[uuid] token: the quote resolves it to "@Name" at render.
+  if (body !== '') return truncateBody(body, REPLY_PREVIEW_LIMIT);
   if (message.attachments.length > 0) return 'Attachment';
   if (message.sharedPostIds.length > 0) return 'Shared post';
   if ((message.sharedBriefIds ?? []).length > 0) return 'Shared brief';

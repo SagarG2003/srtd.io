@@ -75,7 +75,11 @@ import {
   stripLoops,
   threadStripSlot,
   type ThreadRow,
+  mentionClass,
+  profileNameOf,
+  renderBodyWithMentions,
 } from '@/components/chat/MessageThread';
+import { resolveMentionText } from '@/lib/chat/mentions';
 import { renderToStaticMarkup as renderStrip } from 'react-dom/server';
 import { MarkStrip } from '@/components/chat/MarksSheet';
 import type { ChatMark } from '@/lib/chat/marks';
@@ -3197,5 +3201,114 @@ describe('F14: a failed mark never shows raw error text', () => {
       "Couldn't mark, try again",
     );
     expect(markOutcomeCopy({ ok: true })).toBeNull();
+  });
+});
+
+describe('@mentions in bubbles', () => {
+  const ME = '11111111-1111-4111-8111-111111111111';
+  const BEN = '22222222-2222-4222-8222-222222222222';
+  const GONE = '99999999-9999-4999-8999-999999999999';
+  const names: Map<string, ChatProfile> = new Map([
+    [ME, { userId: ME, displayName: 'Me Person', avatarUrl: null }],
+    [BEN, { userId: BEN, displayName: 'Ben', avatarUrl: null }],
+  ]);
+  const nameOf = profileNameOf(names);
+  const body = `hi @[${BEN}], @[${ME}] and @[${GONE}]`;
+
+  function markup(mine: boolean, onOpen = vi.fn(), peerUserId: string | null = null): string {
+    return renderStrip(
+      <p>
+        {renderBodyWithMentions(body, mine, {
+          nameOf,
+          viewerUserId: ME,
+          mentions: { peerUserId, onOpen },
+        })}
+      </p>,
+    );
+  }
+
+  it('turns every token into "@Name", unknown into "@Unknown member", never a raw token', () => {
+    const html = markup(false);
+    expect(html).toContain('@Ben');
+    expect(html).toContain('@Me Person');
+    expect(html).toContain('@Unknown member');
+    expect(html).not.toContain('@[');
+  });
+
+  it('styles like the bubble link colour (own and peer) and bolds a mention of me', () => {
+    expect(mentionClass(true, false)).toContain('text-accent-fg');
+    expect(mentionClass(false, false)).toContain('text-accent');
+    expect(mentionClass(false, true)).toContain('font-bold');
+    const own = markup(true);
+    const peer = markup(false);
+    expect(own).toContain('text-accent-fg');
+    expect(peer).not.toContain('text-accent-fg');
+    expect(peer).toMatch(/data-mention="11111111[^"]*" class="[^"]*font-bold/);
+  });
+
+  it('tapping another person opens the DM via the opener; my own name is inert', () => {
+    const onOpen = vi.fn();
+    const nodes = renderBodyWithMentions(body, false, {
+      nameOf,
+      viewerUserId: ME,
+      mentions: { peerUserId: null, onOpen },
+    });
+    const els = nodes.filter(isValidElement) as ReactElement<Record<string, unknown>>[];
+    const ben = els.find((el) => el.props['data-mention'] === BEN);
+    const me = els.find((el) => el.props['data-mention'] === ME);
+    expect(ben?.type).toBe('button');
+    expect(String(ben?.props.className)).toContain('before:h-[44px]');
+    (ben?.props.onClick as () => void)();
+    expect(onOpen).toHaveBeenCalledWith(BEN);
+    expect(me?.type).toBe('span');
+    expect(me?.props.onClick).toBeUndefined();
+  });
+
+  it("inside our DM the other person's name is inert", () => {
+    const html = markup(false, vi.fn(), BEN);
+    expect(html).not.toContain('<button');
+  });
+
+  it('a bubble and its reply quote show names, never tokens', () => {
+    const message = makeMessage({
+      body,
+      reply: { id: 'q1', authorUserId: BEN, preview: `ask @[${ME}]` },
+    });
+    const root = MessageBubble({
+      message,
+      profiles: names,
+      cache,
+      presignEnabled: false,
+      showTicks: false,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      layout: 'touch',
+      viewerUserId: ME,
+      mentions: { peerUserId: null, onOpen: () => {} },
+      onBadgeClick: () => {},
+    });
+    const texts: string[] = [];
+    const labels: string[] = [];
+    walk(root, (el) => {
+      const props = el.props as Record<string, unknown>;
+      if (typeof props.children === 'string') texts.push(props.children);
+      if (typeof props.preview === 'string') labels.push(props.preview);
+      if (props['data-mention'] !== undefined) texts.push(String(props.children));
+    });
+    expect(texts).toContain('@Ben');
+    expect(labels).toContain('ask @Me Person');
+    expect([...texts, ...labels].join(' ')).not.toContain('@[');
+  });
+
+  it('copy to clipboard reads "@Name"', () => {
+    expect(resolveMentionText(body, nameOf)).toBe('hi @Ben, @Me Person and @Unknown member');
+  });
+
+  it('a body with no mention renders exactly as before', () => {
+    expect(renderBodyWithMentions('plain', false, { nameOf, viewerUserId: ME })).toEqual(
+      renderMessageBody('plain', false),
+    );
   });
 });

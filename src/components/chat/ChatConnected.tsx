@@ -30,6 +30,10 @@ import { MessageThread } from '@/components/chat/MessageThread';
 import { NewChatSheet } from '@/components/chat/NewChatSheet';
 import { GroupInfoSheet } from '@/components/chat/GroupInfoSheet';
 import { leaveSelectionThen } from '@/lib/chat/forward';
+import { startDmChannel } from '@/components/chat/chat-actions';
+import { useChannelMembers } from '@/components/chat/use-channel-members';
+import { mentionIds, rememberMentionNames } from '@/lib/chat/mentions';
+import { useToast } from '@/components/ui/toast';
 
 interface ChatConnectedProps {
   client: ChatConnection | null;
@@ -41,6 +45,68 @@ interface ChatConnectedProps {
 const DESKTOP_QUERY = '(min-width: 768px)';
 
 const NO_MESSAGES: ThreadMessage[] = [];
+
+/** The toast when opening a DM from a mention fails; the raw error is only logged. */
+export const MENTION_DM_FAILED = "Couldn't open that chat, try again";
+
+/**
+ * The user ids a thread's first paint needs names for: every sender, the DM
+ * peer, and every @mention in a body or a reply quote, minus the ones already
+ * held. One batched read covers them all (no per-token fetch). Pure.
+ */
+export function profileIdsNeeded(
+  messages: readonly ThreadMessage[],
+  peerUserId: string | null,
+  held: ReadonlyMap<string, unknown>,
+): string[] {
+  const needed = new Set<string>();
+  const add = (id: string | null): void => {
+    if (id !== null && !held.has(id)) needed.add(id);
+  };
+  for (const message of messages) {
+    add(message.senderUserId);
+    for (const id of mentionIds(message.body)) add(id);
+    if (message.reply !== null) for (const id of mentionIds(message.reply.preview)) add(id);
+  }
+  add(peerUserId);
+  return [...needed];
+}
+
+/**
+ * The deep link's jump target: ?message= only counts alongside the ?channel= it
+ * belongs to. Pure.
+ */
+export function messageParamTarget(
+  params: URLSearchParams,
+): { channelId: string; messageId: string } | null {
+  const channelId = params.get('channel');
+  const messageId = params.get('message');
+  if (channelId === null || channelId === '' || messageId === null || messageId === '') return null;
+  return { channelId, messageId };
+}
+
+/** What opening a DM from a tapped mention needs. */
+export interface MentionDmDeps {
+  workspaceId: string;
+  /** The existing open-or-create DM function (startDmChannel), bound to its client. */
+  start: (
+    params: { workspaceId: string; peerUserId: string; traceId: string },
+    onOpen: (channelId: string) => void,
+  ) => Promise<{ message: string } | null>;
+  /** Select and open the DM once it exists. */
+  onOpen: (channelId: string) => void;
+  onFailed: (traceId: string, message: string) => void;
+}
+
+/** Open (or create) my DM with a mentioned person, one fresh trace per tap. */
+export async function openMentionDm(userId: string, deps: MentionDmDeps): Promise<void> {
+  const traceId = generateTraceId();
+  const failure = await deps.start(
+    { workspaceId: deps.workspaceId, peerUserId: userId, traceId },
+    deps.onOpen,
+  );
+  if (failure !== null) deps.onFailed(traceId, failure.message);
+}
 
 /** Resolve a channel's Agora target defensively; a bad row yields no target. */
 function safeTarget(channel: ChannelSummary | null): ChannelTarget | null {
@@ -66,6 +132,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const [profiles, setProfiles] = useState<Map<string, ChatProfile>>(new Map());
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [groupInfoOpen, setGroupInfoOpen] = useState(false);
+  // An Activity mention's ?message=: the thread opens with it in view.
+  const [pendingJump, setPendingJump] = useState<{ channelId: string; messageId: string } | null>(
+    null,
+  );
+  // The first page paints once its names (senders and @mentions) are in.
+  const [namesSettled, setNamesSettled] = useState<string | null>(null);
+  const toast = useToast();
 
   const {
     state: chatStore,
@@ -130,11 +203,24 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     }
     if (selectedFromParam.current === channel) return;
     selectedFromParam.current = channel;
-    if (selectedRef.current?.channelId === channel) return;
     const found = roster.find((c) => c.channelId === channel);
+    // ?message= is consumed once: the thread takes it, the url drops it.
+    const jump = messageParamTarget(searchParams);
+    if (jump !== null) {
+      if (found !== undefined) setPendingJump(jump);
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete('message');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+    if (selectedRef.current?.channelId === channel) return;
     if (found !== undefined) setSelected(found);
     else writeChannelParam(null);
-  }, [loadStatus, roster, searchParams, writeChannelParam]);
+  }, [loadStatus, roster, searchParams, setSearchParams, writeChannelParam]);
 
   // A ?channel= that disappears by any route other than closeChannel (browser
   // back, external navigation) closes the thread below md so the chrome returns.
@@ -304,25 +390,28 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   });
   const presence = useChatPresence({ client, peerUserId: selected?.peerUserId ?? null });
 
-  // Resolve sender display info in one batched read per set of new ids (no N+1).
+  // Resolve sender and @mention display info in one batched read per set of
+  // new ids (no N+1). The first page of a chat is held until its names are in,
+  // so no mention ever paints as "@Unknown member" and then swaps.
+  const firstPageIn = !thread.loading && threadCurrent;
   useEffect(() => {
-    const needed = new Set<string>();
-    for (const message of thread.messages) {
-      if (message.senderUserId !== null && !profiles.has(message.senderUserId)) {
-        needed.add(message.senderUserId);
-      }
+    const needed = profileIdsNeeded(thread.messages, selected?.peerUserId ?? null, profiles);
+    const settle = (): void => {
+      if (firstPageIn) setNamesSettled(selectedChannelId);
+    };
+    if (needed.length === 0) {
+      settle();
+      return;
     }
-    if (selected?.peerUserId != null && !profiles.has(selected.peerUserId)) {
-      needed.add(selected.peerUserId);
-    }
-    if (needed.size === 0) return;
     let cancelled = false;
-    void readProfiles(supabase, [...needed]).then((result) => {
+    void readProfiles(supabase, needed).then((result) => {
       if (cancelled) return;
+      settle();
       if (!result.ok) {
         logger.warn('chat: profile read failed', { error: result.error.message });
         return;
       }
+      rememberMentionNames(result.data);
       setProfiles((prev) => {
         const next = new Map(prev);
         for (const profile of result.data) next.set(profile.userId, profile);
@@ -332,7 +421,31 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [thread.messages, selected, profiles]);
+  }, [thread.messages, selected, profiles, firstPageIn, selectedChannelId]);
+  const namesReady = namesSettled === selectedChannelId;
+
+  // The @ picker's people: the group's members, or the DM's other person.
+  const mentionMembers = useChannelMembers({
+    workspaceId,
+    currentUserId,
+    groupId: selectedGroupId,
+    peerUserId: selected?.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
+  });
+
+  // Tapping a mentioned name opens my DM with them (created on first use).
+  const onOpenMention = useCallback(
+    (userId: string) =>
+      void openMentionDm(userId, {
+        workspaceId,
+        start: (params, onOpen) => startDmChannel(supabase, params, onOpen),
+        onOpen: onDmReady,
+        onFailed: (traceId, message) => {
+          logger.warn('chat: mention dm open failed', { trace_id: traceId, error: message });
+          toast.show({ title: MENTION_DM_FAILED });
+        },
+      }),
+    [workspaceId, onDmReady, toast],
+  );
 
   const onBack = closeChannel;
 
@@ -370,7 +483,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               isGroup={isGroup}
               profiles={profiles}
               messages={threadCurrent ? thread.messages : NO_MESSAGES}
-              loading={thread.loading || !threadCurrent}
+              loading={thread.loading || !threadCurrent || !namesReady}
               loadingOlder={thread.loadingOlder}
               hasMore={thread.hasMore}
               onLoadOlder={thread.loadOlder}
@@ -394,6 +507,14 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               forwardChannels={roster}
               onForward={thread.forward}
               onEnsureLoaded={thread.ensureLoaded}
+              mentionMembers={mentionMembers}
+              mentions={{
+                peerUserId: selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
+                onOpen: onOpenMention,
+              }}
+              initialMessageId={
+                pendingJump?.channelId === selected.channelId ? pendingJump.messageId : null
+              }
               showTicks={selected.channelType === 'dm'}
               {...(selected.peerUserId != null ? { presence } : {})}
               {...(isDesktop ? {} : { onBack })}

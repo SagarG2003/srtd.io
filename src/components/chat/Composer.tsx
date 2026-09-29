@@ -19,6 +19,7 @@ import { useAudioRecorder, recordingFileName } from '@/lib/chat/use-audio-record
 import type { TranscribeResult } from '@/lib/chat/transcribe';
 import { AttachmentMenu } from '@/components/chat/AttachmentMenu';
 import { PostPicker } from '@/components/chat/PostPicker';
+import { MentionPicker, stepActive } from '@/components/chat/MentionPicker';
 import { PendingChip } from '@/components/chat/PendingChip';
 import { PostRefThumb, postRefKey, type PostRefPost } from '@/components/chat/PostRefChip';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
@@ -47,6 +48,22 @@ import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { clearDraft, EMPTY_DRAFT, getDraft, setDraft, type DraftFile } from '@/lib/chat/drafts';
 import { deletedMessageLabel } from '@/lib/chat/thread';
+import {
+  addPick,
+  deserializeMentions,
+  displayCaret,
+  filterMentionMembers,
+  insertMention,
+  knownMentionName,
+  mentionQuery,
+  rememberMentionNames,
+  resolveMentionText,
+  serializedCaret,
+  serializeMentions,
+  type MentionMember,
+  type MentionPick,
+  type NameOf,
+} from '@/lib/chat/mentions';
 import {
   COMPOSER_INPUT_TYPE,
   NO_TOUCH_SELECT,
@@ -117,6 +134,53 @@ interface ComposerProps {
   onCancelEdit?: (() => void) | undefined;
   /** Record the edited body; resolves ok, or the mapped failure copy to show. */
   onEdit?: ((text: string) => Promise<{ ok: true } | { ok: false; message: string }>) | undefined;
+  /**
+   * The @ member picker: this chat's people (never the viewer) and the name
+   * lookup that turns stored @[uuid] tokens back into "@Name". Absent turns @
+   * mentions off; the text is then sent as typed.
+   */
+  mentions?: ComposerMentions | undefined;
+}
+
+/** What the composer needs for @ mentions. */
+export interface ComposerMentions {
+  members: readonly MentionMember[];
+  selfId: string | null;
+  nameOf: NameOf;
+}
+
+/** The name lookup for stored tokens: the chat's own, then the registry. */
+function mentionNameOf(mentions: ComposerMentions | undefined): NameOf {
+  const own = mentions?.nameOf;
+  return (userId) => own?.(userId) ?? knownMentionName(userId);
+}
+
+/**
+ * The textarea text and caret for a stored (serialized) draft: tokens become
+ * "@Name" and their picks come back, so the draft keeps its mention map. Pure.
+ */
+export function restoreDraftText(
+  stored: { text: string; caret: number },
+  nameOf: NameOf,
+): { text: string; caret: number; picks: MentionPick[] } {
+  const restored = deserializeMentions(stored.text, nameOf);
+  return { ...restored, caret: displayCaret(stored.text, stored.caret, nameOf) };
+}
+
+/**
+ * Which keys the open @ picker takes: Up / Down move, Enter or Tab picks (Enter
+ * never sends while it is open), Escape closes. Null for any other key. Pure.
+ */
+export function mentionKeyAction(
+  key: string,
+  isComposing: boolean,
+): 'up' | 'down' | 'pick' | 'close' | null {
+  if (isComposing) return null;
+  if (key === 'ArrowUp') return 'up';
+  if (key === 'ArrowDown') return 'down';
+  if (key === 'Enter' || key === 'Tab') return 'pick';
+  if (key === 'Escape') return 'close';
+  return null;
 }
 
 /**
@@ -599,7 +663,12 @@ export function Composer(props: ComposerProps): ReactElement {
   // First render starts from this chat's draft (never an effect), so a switch
   // paints the right text and chips on its first frame.
   const [initial] = useState(() => (channelId !== undefined ? getDraft(channelId) : EMPTY_DRAFT));
-  const [text, setText] = useState(initial.text);
+  // The draft stores the serialized body (tokens), so its mention map survives
+  // a chat switch; the textarea shows "@Name" and the picks come back with it.
+  const nameOf = mentionNameOf(props.mentions);
+  const [restored] = useState(() => restoreDraftText(initial, nameOf));
+  const [text, setText] = useState(restored.text);
+  const [picks, setPicks] = useState<MentionPick[]>(restored.picks);
   const [pending, setPending] = useState<Pending[]>(initial.pendingFiles);
   const [sharedPosts, setSharedPosts] = useState<PostCardFields[]>(initial.sharedPosts);
   const [sharedBriefs, setSharedBriefs] = useState<BriefCardFields[]>(initial.sharedBriefs);
@@ -608,9 +677,12 @@ export function Composer(props: ComposerProps): ReactElement {
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [resolvingLinks, setResolvingLinks] = useState(false);
   // The caret, read on every change and selection, drives the hash picker.
-  const [caret, setCaret] = useState(initial.caret);
+  const [caret, setCaret] = useState(restored.caret);
   // Escape closes the hash picker until the caret leaves the token.
   const [hashDismissed, setHashDismissed] = useState(false);
+  // The @ picker: Escape closes it until the caret leaves the @ run.
+  const [mentionDismissed, setMentionDismissed] = useState(false);
+  const [mentionActive, setMentionActive] = useState(0);
   // Editing: the draft to restore after, and whether the edit is being recorded.
   const editSessionRef = useRef<EditSession | null>(null);
   const [editBusy, setEditBusy] = useState(false);
@@ -643,24 +715,35 @@ export function Composer(props: ComposerProps): ReactElement {
   const editingNow = editing !== undefined;
   useEffect(() => {
     if (channelId === undefined || editingNow) return;
-    setDraft(channelId, { text, caret, pendingFiles: pending, sharedPosts, sharedBriefs });
-  }, [channelId, editingNow, text, caret, pending, sharedPosts, sharedBriefs]);
+    setDraft(channelId, {
+      text: serializeMentions(text, picks),
+      caret: serializedCaret(text, caret, picks),
+      pendingFiles: pending,
+      sharedPosts,
+      sharedBriefs,
+    });
+  }, [channelId, editingNow, text, caret, picks, pending, sharedPosts, sharedBriefs]);
 
   // Enter / leave editing once per message id: the text swaps (and comes back
   // after), the caret goes to the end. Before paint, so the old text never shows.
-  const textRef = useRef(text);
-  textRef.current = text;
+  // The session carries serialized bodies (tokens): the edit's initialText and
+  // the saved draft both come back as "@Name" text plus their picks.
+  const textRef = useRef(serializeMentions(text, picks));
+  textRef.current = serializeMentions(text, picks);
   const editingId = editing?.messageId;
   useLayoutEffect(() => {
     const step = editTransition(editSessionRef.current, editing, textRef.current);
     editSessionRef.current = step.session;
     if (step.text === undefined) return;
     // Leaving an edit restores this chat's own draft (the composer is per chat).
-    const next =
+    const stored =
       step.session === null && channelId !== undefined
         ? editRestoreText(channelId, step.text)
         : step.text;
+    const shown = deserializeMentions(stored, nameOf);
+    const next = shown.text;
     setText(next);
+    setPicks(shown.picks);
     setCaret(next.length);
     setEditBusy(false);
     if (step.session === null) return;
@@ -720,6 +803,18 @@ export function Composer(props: ComposerProps): ReactElement {
   // devices keep the default newline. Route through the form's submit so the
   // Send button's exact handler and guard run.
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    const action =
+      mentionRows.length > 0 ? mentionKeyAction(event.key, event.nativeEvent.isComposing) : null;
+    if (action !== null) {
+      event.preventDefault();
+      if (action === 'close') setMentionDismissed(true);
+      else if (action === 'pick') pickMention(mentionRows[activeRow] ?? mentionRows[0]);
+      else
+        setMentionActive(
+          stepActive(activeRow, mentionRows.length, action === 'up' ? 'ArrowUp' : 'ArrowDown'),
+        );
+      return;
+    }
     if (event.key === 'Escape' && hashQuery !== null) {
       event.preventDefault();
       setHashDismissed(true);
@@ -739,8 +834,10 @@ export function Composer(props: ComposerProps): ReactElement {
   }
 
   function submitEdit(draft: EditingDraft): void {
+    // The saved body carries its tokens; the edit flow sends its full mention list.
+    const body = serializeMentions(text, picks);
     const decision = editSendDecision({
-      text,
+      text: body,
       initialText: draft.initialText,
       hasOtherContent: draft.hasOtherContent === true,
     });
@@ -754,7 +851,7 @@ export function Composer(props: ComposerProps): ReactElement {
     }
     setEditBusy(true);
     void props
-      .onEdit(text)
+      .onEdit(body)
       .catch((error: unknown) => {
         logger.error('chat composer: edit threw', { error: String(error) });
         return { ok: false as const, message: "Couldn't edit, try again" };
@@ -774,14 +871,15 @@ export function Composer(props: ComposerProps): ReactElement {
       submitEdit(editing);
       return;
     }
+    const body = serializeMentions(text, picks);
     const draft: LinkCardDraft = {
-      text,
+      text: body,
       sharedPostIds: sharedPosts.map((post) => post.id),
       sharedBriefIds: sharedBriefs.map((brief) => brief.id),
     };
     const origin = currentOrigin();
     // Pasted post / brief links resolve here, at Send only (never per keystroke).
-    if (workspaceId === null || !hasLinkCards(text, workspaceKey, origin)) {
+    if (workspaceId === null || !hasLinkCards(body, workspaceKey, origin)) {
       send(draft);
       return;
     }
@@ -820,6 +918,7 @@ export function Composer(props: ComposerProps): ReactElement {
     // The preview URLs now belong to the bubble (revoked when it goes).
     if (channelId !== undefined) clearDraft(channelId);
     setText('');
+    setPicks([]);
     setCaret(0);
     setPending([]);
     setSharedPosts([]);
@@ -886,6 +985,7 @@ export function Composer(props: ComposerProps): ReactElement {
     const next = el.selectionStart ?? el.value.length;
     setCaret(next);
     if (caretHashQuery(el.value, next) === null) setHashDismissed(false);
+    if (mentionQuery(el.value, next) === null) setMentionDismissed(false);
   }
 
   const hashQuery = hashPickerQuery({
@@ -895,10 +995,39 @@ export function Composer(props: ComposerProps): ReactElement {
     caret,
   });
 
+  // The @ picker's rows: this chat's people matching the typed run, never me.
+  const openMention =
+    props.mentions !== undefined && !props.disabled && !mentionDismissed
+      ? mentionQuery(text, caret)
+      : null;
+  const mentionRows =
+    openMention !== null && props.mentions !== undefined
+      ? filterMentionMembers(props.mentions.members, openMention.query, props.mentions.selfId)
+      : [];
+  const activeRow = Math.min(mentionActive, Math.max(mentionRows.length - 1, 0));
+
+  // A pick swaps the "@query" run for "@Name " and keeps the mention in the map.
+  function pickMention(member: MentionMember | undefined): void {
+    if (member === undefined) return;
+    const next = insertMention(text, caret, member.displayName);
+    rememberMentionNames([member]);
+    setPicks((prev) => addPick(prev, { userId: member.userId, name: member.displayName }));
+    setText(next.text);
+    setCaret(next.caret);
+    setMentionActive(0);
+    const el = textareaRef.current;
+    if (el !== null) {
+      requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(next.caret, next.caret);
+      });
+    }
+  }
+
   // Laptop: the cursor sits in the composer when a chat opens (once, on mount),
-  // unless a restored draft reopened the hash picker.
+  // unless a restored draft reopened the hash or @ picker.
   const focusOnMount = props.focusOnMount === true;
-  const hashOpenOnMount = hashQuery !== null;
+  const hashOpenOnMount = hashQuery !== null || mentionRows.length > 0;
   useEffect(() => {
     if (
       !shouldFocusComposer({
@@ -958,7 +1087,13 @@ export function Composer(props: ComposerProps): ReactElement {
       onSubmit={submit}
       className="relative flex flex-col gap-2 border-t border-border bg-panel px-3 py-2.5"
     >
-      {hashQuery !== null ? (
+      {mentionRows.length > 0 ? (
+        <div data-mention-anchor="" className="absolute inset-x-3 bottom-full z-20 mb-2">
+          <MentionPicker members={mentionRows} active={activeRow} onPick={pickMention} />
+        </div>
+      ) : null}
+
+      {hashQuery !== null && mentionRows.length === 0 ? (
         <div data-hash-picker="" className="absolute inset-x-3 bottom-full z-20 mb-2">
           <PostPicker
             inline
@@ -975,7 +1110,10 @@ export function Composer(props: ComposerProps): ReactElement {
       ) : null}
 
       {bars.editing && editing !== undefined ? (
-        <EditingBar text={editing.initialText} onCancel={() => props.onCancelEdit?.()} />
+        <EditingBar
+          text={resolveMentionText(editing.initialText, nameOf)}
+          onCancel={() => props.onCancelEdit?.()}
+        />
       ) : null}
 
       {bars.about && props.about !== undefined ? (
@@ -984,7 +1122,13 @@ export function Composer(props: ComposerProps): ReactElement {
 
       {bars.reply && props.reply != null ? (
         <ReplyBar
-          reply={props.reply}
+          reply={{
+            ...props.reply,
+            quote: {
+              ...props.reply.quote,
+              preview: resolveMentionText(props.reply.quote.preview, nameOf),
+            },
+          }}
           viewerUserId={props.viewerUserId}
           onCancel={() => props.onCancelReply?.()}
         />
@@ -1093,6 +1237,7 @@ export function Composer(props: ComposerProps): ReactElement {
               value={text}
               onChange={(event) => {
                 setText(event.target.value);
+                setMentionActive(0);
                 trackCaret(event);
                 props.onTyping?.();
               }}

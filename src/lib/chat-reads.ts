@@ -194,6 +194,38 @@ export async function listGroupMemberIds(
   return { ok: true, data: rows.map((r) => r.user_id) };
 }
 
+/** A chat member the mention picker offers: display info plus workspace role. */
+export interface ChatMember extends ChatProfile {
+  /** The raw workspace_members.role; labelled at render. */
+  role: string;
+}
+
+/**
+ * Resolve chat member ids to picker rows: one batched users read and one batched
+ * workspace_members read (active, not removed). An id with no active membership
+ * or no profile is left out, so a removed member is never offered.
+ */
+export async function readChatMembers(
+  client: Client,
+  params: { workspaceId: string; userIds: string[] },
+): Promise<Result<ChatMember[]>> {
+  const ids = unique(params.userIds);
+  const [usersRes, rolesRes] = await Promise.all([
+    readUsers(client, ids),
+    readMemberRoles(client, params.workspaceId, ids),
+  ]);
+  if (!usersRes.ok) return usersRes;
+  if (!rolesRes.ok) return rolesRes;
+  const roleOf = new Map(rolesRes.data.map((m) => [m.user_id, m.role]));
+  const members: ChatMember[] = [];
+  for (const u of usersRes.data) {
+    const role = roleOf.get(u.id);
+    if (role === undefined) continue;
+    members.push({ userId: u.id, displayName: u.display_name, avatarUrl: u.avatar_url, role });
+  }
+  return { ok: true, data: members };
+}
+
 /** One "delete chat for me" row: when the caller cleared a channel. */
 export interface ChannelClearRecord {
   channelId: string;

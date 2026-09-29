@@ -73,6 +73,8 @@ function item(over: Partial<ActivityItem>): ActivityItem {
     pointsAdded: null,
     checkpointTotal: null,
     batchId: null,
+    messageId: null,
+    channelType: null,
     ...over,
   };
 }
@@ -307,5 +309,44 @@ describe('AvatarStack', () => {
   it('overlaps up to three and shows a +N indicator beyond that', () => {
     const html = renderToStaticMarkup(<AvatarStack names={['Ann', 'Bo', 'Cy', 'Di', 'Ed']} />);
     expect(html).toContain('+2');
+  });
+});
+
+describe('ActivityCard chat mention row', () => {
+  it('reads "<actor> mentioned you in <group>" over the message first line', () => {
+    const html = renderCard([
+      item({
+        eventType: 'mention',
+        entityType: 'chat_channel',
+        entityId: 'chan-1',
+        scope: 'groups',
+        channelType: 'group',
+        title: 'Launch crew',
+        actorName: 'Bob',
+        body: 'hey @Ana see this',
+        messageId: 'msg-1',
+      }),
+    ]);
+    expect(html).toContain('Bob mentioned you in Launch crew');
+    expect(html).toContain('hey @Ana see this');
+    expect(html).not.toContain('@[');
+    const classes = [...html.matchAll(/class="([^"]*)"/g)].map((m) => m[1]).join(' ');
+    expect(classes).not.toMatch(/dark:|#[0-9a-f]{6}/i);
+  });
+
+  it('a DM mention reads "<actor> mentioned you"', () => {
+    const html = renderCard([
+      item({
+        eventType: 'mention',
+        entityType: 'chat_channel',
+        entityId: 'chan-2',
+        scope: 'people',
+        channelType: 'dm',
+        actorName: 'Bob',
+        body: 'ping',
+      }),
+    ]);
+    expect(html).toContain('Bob mentioned you');
+    expect(html).not.toContain('mentioned you in');
   });
 });

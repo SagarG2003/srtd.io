@@ -257,6 +257,8 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
   let bClient: GenericClient;
   let cClient: GenericClient;
   let outsiderClient: GenericClient;
+  // Users a single test seeds on its own (T14's extra group members), cleaned up with the rest.
+  const extraUsers: SeededUser[] = [];
 
   beforeAll(async () => {
     const env = loadRlsEnv();
@@ -291,7 +293,7 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
   });
 
   afterAll(async () => {
-    await cleanupWorkspaces(admin, [wsA, wsOther], [owner, userB, userC, outsider]);
+    await cleanupWorkspaces(admin, [wsA, wsOther], [owner, userB, userC, outsider, ...extraUsers]);
   });
 
   // -------------------------------------------------------------------------
@@ -1786,6 +1788,75 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
       expect(res.data?.body).toBe('four args');
       expect(res.data?.mentions).toBeNull();
       expect(res.data?.edited_at).not.toBeNull();
+    });
+
+    it('T13 a 4-arg edit on a message WITH mentions clears them and retracts every entry', async () => {
+      const args = sendArgs(ctx.channelId, 'hi @b', { mentions: [userB.id] });
+      const sent = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(sent.error).toBeNull();
+      expect(live(await mentionEntries(args.p_id), userB.id)).toHaveLength(1);
+
+      const edit = editArgs(args.p_id, ctx.channelId, 'hi, no mention now');
+      expect(edit).not.toHaveProperty('p_mentions');
+      const res = await clientFor(owner.id).rpc('chat_message_edit', edit);
+      expect(res.error).toBeNull();
+      expect(res.data?.mentions).toBeNull();
+      expect(await storedMentions(args.p_id)).toBeNull();
+      const entries = await mentionEntries(args.p_id);
+      expect(entries.length).toBeGreaterThanOrEqual(1);
+      expect(entries.every((e) => e.deleted_at !== null)).toBe(true);
+    });
+
+    it('T14 one edit that removes X, keeps Y and adds Z', async () => {
+      // Two more group members (seeded with the existing helpers): X = userB, Y, Z.
+      const y = await seedUser(loadRlsEnv(), admin);
+      const z = await seedUser(loadRlsEnv(), admin);
+      extraUsers.push(y, z);
+      for (const member of [y, z]) {
+        await seedMember(adminGeneric, wsA, member, 'agency');
+        await insertRow(adminGeneric, 'group_members', {
+          group_id: ctx.groupId,
+          user_id: member.id,
+          workspace_id: wsA.id,
+        });
+      }
+
+      const args = sendArgs(ctx.channelId, 'hi @x @y', { mentions: [userB.id, y.id] });
+      const sent = await clientFor(owner.id).rpc('chat_message_send', args);
+      expect(sent.error).toBeNull();
+      const before = await mentionEntries(args.p_id);
+      expect(live(before, userB.id)).toHaveLength(1);
+      const yBefore = live(before, y.id);
+      expect(yBefore).toHaveLength(1);
+
+      const res = await clientFor(owner.id).rpc(
+        'chat_message_edit',
+        editArgs(args.p_id, ctx.channelId, 'hi @y @z', [y.id, z.id]),
+      );
+      expect(res.error).toBeNull();
+      expect([...((res.data?.mentions as string[] | null) ?? [])].sort()).toEqual(
+        [y.id, z.id].sort(),
+      );
+
+      const after = await mentionEntries(args.p_id);
+      // X retracted.
+      expect(live(after, userB.id)).toHaveLength(0);
+      expect(after.filter((e) => e.user_id === userB.id).every((e) => e.deleted_at !== null)).toBe(
+        true,
+      );
+      // Y kept as the same single live entry.
+      expect(live(after, y.id)).toEqual(yBefore);
+      // Z added once.
+      const zLive = live(after, z.id);
+      expect(zLive).toHaveLength(1);
+      expect(zLive[0]).toMatchObject({
+        entity_type: 'chat_channel',
+        entity_id: ctx.channelId,
+        scope: 'groups',
+        tier: 'urgent',
+        payload: { message_id: args.p_id },
+        actor_user_id: owner.id,
+      });
     });
   });
 });

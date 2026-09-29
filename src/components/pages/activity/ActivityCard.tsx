@@ -13,6 +13,7 @@ import {
   cardTitle,
   isSnoozed,
   relativeTime,
+  isChatMention,
   segmentSelfMentions,
   type ActivityItem,
   type SnoozeKind,
@@ -125,6 +126,8 @@ function pointsPhrase(n: number): string {
  * name, or fall back to the full activity line when there is no actor.
  */
 function actorLine(item: ActivityItem, who: string | null): string {
+  // A chat mention's title already reads "<who> mentioned you ...": the top line is the name.
+  if (isChatMention(item)) return who ?? 'New mention';
   switch (item.eventType) {
     case 'comment':
       return who !== null ? `${who} commented` : 'New comment';

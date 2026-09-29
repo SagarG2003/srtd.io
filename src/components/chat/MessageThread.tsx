@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -14,6 +15,14 @@ import {
 } from 'react';
 import { Link } from 'react-router-dom';
 import { isNearBottom } from '@/lib/chat/scroll';
+import {
+  knownMentionName,
+  mentionLabel,
+  resolveMentionText,
+  splitMentions,
+  type MentionMember,
+  type NameOf,
+} from '@/lib/chat/mentions';
 import { logger } from '@/lib/logger';
 import {
   distanceFromBottom,
@@ -253,6 +262,12 @@ interface MessageThreadProps {
     messages: readonly ThreadMessage[],
     targets: ChannelSummary[],
   ) => Promise<ForwardSendResult>;
+  /** The @ picker's people for this chat (never the viewer); absent turns @ off. */
+  mentionMembers?: readonly MentionMember[];
+  /** Bubble @mentions: tap opens a DM with that person (never me or our DM's peer). */
+  mentions?: BubbleMentions;
+  /** Open with this message in view (an Activity mention); a miss toasts, the chat stays at the bottom. */
+  initialMessageId?: string | null;
 }
 
 /** Users who asked for less motion: the swipe resets without a spring. */
@@ -1078,6 +1093,86 @@ export function renderMessageBody(
   });
 }
 
+/** What a bubble needs to make its @mentions tappable. */
+export interface BubbleMentions {
+  /** The DM's other person: a mention of them inside our DM does nothing. */
+  peerUserId: string | null;
+  /** Open (or create) my DM with the mentioned person. */
+  onOpen: (userId: string) => void;
+}
+
+/** How one body draws its mentions. */
+export interface MentionRenderContext {
+  nameOf: NameOf;
+  viewerUserId: string | null;
+  /** Absent: every mention is inert (selection mode, previews). */
+  mentions?: BubbleMentions | undefined;
+}
+
+/**
+ * A mention's ink inside a bubble: the link colour of that bubble type (accent-fg
+ * on own, accent on peer), bold when it is me. Tokens only, so light and dark
+ * stay at parity.
+ */
+export function mentionClass(mine: boolean, self: boolean): string {
+  return cn(mine ? 'text-accent-fg' : 'text-accent', self ? 'font-bold' : 'font-medium');
+}
+
+/** A 44x44 hit area centred on the inline name, without changing the line box. */
+const MENTION_HIT =
+  "relative before:absolute before:left-1/2 before:top-1/2 before:h-[44px] before:w-full before:min-w-[44px] before:-translate-x-1/2 before:-translate-y-1/2 before:content-['']";
+
+/** The thread's name lookup: the batched profiles, then the mention registry. */
+export function profileNameOf(profiles: Map<string, ChatProfile>): NameOf {
+  return (userId) => profiles.get(userId)?.displayName ?? knownMentionName(userId);
+}
+
+/**
+ * A message body with its @[uuid] tokens drawn as "@Name" (never the raw
+ * token); the text between keeps renderMessageBody's links. A mention of a known
+ * person other than me (and, in a DM, the other person) is a button that opens
+ * my DM with them.
+ */
+export function renderBodyWithMentions(
+  body: string,
+  mine: boolean,
+  ctx: MentionRenderContext,
+): ReactNode[] {
+  const segments = splitMentions(body);
+  // No mention: exactly the plain renderer's runs.
+  if (segments.every((segment) => segment.kind === 'text')) return renderMessageBody(body, mine);
+  return segments.map((segment, i) => {
+    if (segment.kind === 'text') {
+      return <Fragment key={i}>{renderMessageBody(segment.text, mine)}</Fragment>;
+    }
+    const id = segment.userId;
+    const self = id === ctx.viewerUserId;
+    const label = mentionLabel(id, ctx.nameOf);
+    const open = ctx.mentions;
+    // An unresolvable id ("@Unknown member") has no one to open a chat with.
+    const known = ctx.nameOf(id) !== undefined;
+    if (open === undefined || self || !known || id === open.peerUserId) {
+      return (
+        <span key={i} data-mention={id} className={mentionClass(mine, self)}>
+          {label}
+        </span>
+      );
+    }
+    return (
+      <button
+        key={i}
+        type="button"
+        data-mention={id}
+        data-msg-link=""
+        onClick={() => open.onOpen(id)}
+        className={cn(mentionClass(mine, false), MENTION_HIT)}
+      >
+        {label}
+      </button>
+    );
+  });
+}
+
 /** Whether a pointer went down on a link in the body: the link handles the tap. */
 export function isLinkTarget(target: unknown): boolean {
   return (
@@ -1202,6 +1297,8 @@ export function MessageBubble(props: {
   layout: ChatLayout;
   /** The viewer's user id: a quote of their own deleted message reads "You deleted". */
   viewerUserId?: string | undefined;
+  /** Tappable @mentions; absent draws them inert. */
+  mentions?: BubbleMentions | undefined;
   /** The in-bubble meta; computed from the message when absent. */
   meta?: BubbleMeta;
   onBadgeClick: () => void;
@@ -1326,7 +1423,11 @@ export function MessageBubble(props: {
     reply !== null && reply.authorUserId !== null && reply.authorUserId === props.viewerUserId;
   const body = (
     <p className={bodyText(layout)}>
-      {renderMessageBody(message.body, mine)}
+      {renderBodyWithMentions(message.body, mine, {
+        nameOf: profileNameOf(profiles),
+        viewerUserId: props.viewerUserId ?? null,
+        mentions: selection === undefined ? props.mentions : undefined,
+      })}
       {spacer}
     </p>
   );
@@ -1416,7 +1517,11 @@ export function MessageBubble(props: {
                     ? (profiles.get(reply.authorUserId)?.displayName ?? 'Member')
                     : 'Member'
                 }
-                preview={parentDeleted ? deletedMessageLabel({ mine: quotedMine }) : reply.preview}
+                preview={
+                  parentDeleted
+                    ? deletedMessageLabel({ mine: quotedMine })
+                    : resolveMentionText(reply.preview, profileNameOf(profiles))
+                }
                 deleted={parentDeleted}
                 inBubble={layout}
                 onJump={() => props.onJumpToMessage?.(reply.id)}
@@ -1712,6 +1817,7 @@ function MessageRow(props: {
   timeZone: string;
   layout: ChatLayout;
   viewerUserId?: string | undefined;
+  mentions?: BubbleMentions | undefined;
   meta: BubbleMeta;
   /**
    * Open the menu: its anchor rect and the pressed bubble (drawn above the dim);
@@ -1846,6 +1952,7 @@ function MessageRow(props: {
       timeZone={props.timeZone}
       layout={props.layout}
       viewerUserId={props.viewerUserId}
+      mentions={props.mentions}
       meta={props.meta}
       bubbleRef={bubbleRef}
       rowRef={rowRef}
@@ -2107,6 +2214,8 @@ function ThreadBody(
     layout: ChatLayout;
     /** The viewer's user id, for quotes of their own deleted messages. */
     viewerUserId?: string | undefined;
+    /** Tappable @mentions in bubbles. */
+    mentions?: BubbleMentions | undefined;
     presignEnabled: boolean;
     showTicks: boolean;
     isGroup: boolean;
@@ -2549,6 +2658,7 @@ function ThreadBody(
               timeZone={props.timeZone}
               layout={props.layout}
               viewerUserId={props.viewerUserId}
+              mentions={props.mentions}
               meta={row.meta}
               onOpen={(m, rect, held, reactionsOnly) => {
                 if (m.deleted === true) return;
@@ -2654,7 +2764,9 @@ function ThreadBody(
         }}
         onCopy={() => {
           if (menu) {
-            void navigator.clipboard?.writeText(menu.message.body);
+            void navigator.clipboard?.writeText(
+              resolveMentionText(menu.message.body, profileNameOf(props.profiles)),
+            );
             toast.show({ title: 'Message copied' });
           }
         }}
@@ -3202,6 +3314,16 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   });
   const jumpTo = (id: string): void =>
     setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
+  // Opened from an Activity mention: once the first page is in, jump to that
+  // message through the same path (older pages load as needed; a miss toasts
+  // and the chat stays at the bottom). Once per open.
+  const initialMessageId = props.initialMessageId ?? null;
+  const initialJumpDone = useRef(false);
+  useEffect(() => {
+    if (initialJumpDone.current || initialMessageId === null || props.loading) return;
+    initialJumpDone.current = true;
+    setJumpRequest({ id: initialMessageId, seq: 1 });
+  }, [initialMessageId, props.loading]);
   // Jumps from the marks and contact sheets can land outside the filter.
   const jumpToAll = (id: string): void => {
     setFilterPostId(null);
@@ -3272,9 +3394,15 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   }, [shownMessages]);
   const messagesById = useMemo(() => new Map(shownMessages.map((m) => [m.id, m])), [shownMessages]);
   const markedMessages = props.markedMessages;
+  // The pin board reads bodies as text: mentions resolve to "@Name" first.
+  const profiles = props.profiles;
   const messageFor = useCallback(
-    (id: string): ThreadMessage | undefined => messagesById.get(id) ?? markedMessages?.get(id),
-    [messagesById, markedMessages],
+    (id: string): ThreadMessage | undefined => {
+      const message = messagesById.get(id) ?? markedMessages?.get(id);
+      if (message === undefined) return undefined;
+      return { ...message, body: resolveMentionText(message.body, profileNameOf(profiles)) };
+    },
+    [messagesById, markedMessages, profiles],
   );
 
   // The About post resolved to nothing (RLS, failed read): drop it and say so.
@@ -3444,6 +3572,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       <ThreadBody
         layout={layout}
         viewerUserId={props.currentUserId}
+        mentions={props.mentions}
         marks={marks}
         jumpRequest={jumpRequest}
         {...(props.onEnsureLoaded !== undefined ? { onEnsureLoaded: props.onEnsureLoaded } : {})}
@@ -3555,6 +3684,15 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
               }
             : {})}
           onCancelEdit={() => setEditing(null)}
+          {...(props.mentionMembers !== undefined
+            ? {
+                mentions: {
+                  members: props.mentionMembers,
+                  selfId: props.currentUserId ?? null,
+                  nameOf: profileNameOf(props.profiles),
+                },
+              }
+            : {})}
         />
       )}
       {props.marks !== undefined &&

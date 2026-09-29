@@ -5,12 +5,14 @@ import {
   bucketActorNames,
   cardBodyLine,
   cardTitle,
+  chatMentionPreview,
   entityHref,
   entityKey,
   fetchActivityEntries,
   filterByScope,
   filterByState,
   groupDigest,
+  isChatMention,
   isSnoozed,
   mapEntry,
   payloadNum,
@@ -76,6 +78,8 @@ function item(over: Partial<ActivityItem>): ActivityItem {
     pointsAdded: null,
     checkpointTotal: null,
     batchId: null,
+    messageId: null,
+    channelType: null,
     ...over,
   };
 }
@@ -616,6 +620,39 @@ describe('fetchActivityEntries enrichment', () => {
   const inboxRow = (over: Partial<InboxEntryRow>): Record<string, unknown> =>
     row(over) as unknown as Record<string, unknown>;
 
+  it('a chat mention row reads "<actor> mentioned you in <group>" with the message first line', async () => {
+    const ANA = '11111111-1111-4111-8111-111111111111';
+    const client = fakeClient({
+      inbox_entries: ok([
+        inboxRow({
+          id: 'e-chat',
+          event_type: 'mention',
+          entity_type: 'chat_channel',
+          entity_id: 'chan-g',
+          scope: 'groups',
+          actor_user_id: 'u-bob',
+          payload: { message_id: 'msg-1' },
+        }),
+      ]),
+      chat_channels: ok([{ channel_id: 'chan-g', channel_type: 'group', entity_id: 'g1' }]),
+      chat_messages: ok([{ id: 'msg-1', body: `hey @[${ANA}] see this\nsecond line` }]),
+      groups: ok([{ id: 'g1', name: 'Launch crew' }]),
+      users: ok([
+        { id: 'u-bob', display_name: 'Bob', avatar_url: null },
+        { id: ANA, display_name: 'Ana', avatar_url: null },
+      ]),
+    });
+    const res = await fetchActivityEntries(client, 'w1');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const chat = res.data[0] ?? item({});
+    expect(chat.actorName).toBe('Bob');
+    expect(chat.channelType).toBe('group');
+    expect(activityLine(chat)).toBe('Bob mentioned you in Launch crew');
+    expect(chat.body).toBe('hey @Ana see this');
+    expect(entityHref(chat)).toBe('/chat?channel=chan-g&message=msg-1');
+  });
+
   it('resolves a comment actorName via comments -> users and the title via posts', async () => {
     const client = fakeClient({
       inbox_entries: ok([
@@ -956,5 +993,74 @@ describe('fetchActivityEntries query composition', () => {
     expect(hasCall(calls, 'eq', ['event_type', 'mention'])).toBe(true);
     expect(hasCall(calls, 'order', ['created_at', { ascending: false }])).toBe(true);
     expect(hasCall(calls, 'limit', [50])).toBe(true);
+  });
+});
+
+describe('chat mention rows', () => {
+  const chat = (over: Partial<ActivityItem>): ActivityItem =>
+    item({
+      eventType: 'mention',
+      entityType: 'chat_channel',
+      entityId: 'chan-1',
+      scope: 'people',
+      messageId: 'msg-9',
+      actorName: 'Bob',
+      ...over,
+    });
+
+  it('a DM mention reads "<actor> mentioned you"; a group one names the group', () => {
+    expect(activityLine(chat({ channelType: 'dm' }))).toBe('Bob mentioned you');
+    expect(activityLine(chat({ channelType: 'group', title: 'Ops' }))).toBe(
+      'Bob mentioned you in Ops',
+    );
+    expect(activityLine(chat({ channelType: 'dm', actorName: null }))).toBe('New mention');
+  });
+
+  it('links to the chat and the message', () => {
+    expect(entityHref(chat({}))).toBe('/chat?channel=chan-1&message=msg-9');
+    expect(entityHref(chat({ messageId: null }))).toBe('/chat?channel=chan-1');
+  });
+
+  it('maps the sender from actor_user_id and the message id from the payload', () => {
+    const mapped = mapEntry(
+      row({
+        event_type: 'mention',
+        entity_type: 'chat_channel',
+        entity_id: 'chan-1',
+        actor_user_id: 'u-bob',
+        payload: { message_id: 'msg-9' },
+      }),
+    );
+    expect(mapped.actorId).toBe('u-bob');
+    expect(mapped.messageId).toBe('msg-9');
+    expect(isChatMention(mapped)).toBe(true);
+  });
+
+  it('the preview is the first line with tokens resolved, never a raw token', () => {
+    const ANA = '11111111-1111-4111-8111-111111111111';
+    const GONE = '99999999-9999-4999-8999-999999999999';
+    const names = new Map([[ANA, 'Ana']]);
+    expect(chatMentionPreview(`\n @[${ANA}] and @[${GONE}]\nmore`, (id) => names.get(id))).toBe(
+      '@Ana and @Unknown member',
+    );
+    expect(chatMentionPreview(null, () => undefined)).toBeNull();
+  });
+
+  it('a comment mention row is unchanged', () => {
+    const comment = item({
+      eventType: 'mention',
+      entityType: 'post',
+      entityId: 'p1',
+      title: 'Q3 Launch',
+      actorName: 'Bob',
+      commentId: 'c1',
+    });
+    expect(isChatMention(comment)).toBe(false);
+    expect(activityLine(comment)).toBe('Bob mentioned you in Q3 Launch');
+    expect(entityHref(comment)).toBe('/posts/p1?comment=c1');
+    expect(
+      mapEntry(row({ event_type: 'mention', entity_type: 'post', payload: { created_by: 'u1' } }))
+        .actorId,
+    ).toBe('u1');
   });
 });

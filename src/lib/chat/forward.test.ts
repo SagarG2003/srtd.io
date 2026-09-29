@@ -269,6 +269,17 @@ describe('forwardRecordInput', () => {
     });
   });
 
+  it('never carries mentions: a forwarded body keeps its tokens, p_mentions is not sent', () => {
+    const X = '11111111-1111-4111-8111-111111111111';
+    const input = forwardRecordInput(msg({ body: `hi @[${X}]` }), {
+      id: 'new',
+      channelId: 'c2',
+      traceId: 't',
+    });
+    expect(input.body).toBe(`hi @[${X}]`);
+    expect(input).not.toHaveProperty('mentions');
+  });
+
   it('previews an attachment-only forward as Attachment', () => {
     expect(forwardPreviewText(msg({ body: '', sharedPostIds: ['p'] }))).toBe('Attachment');
     expect(forwardPreviewText(msg({ body: 'hi' }))).toBe('hi');

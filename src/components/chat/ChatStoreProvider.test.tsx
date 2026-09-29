@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ReactElement, ReactNode } from 'react';
 import type { Result } from '@srtdio/rpc';
+import type { ConversationPreview } from '@/lib/chat/history';
 
 // The provider's import graph pulls the real agora-chat browser SDK. Mock it so
 // importing it in node never touches browser globals, mirroring ChatShell.test.tsx.
@@ -11,11 +12,14 @@ vi.mock('agora-chat', () => ({
 import {
   handleMessagesDeleted,
   loadChatList,
+  previewMentionText,
+  resolvePreviewMentions,
   routeGlobalCmd,
   type ChatListReaders,
 } from '@/components/chat/ChatStoreProvider';
 import { deleteEventExt, readEventExt, type ChatMessageRow } from '@/lib/chat/thread';
-import { ChannelCard, channelListContent } from '@/components/chat/ChannelList';
+import { ChannelCard, channelListContent, draftLine } from '@/components/chat/ChannelList';
+import { rememberMentionNames, resetMentionNames } from '@/lib/chat/mentions';
 import { EmptyState } from '@/components/ui/EmptyState';
 import type { ChannelSummary } from '@/lib/chat-reads';
 import {
@@ -445,5 +449,49 @@ describe('D1: the store handles a delete signal for any channel', () => {
       ['older'],
     );
     expect(rereadPreviews).not.toHaveBeenCalled();
+  });
+});
+
+describe('chat list mentions', () => {
+  const ANA = '11111111-1111-4111-8111-111111111111';
+  const GONE = '99999999-9999-4999-8999-999999999999';
+  const preview = (body: string): ConversationPreview => ({
+    channelId: 'c1',
+    messageId: 'm1',
+    senderUserId: 'x',
+    body,
+    hasAttachments: false,
+    createdAt: '2026-09-22T10:00:00Z',
+  });
+
+  it('previews resolve tokens to "@Name" after one batched name read', async () => {
+    resetMentionNames();
+    const readNames = vi.fn(async (ids: string[]) => ({
+      ok: true as const,
+      data: ids
+        .filter((id) => id === ANA)
+        .map((id) => ({ userId: id, displayName: 'Ana', avatarUrl: null })),
+    }));
+    const result = await resolvePreviewMentions(
+      { ok: true, data: [preview(`hi @[${ANA}]`), preview(`and @[${GONE}] @[${ANA}]`)] },
+      readNames,
+    );
+    expect(readNames).toHaveBeenCalledTimes(1);
+    expect(readNames).toHaveBeenCalledWith([ANA, GONE]);
+    expect(result.ok && result.data.map((p) => p.body)).toEqual([
+      'hi @Ana',
+      'and @Unknown member @Ana',
+    ]);
+    // Known names need no second read.
+    await resolvePreviewMentions({ ok: true, data: [preview(`@[${ANA}]`)] }, readNames);
+    expect(readNames).toHaveBeenCalledTimes(1);
+  });
+
+  it('own sends, forwards and the Draft line read "@Name"', () => {
+    resetMentionNames();
+    rememberMentionNames([{ userId: ANA, displayName: 'Ana' }]);
+    expect(previewMentionText(`ok @[${ANA}]`)).toBe('ok @Ana');
+    expect(draftLine(`draft @[${ANA}] @[${GONE}]`)).toBe('draft @Ana @Unknown member');
+    resetMentionNames();
   });
 });
