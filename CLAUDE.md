@@ -65,6 +65,7 @@ Every user action generates a uuid_v7 `trace_id` (`src/lib/trace.ts`) that flows
 - Briefs are read-only once created.
 - Approval is per-post; there is no bulk approve.
 - Touch targets are at least 44x44 px.
+- No connection-state UI anywhere (no Reconnecting/Connecting/Offline). Failures show per message only: clock while pending, 'Not sent' + retry on failure.
 - No AI features in v2.0.
 
 ## Rules for Claude Code
