@@ -42,9 +42,14 @@ import {
   threadLightbox,
   threadRows,
   ThreadHeaderIdentity,
+  stripLoops,
+  threadStripSlot,
   TimeLabel,
   type ThreadRow,
 } from '@/components/chat/MessageThread';
+import { renderToStaticMarkup as renderStrip } from 'react-dom/server';
+import { MarkStrip } from '@/components/chat/MarksSheet';
+import type { ChatMark } from '@/lib/chat/marks';
 import { roleLabel } from '@/components/pages/settings/members-data';
 import { IconClock, IconTickDouble, IconTickSingle } from '@/components/ui/icons';
 import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
@@ -1788,5 +1793,127 @@ describe('post references after audit', () => {
       filterEmptyLabel('GBL-14'),
     );
     expect(withRows.map((i) => i.key)).not.toContain('filter-empty');
+  });
+});
+
+describe('open loops strip slot', () => {
+  it('FilterStrip still wins while filtering; else the loops strip for threads with marks', () => {
+    expect(threadStripSlot({ filtering: true, hasMarks: true, selecting: false })).toBe('filter');
+    expect(threadStripSlot({ filtering: true, hasMarks: false, selecting: true })).toBe('filter');
+    expect(threadStripSlot({ filtering: false, hasMarks: true, selecting: false })).toBe('loops');
+    expect(threadStripSlot({ filtering: false, hasMarks: true, selecting: true })).toBeNull();
+    expect(threadStripSlot({ filtering: false, hasMarks: false, selecting: false })).toBeNull();
+  });
+
+  it('the strip label carries the posts waiting ahead of the marks', () => {
+    const marks = new Map([
+      [
+        'm1',
+        {
+          messageId: 'm1',
+          channelId: 'c1',
+          type: 'pending' as const,
+          priority: 1 as const,
+          markedAt: '2026-09-27T10:00:00Z',
+          resolved: false,
+          resolvedBy: null,
+          resolvedAt: null,
+        },
+      ],
+    ]);
+    const html = renderStrip(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: true, posts: 4, side: 'agency' }}
+        onOpen={() => {}}
+      />,
+    );
+    const text = html.replace(/<span class="sr-only">[^<]*<\/span>/, '').replace(/<[^>]+>/g, '');
+    expect(text).toBe('54 posts waiting on client · 1 pending (1 P1)');
+  });
+
+  it('first paint is final: the label waits for posts and side together', () => {
+    const marks = new Map();
+    const pending = renderStrip(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: false, posts: 3, side: 'unknown' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(pending.replace(/<span class="sr-only">[^<]*<\/span>/, '').replace(/<[^>]+>/g, '')).toBe(
+      '',
+    );
+    const ready = renderStrip(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: true, posts: 3, side: 'client' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(ready.replace(/<span class="sr-only">[^<]*<\/span>/, '').replace(/<[^>]+>/g, '')).toBe(
+      '33 posts waiting on you',
+    );
+  });
+});
+
+describe('open loops first paint waits for marks (B1)', () => {
+  const pending = (id: string, channelId: string): ChatMark => ({
+    messageId: id,
+    channelId,
+    type: 'pending',
+    priority: null,
+    markedAt: '2026-09-27T10:00:00Z',
+    resolved: false,
+    resolvedBy: null,
+    resolvedAt: null,
+  });
+  const visible = (html: string): string =>
+    html.replace(/<span class="sr-only">[^<]*<\/span>/, '').replace(/<[^>]+>/g, '');
+  // One strip frame as MessageThread renders it: the marks prop plus the
+  // marksLoaded prop through stripLoops.
+  const paint = (marks: Map<string, ChatMark>, input: Parameters<typeof stripLoops>[0]): string =>
+    visible(renderStrip(<MarkStrip marks={marks} loops={stripLoops(input)} onOpen={() => {}} />));
+  const side = { side: 'client' as const, ready: true };
+
+  it('channel switch into a thread with marks: no label until its marks are loaded', () => {
+    const oldMarks = new Map([['a', pending('a', 'A')]]);
+    const newMarks = new Map([
+      ['b1', pending('b1', 'B')],
+      ['b2', pending('b2', 'B')],
+    ]);
+    const posts = { ready: true, count: 1, failed: false };
+    const frames = [
+      // First render after the switch: old map, marksLoaded already false.
+      paint(oldMarks, { openPosts: { ...posts, ready: false }, side, marksLoaded: false }),
+      paint(oldMarks, { openPosts: posts, side, marksLoaded: false }),
+      // The hook's reset: empty map, still loading.
+      paint(new Map(), { openPosts: posts, side, marksLoaded: false }),
+      paint(newMarks, { openPosts: posts, side, marksLoaded: true }),
+    ];
+    expect(frames.slice(0, 3)).toEqual(['', '', '']);
+    expect(frames[3]).toBe('31 post waiting on you · 2 pending');
+  });
+
+  it('first open, posts settle before marks: no intermediate label (never Nothing open)', () => {
+    const posts = { ready: true, count: 0, failed: false };
+    expect(paint(new Map(), { openPosts: posts, side, marksLoaded: false })).toBe('');
+    expect(
+      paint(new Map([['c', pending('c', 'C')]]), { openPosts: posts, side, marksLoaded: true }),
+    ).toBe('11 pending');
+  });
+
+  it('ready needs posts, side and the marksLoaded prop; a failed posts read is posts null', () => {
+    const ok = { ready: true, count: 4, failed: false };
+    expect(stripLoops({ openPosts: ok, side, marksLoaded: true }).ready).toBe(true);
+    expect(stripLoops({ openPosts: ok, side, marksLoaded: false }).ready).toBe(false);
+    expect(
+      stripLoops({ openPosts: ok, side: { ...side, ready: false }, marksLoaded: true }).ready,
+    ).toBe(false);
+    expect(stripLoops({ openPosts: { ...ok, failed: true }, side, marksLoaded: true })).toEqual({
+      ready: true,
+      posts: null,
+      side: 'client',
+    });
   });
 });

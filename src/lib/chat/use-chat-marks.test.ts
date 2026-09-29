@@ -8,7 +8,7 @@ vi.mock('agora-chat', () => ({
 
 import type { Client } from '@srtdio/rpc';
 import { indexMarks, marksForTab, upsertMark, type ChatMark } from '@/lib/chat/marks';
-import { runMarkTransition } from '@/lib/chat/use-chat-marks';
+import { marksReadSettled, runMarkTransition } from '@/lib/chat/use-chat-marks';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MARKED_AT = '2026-09-27T10:00:00+00:00';
@@ -144,5 +144,15 @@ describe('runMarkTransition', () => {
     });
     expect(result.ok).toBe(false);
     expect(s.get().get('m1')).toEqual(mark());
+  });
+});
+
+describe('marks loaded flag (B1)', () => {
+  it('true only for the channel whose read settled; a switch reads false at once', () => {
+    expect(marksReadSettled(null, 'c1')).toBe(false);
+    expect(marksReadSettled('c1', 'c1')).toBe(true);
+    // First render after a switch, before the reset effect: still the old channel's read.
+    expect(marksReadSettled('c1', 'c2')).toBe(false);
+    expect(marksReadSettled(null, null)).toBe(false);
   });
 });

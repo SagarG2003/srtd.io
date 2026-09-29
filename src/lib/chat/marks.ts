@@ -260,6 +260,63 @@ export function markStripLabel(counts: MarkCounts): string {
   return parts.join(' · ');
 }
 
+/** Which side the open-loops wording speaks to; 'unknown' reads neutral. */
+export type LoopsSide = 'agency' | 'client' | 'unknown';
+
+/** The strip line and sheet heading for posts in review, per side. */
+export function openPostsPart(count: number, side: LoopsSide): string {
+  const posts = plural(count, 'post', 'posts');
+  if (side === 'client') return `${posts} waiting on you`;
+  if (side === 'agency') return `${posts} waiting on client`;
+  return `${posts} in review`;
+}
+
+export function openPostsHeading(side: LoopsSide): string {
+  if (side === 'client') return 'Posts waiting on you';
+  if (side === 'agency') return 'Posts waiting on client';
+  return 'Posts in review';
+}
+
+export const NOTHING_OPEN = 'Nothing open between you';
+
+export interface LoopsStripLabel {
+  /** The leading pill: posts waiting plus open marks. */
+  count: number;
+  /**
+   * The parts joined; {@link NOTHING_OPEN} only when the posts read succeeded
+   * with 0 and no mark is open; '' when the posts are unknown and no mark is.
+   */
+  text: string;
+  /** Nothing is open, known for sure. */
+  empty: boolean;
+}
+
+/**
+ * The open-loops strip: posts waiting first, then the mark parts exactly as
+ * {@link markStripLabel} words them, zero parts omitted. Nothing open reads
+ * {@link NOTHING_OPEN}; the strip never hides. `posts: null` means the posts
+ * read failed with nothing to fall back on: the posts part is left out and the
+ * line never claims nothing is open.
+ */
+export function loopsStripLabel(input: {
+  posts: number | null;
+  side: LoopsSide;
+  marks: MarkCounts;
+}): LoopsStripLabel {
+  const marksOpen = input.marks.commitments + input.marks.decisions + input.marks.pending;
+  if (input.posts === null) {
+    return { count: marksOpen, text: markStripLabel(input.marks), empty: false };
+  }
+  const posts = Math.max(0, input.posts);
+  const count = posts + marksOpen;
+  if (count === 0) return { count: 0, text: NOTHING_OPEN, empty: true };
+  const parts: string[] = [];
+  if (posts > 0) parts.push(openPostsPart(posts, input.side));
+  const marks = markStripLabel(input.marks);
+  if (marks !== '') parts.push(marks);
+  return { count, text: parts.join(' · '), empty: false };
+}
+
 /** The pin board tabs: open marks, and stamped marks. */
 export type MarkTab = 'open' | 'history';
 

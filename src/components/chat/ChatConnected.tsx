@@ -333,6 +333,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               onTyping={typing.notifyTyping}
               onToggleReaction={thread.toggleReaction}
               marks={marks.marks}
+              marksLoaded={marks.loaded}
               markedMessages={marks.markedMessages}
               onSetMark={marks.setMark}
               onResolveMark={marks.resolve}

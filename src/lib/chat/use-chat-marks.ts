@@ -46,6 +46,11 @@ import type { ChatConnection } from '@/lib/chat/types';
 export interface UseChatMarks {
   /** Every mark of the open channel keyed by message id (resolved included). */
   marks: Map<string, ChatMark>;
+  /**
+   * The open channel's marks read has settled (ok or not). False on mount and
+   * on every channel switch until that channel's read resolves.
+   */
+  loaded: boolean;
   /** Marked messages read from the record (for sheet rows beyond loaded history). */
   markedMessages: Map<string, ThreadMessage>;
   /** Re-read all marks of the open channel. */
@@ -56,6 +61,14 @@ export interface UseChatMarks {
   resolve: (messageId: string) => Promise<WriteResult>;
   /** Return a stamped mark to open. */
   reopen: (messageId: string) => Promise<WriteResult>;
+}
+
+/**
+ * Whether the open channel's marks read has settled. Keyed by channel, so a
+ * switch reads false on its first render, before the reset effect runs.
+ */
+export function marksReadSettled(loadedFor: string | null, channelId: string | null): boolean {
+  return channelId !== null && loadedFor === channelId;
 }
 
 /**
@@ -100,6 +113,8 @@ export function useChatMarks(params: {
   const db: Client = params.db ?? supabase;
   const [marks, setMarks] = useState<Map<string, ChatMark>>(new Map());
   const [markedMessages, setMarkedMessages] = useState<Map<string, ThreadMessage>>(new Map());
+  // The channel whose marks read has settled (ok or not); null until one has.
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const marksRef = useRef(marks);
   marksRef.current = marks;
   const channelRef = useRef(channelId);
@@ -137,9 +152,12 @@ export function useChatMarks(params: {
           channel_id: forChannel,
           error: result.error.message,
         });
+        // Settled all the same: the strip stops holding and shows what it has.
+        setLoadedFor(forChannel);
         return;
       }
       setMarks(indexMarks(result.data));
+      setLoadedFor(forChannel);
       await loadMarkedMessages(
         result.data.map((m) => m.messageId),
         forChannel,
@@ -151,6 +169,7 @@ export function useChatMarks(params: {
   useEffect(() => {
     setMarks(new Map());
     setMarkedMessages(new Map());
+    setLoadedFor(null);
     if (channelId === null) return;
     void load(channelId);
   }, [channelId, load]);
@@ -285,8 +304,9 @@ export function useChatMarks(params: {
     [transition],
   );
 
+  const loaded = marksReadSettled(loadedFor, channelId);
   return useMemo(
-    () => ({ marks, markedMessages, refetch, setMark, resolve, reopen }),
-    [marks, markedMessages, refetch, setMark, resolve, reopen],
+    () => ({ marks, loaded, markedMessages, refetch, setMark, resolve, reopen }),
+    [marks, loaded, markedMessages, refetch, setMark, resolve, reopen],
   );
 }

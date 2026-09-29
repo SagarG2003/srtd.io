@@ -7,6 +7,9 @@
 // (Delivered / Closed / Completed) and every History row a 44x44 Reopen; both
 // ask first in an inline confirm inside the row (a height change only, no
 // browser dialog). Colours are design tokens only, so light and dark match.
+// The strip leads with the open-loops count (posts waiting in review plus open
+// marks) and never hides; the Open tab lists those posts above the marks, each
+// with Jump (a card is in this chat) or Share here.
 
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactElement } from 'react';
@@ -14,16 +17,27 @@ import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Sheet } from '@/components/ui/Sheet';
-import { IconCheck, IconChevronRight, IconPin, IconRotateCcw } from '@/components/ui/icons';
+import {
+  IconCheck,
+  IconChevronRight,
+  IconPipeline,
+  IconPin,
+  IconRotateCcw,
+} from '@/components/ui/icons';
 import { Tag } from '@/components/ui/Tag';
 import { useToast } from '@/components/ui/toast';
 import { MARK_TONE } from '@/components/chat/MarkBits';
+import { PRESIGN_ENABLED, sharedCardPresignCache } from '@/components/chat/PostCard';
+import { useThumbnail } from '@/components/media/use-thumbnail';
+import { formatEntityRef } from '@/lib/entityRef';
+import { formatLabel } from '@/lib/post-detail-presentation';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { readPostsByIds } from '@srtdio/posts';
 import type { ChatProfile } from '@/lib/chat-reads';
 import { readBriefsByIds } from '@/lib/chat/briefs';
-import { formatMessageTime } from '@/lib/chat/time-format';
+import { formatMessageTime, formatShortDateOnly } from '@/lib/chat/time-format';
+import type { OpenPostRow } from '@/lib/chat/use-open-posts';
 import type { WriteResult } from '@/lib/chat/record';
 import type { ThreadMessage } from '@/lib/chat/thread';
 import {
@@ -31,16 +45,17 @@ import {
   MARK_UPDATE_FAILED,
   STAMP_WORD,
   TYPE_LABEL,
+  loopsStripLabel,
   markConfirmAction,
   markConfirmCopy,
   markCounts,
   markRowText,
-  markStripLabel,
   markTabCounts,
   marksForTab,
   priorityLabel,
   resolverName,
   type ChatMark,
+  type LoopsSide,
   type MarkPriority,
   type MarkTab,
   type MarkTransition,
@@ -54,33 +69,206 @@ export function stripLabelParts(label: string): Array<{ text: string; count: boo
     .map((part) => ({ text: part, count: /^\d+$/.test(part) }));
 }
 
-/** The count strip; renders nothing when every count is zero. */
+/** What the strip knows about posts in review; not ready holds the first paint. */
+export interface StripLoops {
+  ready: boolean;
+  /**
+   * Posts waiting in review; null when the list read failed with nothing to
+   * fall back on (the posts part is left out, never "Nothing open").
+   */
+  posts: number | null;
+  side: LoopsSide;
+}
+
+const NO_LOOPS: StripLoops = { ready: true, posts: 0, side: 'unknown' };
+
+/** The strip's name suffix (screen readers hear it after the visible line). */
+export const LOOPS_STRIP_ARIA = 'Open loops in this chat';
+
+/** The marks section body when posts are listed but no mark is open. */
+export const NO_OPEN_MARKS = 'No open marks';
+
+/**
+ * The open-loops strip: a count pill (posts waiting plus open marks), then the
+ * parts; "Nothing open between you" with a check when nothing is. It always
+ * keeps its 44px slot, and holds an empty body until the posts read and the
+ * viewer side have settled so the first painted label is final.
+ */
 export function MarkStrip(props: {
   marks: Map<string, ChatMark>;
+  loops?: StripLoops;
   onOpen: () => void;
 }): ReactElement {
-  const label = markStripLabel(markCounts(props.marks.values()));
-  if (label === '') return <></>;
+  const loops = props.loops ?? NO_LOOPS;
+  const label = loopsStripLabel({
+    posts: loops.posts,
+    side: loops.side,
+    marks: markCounts(props.marks.values()),
+  });
   return (
     <button
       type="button"
+      aria-busy={!loops.ready}
+      data-loops-strip={
+        !loops.ready ? 'pending' : label.empty ? 'empty' : label.text === '' ? 'unknown' : 'open'
+      }
       onClick={props.onOpen}
       className="flex min-h-[44px] w-full shrink-0 items-center gap-2 border-b border-border bg-panel-2 px-4 text-left text-xs text-fg-2 transition-colors hover:bg-panel-3"
     >
-      <IconPin size={14} className="shrink-0 text-fg-3" />
-      <span className="min-w-0 flex-1 truncate">
-        {stripLabelParts(label).map((part, i) =>
-          part.count ? (
-            <span key={i} className="font-semibold text-fg">
-              {part.text}
-            </span>
-          ) : (
-            part.text
-          ),
-        )}
-      </span>
+      {!loops.ready || (!label.empty && label.text === '') ? (
+        <span className="min-w-0 flex-1" />
+      ) : label.empty ? (
+        <>
+          <IconCheck size={14} className="shrink-0 text-fg-3" />
+          <span className="min-w-0 flex-1 truncate text-fg-3">{label.text}</span>
+        </>
+      ) : (
+        <>
+          <span
+            data-loops-count=""
+            className="shrink-0 rounded-full bg-panel-3 px-2 py-0.5 font-semibold text-fg"
+          >
+            {label.count}
+          </span>
+          <span className="min-w-0 flex-1 truncate">
+            {stripLabelParts(label.text).map((part, i) =>
+              part.count ? (
+                <span key={i} className="font-semibold text-fg">
+                  {part.text}
+                </span>
+              ) : (
+                part.text
+              ),
+            )}
+          </span>
+        </>
+      )}
       <IconChevronRight size={16} className="shrink-0 text-fg-3" />
+      <span className="sr-only">{LOOPS_STRIP_ARIA}</span>
     </button>
+  );
+}
+
+/** The 44px cover of an open post (lazy, same presign path as the cards); KEY tile without one. */
+function OpenPostThumb(props: { assetVersionId: string | null; monogram: string | null }) {
+  const thumb = useThumbnail<HTMLSpanElement>({
+    assetVersionId: props.assetVersionId,
+    cache: sharedCardPresignCache(),
+    enabled: PRESIGN_ENABLED,
+  });
+  return (
+    <span
+      ref={thumb.ref}
+      aria-hidden="true"
+      data-open-post-thumb=""
+      className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-md bg-panel-3 font-mono text-[11px] font-semibold text-fg-3"
+    >
+      {thumb.url !== null && !thumb.failed ? (
+        <img
+          src={thumb.url}
+          alt=""
+          loading="lazy"
+          onError={thumb.onError}
+          className="h-full w-full object-cover"
+        />
+      ) : props.monogram !== null ? (
+        props.monogram
+      ) : (
+        <IconPipeline size={16} />
+      )}
+    </span>
+  );
+}
+
+export const IN_THIS_CHAT = 'in this chat';
+export const NOT_SHARED_HERE = 'not shared here yet';
+
+/** The two text lines of an open post row. Pure. */
+export function openPostLines(
+  post: OpenPostRow,
+  workspaceKey: string | null,
+  shared: boolean,
+): { title: string; meta: string } {
+  const ref =
+    workspaceKey !== null && workspaceKey !== ''
+      ? formatEntityRef(workspaceKey, post.number)
+      : null;
+  const date = post.target_date !== null ? formatShortDateOnly(post.target_date) : '';
+  return {
+    title: ref !== null ? `${ref} · ${post.title}` : post.title,
+    meta: [formatLabel(post.format), date, shared ? IN_THIS_CHAT : NOT_SHARED_HERE]
+      .filter((part) => part !== '')
+      .join(' · '),
+  };
+}
+
+/** One 64px open post row. Hook-free (the thumb is its own component), so tests walk it. */
+export function OpenPostSheetRow(props: {
+  post: OpenPostRow;
+  workspaceKey: string | null;
+  shared: boolean;
+  onJump: () => void;
+  onShare: () => void;
+}): ReactElement {
+  const lines = openPostLines(props.post, props.workspaceKey, props.shared);
+  const key =
+    props.workspaceKey !== null && props.workspaceKey !== ''
+      ? props.workspaceKey.toUpperCase()
+      : null;
+  return (
+    <li
+      data-open-post={props.post.id}
+      className="flex h-16 items-center gap-3 border-b border-border px-2 last:border-b-0"
+    >
+      <OpenPostThumb assetVersionId={props.post.thumbnailAssetVersionId} monogram={key} />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="truncate text-sm font-medium text-fg">{lines.title}</span>
+        <span className="truncate text-xs text-fg-3">{lines.meta}</span>
+      </span>
+      <Button
+        type="button"
+        size="lg"
+        data-open-post-action={props.shared ? 'jump' : 'share'}
+        onClick={props.shared ? props.onJump : props.onShare}
+        className={ROW_ACTION}
+      >
+        {props.shared ? 'Jump' : 'Share here'}
+      </Button>
+    </li>
+  );
+}
+
+/** The Open tab's posts section input, from the thread. */
+export interface OpenPostsSection {
+  heading: string;
+  /** Rows, or null while unread / after a failed read (the section is left out). */
+  posts: OpenPostRow[] | null;
+  workspaceKey: string | null;
+  /** Posts that have a card in the loaded thread. */
+  sharedIds: ReadonlySet<string>;
+  onJump: (postId: string) => void;
+  onShare: (postId: string) => void;
+}
+
+/** The posts section above the Open marks; nothing when no post is waiting. */
+export function OpenPostsList(props: OpenPostsSection): ReactElement | null {
+  if (props.posts === null || props.posts.length === 0) return null;
+  return (
+    <section data-open-posts="" className="flex flex-col gap-1">
+      <h3 className="px-2 text-xs font-semibold text-fg-3">{props.heading}</h3>
+      <ul className="flex max-h-[40vh] flex-col overflow-y-auto">
+        {props.posts.map((post) => (
+          <OpenPostSheetRow
+            key={post.id}
+            post={post}
+            workspaceKey={props.workspaceKey}
+            shared={props.sharedIds.has(post.id)}
+            onJump={() => props.onJump(post.id)}
+            onShare={() => props.onShare(post.id)}
+          />
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -264,6 +452,22 @@ export interface MarksListProps {
   onJump: (messageId: string) => void;
   onResolve: (messageId: string) => Promise<WriteResult>;
   onReopen: (messageId: string) => Promise<WriteResult>;
+  /** Posts waiting in review, listed first on the Open tab (the thread sheet only). */
+  openPosts?: OpenPostsSection;
+}
+
+/**
+ * What sits under the tabs after the posts section: the mark rows; a muted "No
+ * open marks" line when posts are listed above but no mark is open; else the
+ * full empty state. Pure.
+ */
+export function marksListBody(
+  tab: MarkTab,
+  markRows: number,
+  openPostRows: number,
+): 'rows' | 'no-open-marks' | 'empty' {
+  if (markRows > 0) return 'rows';
+  return tab === 'open' && openPostRows > 0 ? 'no-open-marks' : 'empty';
 }
 
 /**
@@ -294,6 +498,7 @@ export function MarksList(props: MarksListProps): ReactElement {
   }, [props.marks, messageFor]);
   const titles = useCardTitles(props.open, markedMessages);
   const tabCount = markTabCounts(props.marks.values());
+  const body = marksListBody(tab, rows.length, props.openPosts?.posts?.length ?? 0);
   const displayNameOf = (userId: string): string | undefined => profiles.get(userId)?.displayName;
 
   async function confirm(mark: ChatMark): Promise<void> {
@@ -323,7 +528,14 @@ export function MarksList(props: MarksListProps): ReactElement {
           />
         ))}
       </div>
-      {rows.length === 0 ? (
+      {tab === 'open' && props.openPosts !== undefined ? (
+        <OpenPostsList {...props.openPosts} />
+      ) : null}
+      {body === 'no-open-marks' ? (
+        <p data-no-open-marks="" className="px-2 text-xs text-fg-3">
+          {NO_OPEN_MARKS}
+        </p>
+      ) : body === 'empty' ? (
         <EmptyState
           icon={<IconPin size={22} />}
           title="Nothing here"
