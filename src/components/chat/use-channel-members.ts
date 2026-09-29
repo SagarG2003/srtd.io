@@ -3,14 +3,16 @@
 // group's member ids (listGroupMemberIds, groups only) and one readChatMembers
 // (users IN + workspace_members IN, active only). Loaded once per chat open;
 // the names also go to the mention registry so the chat list's "Draft:" line
-// resolves a draft's tokens. Each read has a 5s timeout (withReadTimeout): a
-// hang is a failed read, so the composer's hold always releases.
+// resolves a draft's tokens. Both reads share one 5s budget (withReadTimeout
+// with the time left): a hang is a failed read, so the composer's hold always
+// releases within 5s overall.
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import {
   listGroupMemberIds,
+  READ_TIMEOUT_MS,
   readChatMembers,
   withReadTimeout,
   type ChatMember,
@@ -39,13 +41,22 @@ export interface ChannelMemberReaders {
 /** One chat's member list: loaded, or failed (a read error or a 5s timeout). */
 export type ChannelMembersLoad = { ok: true; members: MentionMember[] } | { ok: false };
 
+/** Milliseconds left before `deadline` (never negative). */
+function budgetLeft(deadline: number): number {
+  return Math.max(0, deadline - Date.now());
+}
+
 async function channelMemberIdsResult(
   input: ChannelMembersInput,
   readers: ChannelMemberReaders,
+  deadline: number = Date.now() + READ_TIMEOUT_MS,
 ): Promise<Result<string[]>> {
   if (input.groupId !== null) {
     const groupId = input.groupId;
-    const ids = await withReadTimeout((signal) => readers.groupMemberIds(groupId, signal));
+    const ids = await withReadTimeout(
+      (signal) => readers.groupMemberIds(groupId, signal),
+      budgetLeft(deadline),
+    );
     if (!ids.ok) {
       logger.warn('chat: mention members read failed', { error: ids.error.message });
       return ids;
@@ -80,10 +91,15 @@ export async function loadChannelMembersResult(
 ): Promise<ChannelMembersLoad> {
   if (input.workspaceId === null) return { ok: true, members: [] };
   const workspaceId = input.workspaceId;
-  const ids = await channelMemberIdsResult(input, readers);
+  // One deadline for both reads: the second only gets what the first left.
+  const deadline = Date.now() + READ_TIMEOUT_MS;
+  const ids = await channelMemberIdsResult(input, readers, deadline);
   if (!ids.ok) return { ok: false };
   if (ids.data.length === 0) return { ok: true, members: [] };
-  const result = await withReadTimeout((signal) => readers.members(workspaceId, ids.data, signal));
+  const result = await withReadTimeout(
+    (signal) => readers.members(workspaceId, ids.data, signal),
+    budgetLeft(deadline),
+  );
   if (!result.ok) {
     logger.warn('chat: mention member profiles read failed', { error: result.error.message });
     return { ok: false };

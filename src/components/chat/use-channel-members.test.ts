@@ -127,6 +127,34 @@ describe('H1 member-list reads time out and settle as failed', () => {
     ).resolves.toEqual({ ok: false });
   });
 
+  it('J3 slow first read leaves only the remaining budget for the second; total hold never exceeds 5s', async () => {
+    vi.useFakeTimers();
+    try {
+      const r: ChannelMemberReaders = {
+        groupMemberIds: () =>
+          new Promise((resolve) =>
+            setTimeout(() => resolve({ ok: true, data: [ME, 'a'] }), READ_TIMEOUT_MS - 1_000),
+          ),
+        members: () => new Promise(() => undefined),
+      };
+      let settled = false;
+      const pending = loadChannelMembersResult(
+        { workspaceId: 'w', currentUserId: ME, groupId: 'g', peerUserId: null },
+        r,
+      ).then((load) => {
+        settled = true;
+        return load;
+      });
+      await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      await expect(pending).resolves.toEqual({ ok: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('only a successful read confirms someone gone', () => {
     const load = {
       ok: true as const,
