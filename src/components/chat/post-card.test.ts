@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PostCardRow } from '../../../packages/posts/src/reads';
 import {
   POST_CHANGED_EVENT,
@@ -16,6 +16,21 @@ import {
 } from '@/components/chat/post-card';
 
 const TZ = 'UTC';
+
+/** Pin the device locale: Intl.DateTimeFormat with no locale resolves to `locale`. */
+function deviceLocale(locale: string): void {
+  const Real = Intl.DateTimeFormat;
+  vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (
+    requested?: string | string[],
+    options?: Intl.DateTimeFormatOptions,
+  ) {
+    return new Real(requested ?? locale, options);
+  } as typeof Intl.DateTimeFormat);
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function cardRow(id: string, over: Partial<PostCardRow> = {}): PostCardRow {
   return {
@@ -92,12 +107,25 @@ describe('cardFooter', () => {
   const approved = cardRow('p1', { approved_by: 'u1', approved_at: '2026-09-21T14:05:00Z' });
 
   it('approved with a name: check, name and date + time, Open', () => {
+    deviceLocale('en-GB');
     expect(cardFooter(approved, 'Asha', 'agency', TZ)).toEqual({
       state: 'Approved by Asha · Sep 21 14:05',
       action: 'Open',
       accent: false,
       check: true,
     });
+  });
+
+  it('the approval time follows the device hour cycle: en-IN 12h, en-GB 24h', () => {
+    deviceLocale('en-IN');
+    expect(cardFooter(approved, 'Asha', 'agency', TZ).state).toBe(
+      'Approved by Asha · Sep 21 2:05 pm',
+    );
+    vi.restoreAllMocks();
+    deviceLocale('en-GB');
+    expect(cardFooter(approved, 'Asha', 'agency', TZ).state).toBe(
+      'Approved by Asha · Sep 21 14:05',
+    );
   });
 
   it('approved without an approver falls back to the stage_entered_at date', () => {

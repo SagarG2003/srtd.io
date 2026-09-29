@@ -6,7 +6,7 @@
 // footer wording, media pills and refetch triggers are decided here too.
 
 import type { PostCardRow } from '../../../packages/posts/src/reads';
-import { formatMessageTime, formatShortDate } from '@/lib/chat/time-format';
+import { formatClockTime, formatShortDate } from '@/lib/chat/time-format';
 import type { ViewerSide } from '@/lib/chat/viewer-role';
 
 /** The route a shared post card navigates to (the existing /posts/:id view). */
@@ -73,10 +73,10 @@ export interface CardFooter {
   check: boolean;
 }
 
-/** "Oct 2 14:05" in the workspace zone, or '' for an unparseable instant. */
+/** "Oct 2 2:05 pm" (device hour cycle, workspace zone), or '' for an unparseable instant. */
 function dateTime(iso: string, timeZone: string): string {
   const date = formatShortDate(iso, timeZone);
-  return date === '' ? '' : `${date} ${formatMessageTime(iso, timeZone)}`;
+  return date === '' ? '' : `${date} ${formatClockTime(iso, timeZone)}`;
 }
 
 /**
