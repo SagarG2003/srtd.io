@@ -39,6 +39,7 @@ import { useToast } from '@/components/ui/toast';
 import { Avatar } from '@/components/ui/Avatar';
 import { listChannelClears, listChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
 import { SIGNOUT_EVENT } from '@/lib/events';
+import { stripDeletedReplies } from '@/lib/chat/drafts';
 import { generateTraceId } from '@/lib/trace';
 import { useChat } from '@/lib/chat/chat-context';
 import { createTextMessage } from '@/lib/chat/message-factory';
@@ -114,6 +115,9 @@ const EMPTY_ROSTER: readonly ChannelSummary[] = [];
 /** Bound on the live-message ids remembered for dedupe. */
 const SEEN_IDS_LIMIT = 500;
 
+/** Bound on the deleted message ids remembered for stripping queued quotes. */
+const DELETED_IDS_LIMIT = 500;
+
 function indexSummaries(roster: readonly ChannelSummary[]): Map<string, ChannelSummary> {
   const map = new Map<string, ChannelSummary>();
   for (const summary of roster) {
@@ -142,14 +146,46 @@ function liveTarget(summary: ChannelSummary | undefined): ChannelTarget | null {
 }
 
 /** Remember a live message id; true when it was already seen. Bounded FIFO. */
-export function rememberSeen(seen: Set<string>, id: string): boolean {
+export function rememberSeen(
+  seen: Set<string>,
+  id: string,
+  limit: number = SEEN_IDS_LIMIT,
+): boolean {
   if (seen.has(id)) return true;
   seen.add(id);
-  if (seen.size > SEEN_IDS_LIMIT) {
+  if (seen.size > limit) {
     const oldest = seen.values().next().value;
     if (oldest !== undefined) seen.delete(oldest);
   }
   return false;
+}
+
+/** What handling a tombstone signal touches, injected so the order is unit-tested. */
+export interface DeletedSignalDeps {
+  /** The channels whose list line shows one of the ids (store.channelsShowingDeleted). */
+  channelsShowing: (messageIds: readonly string[]) => string[];
+  /** One batched preview read (the existing reader), applied to just these channels. */
+  rereadPreviews: (channelIds: readonly string[]) => void;
+  /** Strip draft replies that quote the ids (drafts.stripDeletedReplies). */
+  stripDrafts: (messageIds: readonly string[]) => void;
+  /** Clear the quote text of queued sends that quote the ids (persisted outbox). */
+  stripOutbox: (messageIds: readonly string[]) => void;
+}
+
+/**
+ * Messages became tombstones, in any channel: strip them from draft replies and
+ * the queued outbox, and re-read the list lines that showed one, all in one
+ * preview read however many channels are hit (none when no line showed one).
+ */
+export function handleMessagesDeleted(
+  deps: DeletedSignalDeps,
+  messageIds: readonly string[],
+): void {
+  if (messageIds.length === 0) return;
+  deps.stripDrafts(messageIds);
+  deps.stripOutbox(messageIds);
+  const channels = deps.channelsShowing(messageIds);
+  if (channels.length > 0) deps.rereadPreviews(channels);
 }
 
 /** The four reads the chat list's first paint waits on. */
@@ -218,6 +254,12 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   clientRef.current = client;
   const senderRef = useRef<OutboxSender | null>(null);
   const outboxListenersRef = useRef<Set<(event: OutboxEvent) => void>>(new Set());
+  // Latest store state for the tombstone handler (it runs outside render).
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  // Deleted ids whose quotes queued sends must not persist (bounded FIFO).
+  const deletedIdsRef = useRef<Set<string>>(new Set());
+  const onMessagesDeletedRef = useRef<(messageIds: readonly string[]) => void>(() => {});
   // Stable facade over the current sender, which is replaced per workspace/user.
   const outbox = useMemo<ChannelOutbox>(
     () => ({
@@ -232,6 +274,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           listeners.delete(listener);
         };
       },
+      messagesDeleted: (messageIds) => onMessagesDeletedRef.current(messageIds),
     }),
     [],
   );
@@ -300,6 +343,37 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     });
   }, [scope, workspaceId, currentUserId]);
 
+  // Messages became tombstones: drafts, the queued outbox and the list lines
+  // that showed one. The re-read is one preview scan for every hit channel.
+  onMessagesDeletedRef.current = (messageIds) => {
+    handleMessagesDeleted(
+      {
+        channelsShowing: (ids) => store.channelsShowingDeleted(stateRef.current, ids),
+        rereadPreviews: (channelIds) => {
+          if (scope === null || workspaceId === null || currentUserId === null) return;
+          const forUser = currentUserId;
+          void loadConversationPreviews(supabase, workspaceId).then((result) => {
+            if (!result.ok) {
+              logger.warn('chat store: previews load failed', { error: result.error.message });
+              return;
+            }
+            setState((prev) =>
+              prev.scope === scope
+                ? store.applyChannelPreviews(prev, channelIds, result.data, forUser)
+                : prev,
+            );
+          });
+        },
+        stripDrafts: stripDeletedReplies,
+        stripOutbox: (ids) => {
+          for (const id of ids) rememberSeen(deletedIdsRef.current, id, DELETED_IDS_LIMIT);
+          store.stripPersistedQuotes(browserStorage(), ids);
+        },
+      },
+      messageIds,
+    );
+  };
+
   // Seed the store on workspace/user switch (and on Retry): the roster, clears,
   // previews and unread counts are read in parallel and applied in one update,
   // so the list's first paint is its final state. Any failure is the error
@@ -355,7 +429,18 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           const target = liveTarget(summariesRef.current.get(channelId));
           return runSend(
             {
-              recordMessage: (input) => sendMessageRecord({ client: supabase, ...input }),
+              // The ack's server created_at against the device time of the
+              // send sets the server clock offset (the edit / delete windows).
+              recordMessage: (input) => {
+                const sentAt = Date.now();
+                return sendMessageRecord({ client: supabase, ...input }).then((result) => {
+                  if (result.ok) {
+                    const createdAt = result.row.created_at;
+                    setState((prev) => store.applyServerClock(prev, createdAt, sentAt));
+                  }
+                  return result;
+                });
+              },
               publishLive:
                 connection !== null && target !== null
                   ? (input) =>
@@ -394,12 +479,23 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           if (event.type === 'recorded') {
             const { channelId, message } = event;
             setState((prev) =>
-              store.updateOwnMessage(prev, { channelId, text: message.body, ts: message.time }),
+              store.updateOwnMessage(prev, {
+                channelId,
+                messageId: message.id,
+                text: message.body,
+                ts: message.time,
+              }),
             );
           }
           for (const listener of outboxListenersRef.current) listener(event);
         },
-        onChange: (next) => store.writePersistedOutbox(storage, scopeKey, next),
+        // A queued send quoting a deleted message never persists its quote text.
+        onChange: (next) =>
+          store.writePersistedOutbox(
+            storage,
+            scopeKey,
+            store.stripDeletedQuotes(next, deletedIdsRef.current),
+          ),
         onAttemptFailed: (context) => logger.warn('chat: message record attempt failed', context),
       },
       store.readPersistedOutbox(storage, scopeKey),
@@ -479,6 +575,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         setState((prev) =>
           store.applyIncoming(prev, {
             channelId: row.channel_id,
+            messageId: row.id,
             senderIsSelf: false,
             text,
             ts: Number.isNaN(ts) ? mapped.message.time : ts,
@@ -546,6 +643,16 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   );
 
   return <ChatStoreContext.Provider value={value}>{children}</ChatStoreContext.Provider>;
+}
+
+/**
+ * Server time now: the device clock plus the store's server clock offset (0
+ * outside a provider or before the first own-send ack). The edit and delete
+ * windows read this, never Date.now() alone.
+ */
+export function useServerNow(): () => number {
+  const offset = useContext(ChatStoreContext)?.state.serverClockOffsetMs ?? 0;
+  return useCallback(() => Date.now() + offset, [offset]);
 }
 
 export function useChatStore(): ChatStoreContextValue {

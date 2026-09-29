@@ -1264,6 +1264,27 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
       );
       expect(await deletedAt(old)).toBeNull();
     });
+
+    it("chat_reaction_add raises 'message deleted' on a tombstone and adds nothing", async () => {
+      const id = await recentMessage(userB.id);
+      const del = await clientFor(userB.id).rpc(
+        'chat_message_delete',
+        deleteArgs([id], ctx.channelId),
+      );
+      expect(del.error).toBeNull();
+      const emoji = `r${randomSuffix()}`;
+      const res = await clientFor(owner.id).rpc(
+        'chat_reaction_add',
+        reactionArgs(id, ctx.channelId, emoji),
+      );
+      expect(res.error?.message).toBe('message deleted');
+      expect(
+        await countWhere(adminGeneric, 'chat_reactions', [
+          ['message_id', id],
+          ['emoji', emoji],
+        ]),
+      ).toBe(0);
+    });
   });
 
   // -------------------------------------------------------------------------

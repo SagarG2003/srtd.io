@@ -60,22 +60,55 @@ export function pruneThreadSelection(
   return new Set([...selected].filter((id) => allowed.has(id)));
 }
 
+/** Own messages can be deleted for everyone this long after their server created_at. */
+export const DELETE_SELECTION_WINDOW_MS = 30 * 60 * 1000;
+
+/** Why the selection's Delete is disabled; the bar shows it as one line. */
+export type DeleteBlock = 'others' | 'old';
+
+/** The reason line for each disabled Delete. */
+export const DELETE_BLOCK_COPY: Record<DeleteBlock, string> = {
+  others: 'Only your own messages can be deleted',
+  old: "Messages older than 30 min can't be deleted",
+};
+
+/**
+ * Why Delete cannot apply to the selection, or null when it can (or nothing is
+ * selected: Delete is simply disabled at 0 with no reason). Someone else's
+ * message wins over age. `nowMs` is server time (the store's clock offset
+ * applied), never the device clock alone. Marked own messages are locked and
+ * never selected.
+ */
+export function deleteSelectionBlock(
+  selected: ReadonlySet<string>,
+  messages: readonly ThreadMessage[],
+  marks: Map<string, ChatMark>,
+  nowMs: number,
+): DeleteBlock | null {
+  if (selected.size === 0) return null;
+  const byId = new Map(messages.map((m) => [m.id, m]));
+  let old = false;
+  for (const id of selected) {
+    const message = byId.get(id);
+    if (message === undefined || selectionRole(message, marks) !== 'selectable') return 'others';
+    const created = Date.parse(message.createdAt);
+    if (Number.isNaN(created) || nowMs - created > DELETE_SELECTION_WINDOW_MS) old = true;
+  }
+  return old ? 'old' : null;
+}
+
 /**
  * Delete stays own-only: every selected message must be the caller's own,
- * recorded and unmarked (the proc refuses marked ones). False at 0.
+ * recorded, unmarked (the proc refuses marked ones) and inside the 30 minute
+ * window on server time. False at 0.
  */
 export function canDeleteSelection(
   selected: ReadonlySet<string>,
   messages: readonly ThreadMessage[],
   marks: Map<string, ChatMark>,
+  nowMs: number,
 ): boolean {
-  if (selected.size === 0) return false;
-  const byId = new Map(messages.map((m) => [m.id, m]));
-  for (const id of selected) {
-    const message = byId.get(id);
-    if (message === undefined || selectionRole(message, marks) !== 'selectable') return false;
-  }
-  return true;
+  return selected.size > 0 && deleteSelectionBlock(selected, messages, marks, nowMs) === null;
 }
 
 /** The selected messages to forward, in thread order. */

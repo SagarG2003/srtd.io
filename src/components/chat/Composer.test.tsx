@@ -22,6 +22,7 @@ import {
   draftAttachments,
   hasLinkCards,
   isSendKeydown,
+  replyBarPreview,
   shouldShowMic,
   withLinkCards,
 } from '@/components/chat/Composer';
@@ -470,5 +471,34 @@ describe('editing mode', () => {
     expect(editSendDecision({ text: 'hi there', initialText: 'hi', hasOtherContent: false })).toBe(
       'send',
     );
+  });
+});
+
+describe('D1: the reply bar for a deleted quote', () => {
+  const quote = { id: 'm1', authorUserId: 'peer', preview: 'the words' };
+
+  it('shows the quote text while the message lives', () => {
+    expect(replyBarPreview({ quote }, 'me')).toBe('the words');
+  });
+
+  it('once stripped, reads deletedMessageLabel (own or not), never the old text', () => {
+    const stripped = { quote: { ...quote, preview: '' }, deleted: true as const };
+    expect(replyBarPreview(stripped, 'me')).toBe('This message was deleted');
+    expect(
+      replyBarPreview({ ...stripped, quote: { ...stripped.quote, authorUserId: 'me' } }, 'me'),
+    ).toBe('You deleted this message');
+  });
+});
+
+describe('D7: the composer keeps normal text selection', () => {
+  it('no select-none or no-callout class anywhere in the composer', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const source = readFileSync(fileURLToPath(new URL('./Composer.tsx', import.meta.url)), 'utf8');
+    expect(source).not.toContain('select-none');
+    expect(source).not.toContain('touch-callout');
+    expect(source).not.toContain('NO_TOUCH_SELECT');
+    // Nothing in chat ever clears a selection programmatically.
+    expect(source).not.toContain('removeAllRanges');
   });
 });

@@ -10,8 +10,12 @@ import {
   GROUP_INFO_ADMIN_ONLY,
   GroupInfoNotice,
   groupActionMessage,
+  MEMBERS_REFRESH_FAILED,
+  MembersRefreshNotice,
+  membersAfterRefresh,
   requestRename,
   withGroupBusy,
+  type MembersState,
 } from '@/components/chat/GroupInfoSheet';
 
 describe('group info permission (mirrors group_rename)', () => {
@@ -150,5 +154,35 @@ describe('R6: the group sheet never sticks busy and never shows raw text', () =>
     expect(groupActionMessage({ code: 'unknown', message: 'workspace_member_only' })).toBe(
       'Only workspace members can do this',
     );
+  });
+});
+
+describe('G4: a failed member refresh after an add or remove', () => {
+  const shown: MembersState = {
+    options: [{ userId: 'u1', displayName: 'Asha', avatarUrl: null }],
+    loading: false,
+    error: null,
+  };
+
+  it('keeps the current list and flags the failure', () => {
+    const failed: MembersState = { options: [], loading: false, error: GROUP_ACTION_FALLBACK };
+    const outcome = membersAfterRefresh(shown, failed);
+    expect(outcome.members).toBe(shown);
+    expect(outcome.refreshFailed).toBe(true);
+  });
+
+  it('a successful refresh replaces the list and clears the flag', () => {
+    const next: MembersState = { ...shown, options: [] };
+    expect(membersAfterRefresh(shown, next)).toEqual({ members: next, refreshFailed: false });
+  });
+
+  it('shows "Couldn\'t refresh members, try again" as a 44px retry', () => {
+    expect(MEMBERS_REFRESH_FAILED).toBe("Couldn't refresh members, try again");
+    const onRetry = vi.fn();
+    const el = MembersRefreshNotice({ onRetry });
+    expect(el.props.children).toBe(MEMBERS_REFRESH_FAILED);
+    expect(String(el.props.className)).toContain('min-h-[44px]');
+    (el.props.onClick as () => void)();
+    expect(onRetry).toHaveBeenCalledOnce();
   });
 });

@@ -31,6 +31,8 @@ export interface ConversationSummary {
   lastMessageTs: number;
   /** Unread count for this channel; 0 when read or empty. */
   unread: number;
+  /** Id of the message the line shows, when known (a delete of it re-reads the line). */
+  lastMessageId?: string;
 }
 
 /**
@@ -58,6 +60,12 @@ export interface ChatStoreState {
    * newer than this arrives; the record hides older rows itself (RLS).
    */
   clears: Record<string, number>;
+  /**
+   * Server clock minus device clock (ms), from the created_at on the ack of the
+   * caller's own sends; 0 until the first ack. The edit and delete windows are
+   * judged on Date.now() + this, never the device clock alone.
+   */
+  serverClockOffsetMs: number;
 }
 
 /** One chat_channel_clears row as the store reads it. */
@@ -74,6 +82,8 @@ export interface RosterEntry {
 /** A live incoming message, already mapped to our channel_id. */
 export interface IncomingMessage {
   channelId: string;
+  /** The row's id; the line re-reads when this message is deleted. */
+  messageId?: string;
   senderIsSelf: boolean;
   text: string;
   prefix?: string;
@@ -83,6 +93,8 @@ export interface IncomingMessage {
 /** A just-sent outbound message, used to refresh the channel's last line. */
 export interface OwnMessage {
   channelId: string;
+  /** The recorded row's id, when known. */
+  messageId?: string;
   text: string;
   ts: number;
 }
@@ -97,15 +109,23 @@ export function initialState(): ChatStoreState {
     activeConversationId: null,
     pendingOpenConversationId: null,
     clears: {},
+    serverClockOffsetMs: 0,
   };
 }
 
-function summary(text: string, ts: number, unread: number, prefix?: string): ConversationSummary {
+function summary(
+  text: string,
+  ts: number,
+  unread: number,
+  prefix?: string,
+  messageId?: string,
+): ConversationSummary {
   return {
     lastMessageText: text,
     lastMessageTs: ts,
     unread,
     ...(prefix !== undefined ? { lastMessagePrefix: prefix } : {}),
+    ...(messageId !== undefined ? { lastMessageId: messageId } : {}),
   };
 }
 
@@ -164,6 +184,7 @@ export function beginLoad(state: ChatStoreState, scope: string): ChatStoreState 
     scope,
     activeConversationId: sameScope ? state.activeConversationId : null,
     pendingOpenConversationId: sameScope ? state.pendingOpenConversationId : null,
+    serverClockOffsetMs: state.serverClockOffsetMs,
   };
 }
 
@@ -190,6 +211,7 @@ export function loadReady(state: ChatStoreState, load: InitialLoad): ChatStoreSt
     roster: load.roster,
     activeConversationId: state.activeConversationId,
     pendingOpenConversationId: state.pendingOpenConversationId,
+    serverClockOffsetMs: state.serverClockOffsetMs,
   };
   const withClears = applyClears(seeded, load.clears);
   const withPreviews = applyPreviews(withClears, load.previews, load.currentUserId);
@@ -270,9 +292,79 @@ export function applyPreviews(
       Number.isNaN(ts) ? existing.lastMessageTs : Math.max(existing.lastMessageTs, ts),
       existing.unread,
       isOwn ? OWN_PREFIX : undefined,
+      preview.messageId,
     );
   }
   return { ...state, conversations };
+}
+
+/**
+ * The channels whose list line shows one of these (now deleted) messages, in
+ * roster order; only those need their line re-read. Pure.
+ */
+export function channelsShowingDeleted(
+  state: ChatStoreState,
+  messageIds: readonly string[],
+): string[] {
+  if (messageIds.length === 0) return [];
+  const hit = new Set(messageIds);
+  return Object.entries(state.conversations)
+    .filter(([, convo]) => convo.lastMessageId !== undefined && hit.has(convo.lastMessageId))
+    .map(([channelId]) => channelId);
+}
+
+/**
+ * Apply one re-read of the previews to just these channels (the ones whose
+ * line showed a deleted message). A listed channel with no preview left in the
+ * read has no live message to show: its line empties (time and unread stay).
+ * Other channels are untouched.
+ */
+export function applyChannelPreviews(
+  state: ChatStoreState,
+  channelIds: readonly string[],
+  previews: readonly ConversationPreview[],
+  currentUserId: string,
+): ChatStoreState {
+  if (channelIds.length === 0) return state;
+  const wanted = new Set(channelIds);
+  const byChannel = new Map(
+    previews.filter((p) => wanted.has(p.channelId)).map((p) => [p.channelId, p]),
+  );
+  const conversations = { ...state.conversations };
+  for (const channelId of wanted) {
+    const existing = conversations[channelId];
+    if (existing === undefined) continue;
+    const preview = byChannel.get(channelId);
+    if (preview === undefined) {
+      conversations[channelId] = summary('', existing.lastMessageTs, existing.unread);
+      continue;
+    }
+    const isOwn = preview.senderUserId !== null && preview.senderUserId === currentUserId;
+    conversations[channelId] = summary(
+      previewText(preview),
+      existing.lastMessageTs,
+      existing.unread,
+      isOwn ? OWN_PREFIX : undefined,
+      preview.messageId,
+    );
+  }
+  return { ...state, conversations };
+}
+
+/**
+ * The server clock offset from one own send's ack: the row's server created_at
+ * minus the device time the send was made. An unparseable time keeps the
+ * current offset. Pure.
+ */
+export function applyServerClock(
+  state: ChatStoreState,
+  createdAt: string,
+  localSentMs: number,
+): ChatStoreState {
+  const server = Date.parse(createdAt);
+  if (Number.isNaN(server) || !Number.isFinite(localSentMs)) return state;
+  const offset = server - localSentMs;
+  return offset === state.serverClockOffsetMs ? state : { ...state, serverClockOffsetMs: offset };
 }
 
 /**
@@ -291,7 +383,7 @@ export function applyIncoming(state: ChatStoreState, message: IncomingMessage): 
   return setConversation(
     state,
     message.channelId,
-    summary(message.text, message.ts, unread, message.prefix),
+    summary(message.text, message.ts, unread, message.prefix, message.messageId),
   );
 }
 
@@ -321,7 +413,7 @@ export function updateOwnMessage(state: ChatStoreState, own: OwnMessage): ChatSt
   return setConversation(
     state,
     own.channelId,
-    summary(own.text, own.ts, existingUnread, OWN_PREFIX),
+    summary(own.text, own.ts, existingUnread, OWN_PREFIX, own.messageId),
   );
 }
 
@@ -518,6 +610,32 @@ export interface ChannelOutbox {
    */
   settle: (channelId: string, id: string) => void;
   subscribe: (listener: (event: OutboxEvent) => void) => () => void;
+  /**
+   * Messages became tombstones (by us, or live by their sender): the store
+   * strips their text from draft replies and queued sends that quote them, and
+   * re-reads any chat list line that showed one.
+   */
+  messagesDeleted: (messageIds: readonly string[]) => void;
+}
+
+/**
+ * Queued sends that quote a deleted message lose the quote's text (the
+ * reply_to id stays, so the record still links it). The same outbox when none
+ * match. Pure.
+ */
+export function stripDeletedQuotes(outbox: Outbox, deletedIds: ReadonlySet<string>): Outbox {
+  if (deletedIds.size === 0) return outbox;
+  let changed = false;
+  const next: Record<string, readonly OutboxEntry[]> = {};
+  for (const [channelId, list] of Object.entries(outbox)) {
+    next[channelId] = list.map((entry) => {
+      const reply = entry.local.reply;
+      if (reply === null || reply.preview === '' || !deletedIds.has(reply.id)) return entry;
+      changed = true;
+      return { ...entry, local: { ...entry.local, reply: { ...reply, preview: '' } } };
+    });
+  }
+  return changed ? next : outbox;
 }
 
 /** The one localStorage key the pending outbox lives under. */
@@ -676,6 +794,37 @@ export function writePersistedOutbox(
     );
   } catch {
     // Storage full or blocked: the send carries on from memory.
+  }
+}
+
+/**
+ * Clear the quote text of persisted sends that quote a deleted message, in
+ * place (whatever workspace and user the blob holds); reply ids stay. Never
+ * throws.
+ */
+export function stripPersistedQuotes(
+  storage: OutboxStorage | null,
+  deletedIds: readonly string[],
+): void {
+  if (storage === null || deletedIds.length === 0) return;
+  try {
+    const stored = readRaw(storage);
+    if (stored === null || !isRecord(stored.outbox)) return;
+    const hit = new Set(deletedIds);
+    let changed = false;
+    for (const list of Object.values(stored.outbox)) {
+      if (!Array.isArray(list)) continue;
+      for (const entry of list) {
+        if (!isRecord(entry) || !isRecord(entry.local) || !isRecord(entry.local.reply)) continue;
+        const reply = entry.local.reply;
+        if (typeof reply.id !== 'string' || !hit.has(reply.id) || reply.preview === '') continue;
+        reply.preview = '';
+        changed = true;
+      }
+    }
+    if (changed) storage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(stored));
+  } catch {
+    // Unreadable or blocked storage: nothing to strip.
   }
 }
 

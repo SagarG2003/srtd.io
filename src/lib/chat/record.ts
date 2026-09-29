@@ -158,6 +158,28 @@ export function editFailureCopy(message: string): string {
   return "Couldn't edit, try again";
 }
 
+/**
+ * User-facing copy for a failed delete, mapped from the proc's exception text
+ * the same way edits are. Anything else (transport errors included) reads the
+ * generic line, so raw error text never reaches a toast.
+ */
+export function deleteFailureCopy(message: string): string {
+  if (/from the last 30 minutes can be deleted/i.test(message)) {
+    return 'Delete window has closed (30 min)';
+  }
+  if (/marked messages cannot be deleted/i.test(message)) return "Marked messages can't be deleted";
+  return "Couldn't delete, try again";
+}
+
+/**
+ * The toast for a chunked delete that stopped at a failing chunk: how many of
+ * the selection were deleted, or the mapped failure when none were.
+ */
+export function deleteOutcomeCopy(deleted: number, total: number, message: string): string {
+  if (deleted === 0) return deleteFailureCopy(message);
+  return `Deleted ${deleted} of ${total}. Couldn't delete the rest, try again`;
+}
+
 /** A void proc outcome; the message is the raw error for logging. */
 export type WriteResult = { ok: true } | { ok: false; message: string };
 

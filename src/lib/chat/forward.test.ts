@@ -5,6 +5,8 @@ import type { ThreadMessage } from '@/lib/chat/thread';
 import {
   canDeleteSelection,
   canForward,
+  DELETE_BLOCK_COPY,
+  deleteSelectionBlock,
   forwardFailedMessage,
   forwardPickerChannels,
   forwardPreviewText,
@@ -115,11 +117,33 @@ describe('thread selection (Forward any, Delete own only)', () => {
     expect([...pruned].sort()).toEqual(['own', 'peer']);
   });
 
+  // Server time 5 minutes after the fixtures' created_at (inside the window).
+  const NOW = Date.parse('2026-09-22T10:05:00Z');
+
   it('allows delete only when every selected message is own and unmarked', () => {
-    expect(canDeleteSelection(new Set(), messages, marks)).toBe(false);
-    expect(canDeleteSelection(new Set(['own']), messages, marks)).toBe(true);
-    expect(canDeleteSelection(new Set(['own', 'peer']), messages, marks)).toBe(false);
-    expect(canDeleteSelection(new Set(['marked']), messages, marks)).toBe(false);
+    expect(canDeleteSelection(new Set(), messages, marks, NOW)).toBe(false);
+    expect(canDeleteSelection(new Set(['own']), messages, marks, NOW)).toBe(true);
+    expect(canDeleteSelection(new Set(['own', 'peer']), messages, marks, NOW)).toBe(false);
+    expect(canDeleteSelection(new Set(['marked']), messages, marks, NOW)).toBe(false);
+  });
+
+  it('D4: Delete is disabled for an own message older than 30 min, on server time', () => {
+    const late = Date.parse('2026-09-22T10:31:00Z');
+    expect(canDeleteSelection(new Set(['own']), messages, marks, late)).toBe(false);
+    expect(deleteSelectionBlock(new Set(['own']), messages, marks, late)).toBe('old');
+    // Exactly 30 minutes is still inside (the proc's >= now() - 30 min).
+    const edge = Date.parse('2026-09-22T10:30:00Z');
+    expect(canDeleteSelection(new Set(['own']), messages, marks, edge)).toBe(true);
+  });
+
+  it('D4: both reason lines; others wins over age; none at 0 or when allowed', () => {
+    const late = Date.parse('2026-09-22T10:31:00Z');
+    expect(deleteSelectionBlock(new Set(['own', 'peer']), messages, marks, NOW)).toBe('others');
+    expect(deleteSelectionBlock(new Set(['own', 'peer']), messages, marks, late)).toBe('others');
+    expect(deleteSelectionBlock(new Set(), messages, marks, late)).toBeNull();
+    expect(deleteSelectionBlock(new Set(['own']), messages, marks, NOW)).toBeNull();
+    expect(DELETE_BLOCK_COPY.others).toBe('Only your own messages can be deleted');
+    expect(DELETE_BLOCK_COPY.old).toBe("Messages older than 30 min can't be deleted");
   });
 });
 

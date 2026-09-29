@@ -1,25 +1,132 @@
-// Bottom bar for selection mode: the selected count, a 44px Forward (any
-// recorded message), a 44x44 Delete that opens the confirm dialog (own, unmarked
-// messages only; disabled otherwise), and Cancel. The confirm dialog runs
-// the delete; on failure the proc's message shows as a toast and the selection
-// is kept (the caller only clears it on success). Design tokens only.
+// Selection mode's two bars. The header bar replaces the thread header: "N
+// selected" and a 44x44 Cancel. The bottom bar replaces the composer: Forward
+// (any recorded message) and Delete (own, unmarked, inside 30 minutes). When
+// Delete cannot apply it stays visible but disabled, with one line saying why.
+// Delete opens the confirm dialog; a failure shows the mapped copy as a toast
+// (never raw proc text) and the selection is kept (the caller only clears it
+// on success). The bottom bar keeps clear of the safe-area inset. Design
+// tokens only, so light and dark stay at parity.
 
 import { useState } from 'react';
 import type { ReactElement } from 'react';
 import { Button } from '@/components/ui/Button';
-import { IconButton } from '@/components/ui/IconButton';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { IconForward, IconTrash } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
+import { cn } from '@/lib/cn';
+import { DELETE_BLOCK_COPY, type DeleteBlock } from '@/lib/chat/forward';
+import {
+  HEADER_NAME_TYPE,
+  SELECTION_REASON_TYPE,
+  sized,
+  type ChatLayout,
+} from '@/components/chat/chat-type';
+
+/** The selection header's count line. */
+export function selectedCountLabel(count: number): string {
+  return `${count} selected`;
+}
+
+/**
+ * The header while selecting: the count and Cancel (44x44), in place of the
+ * thread header. Zero selected stays here until Cancel. Hook-free.
+ */
+export function SelectionHeader(props: {
+  count: number;
+  onCancel: () => void;
+  layout: ChatLayout;
+}): ReactElement {
+  return (
+    <>
+      <span
+        data-selection-count=""
+        aria-live="polite"
+        className={cn('min-w-0 flex-1 truncate text-fg', sized(HEADER_NAME_TYPE, props.layout))}
+      >
+        {selectedCountLabel(props.count)}
+      </span>
+      <button
+        type="button"
+        data-selection-cancel=""
+        onClick={props.onCancel}
+        className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-md px-3 text-sm font-medium text-accent hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        Cancel
+      </button>
+    </>
+  );
+}
+
+/**
+ * The bottom bar's view: Forward, then Delete, with the reason line under the
+ * pair when Delete is blocked. Hook-free so the tests call it directly.
+ */
+export function SelectionBarView(props: {
+  count: number;
+  /** Why Delete cannot apply (the reason line), or null. */
+  block: DeleteBlock | null;
+  /** False disables Delete (a block, or nothing selected). */
+  canDelete: boolean;
+  /** Opens the forward picker; absent hides Forward. */
+  onForward?: (() => void) | undefined;
+  /** Opens the delete confirm. */
+  onDeleteTap: () => void;
+}): ReactElement {
+  return (
+    <div
+      data-selection-bar=""
+      className="flex shrink-0 flex-col gap-1 border-t border-border bg-panel px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3"
+    >
+      <div className="flex items-center justify-between gap-2">
+        {props.onForward !== undefined ? (
+          <Button
+            variant="ghost"
+            size="lg"
+            data-selection-forward=""
+            disabled={props.count === 0}
+            onClick={props.onForward}
+          >
+            <IconForward size={18} />
+            Forward
+          </Button>
+        ) : (
+          <span />
+        )}
+        <Button
+          variant="ghost"
+          size="lg"
+          data-selection-delete=""
+          aria-describedby={props.block !== null ? 'selection-delete-reason' : undefined}
+          className="text-bad hover:bg-bad-soft hover:text-bad disabled:opacity-50"
+          disabled={!props.canDelete}
+          onClick={props.onDeleteTap}
+        >
+          <IconTrash size={18} />
+          Delete
+        </Button>
+      </div>
+      {props.block !== null ? (
+        <p
+          id="selection-delete-reason"
+          data-selection-reason={props.block}
+          className={cn('text-right text-fg-3', SELECTION_REASON_TYPE)}
+        >
+          {DELETE_BLOCK_COPY[props.block]}
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 export function SelectionBar(props: {
   count: number;
-  /** False when a selected message is not the caller's own unmarked one. */
-  canDelete?: boolean;
+  /** Why Delete cannot apply (see deleteSelectionBlock), or null. */
+  block: DeleteBlock | null;
+  /** False when Delete cannot apply to the selection (or nothing is selected). */
+  canDelete: boolean;
   /** Opens the forward picker for the selection; absent hides Forward. */
-  onForward?: () => void;
-  onCancel: () => void;
-  /** Runs the delete; resolves ok, or the proc's message. */
+  onForward?: (() => void) | undefined;
+  /** Runs the delete; resolves ok, or the user copy to toast. */
   onDelete: () => Promise<{ ok: true } | { ok: false; message: string }>;
 }): ReactElement {
   const [confirming, setConfirming] = useState(false);
@@ -36,25 +143,14 @@ export function SelectionBar(props: {
   }
 
   return (
-    <div className="flex items-center gap-2 border-t border-border bg-panel px-4 py-3">
-      <span className="flex-1 text-sm text-fg-2">{`${props.count} selected`}</span>
-      {props.onForward !== undefined ? (
-        <Button variant="ghost" size="lg" disabled={props.count === 0} onClick={props.onForward}>
-          <IconForward size={18} />
-          Forward
-        </Button>
-      ) : null}
-      <IconButton
-        label="Delete selected messages"
-        className="text-bad hover:bg-bad-soft hover:text-bad disabled:opacity-50"
-        disabled={props.count === 0 || props.canDelete === false}
-        onClick={() => setConfirming(true)}
-      >
-        <IconTrash size={20} />
-      </IconButton>
-      <Button variant="ghost" size="lg" onClick={props.onCancel}>
-        Cancel
-      </Button>
+    <>
+      <SelectionBarView
+        count={props.count}
+        block={props.block}
+        canDelete={props.canDelete}
+        onForward={props.onForward}
+        onDeleteTap={() => setConfirming(true)}
+      />
       {deleteMessagesConfirm({
         open: confirming,
         count: props.count,
@@ -62,7 +158,7 @@ export function SelectionBar(props: {
         onCancel: () => setConfirming(false),
         onConfirm: () => void confirm(),
       })}
-    </div>
+    </>
   );
 }
 

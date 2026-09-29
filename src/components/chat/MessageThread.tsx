@@ -21,7 +21,10 @@ import {
   intentAfterNewest,
   intentAfterScroll,
   isScrollKey,
+  listenTouchEnd,
+  newRowsAction,
   openingIntent,
+  sentFromThisDevice,
   SCROLL_SETTLE_MS,
   settleDecision,
   sizeChangeAction,
@@ -59,19 +62,21 @@ import {
 import { classifyAttachment, splitAlbum, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
 import { formatClockTime } from '@/lib/chat/time-format';
-import { getDraft, setDraft, type DraftReply } from '@/lib/chat/drafts';
+import { getDraft, setDraft, strippedReply, type DraftReply } from '@/lib/chat/drafts';
 import {
   BUBBLE_BODY_TYPE,
   BUBBLE_MAX,
   BUBBLE_META_TYPE,
   BUBBLE_PAD,
   BUBBLE_SHAPE,
+  COARSE_POINTER_QUERY,
   DATE_PILL_TYPE,
   GROUP_SENDER_TYPE,
   HEADER_LINE_TYPE,
   HEADER_NAME_TYPE,
   HEADER_PAD,
   HOVER_POINTER_QUERY,
+  NO_TOUCH_SELECT,
   REACTION_EMOJI_TYPE,
   sized,
   TICK_ICON_BOX,
@@ -106,7 +111,9 @@ import {
   BanGlyph,
   MessageActionMenu,
   ownMessageActions,
+  scheduleWindowBoundary,
 } from '@/components/chat/MessageActionMenu';
+import { useServerNow } from '@/components/chat/ChatStoreProvider';
 import { SharedBriefCards } from '@/components/chat/BriefCard';
 import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
 import {
@@ -118,14 +125,14 @@ import {
 import { useOpenPosts, type UseOpenPosts } from '@/lib/chat/use-open-posts';
 import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { ContactSheet } from '@/components/chat/ContactSheet';
-import { SelectionBar, deleteOneConfirm } from '@/components/chat/SelectionBar';
+import { SelectionBar, SelectionHeader } from '@/components/chat/SelectionBar';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { withDaySeparators } from '@/components/chat/day-separators';
 import { ForwardPicker, type ForwardSendResult } from '@/components/chat/ForwardPicker';
 import {
   FORWARDED_LABEL,
-  canDeleteSelection,
   canForward,
+  deleteSelectionBlock,
   pruneThreadSelection,
   selectedForForward,
   threadSelectable,
@@ -248,8 +255,8 @@ export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
 /** Pointer handlers on a bubble: the long-press and swipe-to-reply controllers, composed. */
 export interface BubblePointerHandlers {
-  onPointerDown: (event: PointerEvent<HTMLDivElement>) => void;
-  onPointerMove: (event: PointerEvent<HTMLDivElement>) => void;
+  onPointerDown: (event: PointerEvent<HTMLElement>) => void;
+  onPointerMove: (event: PointerEvent<HTMLElement>) => void;
   onPointerUp: () => void;
   onPointerCancel: () => void;
 }
@@ -968,7 +975,8 @@ export function bubbleClass(
   },
 ): string {
   return cn(
-    'group/bubble relative min-w-0 select-none [-webkit-touch-callout:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
+    'group/bubble relative min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg',
+    NO_TOUCH_SELECT,
     bubbleCorners(state),
     state.album === true ? 'min-w-[240px] p-[3px]' : sized(BUBBLE_PAD, state.layout),
     state.voiceOnly && 'min-w-[220px]',
@@ -983,12 +991,28 @@ export function bubbleClass(
  */
 export function tombstoneClass(shape: BubbleShape): string {
   return cn(
-    'relative flex min-w-0 select-none items-center gap-1.5 border border-border italic text-fg-3',
+    'relative flex min-w-0 items-center gap-1.5 border border-border italic text-fg-3',
+    NO_TOUCH_SELECT,
     sized(BUBBLE_BODY_TYPE, shape.layout),
     bubbleCorners(shape),
     sized(BUBBLE_PAD, shape.layout),
   );
 }
+
+/** Cancel the native default (the touch contextmenu on rows). */
+function preventDefault(event: { preventDefault: () => void }): void {
+  event.preventDefault();
+}
+
+/**
+ * Selection mode's static check column: every row (tombstones included, so
+ * the sides stay aligned) makes room for the 44px circle at its left. No
+ * transition: the column appears at once.
+ */
+export const SELECTION_ROW_OFFSET = 'relative pl-[60px]';
+
+/** Where the check circle (or lock) sits: the row's left column, vertically centred. */
+export const SELECTION_CHECK_SLOT = 'absolute left-4 top-1/2 flex -translate-y-1/2';
 
 /** A checked row's neutral tint: panel-3 at partial opacity across the full row. */
 export const SELECTED_ROW_TINT = 'pointer-events-none absolute inset-0 -z-10 bg-panel-3 opacity-60';
@@ -1195,6 +1219,13 @@ export function MessageBubble(props: {
     handlers: BubblePointerHandlers;
     onContextMenu: (event: MouseEvent) => void;
     consumeClick: () => boolean;
+    /**
+     * Selection mode: true (once) when this click trails a long-press that
+     * already toggled the row, so the tap is not counted twice.
+     */
+    consumeSelectHold?: () => boolean;
+    /** A coarse (touch-first) pointer: the row suppresses the native contextmenu. */
+    coarse?: boolean;
     /** Keyboard open (Enter / Space / Shift+F10), anchored to the bubble. */
     onKeyOpen: () => void;
     /** Fine pointer only: the in-bubble chevron, opening the full menu. */
@@ -1243,16 +1274,28 @@ export function MessageBubble(props: {
     <span className={cn('text-fg', sized(GROUP_SENDER_TYPE, layout))}>{name}</span>
   ) : null;
   const shape: BubbleShape = { mine, head, tail, layout };
+  const selecting = selection !== undefined;
   const rowClass = cn(
     'group flex items-start gap-2 px-4',
+    NO_TOUCH_SELECT,
     head ? (props.afterLabel === true ? 'pt-0' : 'pt-2.5') : 'pt-0.5',
     mine ? 'flex-row-reverse' : 'flex-row',
+    // Selection mode: a static 44px check column at the left of every row.
+    selecting && SELECTION_ROW_OFFSET,
   );
+  // Rows never show the native menu or callout on a touch-first device.
+  const rowContextMenu = press?.coarse === true ? preventDefault : undefined;
   if (message.deleted === true) {
     // A tombstone keeps its side, meta and run grouping; nothing else.
     const tombMeta: BubbleMeta = { time: meta.time, edited: false, status: null };
     return (
-      <li data-msg-id={message.id} data-state={message.state} data-deleted="" className={rowClass}>
+      <li
+        data-msg-id={message.id}
+        data-state={message.state}
+        data-deleted=""
+        className={rowClass}
+        onContextMenu={rowContextMenu}
+      >
         {showMeta ? (
           <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" />
         ) : null}
@@ -1294,15 +1337,38 @@ export function MessageBubble(props: {
       data-state={message.state}
       data-selection={selection?.role}
       data-checked={checked ? '' : undefined}
-      className={cn(rowClass, hasReactions && REACTION_ROW_SPACE, checked && 'relative isolate')}
+      className={cn(rowClass, hasReactions && REACTION_ROW_SPACE, checked && 'isolate')}
+      // Selection mode: the whole row is the target. A tap anywhere on it
+      // (bubble, blank space, the circle) toggles, and nothing inside opens
+      // (links, media, cards, voice, chips); a long-press toggles too.
+      {...(selection !== undefined
+        ? {
+            ...press?.handlers,
+            onContextMenu: press?.onContextMenu,
+            onClickCapture: (e: MouseEvent) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (press?.consumeSelectHold?.() === true) return;
+              if (selection.role === 'selectable') selection.onToggle();
+            },
+          }
+        : { onContextMenu: rowContextMenu })}
     >
       {checked ? (
         <span aria-hidden="true" data-selected-tint="" className={SELECTED_ROW_TINT} />
       ) : null}
       {selection?.role === 'selectable' ? (
-        <SelectCheckbox checked={selection.checked} onToggle={selection.onToggle} />
+        <SelectCheckbox
+          checked={selection.checked}
+          onToggle={selection.onToggle}
+          className={SELECTION_CHECK_SLOT}
+        />
       ) : null}
-      {selection?.role === 'locked' ? <SelectLock /> : null}
+      {selection?.role === 'locked' ? (
+        <span className={SELECTION_CHECK_SLOT}>
+          <SelectLock />
+        </span>
+      ) : null}
       {showMeta ? <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" /> : null}
       {gutter ? <span className="w-[26px] shrink-0" aria-hidden="true" /> : null}
       <div className={cn('relative', column)}>
@@ -1315,20 +1381,15 @@ export function MessageBubble(props: {
           role="group"
           tabIndex={0}
           aria-label={`${mine ? 'Your message' : `Message from ${name}`}, ${bubbleTimeLabel(message, timeZone)}`}
-          {...press?.handlers}
-          onContextMenu={press?.onContextMenu}
+          {...(selection === undefined ? press?.handlers : {})}
+          onContextMenu={selection === undefined ? press?.onContextMenu : undefined}
           onKeyDown={(e: KeyboardEvent<HTMLDivElement>) => {
             if (selection !== undefined || press === undefined || !keyOpensMenu(e)) return;
             e.preventDefault();
             press.onKeyOpen();
           }}
           onClickCapture={(e) => {
-            if (selection !== undefined) {
-              e.preventDefault();
-              e.stopPropagation();
-              if (selection.role === 'selectable') selection.onToggle();
-              return;
-            }
+            // Selection mode's tap is handled by the row, before this.
             if (press?.consumeClick()) {
               e.preventDefault();
               e.stopPropagation();
@@ -1577,7 +1638,7 @@ export function threadRows(
  * slack above the first message and a short thread pins to the bottom. Never
  * justify-end on the scroll container; the spacer collapses to 0 on overflow.
  */
-export const THREAD_LIST_CLASS = 'flex flex-1 flex-col overflow-y-auto py-2';
+export const THREAD_LIST_CLASS = cn('flex flex-1 flex-col overflow-y-auto py-2', NO_TOUCH_SELECT);
 
 /**
  * The list's children in order: the bottom-pin spacer, the older-page row, then
@@ -1679,6 +1740,8 @@ function MessageRow(props: {
   selection?: RowSelection;
   /** Fine pointer device: the in-bubble chevron and the smiley. */
   hoverMenu: boolean;
+  /** Coarse (touch-first) pointer: long-press owns the menu, contextmenu is suppressed. */
+  coarsePointer: boolean;
   /** prefers-reduced-motion: the swipe resets without a spring. */
   reducedMotion: boolean;
   /** Swiped past the threshold: the same reply path as the menu's Reply. */
@@ -1696,12 +1759,20 @@ function MessageRow(props: {
   // Mouse holds never open the menu (right-click and ⋯ do); touch is unchanged.
   // A completed long-press ends any pending swipe for that touch.
   const { handlers, consumeClickSuppression, cancel, clearClickSuppression } = useLongPress(
-    () => {
-      swipeRef.current?.cancel();
-      open(bubbleRect());
-    },
+    () => rowHold.hold(),
     { ignoreMouse: true },
   );
+  const rowHoldRef = useRef<RowHold | null>(null);
+  rowHoldRef.current ??= createRowHold({
+    selection: () => latest.current.selection,
+    coarse: () => latest.current.coarsePointer,
+    openMenu: () => open(bubbleRect()),
+    cancelTimer: () => cancel(),
+    cancelSwipe: () => swipeRef.current?.cancel(),
+    swiping: () => swipeRef.current?.swiping() === true,
+    clearClickSuppression: () => clearClickSuppression(),
+  });
+  const rowHold = rowHoldRef.current;
   if (swipeRef.current === null) {
     swipeRef.current = createSwipeReplyController({
       onReply: () => latest.current.onSwipeReply(latest.current.message),
@@ -1727,22 +1798,19 @@ function MessageRow(props: {
     };
   }, [swipe]);
   function open(anchor: DOMRect | null, reactionsOnly = false): void {
-    if (selecting) return;
+    if (latest.current.selection !== undefined) return;
     // The menu's backdrop takes the trailing pointerup, so no click to swallow.
     clearClickSuppression();
-    props.onOpen(props.message, anchor, bubbleRef.current, reactionsOnly);
+    const current = latest.current;
+    current.onOpen(current.message, anchor, bubbleRef.current, reactionsOnly);
   }
-  const onContextMenu = (e: MouseEvent): void => {
-    e.preventDefault();
-    cancel();
-    if (swipe.swiping()) return;
-    open(bubbleRect());
-  };
   const pointer: BubblePointerHandlers = {
     onPointerDown: (e) => {
+      rowHold.pointerDown();
       // A press on a body link never arms the long-press menu; the swipe still
-      // only starts past 8px, so a tap under that is the link's.
-      if (!isLinkTarget(e.target)) handlers.onPointerDown(e);
+      // only starts past 8px, so a tap under that is the link's. In selection
+      // mode a hold anywhere on the row toggles it, links included.
+      if (selecting || !isLinkTarget(e.target)) handlers.onPointerDown(e);
       swipe.handlers.onPointerDown(e);
     },
     onPointerMove: (e) => {
@@ -1778,13 +1846,15 @@ function MessageRow(props: {
       swipe={{ iconRef }}
       press={{
         handlers: pointer,
-        onContextMenu,
+        onContextMenu: rowHold.contextMenu,
         consumeClick: () => {
           // Read both so neither flag lingers into the next tap.
           const held = consumeClickSuppression();
           const swiped = swipe.consumeClickSuppression();
           return held || swiped;
         },
+        consumeSelectHold: rowHold.consumeSelectHold,
+        coarse: props.coarsePointer,
         onKeyOpen: () => open(bubbleRect()),
         // Chevron, right-click and long-press all open the same one-box menu.
         ...(props.hoverMenu
@@ -1803,6 +1873,74 @@ function MessageRow(props: {
       onBadgeClick={() => props.onOpen(props.message, bubbleRect(), bubbleRef.current)}
     />
   );
+}
+
+/** One row's hold (long-press) and contextmenu decisions; see createRowHold. */
+export interface RowHold {
+  /** The long-press fired. */
+  hold: () => void;
+  /** The row's or bubble's contextmenu event. */
+  contextMenu: (event: { preventDefault: () => void }) => void;
+  /** A new gesture starts: nothing has fired yet. */
+  pointerDown: () => void;
+  /** True (once) when this click trails a hold that already toggled the row. */
+  consumeSelectHold: () => boolean;
+}
+
+/**
+ * The hold and contextmenu of one message row, framework-free so the rules are
+ * unit-tested. A hold (long-press) opens the menu, or in selection mode
+ * toggles the row and opens nothing; the click that may trail it is then
+ * swallowed once, so a hold never toggles twice. contextmenu always cancels
+ * the native one: on a touch-first pointer the hold owns it (a contextmenu
+ * that beats the hold timer acts as the hold, once per gesture); on a laptop
+ * right-click opens the menu as before, and does nothing while selecting.
+ */
+export function createRowHold(deps: {
+  selection: () => RowSelection | undefined;
+  coarse: () => boolean;
+  openMenu: () => void;
+  cancelTimer: () => void;
+  cancelSwipe: () => void;
+  swiping: () => boolean;
+  clearClickSuppression: () => void;
+}): RowHold {
+  let holdFired = false;
+  let selectHold = false;
+  const hold = (): void => {
+    holdFired = true;
+    deps.cancelSwipe();
+    const selection = deps.selection();
+    if (selection === undefined) {
+      deps.openMenu();
+      return;
+    }
+    deps.clearClickSuppression();
+    selectHold = true;
+    if (selection.role === 'selectable') selection.onToggle();
+  };
+  return {
+    hold,
+    contextMenu: (event) => {
+      event.preventDefault();
+      deps.cancelTimer();
+      if (deps.swiping()) return;
+      if (deps.coarse()) {
+        if (!holdFired) hold();
+        return;
+      }
+      if (deps.selection() === undefined) deps.openMenu();
+    },
+    pointerDown: () => {
+      holdFired = false;
+      selectHold = false;
+    },
+    consumeSelectHold: () => {
+      const toggled = selectHold;
+      selectHold = false;
+      return toggled;
+    },
+  };
 }
 
 /**
@@ -1854,13 +1992,13 @@ function ThreadBody(
     selection?: { selected: ReadonlySet<string>; onToggle: (id: string) => void };
     /** Menu "Mark as ..." picked; absent hides mark actions. */
     onMark?: (message: ThreadMessage, type: MarkType) => void;
-    /** Menu "Select" picked; absent hides it. */
+    /** Menu "Select" picked: selection mode with the message ticked; absent hides it. */
     onStartSelect?: (message: ThreadMessage) => void;
-    /** Menu "Forward" picked; absent hides it. */
+    /** Menu "Forward" picked: selection mode with the message ticked; absent hides it. */
     onForwardMessage?: (message: ThreadMessage) => void;
     /** Menu "Edit" picked; absent hides it. */
     onEditMessage?: (message: ThreadMessage) => void;
-    /** Menu "Delete" picked (the caller confirms); absent hides it. */
+    /** Menu "Delete" picked: selection mode with the message ticked; absent hides it. */
     onDeleteMessage?: (message: ThreadMessage) => void;
     onChangePriority?: (messageId: string) => void;
     /** A jump-to request (seq makes a repeat of the same id fire again). */
@@ -1877,8 +2015,9 @@ function ThreadBody(
   },
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
-  // The open menu: its message, anchor, held bubble and the moment it opened
-  // (the edit and delete windows are judged then, not re-evaluated live).
+  // The open menu: its message, anchor, held bubble and the server moment its
+  // rows were judged at (the edit and delete windows). While it is open, one
+  // timeout for the message's next window boundary re-judges them.
   const [menu, setMenu] = useState<{
     message: ThreadMessage;
     rect: DOMRect | null;
@@ -1896,7 +2035,20 @@ function ThreadBody(
     const current = props.messages.find((m) => m.id === menuId);
     if (current === undefined || current.deleted === true) setMenu(null);
   }, [props.messages, menuId]);
+  // Server time (device clock plus the store's offset), never the device clock alone.
+  const serverNow = useServerNow();
+  const menuCreatedAt = menu?.message.createdAt ?? null;
+  const menuOpenedAt = menu?.openedAt ?? null;
+  useEffect(() => {
+    if (menuCreatedAt === null || menuOpenedAt === null) return;
+    return scheduleWindowBoundary({
+      createdAt: menuCreatedAt,
+      now: serverNow,
+      onBoundary: () => setMenu((m) => (m !== null ? { ...m, openedAt: serverNow() } : m)),
+    });
+  }, [menuCreatedAt, menuOpenedAt, serverNow]);
   const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
+  const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
   const reducedMotion = useMediaQuery(REDUCED_MOTION_QUERY);
   const toast = useToast();
   const listRef = useRef<HTMLUListElement>(null);
@@ -1961,11 +2113,16 @@ function ThreadBody(
     userGesture();
     touchingRef.current = true;
   };
-  const touchEnd = (): void => {
+  // Touch ends are heard on the window (a row removed under the finger takes
+  // its own touchend with it); only a touch that started on the list counts.
+  const touchEndRef = useRef<() => void>(() => {});
+  touchEndRef.current = (): void => {
+    if (!touchingRef.current) return;
     touchingRef.current = false;
     touchScrollAtRef.current = Date.now();
     scheduleSettle();
   };
+  useEffect(() => listenTouchEnd(window, () => touchEndRef.current()), []);
   const ensureLoadedRef = useRef(props.onEnsureLoaded);
   ensureLoadedRef.current = props.onEnsureLoaded;
   const toastRef = useRef(toast);
@@ -2030,19 +2187,36 @@ function ThreadBody(
       anchorHeightRef.current = null;
       return;
     }
+    const newestChanged = last !== undefined && last.id !== lastIdRef.current;
     stickRef.current = intentAfterNewest({
       intent: stickRef.current,
       newest: last,
       previousNewestId: lastIdRef.current,
     });
     lastIdRef.current = last?.id ?? null;
-    if (!stickRef.current) return;
+    // An own local send pins now; anything else waits out a flick (the
+    // settle pins it if the reader is still near the bottom).
+    const touchScrollAt = touchScrollAtRef.current;
+    const action = newRowsAction({
+      intent: stickRef.current,
+      flicking: flickInProgress({
+        touching: touchingRef.current,
+        msSinceTouchScroll: touchScrollAt !== null ? Date.now() - touchScrollAt : null,
+      }),
+      ownLocalSend: newestChanged && last !== undefined && sentFromThisDevice(last),
+    });
+    if (action === 'leave') return;
+    if (action === 'defer') {
+      deferredPinRef.current = true;
+      if (!touchingRef.current && settleTimerRef.current === null) scheduleSettle();
+      return;
+    }
     pin();
     if (last !== undefined && newestIdRef.current !== last.id) {
       newestIdRef.current = last.id;
       onNewestVisible?.();
     }
-  }, [props.messages, onNewestVisible, reveal, pin, programScroll]);
+  }, [props.messages, onNewestVisible, reveal, pin, programScroll, scheduleSettle]);
   // Pin on any size change: every row and the list itself are observed (rows
   // as they mount and unmount), so late growth (cards, marks, badges, the
   // typing row, the composer, a font swap) re-pins before paint while the
@@ -2150,8 +2324,6 @@ function ThreadBody(
         ref={listRef}
         onTouchStart={touchStart}
         onTouchMove={userGesture}
-        onTouchEnd={touchEnd}
-        onTouchCancel={touchEnd}
         onWheel={userGesture}
         onKeyDown={(e) => {
           if (isScrollKey(e.key)) userGesture();
@@ -2216,12 +2388,13 @@ function ThreadBody(
                   message: m,
                   rect,
                   held,
-                  openedAt: Date.now(),
+                  openedAt: serverNow(),
                   reactionsOnly: reactionsOnly === true,
                 });
               }}
               onOpenImage={(m, index) => setViewer({ messageId: m.id, index })}
               hoverMenu={hoverMenu}
+              coarsePointer={coarsePointer}
               reducedMotion={reducedMotion}
               onSwipeReply={props.onReply}
               onJumpToMessage={scrollToMessage}
@@ -2386,6 +2559,30 @@ export function rowSelection(
   };
 }
 
+/**
+ * The selection a menu Select, Forward or Delete opens with: that message
+ * ticked, or nothing when it cannot be (an own marked message keeps its lock).
+ */
+export function selectionOnEntry(
+  message: ThreadMessage,
+  marks: Map<string, ChatMark>,
+): Set<string> {
+  return threadSelectable(message, marks) ? new Set([message.id]) : new Set();
+}
+
+/**
+ * Whether the menu's Forward enters selection mode (the message ticked) rather
+ * than opening the picker for it alone: always, where selection mode exists,
+ * except for an own marked message, whose lock keeps it out of the selection.
+ */
+export function forwardEntersSelection(
+  message: ThreadMessage,
+  marks: Map<string, ChatMark>,
+  selectionAvailable: boolean,
+): boolean {
+  return selectionAvailable && threadSelectable(message, marks);
+}
+
 /** The thread pane: header (+ optional back), message list, and composer. */
 export function MessageThread(props: MessageThreadProps): ReactElement {
   const { canAttach, presignEnabled, presignCache, uploadFile, transcribe, canTranscribe } =
@@ -2438,10 +2635,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const [priorityBusy, setPriorityBusy] = useState(false);
   const [jumpRequest, setJumpRequest] = useState<{ id: string; seq: number } | null>(null);
   const [forwardFor, setForwardFor] = useState<ThreadMessage[] | null>(null);
-  // The own message being edited in the composer, and the one awaiting its delete confirm.
+  // The own message being edited in the composer.
   const [editing, setEditing] = useState<EditingDraft | null>(null);
-  const [deleteFor, setDeleteFor] = useState<ThreadMessage | null>(null);
-  const [deleteBusy, setDeleteBusy] = useState(false);
+  // Server time for the delete window (device clock plus the store's offset).
+  const serverNow = useServerNow();
 
   // The message being edited was deleted or left the thread: stop editing it.
   const editingId = editing?.messageId ?? null;
@@ -2483,15 +2680,6 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         message.sharedBriefIds.length > 0,
     });
   };
-  const confirmDeleteOne = async (): Promise<void> => {
-    const target = deleteFor;
-    if (target === null || onDeleteMessages === undefined || deleteBusy) return;
-    setDeleteBusy(true);
-    const result = await onDeleteMessages([target.id]);
-    setDeleteBusy(false);
-    setDeleteFor(null);
-    if (!result.ok) toast.show({ title: result.message });
-  };
   const onForward = props.onForward;
   const forwardChannels = props.forwardChannels;
   const canForwardHere = onForward !== undefined && forwardChannels !== undefined;
@@ -2499,6 +2687,27 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setSelecting(false);
     setSelected(new Set());
   };
+  /**
+   * Menu Select, Forward or Delete: selection mode opens with that message
+   * ticked (when it can be; an own marked message keeps its lock).
+   */
+  const enterSelection = (message: ThreadMessage): void => {
+    setEditing(null);
+    setSelecting(true);
+    setSelected(selectionOnEntry(message, marks));
+  };
+  // Escape leaves selection mode (the laptop's Cancel).
+  useEffect(() => {
+    if (!selecting) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent): void => {
+      if (event.key !== 'Escape' || document.querySelector('[aria-modal="true"], [role="menu"]'))
+        return;
+      setSelecting(false);
+      setSelected(new Set());
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [selecting]);
   const handleReply = (message: ThreadMessage): void => {
     const preview = replyPreview(message);
     setReplyDraft({
@@ -2506,6 +2715,21 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       quote: { id: message.id, authorUserId: message.senderUserId, preview },
     });
   };
+  // The quoted message became a tombstone: the reply chip loses its text and
+  // reads the deleted label (the draft map is stripped by the store too).
+  const replyQuoteId =
+    replyDraft !== null && replyDraft.deleted !== true ? replyDraft.quote.id : null;
+  const replyQuoteDeleted =
+    replyQuoteId !== null &&
+    props.messages.some((m) => m.id === replyQuoteId && m.deleted === true);
+  useEffect(() => {
+    if (!replyQuoteDeleted) return;
+    setReplyDraftState((prev) => (prev !== null ? strippedReply(prev) : prev));
+    if (channelId !== undefined) {
+      const current = getDraft(channelId).reply;
+      if (current !== null) setDraft(channelId, { reply: strippedReply(current) });
+    }
+  }, [replyQuoteDeleted, channelId]);
   const headerLine = dmHeaderLine({
     isGroup: props.isGroup === true,
     peerTyping: props.typingUserIds.length > 0,
@@ -2689,6 +2913,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     );
   };
   const filterPost = filterPostId !== null ? postRef(filterPostId) : undefined;
+  // Delete follows the 30 minute window on server time; the bar says why not.
+  const deleteBlock = selecting
+    ? deleteSelectionBlock(selected, shownMessages, marks, serverNow())
+    : null;
   const stripSlot = threadStripSlot({
     filtering: filterPostId !== null,
     hasMarks: props.marks !== undefined,
@@ -2702,25 +2930,38 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           sized(HEADER_PAD, layout),
         )}
       >
-        {props.onBack !== undefined ? (
-          <IconButton label="Back to conversations" onClick={props.onBack}>
-            <IconChevronLeft size={20} />
-          </IconButton>
-        ) : null}
-        <ThreadHeaderIdentity
-          isGroup={props.isGroup === true}
-          title={props.title}
-          avatarUrl={props.avatarUrl ?? null}
-          presence={headerAvatarPresence(props.presence)}
-          headerLine={headerLine}
-          layout={layout}
-          {...(canOpenContact ? { onOpenContact: () => setContactOpen(true) } : {})}
-        />
-        {props.onOpenInfo !== undefined ? (
-          <IconButton label="Group info" onClick={props.onOpenInfo}>
-            <IconSettings size={20} />
-          </IconButton>
-        ) : null}
+        {selecting ? (
+          <>
+            {props.onBack !== undefined ? (
+              <IconButton label="Cancel selection" onClick={exitSelection}>
+                <IconChevronLeft size={20} />
+              </IconButton>
+            ) : null}
+            <SelectionHeader count={selected.size} onCancel={exitSelection} layout={layout} />
+          </>
+        ) : (
+          <>
+            {props.onBack !== undefined ? (
+              <IconButton label="Back to conversations" onClick={props.onBack}>
+                <IconChevronLeft size={20} />
+              </IconButton>
+            ) : null}
+            <ThreadHeaderIdentity
+              isGroup={props.isGroup === true}
+              title={props.title}
+              avatarUrl={props.avatarUrl ?? null}
+              presence={headerAvatarPresence(props.presence)}
+              headerLine={headerLine}
+              layout={layout}
+              {...(canOpenContact ? { onOpenContact: () => setContactOpen(true) } : {})}
+            />
+            {props.onOpenInfo !== undefined ? (
+              <IconButton label="Group info" onClick={props.onOpenInfo}>
+                <IconSettings size={20} />
+              </IconButton>
+            ) : null}
+          </>
+        )}
       </div>
       {stripSlot === 'filter' ? (
         <FilterStrip
@@ -2759,18 +3000,21 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
             }
           : {})}
         {...(onDeleteMessages !== undefined && !selecting
-          ? {
-              onStartSelect: (message: ThreadMessage) => {
-                setEditing(null);
-                setSelecting(true);
-                setSelected(threadSelectable(message, marks) ? new Set([message.id]) : new Set());
-              },
-              onDeleteMessage: (message: ThreadMessage) => setDeleteFor(message),
-            }
+          ? { onStartSelect: enterSelection, onDeleteMessage: enterSelection }
           : {})}
         {...(onEditMessage !== undefined && !selecting ? { onEditMessage: startEdit } : {})}
         {...(canForwardHere && !selecting
-          ? { onForwardMessage: (message: ThreadMessage) => setForwardFor([message]) }
+          ? {
+              onForwardMessage: (message: ThreadMessage) => {
+                // An own marked message keeps its lock (never ticked), so its
+                // Forward goes straight to the picker; any other enters selection.
+                if (forwardEntersSelection(message, marks, onDeleteMessages !== undefined)) {
+                  enterSelection(message);
+                  return;
+                }
+                setForwardFor([message]);
+              },
+            }
           : {})}
         {...(selecting
           ? {
@@ -2809,12 +3053,14 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       {selecting && onDeleteMessages !== undefined ? (
         <SelectionBar
           count={selected.size}
-          canDelete={canDeleteSelection(selected, shownMessages, marks)}
+          block={deleteBlock}
+          canDelete={selected.size > 0 && deleteBlock === null}
           {...(canForwardHere
             ? { onForward: () => setForwardFor(selectedForForward(selected, shownMessages)) }
             : {})}
-          onCancel={exitSelection}
           onDelete={async () => {
+            // Committed chunks become tombstones (and leave the selection);
+            // a failed chunk's ids stay selected for another try.
             const result = await onDeleteMessages([...selected]);
             if (result.ok) exitSelection();
             return result;
@@ -2829,6 +3075,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           disabled={!props.canSend}
           onTyping={props.onTyping}
           onCancelReply={() => setReplyDraft(null)}
+          viewerUserId={props.currentUserId}
           {...(replyDraft !== null ? { reply: replyDraft } : {})}
           {...(aboutDraft !== null && !aboutGone ? { about: aboutPost ?? null } : {})}
           onCancelAbout={() => setAboutDraft(null)}
@@ -2849,12 +3096,6 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           onCancelEdit={() => setEditing(null)}
         />
       )}
-      {deleteOneConfirm({
-        open: deleteFor !== null,
-        busy: deleteBusy,
-        onCancel: () => setDeleteFor(null),
-        onConfirm: () => void confirmDeleteOne(),
-      })}
       {props.marks !== undefined &&
       props.onResolveMark !== undefined &&
       props.onReopenMark !== undefined ? (

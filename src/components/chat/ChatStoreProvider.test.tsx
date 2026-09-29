@@ -8,11 +8,19 @@ vi.mock('agora-chat', () => ({
   default: { connection: vi.fn(), message: { create: vi.fn() } },
 }));
 
-import { loadChatList, type ChatListReaders } from '@/components/chat/ChatStoreProvider';
+import {
+  handleMessagesDeleted,
+  loadChatList,
+  type ChatListReaders,
+} from '@/components/chat/ChatStoreProvider';
 import { ChannelCard, channelListContent } from '@/components/chat/ChannelList';
 import { EmptyState } from '@/components/ui/EmptyState';
 import type { ChannelSummary } from '@/lib/chat-reads';
 import {
+  applyChannelPreviews,
+  applyPreviews,
+  channelsShowingDeleted,
+  setActive,
   beginLoad,
   initialState,
   loadScope,
@@ -233,5 +241,95 @@ describe('loadChatList', () => {
     const transition = await loadChatList(readers(), SCOPE, ME);
     const moved = beginLoad(initialState(), loadScope('w2', ME));
     expect(transition(moved)).toBe(moved);
+  });
+});
+
+describe('D1: the store handles a delete signal for any channel', () => {
+  it('a non-open chat whose line showed the message re-reads it in one batched read', async () => {
+    let state: ChatStoreState = setActive(
+      applyPreviews(
+        {
+          ...initialState(),
+          conversations: {
+            open: { lastMessageText: '', lastMessageTs: 0, unread: 0 },
+            other: { lastMessageText: '', lastMessageTs: 0, unread: 3 },
+          },
+        },
+        [
+          {
+            channelId: 'open',
+            messageId: 'o1',
+            senderUserId: 'p',
+            body: 'open line',
+            hasAttachments: false,
+            createdAt: '1970-01-01T00:00:00.010Z',
+          },
+          {
+            channelId: 'other',
+            messageId: 'x9',
+            senderUserId: 'p',
+            body: 'deleted words',
+            hasAttachments: false,
+            createdAt: '1970-01-01T00:00:00.020Z',
+          },
+        ],
+        ME,
+      ),
+      'open',
+    );
+    const reads = vi.fn(() =>
+      Promise.resolve([
+        {
+          channelId: 'open',
+          messageId: 'o1',
+          senderUserId: 'p',
+          body: 'open line',
+          hasAttachments: false,
+          createdAt: '1970-01-01T00:00:00.010Z',
+        },
+        {
+          channelId: 'other',
+          messageId: 'x8',
+          senderUserId: 'p',
+          body: 'the line before',
+          hasAttachments: false,
+          createdAt: '1970-01-01T00:00:00.015Z',
+        },
+      ]),
+    );
+    const stripDrafts = vi.fn();
+    const stripOutbox = vi.fn();
+    const pending: Promise<void>[] = [];
+    handleMessagesDeleted(
+      {
+        channelsShowing: (ids) => channelsShowingDeleted(state, ids),
+        rereadPreviews: (channelIds) => {
+          pending.push(
+            reads().then((rows) => {
+              state = applyChannelPreviews(state, channelIds, rows, ME);
+            }),
+          );
+        },
+        stripDrafts,
+        stripOutbox,
+      },
+      ['x9', 'x10'],
+    );
+    await Promise.all(pending);
+    expect(reads).toHaveBeenCalledOnce();
+    expect(selectConversation(state, 'other')?.lastMessageText).toBe('the line before');
+    expect(selectConversation(state, 'other')?.unread).toBe(3);
+    expect(selectConversation(state, 'open')?.lastMessageText).toBe('open line');
+    expect(stripDrafts).toHaveBeenCalledWith(['x9', 'x10']);
+    expect(stripOutbox).toHaveBeenCalledWith(['x9', 'x10']);
+  });
+
+  it('no line shows a deleted id: no read at all', () => {
+    const rereadPreviews = vi.fn();
+    handleMessagesDeleted(
+      { channelsShowing: () => [], rereadPreviews, stripDrafts: vi.fn(), stripOutbox: vi.fn() },
+      ['older'],
+    );
+    expect(rereadPreviews).not.toHaveBeenCalled();
   });
 });

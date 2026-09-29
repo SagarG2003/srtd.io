@@ -44,6 +44,7 @@ import { APP_ENTITY_ROUTES, classify, currentOrigin, tokenize } from '@/lib/chat
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { clearDraft, EMPTY_DRAFT, getDraft, setDraft, type DraftFile } from '@/lib/chat/drafts';
+import { deletedMessageLabel } from '@/lib/chat/thread';
 import { COMPOSER_INPUT_TYPE, sized, useChatLayout } from '@/components/chat/chat-type';
 
 interface ComposerProps {
@@ -74,8 +75,13 @@ interface ComposerProps {
   transcribe?: ((blob: Blob) => Promise<TranscribeResult>) | undefined;
   /** Called on each keystroke so the parent can broadcast a throttled typing signal. */
   onTyping?: (() => void) | undefined;
-  /** The active reply draft; renders the preview bar above the chips when present. */
-  reply?: { authorName: string; quote: ReplyQuote } | undefined;
+  /**
+   * The active reply draft; renders the preview bar above the chips when
+   * present. `deleted` (the quoted message was deleted) reads deletedMessageLabel.
+   */
+  reply?: { authorName: string; quote: ReplyQuote; deleted?: true } | undefined;
+  /** The viewer's user id: a reply to their own deleted message reads "You deleted". */
+  viewerUserId?: string | undefined;
   /** Clears the active reply draft (cancel button, and after a successful send). */
   onCancelReply?: (() => void) | undefined;
   /**
@@ -104,6 +110,20 @@ interface ComposerProps {
   onCancelEdit?: (() => void) | undefined;
   /** Record the edited body; resolves ok, or the mapped failure copy to show. */
   onEdit?: ((text: string) => Promise<{ ok: true } | { ok: false; message: string }>) | undefined;
+}
+
+/**
+ * The reply bar's preview line: the quote's text, or deletedMessageLabel once
+ * the quoted message was deleted ("You deleted this message" when it was the
+ * viewer's own). Pure.
+ */
+export function replyBarPreview(
+  reply: { quote: ReplyQuote; deleted?: true },
+  viewerUserId: string | undefined,
+): string {
+  if (reply.deleted !== true) return reply.quote.preview;
+  const mine = reply.quote.authorUserId !== null && reply.quote.authorUserId === viewerUserId;
+  return deletedMessageLabel({ mine });
 }
 
 /** The message being edited, as the composer takes it. */
@@ -914,7 +934,8 @@ export function Composer(props: ComposerProps): ReactElement {
       {bars.reply && props.reply != null ? (
         <ReplyQuoteBox
           author={props.reply.authorName}
-          preview={props.reply.quote.preview}
+          preview={replyBarPreview(props.reply, props.viewerUserId)}
+          deleted={props.reply.deleted === true}
           trailing={
             <IconButton
               label="Cancel reply"

@@ -34,6 +34,7 @@ import { liveVerifierFor, type LiveVerifier } from '@/lib/chat/live-verify';
 import type { ChannelOutbox, OutboxEntry } from '@/lib/chat/chat-store';
 import {
   addReactionRecord,
+  deleteOutcomeCopy,
   removeReactionRecord,
   sendMessageRecord,
   setReadCursorRecord,
@@ -107,12 +108,14 @@ export interface UseChatThread {
   ) => void;
   /**
    * Delete own messages for everyone (chunked at 100 per proc call). Accepted
-   * chunks leave the thread at once and are signalled live; the first failing
-   * chunk stops the run and its proc message is returned.
+   * chunks turn into tombstones at once and are signalled live; the first
+   * failing chunk stops the run. A failure returns the user copy
+   * (deleteOutcomeCopy: "Deleted N of M ..." or the mapped proc error, never
+   * raw text) and the ids that were deleted.
    */
   deleteMessages: (
     messageIds: readonly string[],
-  ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  ) => Promise<{ ok: true } | { ok: false; message: string; deleted: readonly string[] }>;
   /**
    * Edit the body of an own message: recorded first, then the bubble shows the
    * returned row and peers are signalled live. A failure returns the user copy
@@ -222,6 +225,11 @@ export function useChatThread(params: {
   onCaughtUpRef.current = onCaughtUp;
   const onMessagesDeletedRef = useRef(params.onMessagesDeleted);
   onMessagesDeletedRef.current = params.onMessagesDeleted;
+  /** Messages became tombstones: tell the caller and the store (drafts, outbox, list line). */
+  const reportDeleted = useCallback((forChannel: string, ids: readonly string[]): void => {
+    onMessagesDeletedRef.current?.(forChannel, ids);
+    outboxRef.current.messagesDeleted(ids);
+  }, []);
   const inFlight = useMemo(() => createInFlightGuard(), []);
   const catchingUpRef = useRef(false);
   const loadingOlderRef = useRef(false);
@@ -381,7 +389,7 @@ export function useChatThread(params: {
           .map((m) => m.id);
         if (own.length === 0) return;
         setMessages((prev) => markMessagesDeleted(prev, own));
-        onMessagesDeletedRef.current?.(channelId, own);
+        reportDeleted(channelId, own);
       },
       // The edit renders from the re-read row (like live messages), never the
       // Agora payload; a missing (deleted, unreadable) or unchanged row is ignored.
@@ -406,7 +414,7 @@ export function useChatThread(params: {
       },
     });
     return unsubscribe;
-  }, [db, client, channelId, currentUserId, verifier, foldRows]);
+  }, [db, client, channelId, currentUserId, verifier, foldRows, reportDeleted]);
 
   // Catch-up from Postgres, never gated on the Agora state: rows newer than the
   // newest recorded message (paging past the 200 cap), or the latest page when
@@ -743,7 +751,7 @@ export function useChatThread(params: {
             if (channelRef.current === forChannel) {
               setMessages((prev) => markMessagesDeleted(prev, ids));
             }
-            onMessagesDeletedRef.current?.(forChannel, ids);
+            reportDeleted(forChannel, ids);
           },
           signal:
             connection !== null && liveTarget !== null
@@ -766,9 +774,13 @@ export function useChatThread(params: {
         deleted: result.deleted.length,
         error: result.message,
       });
-      return { ok: false, message: result.message };
+      return {
+        ok: false,
+        message: deleteOutcomeCopy(result.deleted.length, messageIds.length, result.message),
+        deleted: result.deleted,
+      };
     },
-    [db],
+    [db, reportDeleted],
   );
 
   const editMessage = useCallback<UseChatThread['editMessage']>(

@@ -2,11 +2,12 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
 } from 'react';
-import type { KeyboardEvent, MouseEvent, ReactElement } from 'react';
+import type { KeyboardEvent, MouseEvent, PointerEvent, ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/Button';
@@ -43,7 +44,9 @@ import {
   CHAT_LIST_NAME_TYPE,
   CHAT_LIST_PREVIEW_TYPE,
   CHAT_LIST_TIME_TYPE,
+  COARSE_POINTER_QUERY,
   DRAFT_PREFIX_TYPE,
+  NO_TOUCH_SELECT,
   sized,
   useChatLayout,
   type ChatLayout,
@@ -115,6 +118,36 @@ interface ChannelListBodyProps extends Omit<ChannelListProps, 'status' | 'onRetr
   draftFor?: DraftLookup;
   /** A row was long-pressed (or right-clicked): open its menu at the row. */
   onLongPress?: (channel: ChannelSummary, rect: DOMRect | null) => void;
+  /** The list's input, read once per list (never per row); touch when absent. */
+  input?: ChannelListInput;
+}
+
+/**
+ * What the rows need to know about the input, read by ChannelList once (one
+ * listener per list, not one per row) and handed to every row.
+ */
+export interface ChannelListInput {
+  /** The size table (touch or laptop). */
+  layout: ChatLayout;
+  /** A fine hover pointer: the row's hover ⋯ shows. */
+  hoverMenu: boolean;
+  /** A touch-first pointer: long-press owns the row menu, contextmenu is suppressed. */
+  coarsePointer: boolean;
+}
+
+/** Pure tests and first renders without a list: the touch table, no hover. */
+export const DEFAULT_LIST_INPUT: ChannelListInput = {
+  layout: 'touch',
+  hoverMenu: false,
+  coarsePointer: false,
+};
+
+/** The list's input: one layout listener and two media queries for the whole list. */
+export function useChannelListInput(): ChannelListInput {
+  const layout = useChatLayout();
+  const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
+  const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
+  return useMemo(() => ({ layout, hoverMenu, coarsePointer }), [layout, hoverMenu, coarsePointer]);
 }
 
 /**
@@ -164,6 +197,7 @@ export function channelListView(props: ChannelListBodyProps): ReactElement {
             nowMs={nowMs}
             timeZone={timeZone}
             onSelect={props.onSelect}
+            input={props.input ?? DEFAULT_LIST_INPUT}
             {...(props.selecting !== undefined
               ? {
                   checked: props.selecting.selectedIds.has(channel.channelId),
@@ -261,6 +295,7 @@ export interface ChannelRowState {
 export function channelRowClass(state: ChannelRowState): string {
   return cn(
     'group flex w-full items-center border-b border-border transition-colors hover:bg-panel-2',
+    NO_TOUCH_SELECT,
     state.selecting && state.checked
       ? 'bg-accent-soft'
       : state.unread
@@ -269,6 +304,17 @@ export function channelRowClass(state: ChannelRowState): string {
           ? 'bg-panel-2'
           : undefined,
   );
+}
+
+/**
+ * The row's contextmenu on a touch-first pointer: the native menu and callout
+ * never show (the long-press opens the row menu). A laptop's right-click is
+ * left alone here. Pure.
+ */
+export function chatRowContextMenu(
+  coarsePointer: boolean,
+): ((event: { preventDefault: () => void }) => void) | undefined {
+  return coarsePointer ? (event) => event.preventDefault() : undefined;
 }
 
 /** The row's tap target: avatar, two text lines, full row height. */
@@ -391,6 +437,8 @@ export function ChannelCard(props: {
   nowMs: number;
   timeZone: string;
   onSelect: (channel: ChannelSummary) => void;
+  /** The list's input (layout, hover, coarse), read once by the list. */
+  input: ChannelListInput;
   /** Present in select mode: whether this row is checked. */
   checked?: boolean;
   onToggle?: (channelId: string) => void;
@@ -399,9 +447,10 @@ export function ChannelCard(props: {
   const { channel, summary } = props;
   const rowRef = useRef<HTMLButtonElement>(null);
   const selecting = props.onToggle !== undefined;
-  const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
-  const layout = useChatLayout();
+  const { layout, hoverMenu, coarsePointer } = props.input;
   const menuEnabled = !selecting && props.onLongPress !== undefined;
+  // This gesture's hold already opened the menu; reset on every pointerdown.
+  const holdFiredRef = useRef(false);
   const openMenu = (anchor?: DOMRect): void => {
     if (selecting || props.onLongPress === undefined) return;
     // The menu's backdrop takes the trailing pointerup, so no click to swallow.
@@ -410,7 +459,10 @@ export function ChannelCard(props: {
   };
   // Mouse holds never open the menu (right-click and ⋯ do); touch is unchanged.
   const { handlers, consumeClickSuppression, cancel, clearClickSuppression } = useLongPress(
-    () => openMenu(),
+    () => {
+      holdFiredRef.current = true;
+      openMenu();
+    },
     { ignoreMouse: true },
   );
   const checked = props.checked === true;
@@ -422,15 +474,29 @@ export function ChannelCard(props: {
         selecting,
         checked,
       })}
+      // Touch-first: the native menu and callout never show on a row.
+      onContextMenu={chatRowContextMenu(coarsePointer)}
     >
       <button
         ref={rowRef}
         type="button"
-        {...(menuEnabled ? handlers : {})}
+        {...(menuEnabled
+          ? {
+              ...handlers,
+              onPointerDown: (e: PointerEvent<HTMLButtonElement>) => {
+                holdFiredRef.current = false;
+                handlers.onPointerDown(e);
+              },
+            }
+          : {})}
         onContextMenu={(e: MouseEvent) => {
+          if (coarsePointer) e.preventDefault();
           if (!menuEnabled) return;
           e.preventDefault();
           cancel();
+          // Touch-first: a contextmenu that beats the hold timer acts as the hold, once.
+          if (coarsePointer && holdFiredRef.current) return;
+          holdFiredRef.current = true;
           openMenu();
         }}
         onKeyDown={(e: KeyboardEvent<HTMLButtonElement>) => {
@@ -492,6 +558,8 @@ interface ChannelListContentProps extends ChannelListProps {
   onLongPress?: (channel: ChannelSummary, rect: DOMRect | null) => void;
   /** Unsent draft text per chat; absent in pure tests (no drafts). */
   draftFor?: DraftLookup;
+  /** The list's input, read once by ChannelList; touch when absent. */
+  input?: ChannelListInput;
 }
 
 /**
@@ -618,6 +686,7 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
                   : {}),
                 ...(props.nowMs !== undefined ? { nowMs: props.nowMs } : {}),
                 ...(props.timeZone !== undefined ? { timeZone: props.timeZone } : {}),
+                ...(props.input !== undefined ? { input: props.input } : {}),
               })}
       </div>
       {selecting !== undefined ? selectBar(selecting) : null}
@@ -805,10 +874,13 @@ export function ChannelList(props: ChannelListProps): ReactElement {
     setSelectedIds(new Set(list.slice(Math.max(0, at)).map((c) => c.channelId)));
   }
 
+  // One layout listener (and hover / coarse query) for the whole list.
+  const input = useChannelListInput();
   return (
     <>
       {channelListContent({
         ...props,
+        input,
         search,
         onSearchChange: setSearch,
         summaryFor,

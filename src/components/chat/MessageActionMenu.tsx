@@ -9,23 +9,65 @@ import {
   IconEdit,
   IconForward,
   IconPin,
+  IconPlus,
   IconReply,
   IconTrash,
 } from '@/components/ui/icons';
 import { POPOVER_PANEL } from '@/components/ui/popover-classes';
 import { MARK_TONE } from '@/components/chat/MarkBits';
+import { EmojiPicker } from '@/components/chat/EmojiPicker';
+import { useChatLayout } from '@/components/chat/chat-type';
+import { DELETE_SELECTION_WINDOW_MS } from '@/lib/chat/forward';
 import { TYPE_LABEL, type ChatMark, type MarkType } from '@/lib/chat/marks';
 import type { ThreadMessage } from '@/lib/chat/thread';
 import { cn } from '@/lib/cn';
 
-/** Quick-react row offered when a message's action menu is opened. */
+/** Quick-react row offered when a message's action menu is opened; "+" opens the picker after it. */
 export const QUICK_REACTIONS = ['👍', '❤️', '😂', '🆗', '🙏'] as const;
+
+/** The "+" after the quick reactions: opens the full emoji picker. */
+export const MORE_REACTIONS_LABEL = 'More reactions';
 
 /** An own message can be edited this long after its server created_at. */
 export const EDIT_WINDOW_MS = 15 * 60 * 1000;
 
 /** An own message can be deleted for everyone this long after its server created_at. */
-export const DELETE_WINDOW_MS = 30 * 60 * 1000;
+export const DELETE_WINDOW_MS = DELETE_SELECTION_WINDOW_MS;
+
+/**
+ * Milliseconds from `nowMs` (server time) to the next window boundary of a
+ * message (15 min: Edit goes, 30 min: Delete goes), or null when both have
+ * passed or the message has no server time yet. Pure.
+ */
+export function nextWindowBoundaryMs(createdAt: string, nowMs: number): number | null {
+  if (createdAt === '') return null;
+  const created = Date.parse(createdAt);
+  if (Number.isNaN(created)) return null;
+  for (const window of [EDIT_WINDOW_MS, DELETE_WINDOW_MS]) {
+    // The rows allow age <= window, so they change just after the boundary.
+    const at = created + window + 1;
+    if (at > nowMs) return at - nowMs;
+  }
+  return null;
+}
+
+/**
+ * While a menu is open: one timeout for the message's next window boundary,
+ * which calls `onBoundary` (the menu re-computes its rows, and the caller
+ * schedules again from the new moment). No interval. Returns the cancel,
+ * which the caller runs on close.
+ */
+export function scheduleWindowBoundary(input: {
+  createdAt: string;
+  /** Server time now (device clock plus the store's offset). */
+  now: () => number;
+  onBoundary: () => void;
+}): () => void {
+  const delay = nextWindowBoundaryMs(input.createdAt, input.now());
+  if (delay === null) return () => {};
+  const handle = setTimeout(input.onBoundary, delay);
+  return () => clearTimeout(handle);
+}
 
 /** The one disabled line an own marked message shows in place of Edit and Delete. */
 export const MARKED_LOCKED_LABEL = "Marked messages can't be edited or deleted";
@@ -376,6 +418,79 @@ interface Coords {
 }
 
 /**
+ * The reactions row: the five quick reactions, then a "+" that opens the full
+ * picker. Six 44x44 controls. Hook-free so the tests call it directly.
+ */
+export function ReactionsRow(props: {
+  currentReaction: string | null;
+  /** The laptop smiley's row alone: its buttons are the menu's focus stops. */
+  reactionsOnly: boolean;
+  onReact: (emoji: string) => void;
+  onMore: () => void;
+}): ReactElement {
+  const { currentReaction, reactionsOnly } = props;
+  return (
+    <div
+      data-menu-reactions=""
+      className={cn(
+        'flex items-center justify-between',
+        !reactionsOnly && 'mb-1 border-b border-border pb-1',
+      )}
+    >
+      {QUICK_REACTIONS.map((emoji) => (
+        <button
+          key={emoji}
+          type="button"
+          aria-label={`React ${emoji}`}
+          aria-pressed={emoji === currentReaction}
+          {...(reactionsOnly ? { 'data-menu-item': `react-${emoji}` } : {})}
+          onClick={() => props.onReact(emoji)}
+          className={cn(
+            'flex h-11 w-11 items-center justify-center rounded-full text-xl hover:bg-panel-2',
+            emoji === currentReaction && 'bg-panel-3',
+          )}
+        >
+          <span aria-hidden="true">{emoji}</span>
+        </button>
+      ))}
+      <button
+        type="button"
+        data-react-more=""
+        aria-label={MORE_REACTIONS_LABEL}
+        aria-haspopup="dialog"
+        {...(reactionsOnly ? { 'data-menu-item': 'react-more' } : {})}
+        onClick={props.onMore}
+        className="flex h-11 w-11 items-center justify-center rounded-full bg-panel-2 text-fg-2 hover:bg-panel-3 hover:text-fg"
+      >
+        <IconPlus size={20} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A pick from the full picker: react through the same path as the quick row,
+ * once, then close the picker and the menu.
+ */
+export function pickReaction(
+  emoji: string,
+  handlers: { onReact: (emoji: string) => void; closePicker: () => void; closeMenu: () => void },
+): void {
+  handlers.onReact(emoji);
+  handlers.closePicker();
+  handlers.closeMenu();
+}
+
+/** Whether a scroll event came from inside the emoji picker (its grid scrolls; the menu stays). */
+export function scrollFromPicker(target: EventTarget | null): boolean {
+  return (
+    typeof Element !== 'undefined' &&
+    target instanceof Element &&
+    target.closest('[data-emoji-picker]') !== null
+  );
+}
+
+/**
  * Floating, anchored action menu opened by long-press (touch), right-click, the
  * hover ⋯ control (pointer devices) or Enter / Space on a focused bubble. One
  * box: the quick reactions on top (hairline under them), then the action rows.
@@ -397,9 +512,13 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
   const [heldRect, setHeldRect] = useState<DOMRect | null>(null);
   const [shown, setShown] = useState(false);
   const [view, setView] = useState<'main' | 'mark'>('main');
+  const [picking, setPicking] = useState(false);
+  const layout = useChatLayout();
 
   useEffect(() => {
-    if (!open) setView('main');
+    if (open) return;
+    setView('main');
+    setPicking(false);
   }, [open]);
 
   useLayoutEffect(() => {
@@ -476,12 +595,16 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     function onKeyDown(event: KeyboardEvent): void {
       if (menuClosesOnKey(event.key)) onClose();
     }
+    // Scrolling the picker's grid keeps the menu; any other scroll closes it.
+    function onScroll(event: Event): void {
+      if (!scrollFromPicker(event.target)) onClose();
+    }
     document.addEventListener('keydown', onKeyDown);
-    window.addEventListener('scroll', onClose, true);
+    window.addEventListener('scroll', onScroll, true);
     window.addEventListener('resize', onClose);
     return () => {
       document.removeEventListener('keydown', onKeyDown);
-      window.removeEventListener('scroll', onClose, true);
+      window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('resize', onClose);
     };
   }, [open, onClose]);
@@ -535,7 +658,7 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
         aria-label="Message actions"
         data-menu-items=""
         className={cn(
-          'fixed z-50 w-[260px] max-w-[calc(100vw-16px)]',
+          'fixed z-50 w-[288px] max-w-[calc(100vw-16px)]',
           POPOVER_PANEL,
           mine ? 'origin-bottom-right' : 'origin-bottom-left',
           shown ? 'scale-100 opacity-100 ease-enter' : 'scale-[0.96] opacity-0 ease-exit',
@@ -547,38 +670,29 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
         }}
       >
         {props.canReact !== false && view === 'main' ? (
-          <div
-            data-menu-reactions=""
-            className={cn(
-              'flex items-center justify-between',
-              !reactionsOnly && 'mb-1 border-b border-border pb-1',
-            )}
-          >
-            {QUICK_REACTIONS.map((emoji) => (
-              <button
-                key={emoji}
-                type="button"
-                aria-label={`React ${emoji}`}
-                aria-pressed={emoji === currentReaction}
-                {...(reactionsOnly ? { 'data-menu-item': `react-${emoji}` } : {})}
-                onClick={() => {
-                  onReact(emoji);
-                  onClose();
-                }}
-                className={cn(
-                  'flex h-11 w-11 items-center justify-center rounded-full text-xl hover:bg-panel-2',
-                  emoji === currentReaction && 'bg-panel-3',
-                )}
-              >
-                <span aria-hidden="true">{emoji}</span>
-              </button>
-            ))}
-          </div>
+          <ReactionsRow
+            currentReaction={currentReaction}
+            reactionsOnly={reactionsOnly}
+            onReact={(emoji) => {
+              onReact(emoji);
+              onClose();
+            }}
+            onMore={() => setPicking(true)}
+          />
         ) : null}
         {items.map((item) => (
           <MenuRow key={item.key} item={item} onRun={run} />
         ))}
       </div>
+      <EmojiPicker
+        open={picking}
+        onClose={() => setPicking(false)}
+        layout={layout}
+        anchor={containerRef.current?.getBoundingClientRect() ?? anchor}
+        onPick={(emoji) =>
+          pickReaction(emoji, { onReact, closePicker: () => setPicking(false), closeMenu: onClose })
+        }
+      />
     </>,
     document.body,
   );

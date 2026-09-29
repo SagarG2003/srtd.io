@@ -43,6 +43,11 @@ import {
   MessageBubble,
   messageTimeSource,
   rowSelection,
+  createRowHold,
+  forwardEntersSelection,
+  selectionOnEntry,
+  SELECTION_ROW_OFFSET,
+  type RowSelection,
   SELECTED_ROW_TINT,
   tombstoneClass,
   OWN_BUBBLE_CONTENT,
@@ -59,6 +64,7 @@ import {
 import { renderToStaticMarkup as renderStrip } from 'react-dom/server';
 import { MarkStrip } from '@/components/chat/MarksSheet';
 import type { ChatMark } from '@/lib/chat/marks';
+import { SelectCheckbox } from '@/components/chat/MarkBits';
 import { roleLabel } from '@/components/pages/settings/members-data';
 import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
@@ -2390,7 +2396,8 @@ describe('tombstones, edited label and the neutral selection', () => {
     expect(tint?.props.className).toBe(SELECTED_ROW_TINT);
     expect(SELECTED_ROW_TINT).toContain('absolute inset-0');
     expect(SELECTED_ROW_TINT).toContain('bg-panel-3 opacity-60');
-    expect(String(checked.props.className)).toContain('relative isolate');
+    expect(String(checked.props.className)).toContain('relative');
+    expect(String(checked.props.className)).toContain('isolate');
     const bubble = els.find((el) => el.props['data-bubble'] !== undefined);
     // Only the keyboard focus ring (focus-visible:) may name the accent.
     const classes = String(bubble?.props.className).split(' ');
@@ -2440,5 +2447,313 @@ describe('tombstones, edited label and the neutral selection', () => {
       selection: { role: 'locked', checked: false, onToggle: noop },
     });
     expect(renderStrip(lockedRow)).toContain('data-select-lock');
+  });
+});
+
+describe('D7: long-press never selects text or shows the iOS callout', () => {
+  const NO_SELECT = ['select-none', '[-webkit-touch-callout:none]'];
+  const noop = (): void => {};
+  const press = (coarse: boolean): NonNullable<Parameters<typeof MessageBubble>[0]['press']> => ({
+    handlers: {
+      onPointerDown: noop,
+      onPointerMove: noop,
+      onPointerUp: noop,
+      onPointerCancel: noop,
+    },
+    onContextMenu: noop,
+    consumeClick: () => false,
+    onKeyOpen: noop,
+    coarse,
+  });
+  function bubble(message: ThreadMessage, coarse = true): ReactElement<Record<string, unknown>> {
+    return MessageBubble({
+      message,
+      profiles: PROFILES,
+      cache,
+      presignEnabled: false,
+      showTicks: true,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      layout: 'touch',
+      onBadgeClick: noop,
+      press: press(coarse),
+      swipe: {},
+    }) as ReactElement<Record<string, unknown>>;
+  }
+  function find(
+    root: ReactElement,
+    attr: string,
+  ): ReactElement<Record<string, unknown>> | undefined {
+    let hit: ReactElement<Record<string, unknown>> | undefined;
+    walk(root, (el) => {
+      const props = el.props as Record<string, unknown>;
+      if (hit === undefined && props[attr] !== undefined)
+        hit = el as ReactElement<Record<string, unknown>>;
+    });
+    return hit;
+  }
+
+  it('the thread container, every row and bubble carry select-none and the no-callout class', () => {
+    for (const cls of NO_SELECT) expect(THREAD_LIST_CLASS.split(' ')).toContain(cls);
+    const row = bubble(makeMessage({}));
+    for (const cls of NO_SELECT) {
+      expect(String(row.props.className).split(' ')).toContain(cls);
+      expect(String(find(row, 'data-bubble')?.props.className).split(' ')).toContain(cls);
+    }
+    const tomb = bubble(makeMessage({ body: '', deleted: true }));
+    for (const cls of NO_SELECT) {
+      expect(String(tomb.props.className).split(' ')).toContain(cls);
+      expect(String(find(tomb, 'data-tombstone')?.props.className).split(' ')).toContain(cls);
+    }
+  });
+
+  it('no inline styles: the classes are arbitrary Tailwind values', () => {
+    expect(bubble(makeMessage({})).props.style).toBeUndefined();
+  });
+
+  it('contextmenu default is prevented on a row on a coarse pointer only', () => {
+    const preventDefault = vi.fn();
+    const coarseRow = bubble(makeMessage({}), true);
+    (coarseRow.props.onContextMenu as (e: { preventDefault: () => void }) => void)({
+      preventDefault,
+    });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    // Laptop: the row leaves right-click alone (the bubble's own menu is unchanged).
+    expect(bubble(makeMessage({}), false).props.onContextMenu).toBeUndefined();
+  });
+
+  it('bubble contextmenu: coarse = the hold owns it (no second menu); fine = right-click opens the menu', () => {
+    const selection = (): RowSelection | undefined => undefined;
+    const openMenu = vi.fn();
+    const deps = {
+      selection,
+      openMenu,
+      cancelTimer: noop,
+      cancelSwipe: noop,
+      swiping: () => false,
+      clearClickSuppression: noop,
+    };
+    const coarse = createRowHold({ ...deps, coarse: () => true });
+    const preventDefault = vi.fn();
+    coarse.pointerDown();
+    coarse.hold(); // the long-press timer fired first
+    coarse.contextMenu({ preventDefault });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(openMenu).toHaveBeenCalledOnce();
+    const fine = createRowHold({ ...deps, coarse: () => false });
+    fine.contextMenu({ preventDefault });
+    expect(openMenu).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('D8: WhatsApp multi-select', () => {
+  const noop = (): void => {};
+  function row(
+    message: ThreadMessage,
+    selection: RowSelection | undefined,
+    consumeSelectHold: () => boolean = () => false,
+  ): ReactElement<Record<string, unknown>> {
+    return MessageBubble({
+      message,
+      profiles: PROFILES,
+      cache,
+      presignEnabled: false,
+      showTicks: true,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      layout: 'touch',
+      onBadgeClick: noop,
+      press: {
+        handlers: {
+          onPointerDown: noop,
+          onPointerMove: noop,
+          onPointerUp: noop,
+          onPointerCancel: noop,
+        },
+        onContextMenu: noop,
+        consumeClick: () => false,
+        consumeSelectHold,
+        onKeyOpen: noop,
+        coarse: true,
+      },
+      swipe: {},
+      ...(selection !== undefined ? { selection } : {}),
+    }) as ReactElement<Record<string, unknown>>;
+  }
+  function nodes(root: ReactElement): ReactElement<Record<string, unknown>>[] {
+    const out: ReactElement<Record<string, unknown>>[] = [];
+    walk(root, (el) => out.push(el as ReactElement<Record<string, unknown>>));
+    return out;
+  }
+  function tap(root: ReactElement<Record<string, unknown>>): {
+    prevented: boolean;
+    stopped: boolean;
+  } {
+    const event = { prevented: false, stopped: false };
+    (root.props.onClickCapture as (e: unknown) => void)({
+      preventDefault: () => {
+        event.prevented = true;
+      },
+      stopPropagation: () => {
+        event.stopped = true;
+      },
+    });
+    return event;
+  }
+  const selectable = (onToggle: () => void, checked = false): RowSelection => ({
+    role: 'selectable',
+    checked,
+    onToggle,
+  });
+
+  it('menu Select, Forward and Delete enter the mode with that message ticked', () => {
+    const marks = new Map<string, ChatMark>();
+    const own = makeMessage({ id: 'own', mine: true });
+    const peer = makeMessage({ id: 'peer', mine: false });
+    expect([...selectionOnEntry(own, marks)]).toEqual(['own']);
+    expect([...selectionOnEntry(peer, marks)]).toEqual(['peer']);
+    expect(forwardEntersSelection(peer, marks, true)).toBe(true);
+    // An own marked message keeps its lock: never ticked; its Forward goes to the picker.
+    const lockedMarks = new Map<string, ChatMark>([
+      [
+        'own',
+        {
+          messageId: 'own',
+          channelId: 'c',
+          type: 'decision',
+          priority: null,
+          markedAt: 'x',
+          resolved: false,
+          resolvedBy: null,
+          resolvedAt: null,
+        },
+      ],
+    ]);
+    expect([...selectionOnEntry(own, lockedMarks)]).toEqual([]);
+    expect(forwardEntersSelection(own, lockedMarks, true)).toBe(false);
+  });
+
+  it('a tap anywhere on the row (bubble, blank space, circle) toggles it; one handler on the row', () => {
+    const onToggle = vi.fn();
+    const root = row(makeMessage({ mine: false }), selectable(onToggle));
+    // The row owns the tap in capture, so a tap on the bubble, the blank row
+    // space or the circle all land here first.
+    const event = tap(root);
+    expect(onToggle).toHaveBeenCalledOnce();
+    expect(event.stopped).toBe(true);
+    // The circle is a 44x44 check in the left column.
+    const circle = nodes(root).find((el) => el.type === SelectCheckbox);
+    expect(circle).toBeDefined();
+    const html = renderStrip(root);
+    expect(html).toContain('h-11 w-11');
+    expect(String(root.props.className)).toContain(SELECTION_ROW_OFFSET);
+  });
+
+  it('a link, media, card or voice tap in the mode toggles and does not open', () => {
+    const onToggle = vi.fn();
+    const message = makeMessage({
+      body: 'see https://example.com',
+      attachments: [{ assetId: 'v1', name: 'a.png', mime: 'image/png' }],
+      sharedPostIds: ['post-1'],
+    });
+    const root = row(message, selectable(onToggle));
+    const event = tap(root);
+    // Default (the link's navigation) cancelled and propagation stopped before
+    // it reaches the link, the album, the card or the voice player.
+    expect(event.prevented).toBe(true);
+    expect(event.stopped).toBe(true);
+    expect(onToggle).toHaveBeenCalledOnce();
+  });
+
+  it('a long-press in the mode toggles and opens no menu; its trailing click does not toggle back', () => {
+    const onToggle = vi.fn();
+    const openMenu = vi.fn();
+    const hold = createRowHold({
+      selection: () => selectable(onToggle),
+      coarse: () => true,
+      openMenu,
+      cancelTimer: noop,
+      cancelSwipe: noop,
+      swiping: () => false,
+      clearClickSuppression: noop,
+    });
+    hold.pointerDown();
+    hold.hold();
+    expect(onToggle).toHaveBeenCalledOnce();
+    expect(openMenu).not.toHaveBeenCalled();
+    // Android: the native contextmenu after the hold neither opens nor toggles again.
+    hold.contextMenu({ preventDefault: noop });
+    expect(onToggle).toHaveBeenCalledOnce();
+    // The click that may trail the hold is swallowed once by the row.
+    const root = row(makeMessage({}), selectable(onToggle), hold.consumeSelectHold);
+    tap(root);
+    expect(onToggle).toHaveBeenCalledOnce();
+    // The next plain tap toggles again.
+    hold.pointerDown();
+    tap(row(makeMessage({}), selectable(onToggle), hold.consumeSelectHold));
+    expect(onToggle).toHaveBeenCalledTimes(2);
+  });
+
+  it('Step 0 regression: a hold in the mode used to do nothing (menu open bailed); now it toggles', () => {
+    const onToggle = vi.fn();
+    const hold = createRowHold({
+      selection: () => selectable(onToggle),
+      coarse: () => false,
+      openMenu: () => {
+        throw new Error('no menu while selecting');
+      },
+      cancelTimer: noop,
+      cancelSwipe: noop,
+      swiping: () => false,
+      clearClickSuppression: noop,
+    });
+    hold.hold();
+    expect(onToggle).toHaveBeenCalledOnce();
+    // And the blank row space is a target (the row, not only the bubble).
+    const root = row(makeMessage({}), selectable(onToggle));
+    expect(root.type).toBe('li');
+    expect(typeof root.props.onClickCapture).toBe('function');
+    // The bubble no longer owns the selection tap (no double toggle from bubble + row).
+    const bubbleEl = nodes(root).find((el) => el.props['data-bubble'] !== undefined);
+    expect(bubbleEl?.props.onPointerDown).toBeUndefined();
+    expect(root.props.onPointerDown).toBeDefined();
+  });
+
+  it('swipe-to-reply is off in the mode', () => {
+    const root = row(makeMessage({}), selectable(noop));
+    const bubbleEl = nodes(root).find((el) => el.props['data-bubble'] !== undefined);
+    expect(bubbleEl?.props['data-swipe-reply']).toBeUndefined();
+  });
+
+  it('a tombstone has no circle, keeps the column offset and cannot be toggled', () => {
+    const onToggle = vi.fn();
+    const tomb = makeMessage({ body: '', deleted: true });
+    const root = row(tomb, { role: 'none', checked: false, onToggle });
+    expect(nodes(root).some((el) => el.type === SelectCheckbox)).toBe(false);
+    expect(String(root.props.className)).toContain(SELECTION_ROW_OFFSET);
+    expect(root.props.onClickCapture).toBeUndefined();
+  });
+
+  it('zero selected stays in the mode: pruning empties the set but never ends selection', () => {
+    const list = [makeMessage({ id: 'a', mine: true })];
+    const pruned = rowSelection(
+      list[0] as ThreadMessage,
+      { selected: new Set(), onToggle: noop },
+      new Map(),
+    );
+    expect(pruned).toMatchObject({ role: 'selectable', checked: false });
+  });
+
+  it('the check circle fades on opacity only; no layout animation on the row', () => {
+    const root = row(makeMessage({}), selectable(noop));
+    const circle = nodes(root).find((el) => el.type === SelectCheckbox);
+    const html = renderStrip(circle as ReactElement);
+    expect(html).toContain('transition-opacity');
+    expect(html).toContain('[@starting-style]:opacity-0');
+    expect(String(root.props.className)).not.toMatch(/transition|translate-x|animate/);
   });
 });

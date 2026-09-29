@@ -143,6 +143,44 @@ export function sentFromThisDevice(message: { mine: boolean; state: MessageState
   return message.mine && message.state !== 'sent';
 }
 
+/**
+ * What the new-rows pass does: nothing when the intent has let go; an own send
+ * from this device pins at once (even mid-flick: the reader just sent it);
+ * anything else (an incoming message, a status re-render) never pins while a
+ * flick is moving the list and defers to the settle instead.
+ */
+export function newRowsAction(input: {
+  intent: boolean;
+  flicking: boolean;
+  ownLocalSend: boolean;
+}): 'pin' | 'defer' | 'leave' {
+  if (!input.intent) return 'leave';
+  if (input.ownLocalSend) return 'pin';
+  return input.flicking ? 'defer' : 'pin';
+}
+
+/** The slice of Window the touch-end listeners use. */
+export interface TouchEndTarget {
+  addEventListener: (type: 'touchend' | 'touchcancel', listener: () => void) => void;
+  removeEventListener: (type: 'touchend' | 'touchcancel', listener: () => void) => void;
+}
+
+/**
+ * Listen for the end of every touch on the window, not the list: a row
+ * removed under the finger (a tombstone, a re-grouped run) takes its touchend
+ * with it, which would leave the flick "touching" forever and freeze
+ * auto-follow. Returns the teardown (both listeners removed).
+ */
+export function listenTouchEnd(target: TouchEndTarget, onEnd: () => void): () => void {
+  const listener = (): void => onEnd();
+  target.addEventListener('touchend', listener);
+  target.addEventListener('touchcancel', listener);
+  return () => {
+    target.removeEventListener('touchend', listener);
+    target.removeEventListener('touchcancel', listener);
+  };
+}
+
 /** A thread opens holding the bottom, before any gesture. */
 export function openingIntent(): boolean {
   return true;

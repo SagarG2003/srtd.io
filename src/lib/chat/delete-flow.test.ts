@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Client } from '@srtdio/rpc';
 import { runDelete, runEdit } from '@/lib/chat/delete-flow';
-import { parseLiveEvent } from '@/lib/chat/thread';
+import { deleteOutcomeCopy } from '@/lib/chat/record';
+import { pruneThreadSelection } from '@/lib/chat/forward';
+import { markMessagesDeleted, parseLiveEvent, type ThreadMessage } from '@/lib/chat/thread';
 
 function client(fail = false): { client: Client; rpc: ReturnType<typeof vi.fn> } {
   const rpc = vi.fn(() =>
@@ -64,6 +66,71 @@ describe('runDelete', () => {
     await Promise.resolve();
     expect(result).toEqual({ ok: true });
     await vi.waitFor(() => expect(onSignalFailed).toHaveBeenCalledOnce());
+  });
+});
+
+describe('D5: chunked delete, a later chunk fails', () => {
+  const ids = Array.from({ length: 150 }, (_, i) => `m${i}`);
+  const own = (id: string): ThreadMessage => ({
+    id,
+    senderUserId: 'me',
+    body: `body ${id}`,
+    createdAt: '2026-09-22T10:00:00Z',
+    time: 1,
+    provisionalTime: false,
+    mine: true,
+    attachments: [],
+    sharedPostIds: [],
+    sharedBriefIds: [],
+    reply: null,
+    state: 'sent',
+    status: 'sent',
+    reactions: [],
+  });
+
+  it('the first chunk is tombstoned, the failed ids stay selected, and the toast reads "Deleted 100 of 150"', async () => {
+    let call = 0;
+    const rpc = vi.fn(() => {
+      call += 1;
+      return Promise.resolve(
+        call === 2
+          ? { data: null, error: { message: 'network error' } }
+          : { data: null, error: null },
+      );
+    });
+    let thread = ids.map(own);
+    const result = await runDelete(
+      {
+        client: { rpc } as unknown as Client,
+        markDeletedLocal: (chunk) => {
+          thread = markMessagesDeleted(thread, chunk);
+        },
+        signal: undefined,
+        onSignalFailed: vi.fn(),
+      },
+      { channelId: 'c', messageIds: ids, traceId: 't' },
+    );
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ ok: false, message: 'network error', deleted: ids.slice(0, 100) });
+    // Committed chunk: tombstones. Failed chunk: untouched.
+    expect(thread.slice(0, 100).every((m) => m.deleted === true)).toBe(true);
+    expect(thread.slice(100).some((m) => m.deleted === true)).toBe(false);
+    // The selection prunes the tombstones and keeps the failed chunk's ids.
+    const kept = pruneThreadSelection(new Set(ids), thread);
+    expect([...kept]).toEqual(ids.slice(100));
+    const copy = result.ok
+      ? ''
+      : deleteOutcomeCopy(result.deleted.length, ids.length, result.message);
+    expect(copy).toBe("Deleted 100 of 150. Couldn't delete the rest, try again");
+  });
+
+  it('N = 0 uses the mapped delete copy, never the raw error', () => {
+    expect(deleteOutcomeCopy(0, 150, 'marked messages cannot be deleted')).toBe(
+      "Marked messages can't be deleted",
+    );
+    expect(deleteOutcomeCopy(0, 3, 'TypeError: Failed to fetch')).toBe(
+      "Couldn't delete, try again",
+    );
   });
 });
 
