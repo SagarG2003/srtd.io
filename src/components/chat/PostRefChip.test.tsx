@@ -72,7 +72,7 @@ describe('createChipBatch', () => {
     expect(load).toHaveBeenLastCalledWith(['p3']);
   });
 
-  it('a post the read did not return (RLS) or a failed read resolves to null', async () => {
+  it('a post a completed read did not return (RLS) resolves to null; a failed read does not', async () => {
     const batch = createChipBatch((ids) =>
       Promise.resolve({ ok: true as const, data: [cardRow(ids[0] ?? '', 1)] }),
     );
@@ -81,9 +81,13 @@ describe('createChipBatch', () => {
     expect(batch.get('a')?.id).toBe('a');
     expect(batch.get('hidden')).toBeNull();
 
+    vi.useFakeTimers();
     const failing = createChipBatch(() => Promise.reject(new Error('down')));
-    await failing.request(['x']);
-    expect(failing.get('x')).toBeNull();
+    const done = failing.request(['x']);
+    await vi.advanceTimersByTimeAsync(CHIP_BATCH_TIMEOUT_MS);
+    await done;
+    expect(failing.get('x')).toBeUndefined();
+    vi.useRealTimers();
   });
 });
 
@@ -169,6 +173,49 @@ describe('createChipBatch timeout (R5)', () => {
     // The next request retries it.
     expect(batch.request(['slow'])).not.toBeNull();
     expect(load).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('a failed read leaves its ids unknown and retryable, never null; About stays pending', async () => {
+    vi.useFakeTimers();
+    for (const failing of [
+      () => Promise.reject(new Error('offline')),
+      () => Promise.resolve({ ok: false as const, error: { code: 'transport', message: 'down' } }),
+    ]) {
+      const load = vi.fn(failing);
+      const batch = createChipBatch(load as Parameters<typeof createChipBatch>[0]);
+      const done = batch.request(['p']);
+      await vi.advanceTimersByTimeAsync(1);
+      // The failure landed at once; the ids are held until the window ends.
+      expect(batch.get('p')).toBeUndefined();
+      expect(batch.request(['p'])).toBeNull();
+      await vi.advanceTimersByTimeAsync(CHIP_BATCH_TIMEOUT_MS);
+      await done;
+      expect(batch.get('p')).toBeUndefined();
+      expect(batch.attempted('p')).toBe(true);
+      expect(aboutState(batch.get('p'))).toBe('pending');
+      expect(batch.request(['p'])).not.toBeNull();
+      expect(load).toHaveBeenCalledTimes(2);
+    }
+    vi.useRealTimers();
+  });
+
+  it('two fast failures in a row make at most one re-request per window', async () => {
+    vi.useFakeTimers();
+    const load = vi.fn(() => Promise.reject(new Error('offline')));
+    const batch = createChipBatch(load as Parameters<typeof createChipBatch>[0]);
+    // The hook's loop: every settled request asks again for the same ids.
+    const loop = (): void => {
+      void batch.request(['p'])?.then(loop);
+    };
+    loop();
+    await vi.advanceTimersByTimeAsync(CHIP_BATCH_TIMEOUT_MS - 1);
+    expect(load).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(load).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(CHIP_BATCH_TIMEOUT_MS);
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(batch.get('p')).toBeUndefined();
     vi.useRealTimers();
   });
 

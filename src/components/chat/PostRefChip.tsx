@@ -39,9 +39,12 @@ export interface ChipBatch {
 }
 
 /**
- * A read slower than this is given up on: its ids go back to unknown (the next
- * request retries them, rows show the plain quote meanwhile, About stays
- * pending), never to null. Only a completed read decides a post is not visible.
+ * A read slower than this is given up on, and a read that fails (transport
+ * error, a not-ok result) is treated the same: its ids go back to unknown at
+ * the end of this window (the next request retries them, one read per window,
+ * so a fast-failing offline fetch never spins; rows show the plain quote
+ * meanwhile; About stays pending), never to null. Only a completed read that
+ * returns no row for an id decides that post is not visible.
  */
 export const CHIP_BATCH_TIMEOUT_MS = 4_000;
 
@@ -59,24 +62,26 @@ export function createChipBatch(
       const fresh = [...new Set(ids)].filter((id) => !requested.has(id)).sort();
       if (fresh.length === 0) return null;
       for (const id of fresh) requested.add(id);
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<'timeout'>((resolve) => {
-        timer = setTimeout(() => resolve('timeout'), timeoutMs);
+      const window = new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), timeoutMs);
       });
       const read = load(fresh).then(
-        (result): PostCardRow[] => (result.ok ? result.data : []),
-        (): PostCardRow[] => [],
+        (result): PostCardRow[] | 'failed' => (result.ok ? result.data : 'failed'),
+        (): 'failed' => 'failed',
       );
-      return Promise.race([read, timeout]).then((outcome) => {
-        clearTimeout(timer);
+      // A failure waits out the window too, so retries keep the window's cadence.
+      const outcome = Promise.race([read, window]).then((first) =>
+        first === 'failed' ? window : first,
+      );
+      return outcome.then((result) => {
         for (const id of fresh) attempted.add(id);
-        if (outcome === 'timeout') {
-          // Back to unknown; the late result, if any, is dropped.
+        if (result === 'timeout') {
+          // Back to unknown; a late result, if any, is dropped.
           for (const id of fresh) requested.delete(id);
           return;
         }
         for (const id of fresh) resolved.set(id, null);
-        for (const row of outcome) resolved.set(row.id, row);
+        for (const row of result) resolved.set(row.id, row);
       });
     },
   };
