@@ -134,9 +134,9 @@ describe('channelListView', () => {
       onSelect: () => {},
       onNewChat: () => {},
     });
-    expect(view.type).toBe('ul');
-    const children = (view.props as { children: ReactElement[] }).children;
-    expect(children).toHaveLength(2);
+    const lists = findAll(view, (el) => el.type === 'ul');
+    expect(lists).toHaveLength(1);
+    expect((lists[0]!.props as { children: ReactElement[] }).children).toHaveLength(2);
   });
 });
 
@@ -360,31 +360,35 @@ describe('load status', () => {
     expect(texts(tree)).not.toContain('No conversations yet');
   });
 
-  it('skeleton tiles match the real tile boxes (wide 120 + 72px photo, square 170 + 48px disc)', () => {
+  it('skeleton tiles match the real tile boxes (wide 100 + 76px photo, square 168 + 72px disc)', () => {
     const tiles = findAll(
       withStatus('loading'),
       (el) => (el.props as Record<string, unknown>)['data-skeleton-row'] !== undefined,
     );
     const kinds = tiles.map((t) => (t.props as Record<string, unknown>)['data-skeleton-row']);
-    expect(kinds.filter((k) => k === 'wide')).toHaveLength(2);
-    expect(kinds.filter((k) => k === 'square')).toHaveLength(4);
+    expect(kinds).toEqual(['wide', 'wide', 'square', 'square', 'square', 'square']);
     for (const tile of tiles) {
       const cls = (tile.props as { className: string }).className;
-      for (const token of ['rounded-[14px]', 'border', 'border-border', 'p-3', 'animate-pulse']) {
+      for (const token of ['rounded-[18px]', 'border', 'border-border', 'animate-pulse']) {
         expect(cls).toContain(token);
       }
       const wide = (tile.props as Record<string, unknown>)['data-skeleton-row'] === 'wide';
-      expect(cls).toContain(wide ? 'h-[120px]' : 'h-[170px]');
+      expect(cls).toContain(wide ? 'h-[100px]' : 'h-[168px]');
       const [photo] = findAll(
         tile,
         (el) =>
           el !== tile &&
-          /rounded-(full|\[14px\])/.test((el.props as { className?: string }).className ?? ''),
+          /rounded-(full|\[18px\])/.test((el.props as { className?: string }).className ?? ''),
       );
       expect((photo!.props as { className: string }).className).toContain(
-        wide ? 'h-[72px] w-[72px]' : 'h-12 w-12',
+        wide ? 'h-[76px] w-[76px]' : 'h-[72px] w-[72px]',
       );
     }
+    expect(
+      findAll(withStatus('loading'), (el) =>
+        /animate-spin/.test((el.props as { className?: string }).className ?? ''),
+      ),
+    ).toHaveLength(0);
   });
 
   it('error renders Retry (44px tall) and no rows or Select', () => {

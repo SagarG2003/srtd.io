@@ -9,7 +9,7 @@ vi.mock('@/lib/supabase', () => ({ supabase: {} }));
 
 import type { Database } from '@srtdio/schemas';
 import { shapeChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
-import { channelRowBody, GROUP_TILE_PHOTO } from '@/components/chat/ChannelList';
+import { channelRowBody, GROUP_TILE_PHOTO, PERSON_TILE_PHOTO } from '@/components/chat/ChannelList';
 import {
   groupInfoSections,
   groupInfoSubtitle,
@@ -81,7 +81,7 @@ describe('chat home tile avatar resolution (one batched list read, no per-row fe
     expect(html).toContain(`src="${PHOTO}"`);
     // First paint is the photo: no initials fallback rendered alongside it.
     expect(html).not.toContain('>LA<');
-    // A group is a wide tile: a 72px rounded-square photo.
+    // A group is a wide tile: a 76px rounded-square photo.
     expect(html).toContain(
       `data-group-photo="" class="${GROUP_TILE_PHOTO.replaceAll('&', '&amp;').replaceAll('>', '&gt;')}"`,
     );
@@ -102,8 +102,10 @@ describe('chat home tile avatar resolution (one batched list read, no per-row fe
     expect(dm.avatarUrl).toBe(PEER_PHOTO);
     const html = rowHtml(dm);
     expect(html).toContain(`src="${PEER_PHOTO}"`);
-    // A DM is a square tile: a 48px circular avatar.
-    expect(html).toContain('width:48px;height:48px');
+    // A DM is a square tile: a 72px circular photo.
+    expect(html).toContain(
+      `data-person-photo="" class="${PERSON_TILE_PHOTO.replaceAll('&', '&amp;').replaceAll('>', '&gt;')}"`,
+    );
     expect(html).toContain('rounded-full');
   });
 });
