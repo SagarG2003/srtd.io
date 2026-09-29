@@ -35,8 +35,15 @@ export interface ChipBatch {
   request: (ids: readonly string[]) => Promise<void> | null;
 }
 
+/**
+ * A read slower than this resolves its ids to null (the plain quote), so a hung
+ * request never holds the thread's rows back.
+ */
+export const CHIP_BATCH_TIMEOUT_MS = 4_000;
+
 export function createChipBatch(
   load: (ids: string[]) => Promise<Result<PostCardRow[]>>,
+  timeoutMs: number = CHIP_BATCH_TIMEOUT_MS,
 ): ChipBatch {
   const requested = new Set<string>();
   const resolved = new Map<string, PostCardRow | null>();
@@ -46,13 +53,19 @@ export function createChipBatch(
       const fresh = [...new Set(ids)].filter((id) => !requested.has(id)).sort();
       if (fresh.length === 0) return null;
       for (const id of fresh) requested.add(id);
-      return load(fresh).then(
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs);
+      });
+      return Promise.race([load(fresh), timeout]).then(
         (result) => {
-          const rows = result.ok ? result.data : [];
+          clearTimeout(timer);
+          const rows = result !== null && result.ok ? result.data : [];
           for (const id of fresh) resolved.set(id, null);
           for (const row of rows) resolved.set(row.id, row);
         },
         () => {
+          clearTimeout(timer);
           for (const id of fresh) resolved.set(id, null);
         },
       );
@@ -62,7 +75,8 @@ export function createChipBatch(
 
 /**
  * The thread's chip batch over `ids` (chip posts plus the About and filter
- * posts). A new batch per workspace; re-renders once each read lands.
+ * posts). A new batch per workspace; re-renders once each read lands. With no
+ * workspace there is nothing to read: every post is null (the plain quote).
  */
 export function useChipBatch(ids: readonly string[]): PostRefLookup {
   const { workspaceId } = useWorkspace();
@@ -81,7 +95,7 @@ export function useChipBatch(ids: readonly string[]): PostRefLookup {
     void batch.request(key.split(','))?.then(() => setVersion((v) => v + 1));
   }, [batch, key]);
   return useMemo<PostRefLookup>(
-    () => (postId) => (batch !== null ? batch.get(postId) : undefined),
+    () => (postId) => (batch !== null ? batch.get(postId) : null),
     // version re-derives the lookup so consumers re-render with the new posts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [batch, version],

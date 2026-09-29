@@ -18,6 +18,7 @@ import {
   CARD_SKELETON,
   NotVisibleCard,
   cardTapHandlers,
+  keyTapHandler,
   POST_CARD,
   SHARED_CARD,
   SharedPostCardList,
@@ -371,5 +372,41 @@ describe('post sheet: Talk about', () => {
 
   it('is absent without the hook', () => {
     expect(actions()).not.toContain('Talk about');
+  });
+});
+
+describe('F9: a hold that starts on the KEY', () => {
+  it('talks about the post once, swallows the release, and the next card tap opens the sheet', () => {
+    vi.useFakeTimers();
+    const onTalkAbout = vi.fn();
+    const openSheet = vi.fn();
+    const onShowPost = vi.fn();
+    // The KEY sits inside the card: its pointer events reach the card's hold.
+    const hold = createLongPressController({ onLongPress: onTalkAbout, ...CARD_HOLD });
+    const card = cardTapHandlers(openSheet, hold.consumeClickSuppression);
+    const key = keyTapHandler(onShowPost, hold.consumeClickSuppression);
+    const stop = { stopPropagation: vi.fn() };
+
+    hold.handlers.onPointerDown({ clientX: 0, clientY: 0, pointerType: 'touch' });
+    vi.advanceTimersByTime(450);
+    hold.handlers.onPointerUp();
+    key(stop); // the release click lands on the KEY
+    expect(onTalkAbout).toHaveBeenCalledTimes(1);
+    expect(onShowPost).not.toHaveBeenCalled();
+    expect(openSheet).not.toHaveBeenCalled();
+    expect(stop.stopPropagation).toHaveBeenCalled();
+
+    // No flag left behind: a plain tap on the card opens the sheet.
+    hold.handlers.onPointerDown({ clientX: 0, clientY: 0, pointerType: 'touch' });
+    vi.advanceTimersByTime(100);
+    hold.handlers.onPointerUp();
+    card.onClick();
+    expect(openSheet).toHaveBeenCalledTimes(1);
+
+    // And a plain tap on the KEY shows the post.
+    key(stop);
+    expect(onShowPost).toHaveBeenCalledTimes(1);
+    expect(onTalkAbout).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 });

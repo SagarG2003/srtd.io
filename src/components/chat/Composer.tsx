@@ -65,8 +65,12 @@ interface ComposerProps {
   reply?: { authorName: string; quote: ReplyQuote } | undefined;
   /** Clears the active reply draft (cancel button, and after a successful send). */
   onCancelReply?: (() => void) | undefined;
-  /** The post the conversation is about; renders the About bar above the reply bar. */
-  about?: PostRefPost | undefined;
+  /**
+   * The post the conversation is about; renders the About bar above the reply
+   * bar. Null while its post is still loading: the bar shows as a skeleton (it
+   * can be closed) and sends carry no About reply.
+   */
+  about?: PostRefPost | null | undefined;
   /** Closes the About bar (its X); a send never clears it. */
   onCancelAbout?: (() => void) | undefined;
   /** Post ids already shared in this chat; picker rows say "in this chat". */
@@ -86,24 +90,36 @@ export function composerPlaceholder(aboutRef: string | null): string {
 /**
  * The About bar: the reply bar's grammar (3px accent rule, panel-3 box) with a
  * 32px thumbnail, "About KEY-N" in accent over the title, and a 44px close.
+ * With no post yet (its read is in flight) it is a skeleton: "About", a title
+ * placeholder and the same close, at the same height. No motion.
  */
 export function AboutBar(props: {
-  post: PostRefPost;
+  post: PostRefPost | null;
   refLabel: string | null;
   onCancel: () => void;
 }): ReactElement {
+  const post = props.post;
   return (
     <div
-      data-about-bar={props.post.id}
+      data-about-bar={post?.id ?? ''}
+      data-about-loading={post === null ? '' : undefined}
       className="flex min-w-0 items-center gap-2 overflow-hidden rounded-md bg-panel-3"
     >
       <span className="w-[3px] shrink-0 self-stretch rounded-full bg-accent" aria-hidden="true" />
-      <PostRefThumb assetVersionId={props.post.thumbnailAssetVersionId} size={32} />
+      {post !== null ? (
+        <PostRefThumb assetVersionId={post.thumbnailAssetVersionId} size={32} />
+      ) : (
+        <span aria-hidden="true" className="h-8 w-8 shrink-0 rounded-md bg-panel-2" />
+      )}
       <span className="flex min-w-0 flex-1 flex-col py-1">
         <span className="truncate text-xs font-medium text-accent">
-          {props.refLabel !== null ? `About ${props.refLabel}` : 'About'}
+          {post !== null && props.refLabel !== null ? `About ${props.refLabel}` : 'About'}
         </span>
-        <span className="truncate text-xs text-fg-2">{props.post.title}</span>
+        {post !== null ? (
+          <span className="truncate text-xs text-fg-2">{post.title}</span>
+        ) : (
+          <span aria-hidden="true" className="my-[3px] h-3 w-28 rounded bg-panel-2" />
+        )}
       </span>
       <IconButton label="Close about" className="shrink-0" onClick={props.onCancel}>
         <IconX size={16} />
@@ -583,7 +599,7 @@ export function Composer(props: ComposerProps): ReactElement {
     props.onBringPost?.(post.id);
   }
 
-  const aboutRef = props.about !== undefined ? postRefKey(workspaceKey, props.about.number) : null;
+  const aboutRef = props.about != null ? postRefKey(workspaceKey, props.about.number) : null;
 
   const showMic = shouldShowMic({
     hasUpload: props.uploadFile !== undefined,

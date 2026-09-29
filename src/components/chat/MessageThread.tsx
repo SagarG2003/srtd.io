@@ -62,7 +62,12 @@ import {
   type LightboxImage,
 } from '@/components/ui/ImageLightbox';
 import { SharedPostCards } from '@/components/chat/PostCard';
-import { PostRefChip, useChipBatch, type PostRefPost } from '@/components/chat/PostRefChip';
+import {
+  PostRefChip,
+  postRefKey,
+  useChipBatch,
+  type PostRefPost,
+} from '@/components/chat/PostRefChip';
 import { FilterStrip } from '@/components/chat/FilterStrip';
 import { MessageActionMenu } from '@/components/chat/MessageActionMenu';
 import { SharedBriefCards } from '@/components/chat/BriefCard';
@@ -92,13 +97,17 @@ import {
 } from '@/lib/chat/marks';
 import type { WriteResult } from '@/lib/chat/record';
 import {
+  aboutState,
   chipPostIds,
   chipTargetFor,
+  chipsResolved,
+  createCardExpectation,
   filterRows,
-  newCardFor,
+  gateRows,
   newestCardFor,
   parentIndexOf,
   replyForSend,
+  type ThreadGate,
 } from '@/lib/chat/post-refs';
 import { useWorkspace } from '@/lib/workspace-context';
 
@@ -302,9 +311,12 @@ export interface BubblePostRefs {
 
 /** The chip for a message, from its target and the batch lookup; undefined keeps the quote. */
 export function bubbleChip(
-  target: { postId: string } | null,
+  target: { postId: string; cardMessageId?: string } | null,
   post: PostRefPost | null | undefined,
-  context: { workspaceKey: string | null; onShowPost: (postId: string) => void },
+  context: {
+    workspaceKey: string | null;
+    onShowPost: (postId: string, cardMessageId?: string) => void;
+  },
 ): BubbleChip | undefined {
   if (target === null || post === null) return undefined;
   if (post === undefined) return { kind: 'pending' };
@@ -312,8 +324,61 @@ export function bubbleChip(
     kind: 'chip',
     post,
     workspaceKey: context.workspaceKey,
-    onTap: () => context.onShowPost(target.postId),
+    onTap: () => context.onShowPost(target.postId, target.cardMessageId),
   };
+}
+
+/** Toast when the About post turns out not to be readable here. */
+export const ABOUT_UNAVAILABLE_TOAST = 'That post is not available here';
+
+/** Toast when a chip's card cannot be brought into the loaded history. */
+export const CARD_NOT_LOADED_TOAST = "That post's card is not loaded here";
+
+/** Toast when a share cannot be sent (no open conversation). */
+export const SHARE_UNAVAILABLE_TOAST = 'Could not share right now';
+
+/** The filtered thread's empty line: nothing about the post is loaded yet. */
+export function filterEmptyLabel(refLabel: string | null): string {
+  return `No messages about ${refLabel ?? 'this post'} loaded yet`;
+}
+
+/**
+ * The About reply a send may carry: only while the About bar shows its post.
+ * Pending (the read is in flight) or gone (RLS, failed read) carries none.
+ */
+export function aboutReplyFor(
+  about: { cardMessageId: string } | null,
+  post: PostRefPost | null | undefined,
+  card: ThreadMessage | undefined,
+): ReplyQuote | null {
+  return aboutState(post) === 'visible' ? aboutQuote(about, card) : null;
+}
+
+/**
+ * Enter one post's conversation. With a card for it loaded, at once (About on
+ * its newest card). Otherwise the chip's card is paged in first; only when it
+ * is found does the filter apply (About on that card); else a toast, no filter.
+ */
+export async function openPostFilter(input: {
+  postId: string;
+  cardMessageId: string | undefined;
+  rows: readonly ThreadMessage[];
+  ensureLoaded: ((messageId: string) => Promise<FindOlderOutcome>) | undefined;
+  apply: (postId: string, cardMessageId: string | null) => void;
+  toast: (title: string) => void;
+}): Promise<void> {
+  const card = newestCardFor(input.rows, input.postId);
+  if (card !== null) {
+    input.apply(input.postId, card.id);
+    return;
+  }
+  if (input.cardMessageId === undefined || input.ensureLoaded === undefined) {
+    input.toast(CARD_NOT_LOADED_TOAST);
+    return;
+  }
+  const outcome = await input.ensureLoaded(input.cardMessageId);
+  if (outcome === 'found') input.apply(input.postId, input.cardMessageId);
+  else input.toast(CARD_NOT_LOADED_TOAST);
 }
 
 /**
@@ -1064,6 +1129,8 @@ export function threadListItems(
     afterLabel: boolean,
   ) => ReactElement,
   loadOlder?: () => void,
+  /** The filtered thread with no rows: this line sits under the Load older row. */
+  emptyNote?: string,
 ): ReactElement[] {
   const items: ReactElement[] = [
     <li key="thread-spacer" aria-hidden="true" data-thread-spacer="" className="mt-auto" />,
@@ -1094,6 +1161,17 @@ export function threadListItems(
     else if (row.kind === 'time') items.push(<TimeLabel key={row.key} label={row.label} />);
     else items.push(renderMessage(row, i > 0 && rows[i - 1]?.kind !== 'message'));
   });
+  if (rows.length === 0 && emptyNote !== undefined) {
+    items.push(
+      <li
+        key="filter-empty"
+        data-filter-empty=""
+        className="px-4 py-6 text-center text-sm text-fg-3"
+      >
+        {emptyNote}
+      </li>,
+    );
+  }
   return items;
 }
 
@@ -1303,6 +1381,8 @@ function ThreadBody(
     onShowPost?: (postId: string) => void;
     /** One post's conversation: no time labels, a "Load older" row at the top. */
     filtering?: boolean;
+    /** The filtered post's KEY, for the filtered thread's empty line. */
+    filterRef?: string | null;
   },
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
@@ -1416,7 +1496,7 @@ function ThreadBody(
     window.setTimeout(() => flash.classList.remove(...ring), 1200);
   };
   if (props.loading) return threadSkeleton();
-  if (props.messages.length === 0) {
+  if (props.messages.length === 0 && props.filtering !== true) {
     return (
       <div className="flex flex-1 flex-col justify-center">
         <EmptyState
@@ -1509,6 +1589,7 @@ function ThreadBody(
                 props.onLoadOlder?.();
               }
             : undefined,
+          props.filtering === true ? filterEmptyLabel(props.filterRef ?? null) : undefined,
         )}
       </ul>
       <MessageActionMenu
@@ -1635,7 +1716,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // One post's conversation (client-side over the loaded pages).
   const [filterPostId, setFilterPostId] = useState<string | null>(null);
   // A share just sent: its card message becomes the About once the outbox bubble lands.
-  const pendingCardRef = useRef<{ postId: string; known: ReadonlySet<string> } | null>(null);
+  const cardWaitRef = useRef(createCardExpectation());
+  const cardWait = cardWaitRef.current;
+  // The rows on screen: they advance only once every chip in them is resolved.
+  const gateRef = useRef<ThreadGate<ThreadMessage> | null>(null);
   const { workspaceKey } = useWorkspace();
   const toast = useToast();
   const marks = props.marks ?? NO_MARKS;
@@ -1662,18 +1746,17 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setForwardFor(null);
     setAboutDraft(null);
     setFilterPostId(null);
-    pendingCardRef.current = null;
-  }, [props.title]);
+    cardWait.clear();
+  }, [props.title, cardWait]);
+
+  // Unmount: stop waiting on a share's card.
+  useEffect(() => () => cardWait.clear(), [cardWait]);
 
   // The card a share queued has landed in the list: it is what the chat is about now.
   useEffect(() => {
-    const pending = pendingCardRef.current;
-    if (pending === null) return;
-    const card = newCardFor(props.messages, pending.known, pending.postId);
-    if (card === null) return;
-    pendingCardRef.current = null;
-    setAboutDraft({ postId: pending.postId, cardMessageId: card.id });
-  }, [props.messages]);
+    const found = cardWait.resolve(props.messages);
+    if (found !== null) setAboutDraft(found);
+  }, [props.messages, cardWait]);
 
   // A delete or a new mark landing meanwhile drops ids that are no longer selectable.
   useEffect(() => {
@@ -1764,18 +1847,41 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     () => new Set(props.messages.flatMap((m) => m.sharedPostIds)),
     [props.messages],
   );
-  const shownMessages = useMemo(
-    () => (filterPostId !== null ? filterRows(props.messages, filterPostId) : props.messages),
-    [props.messages, filterPostId],
+  // First paint final: rows (a first page, an older page) render only once
+  // their chips are resolved, so a chip or its fallback quote paints with them
+  // and the bottom snap happens after. Until then the last resolved list stays
+  // (or the skeleton, on open).
+  const chipsReady = useMemo(
+    () => chipsResolved(props.messages, parentIndex, postRef),
+    [props.messages, parentIndex, postRef],
   );
+  const gate = gateRows(gateRef.current, props.title, props.messages, chipsReady);
+  gateRef.current = gate;
+  const gatedMessages = gate.rows;
+  const gatedIndex = useMemo(() => parentIndexOf(gatedMessages ?? []), [gatedMessages]);
+  const shownMessages = useMemo(() => {
+    const rows = gatedMessages ?? [];
+    return filterPostId !== null ? filterRows(rows, filterPostId) : rows;
+  }, [gatedMessages, filterPostId]);
 
-  /** Remember the share just queued so its card becomes the About. */
-  const expectCard = (postId: string): void => {
-    pendingCardRef.current = { postId, known: new Set(props.messages.map((m) => m.id)) };
+  // The About post resolved to nothing (RLS, failed read): drop it and say so.
+  const aboutPost = aboutDraft !== null ? postRef(aboutDraft.postId) : undefined;
+  const aboutGone = aboutDraft !== null && aboutState(aboutPost) === 'gone';
+  useEffect(() => {
+    if (!aboutGone) return;
+    setAboutDraft(null);
+    toast.show({ title: ABOUT_UNAVAILABLE_TOAST });
+  }, [aboutGone, toast]);
+
+  /** Wait for the card of a share about to be sent; false (and a toast) when it cannot be. */
+  const expectCard = (postId: string): boolean => {
+    if (cardWait.expect(props.messages, postId, props.canSend)) return true;
+    toast.show({ title: SHARE_UNAVAILABLE_TOAST });
+    return false;
   };
   /** Talk about a card already in the thread: it becomes the About and flashes. */
   const talkAbout = (postId: string, cardMessageId: string): void => {
-    pendingCardRef.current = null;
+    cardWait.clear();
     setAboutDraft({ postId, cardMessageId });
     jumpTo(cardMessageId);
   };
@@ -1791,31 +1897,52 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       talkAbout(postId, card.id);
       return;
     }
-    expectCard(postId);
+    if (!expectCard(postId)) return;
     props.onSend('', [], [postId], null, []);
   };
-  /** Show one post's conversation; what is typed next stays about it. */
-  const showPost = (postId: string): void => {
-    setFilterPostId(postId);
-    const card = newestCardFor(props.messages, postId);
-    if (card !== null) setAboutDraft({ postId, cardMessageId: card.id });
+  /**
+   * Show one post's conversation; what is typed next stays about it. A chip
+   * whose card is on an unloaded page pages it in first (or toasts).
+   */
+  const title = props.title;
+  const titleRef = useRef(title);
+  titleRef.current = title;
+  const showPost = (postId: string, cardMessageId?: string): void => {
+    void openPostFilter({
+      postId,
+      cardMessageId,
+      rows: props.messages,
+      ensureLoaded: props.onEnsureLoaded,
+      apply: (id, card) => {
+        if (titleRef.current !== title) return;
+        setFilterPostId(id);
+        if (card !== null) setAboutDraft({ postId: id, cardMessageId: card });
+      },
+      toast: (message) => toast.show({ title: message }),
+    });
   };
   const chipFor = (message: ThreadMessage): BubbleChip | undefined => {
-    const target = chipTargetFor(message, parentIndex);
+    const target = chipTargetFor(message, gatedIndex);
     return bubbleChip(target, target !== null ? postRef(target.postId) : null, {
       workspaceKey,
       onShowPost: showPost,
     });
   };
-  // The composer's send: the reply draft wins, else the About card; a share
-  // (paperclip or pasted link) makes its new card the About.
-  const aboutReply = aboutQuote(
+  // The composer's send: the reply draft wins, else the About card while its
+  // bar shows the post; a one-post share (paperclip or pasted link) makes its
+  // new card the About, a several-post share leaves no About.
+  const aboutReply = aboutReplyFor(
     aboutDraft,
+    aboutPost,
     aboutDraft !== null ? messagesById.get(aboutDraft.cardMessageId) : undefined,
   );
   const composerSend: ComposerSend = (text, attachments, sharedPostIds, reply, sharedBriefIds) => {
-    const shared = sharedPostIds[0];
-    if (shared !== undefined) expectCard(shared);
+    const [shared] = sharedPostIds;
+    if (sharedPostIds.length === 1 && shared !== undefined) expectCard(shared);
+    if (sharedPostIds.length > 1) {
+      cardWait.clear();
+      setAboutDraft(null);
+    }
     props.onSend(
       text,
       attachments,
@@ -1824,7 +1951,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       sharedBriefIds,
     );
   };
-  const aboutPost = aboutDraft !== null ? postRef(aboutDraft.postId) : undefined;
+  const filterPost = filterPostId !== null ? postRef(filterPostId) : undefined;
   return (
     <div className="flex h-full flex-col bg-bg">
       <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-2 md:px-4">
@@ -1849,7 +1976,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       </div>
       {filterPostId !== null ? (
         <FilterStrip
-          post={postRef(filterPostId) ?? null}
+          post={filterPost ?? null}
           workspaceKey={workspaceKey}
           onShowAll={() => setFilterPostId(null)}
         />
@@ -1898,7 +2025,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         onTalkAbout={talkAbout}
         onShowPost={showPost}
         filtering={filterPostId !== null}
-        loading={props.loading}
+        filterRef={filterPost != null ? postRefKey(workspaceKey, filterPost.number) : null}
+        loading={props.loading || gatedMessages === null}
         profiles={props.profiles}
         cache={presignCache}
         presignEnabled={presignEnabled}
@@ -1939,7 +2067,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           onTyping={props.onTyping}
           onCancelReply={() => setReplyDraft(null)}
           {...(replyDraft !== null ? { reply: replyDraft } : {})}
-          about={aboutPost ?? undefined}
+          {...(aboutDraft !== null && !aboutGone ? { about: aboutPost ?? null } : {})}
           onCancelAbout={() => setAboutDraft(null)}
           sharedPostIds={sharedInChat}
           onBringPost={bringPost}

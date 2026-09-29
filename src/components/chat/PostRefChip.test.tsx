@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { PostCardRow } from '../../../packages/posts/src/reads';
-import { PostRefChip, createChipBatch, postRefKey } from '@/components/chat/PostRefChip';
+import {
+  CHIP_BATCH_TIMEOUT_MS,
+  PostRefChip,
+  createChipBatch,
+  postRefKey,
+} from '@/components/chat/PostRefChip';
 import { FilterStrip } from '@/components/chat/FilterStrip';
 import { chipPostIds, parentIndexOf } from '@/lib/chat/post-refs';
 import type { ThreadMessage } from '@/lib/chat/thread';
@@ -145,5 +150,18 @@ describe('FilterStrip', () => {
       .children;
     children.find((c) => c.props?.onClick !== undefined)?.props?.onClick?.();
     expect(onShowAll).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createChipBatch timeout', () => {
+  it('a read slower than the timeout resolves its ids to null (plain quote), never holding rows', async () => {
+    vi.useFakeTimers();
+    const batch = createChipBatch(() => new Promise(() => {}));
+    const done = batch.request(['slow']);
+    expect(batch.get('slow')).toBeUndefined();
+    vi.advanceTimersByTime(CHIP_BATCH_TIMEOUT_MS);
+    await done;
+    expect(batch.get('slow')).toBeNull();
+    vi.useRealTimers();
   });
 });

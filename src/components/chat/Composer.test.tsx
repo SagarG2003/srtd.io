@@ -340,3 +340,33 @@ describe('About bar', () => {
     expect(composerPlaceholder(null)).toBe('Write a message');
   });
 });
+
+describe('About bar while its post loads (F14)', () => {
+  it('is a skeleton with the same close: no KEY, a title placeholder', () => {
+    const html = renderToStaticMarkup(
+      <AboutBar post={null} refLabel="GBL-14" onCancel={() => {}} />,
+    );
+    expect(html).toContain('data-about-loading');
+    expect(html).toMatch(/text-accent[^>]*>About</);
+    expect(html).not.toContain('GBL-14');
+    expect(html).toContain('h-3 w-28');
+    expect(html).toContain('aria-label="Close about"');
+  });
+
+  it('can be cancelled while loading', () => {
+    const onCancel = vi.fn();
+    const root = AboutBar({ post: null, refLabel: null, onCancel });
+    const stack: ReactNode[] = [root];
+    let close: ReactElement | null = null;
+    while (stack.length > 0 && close === null) {
+      const node = stack.pop();
+      if (Array.isArray(node)) stack.push(...(node as ReactNode[]));
+      else if (isValidElement(node)) {
+        if (node.type === IconButton) close = node;
+        else stack.push((node.props as { children?: ReactNode }).children);
+      }
+    }
+    (close?.props as { onClick: () => void }).onClick();
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+});

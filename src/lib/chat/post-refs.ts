@@ -67,19 +67,148 @@ export function newestCardFor<T extends Pick<ThreadMessage, 'id' | 'sharedPostId
   return null;
 }
 
-/**
- * The card message a share just queued: the first row sharing the post whose id
- * was not in the list when the share was sent. Null until the outbox bubble lands.
- */
-export function newCardFor<T extends Pick<ThreadMessage, 'id' | 'sharedPostIds' | 'mine'>>(
-  rows: readonly T[],
-  knownIds: ReadonlySet<string>,
+/** A share waiting for its card message: the post, the ids and the newest time loaded when it was sent. */
+export interface ExpectedCard {
+  postId: string;
+  known: ReadonlySet<string>;
+  /** The newest loaded message time when the share was sent; the card orders after it. */
+  after: number;
+}
+
+/** Snapshot what is loaded when a share is sent, so only its own card can match. */
+export function expectedCard(
+  rows: readonly Pick<ThreadMessage, 'id' | 'time'>[],
   postId: string,
-): T | null {
-  for (const row of rows) {
-    if (row.mine && !knownIds.has(row.id) && row.sharedPostIds.includes(postId)) return row;
+): ExpectedCard {
+  let after = Number.NEGATIVE_INFINITY;
+  for (const row of rows) if (row.time > after) after = row.time;
+  return { postId, known: new Set(rows.map((r) => r.id)), after };
+}
+
+/**
+ * The card message a share just queued, newest first: an own outbox bubble
+ * (still 'sending' or 'failed', so a live echo of a send from another device,
+ * which arrives 'sent', never matches) that was not loaded when the share was
+ * sent, orders after everything loaded then (an own card on an older page
+ * loaded since never matches), and shares the post. Null until it lands.
+ */
+export function newCardFor<
+  T extends Pick<ThreadMessage, 'id' | 'sharedPostIds' | 'mine' | 'state' | 'time'>,
+>(rows: readonly T[], expected: ExpectedCard): T | null {
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (row === undefined || row.time <= expected.after) continue;
+    if (!row.mine || row.state === 'sent' || expected.known.has(row.id)) continue;
+    if (row.sharedPostIds.includes(expected.postId)) return row;
   }
   return null;
+}
+
+/** A share's card that has not appeared is forgotten after this long. */
+export const EXPECT_CARD_MS = 30_000;
+
+/** The one share a thread waits on to turn its card into the About. */
+export interface CardExpectation {
+  /**
+   * Wait for the card of a share about to be sent. False (and nothing waited
+   * on) when the thread cannot send; the caller tells the user.
+   */
+  expect: (
+    rows: readonly Pick<ThreadMessage, 'id' | 'time'>[],
+    postId: string,
+    canSend: boolean,
+  ) => boolean;
+  /** The card, once it is in the rows; resolving stops the wait. */
+  resolve: (
+    rows: readonly Pick<ThreadMessage, 'id' | 'sharedPostIds' | 'mine' | 'state' | 'time'>[],
+  ) => { postId: string; cardMessageId: string } | null;
+  /** Stop waiting (conversation switch, unmount, a new share). */
+  clear: () => void;
+  pending: () => ExpectedCard | null;
+}
+
+export function createCardExpectation(
+  timers: {
+    set: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+    clear: (handle: ReturnType<typeof setTimeout>) => void;
+  } = { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h) },
+  timeoutMs: number = EXPECT_CARD_MS,
+): CardExpectation {
+  let current: ExpectedCard | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const clear = (): void => {
+    if (timer !== null) timers.clear(timer);
+    timer = null;
+    current = null;
+  };
+  return {
+    expect: (rows, postId, canSend) => {
+      clear();
+      if (!canSend) return false;
+      current = expectedCard(rows, postId);
+      timer = timers.set(clear, timeoutMs);
+      return true;
+    },
+    resolve: (rows) => {
+      if (current === null) return null;
+      const card = newCardFor(rows, current);
+      if (card === null) return null;
+      const postId = current.postId;
+      clear();
+      return { postId, cardMessageId: card.id };
+    },
+    clear,
+    pending: () => current,
+  };
+}
+
+/**
+ * Whether every chip in the rows has its post resolved in the batch (a row, or
+ * null for a post the viewer cannot see). Rows render only once this holds, so
+ * a chip or its fallback quote is part of the first paint.
+ */
+export function chipsResolved(
+  rows: readonly RefFields[],
+  parentIndex: ParentIndex,
+  lookup: (postId: string) => unknown,
+): boolean {
+  return chipPostIds(rows, parentIndex).every((id) => lookup(id) !== undefined);
+}
+
+/** The rows the thread renders: the newest rows whose chips are resolved, per conversation. */
+export interface ThreadGate<T> {
+  key: string;
+  /** Null until a first list with every chip resolved; the thread shows its skeleton. */
+  rows: T[] | null;
+}
+
+/**
+ * Advance the rendered rows only when every chip is resolved; otherwise keep
+ * the last resolved list of the same conversation (same array, so nothing
+ * re-renders or re-snaps), or nothing for a new conversation. An older page
+ * therefore appears whole, with its chips, in one render.
+ */
+export function gateRows<T>(
+  prev: ThreadGate<T> | null,
+  key: string,
+  rows: T[],
+  ready: boolean,
+): ThreadGate<T> {
+  if (ready) return prev !== null && prev.key === key && prev.rows === rows ? prev : { key, rows };
+  // A shown list stays until the new one is ready; an empty or missing one
+  // (the conversation is still loading) shows the skeleton instead.
+  if (prev !== null && prev.key === key && prev.rows !== null && prev.rows.length > 0) return prev;
+  return { key, rows: null };
+}
+
+/**
+ * The About state from the batch: 'visible' once its post is in, 'pending'
+ * while the read is in flight, 'gone' when it resolved to nothing (RLS or a
+ * failed read). The About reply rides a send only while the bar is visible.
+ */
+export function aboutState(post: unknown): 'visible' | 'pending' | 'gone' {
+  if (post === undefined) return 'pending';
+  return post === null ? 'gone' : 'visible';
 }
 
 /**

@@ -298,17 +298,34 @@ export function cardTapHandlers(
 /** A card's hold: 450 ms still within 10 px, the bubble's long-press defaults. */
 export const CARD_HOLD = { thresholdMs: 450, moveTolerancePx: 10 } as const;
 
+/**
+ * A tap on a card's KEY. The KEY sits inside the card, so a hold that starts on
+ * it is the card's hold: the release click reads (and so clears) the card's
+ * suppression flag and does nothing else. A plain tap shows the post. Never
+ * reaches the card's own click (which would open the sheet). Pure.
+ */
+export function keyTapHandler(
+  onShowPost: () => void,
+  consumeHold: () => boolean,
+): (e: { stopPropagation: () => void }) => void {
+  return (e) => {
+    e.stopPropagation();
+    if (consumeHold()) return;
+    onShowPost();
+  };
+}
+
 /** The small KEY pill on a card; a button (44px hit area) when it filters. */
 function CardRef(props: {
   label: string;
   className: string;
   /** The inline KEY (no cover) carries data-card-ref; the cover pill data-card-pill-ref. */
   inline: boolean;
-  onShowPost?: (() => void) | undefined;
+  onTap?: ((e: { stopPropagation: () => void }) => void) | undefined;
 }): ReactElement {
-  const onShowPost = props.onShowPost;
+  const onTap = props.onTap;
   const marker = props.inline ? { 'data-card-ref': '' } : { 'data-card-pill-ref': '' };
-  if (onShowPost === undefined) {
+  if (onTap === undefined) {
     return (
       <span {...marker} className={props.className}>
         {props.label}
@@ -320,10 +337,7 @@ function CardRef(props: {
       type="button"
       {...marker}
       aria-label={`Show the conversation about ${props.label}`}
-      onClick={(e) => {
-        e.stopPropagation();
-        onShowPost();
-      }}
+      onClick={onTap}
       onKeyDown={(e) => e.stopPropagation()}
       className={cn(
         props.className,
@@ -358,6 +372,9 @@ export function PostCardItem(
     setSheetMounted(true);
     setSheetOpen(true);
   }, hold.consumeClickSuppression);
+  const onShowPost = props.onShowPost;
+  const keyTap =
+    onShowPost !== undefined ? keyTapHandler(onShowPost, hold.consumeClickSuppression) : undefined;
   return (
     <>
       <div
@@ -389,7 +406,7 @@ export function PostCardItem(
             post={post}
             assetVersionId={post.thumbnailAssetVersionId}
             entityRef={ref}
-            onShowPost={props.onShowPost}
+            onKeyTap={keyTap}
           />
         ) : null}
         <div className="flex flex-col gap-1.5 px-3 py-2.5">
@@ -403,7 +420,7 @@ export function PostCardItem(
                 label={ref}
                 className="relative mr-1.5 font-mono text-fg-3"
                 inline
-                onShowPost={props.onShowPost}
+                onTap={keyTap}
               />
             ) : null}
             {post.title}
@@ -481,7 +498,7 @@ function CardMedia(props: {
   post: PostCardRow;
   assetVersionId: string;
   entityRef: string | null;
-  onShowPost?: (() => void) | undefined;
+  onKeyTap?: ((e: { stopPropagation: () => void }) => void) | undefined;
 }): ReactElement {
   const { post, assetVersionId, entityRef: ref } = props;
   const thumb = useThumbnail<HTMLDivElement>({
@@ -506,7 +523,7 @@ function CardMedia(props: {
           label={ref}
           className={cn(MEDIA_PILL, 'absolute left-2 top-2 font-mono')}
           inline={false}
-          onShowPost={props.onShowPost}
+          onTap={props.onKeyTap}
         />
       ) : null}
       <span className={cn(MEDIA_PILL, 'absolute right-2 top-2')}>{formatLabel(post.format)}</span>
