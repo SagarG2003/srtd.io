@@ -72,14 +72,21 @@ export function stripLabelParts(label: string): Array<{ text: string; count: boo
 /** What the strip knows about posts in review; not ready holds the first paint. */
 export interface StripLoops {
   ready: boolean;
-  /** Posts waiting in review; null when the read failed (the part is left out). */
+  /**
+   * Posts waiting in review; null when the list read failed with nothing to
+   * fall back on (the posts part is left out, never "Nothing open").
+   */
   posts: number | null;
   side: LoopsSide;
 }
 
-const NO_LOOPS: StripLoops = { ready: true, posts: null, side: 'unknown' };
+const NO_LOOPS: StripLoops = { ready: true, posts: 0, side: 'unknown' };
 
+/** The strip's name suffix (screen readers hear it after the visible line). */
 export const LOOPS_STRIP_ARIA = 'Open loops in this chat';
+
+/** The marks section body when posts are listed but no mark is open. */
+export const NO_OPEN_MARKS = 'No open marks';
 
 /**
  * The open-loops strip: a count pill (posts waiting plus open marks), then the
@@ -94,20 +101,21 @@ export function MarkStrip(props: {
 }): ReactElement {
   const loops = props.loops ?? NO_LOOPS;
   const label = loopsStripLabel({
-    posts: loops.posts ?? 0,
+    posts: loops.posts,
     side: loops.side,
     marks: markCounts(props.marks.values()),
   });
   return (
     <button
       type="button"
-      aria-label={LOOPS_STRIP_ARIA}
       aria-busy={!loops.ready}
-      data-loops-strip={loops.ready ? (label.empty ? 'empty' : 'open') : 'pending'}
+      data-loops-strip={
+        !loops.ready ? 'pending' : label.empty ? 'empty' : label.text === '' ? 'unknown' : 'open'
+      }
       onClick={props.onOpen}
       className="flex min-h-[44px] w-full shrink-0 items-center gap-2 border-b border-border bg-panel-2 px-4 text-left text-xs text-fg-2 transition-colors hover:bg-panel-3"
     >
-      {!loops.ready ? (
+      {!loops.ready || (!label.empty && label.text === '') ? (
         <span className="min-w-0 flex-1" />
       ) : label.empty ? (
         <>
@@ -136,6 +144,7 @@ export function MarkStrip(props: {
         </>
       )}
       <IconChevronRight size={16} className="shrink-0 text-fg-3" />
+      <span className="sr-only">{LOOPS_STRIP_ARIA}</span>
     </button>
   );
 }
@@ -448,6 +457,20 @@ export interface MarksListProps {
 }
 
 /**
+ * What sits under the tabs after the posts section: the mark rows; a muted "No
+ * open marks" line when posts are listed above but no mark is open; else the
+ * full empty state. Pure.
+ */
+export function marksListBody(
+  tab: MarkTab,
+  markRows: number,
+  openPostRows: number,
+): 'rows' | 'no-open-marks' | 'empty' {
+  if (markRows > 0) return 'rows';
+  return tab === 'open' && openPostRows > 0 ? 'no-open-marks' : 'empty';
+}
+
+/**
  * The pin board body (Open and History tabs, rows, stamp and reopen confirms),
  * shared by MarksSheet and the DM Contact sheet's Marks tab.
  */
@@ -475,6 +498,7 @@ export function MarksList(props: MarksListProps): ReactElement {
   }, [props.marks, messageFor]);
   const titles = useCardTitles(props.open, markedMessages);
   const tabCount = markTabCounts(props.marks.values());
+  const body = marksListBody(tab, rows.length, props.openPosts?.posts?.length ?? 0);
   const displayNameOf = (userId: string): string | undefined => profiles.get(userId)?.displayName;
 
   async function confirm(mark: ChatMark): Promise<void> {
@@ -507,7 +531,11 @@ export function MarksList(props: MarksListProps): ReactElement {
       {tab === 'open' && props.openPosts !== undefined ? (
         <OpenPostsList {...props.openPosts} />
       ) : null}
-      {rows.length === 0 ? (
+      {body === 'no-open-marks' ? (
+        <p data-no-open-marks="" className="px-2 text-xs text-fg-3">
+          {NO_OPEN_MARKS}
+        </p>
+      ) : body === 'empty' ? (
         <EmptyState
           icon={<IconPin size={22} />}
           title="Nothing here"

@@ -46,6 +46,11 @@ import type { ChatConnection } from '@/lib/chat/types';
 export interface UseChatMarks {
   /** Every mark of the open channel keyed by message id (resolved included). */
   marks: Map<string, ChatMark>;
+  /**
+   * The open channel's marks read has settled (ok or not). False on mount and
+   * on every channel switch until that channel's read resolves.
+   */
+  loaded: boolean;
   /** Marked messages read from the record (for sheet rows beyond loaded history). */
   markedMessages: Map<string, ThreadMessage>;
   /** Re-read all marks of the open channel. */
@@ -56,6 +61,40 @@ export interface UseChatMarks {
   resolve: (messageId: string) => Promise<WriteResult>;
   /** Return a stamped mark to open. */
   reopen: (messageId: string) => Promise<WriteResult>;
+}
+
+// The channel whose marks read has settled, keyed by the marks map instance.
+// The thread only receives the map, so the loaded flag travels with it: a map
+// is tagged when its channel's read resolves, and every later update carries
+// the tag to the next map. The empty map set on a channel switch is untagged.
+const LOADED_FOR = new WeakMap<Map<string, ChatMark>, string>();
+
+/** Tag a marks map as the settled read of `channelId`. */
+export function tagMarksLoaded(
+  marks: Map<string, ChatMark>,
+  channelId: string,
+): Map<string, ChatMark> {
+  LOADED_FOR.set(marks, channelId);
+  return marks;
+}
+
+/** Carry `prev`'s loaded tag to `next` (an update of the same channel's marks). */
+export function carryMarksLoaded(
+  prev: Map<string, ChatMark>,
+  next: Map<string, ChatMark>,
+): Map<string, ChatMark> {
+  const channel = LOADED_FOR.get(prev);
+  if (channel !== undefined) LOADED_FOR.set(next, channel);
+  return next;
+}
+
+/** Whether `marks` is the settled marks read of `channelId`. */
+export function marksLoadedFor(
+  marks: Map<string, ChatMark> | undefined,
+  channelId: string | undefined,
+): boolean {
+  if (marks === undefined || channelId === undefined) return false;
+  return LOADED_FOR.get(marks) === channelId;
 }
 
 /**
@@ -137,9 +176,13 @@ export function useChatMarks(params: {
           channel_id: forChannel,
           error: result.error.message,
         });
+        // Settled all the same: the strip stops holding and shows what it has.
+        setMarks((prev) =>
+          LOADED_FOR.get(prev) === forChannel ? prev : tagMarksLoaded(new Map(prev), forChannel),
+        );
         return;
       }
-      setMarks(indexMarks(result.data));
+      setMarks(tagMarksLoaded(indexMarks(result.data), forChannel));
       await loadMarkedMessages(
         result.data.map((m) => m.messageId),
         forChannel,
@@ -176,7 +219,7 @@ export function useChatMarks(params: {
       }
       if (!result.data.found || result.data.mark.channelId !== forChannel) return;
       const mark = result.data.mark;
-      setMarks((prev) => upsertMark(prev, mark));
+      setMarks((prev) => carryMarksLoaded(prev, upsertMark(prev, mark)));
       await loadMarkedMessages([messageId], forChannel);
     },
     [db, loadMarkedMessages],
@@ -226,16 +269,19 @@ export function useChatMarks(params: {
       if (channelRef.current === forChannel) {
         setMarks((prev) => {
           const existing = prev.get(messageId);
-          return upsertMark(prev, {
-            messageId,
-            channelId: forChannel,
-            type,
-            priority: type === 'pending' ? priority : null,
-            markedAt: existing?.markedAt ?? new Date().toISOString(),
-            resolved: false,
-            resolvedBy: null,
-            resolvedAt: null,
-          });
+          return carryMarksLoaded(
+            prev,
+            upsertMark(prev, {
+              messageId,
+              channelId: forChannel,
+              type,
+              priority: type === 'pending' ? priority : null,
+              markedAt: existing?.markedAt ?? new Date().toISOString(),
+              resolved: false,
+              resolvedBy: null,
+              resolvedAt: null,
+            }),
+          );
         });
       }
       signal(messageId, traceId);
@@ -258,7 +304,8 @@ export function useChatMarks(params: {
         action,
         actorId: currentUserId,
         apply: (next) => {
-          if (channelRef.current === forChannel) setMarks((prev) => upsertMark(prev, next));
+          if (channelRef.current === forChannel)
+            setMarks((prev) => carryMarksLoaded(prev, upsertMark(prev, next)));
         },
       });
       if (!result.ok) {
@@ -285,8 +332,9 @@ export function useChatMarks(params: {
     [transition],
   );
 
+  const loaded = marksLoadedFor(marks, channelId ?? undefined);
   return useMemo(
-    () => ({ marks, markedMessages, refetch, setMark, resolve, reopen }),
-    [marks, markedMessages, refetch, setMark, resolve, reopen],
+    () => ({ marks, loaded, markedMessages, refetch, setMark, resolve, reopen }),
+    [marks, loaded, markedMessages, refetch, setMark, resolve, reopen],
   );
 }

@@ -72,9 +72,15 @@ import { FilterStrip } from '@/components/chat/FilterStrip';
 import { MessageActionMenu } from '@/components/chat/MessageActionMenu';
 import { SharedBriefCards } from '@/components/chat/BriefCard';
 import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
-import { MarkStrip, MarksSheet, PrioritySheet } from '@/components/chat/MarksSheet';
-import { useOpenPosts } from '@/lib/chat/use-open-posts';
-import { useViewerSide } from '@/lib/chat/viewer-role';
+import {
+  MarkStrip,
+  MarksSheet,
+  PrioritySheet,
+  type StripLoops,
+} from '@/components/chat/MarksSheet';
+import { marksLoadedFor } from '@/lib/chat/use-chat-marks';
+import { useOpenPosts, type UseOpenPosts } from '@/lib/chat/use-open-posts';
+import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { ContactSheet } from '@/components/chat/ContactSheet';
 import { SelectionBar } from '@/components/chat/SelectionBar';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
@@ -265,6 +271,25 @@ export function threadStripSlot(input: {
 }): 'filter' | 'loops' | null {
   if (input.filtering) return 'filter';
   return input.hasMarks && !input.selecting ? 'loops' : null;
+}
+
+/**
+ * The open-loops strip input. Ready only when the posts round, the viewer side
+ * and this channel's marks read have all settled, so the first painted label
+ * is final. A thread without a channel id has no marks read to wait on.
+ */
+export function stripLoops(input: {
+  openPosts: Pick<UseOpenPosts, 'ready' | 'count' | 'failed'>;
+  side: { side: ViewerSide; ready: boolean };
+  marks: Map<string, ChatMark> | undefined;
+  channelId: string | undefined;
+}): StripLoops {
+  const marksLoaded = input.channelId === undefined || marksLoadedFor(input.marks, input.channelId);
+  return {
+    ready: input.openPosts.ready && input.side.ready && marksLoaded,
+    posts: input.openPosts.failed ? null : input.openPosts.count,
+    side: input.side.side,
+  };
 }
 
 /** A voice note alone (no text, cards or other files): it takes the text-bubble layout. */
@@ -2031,11 +2056,12 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       ) : stripSlot === 'loops' ? (
         <MarkStrip
           marks={marks}
-          loops={{
-            ready: openPosts.ready && viewerSide.ready,
-            posts: openPosts.count,
-            side: viewerSide.side,
-          }}
+          loops={stripLoops({
+            openPosts,
+            side: viewerSide,
+            marks: props.marks,
+            channelId: props.channelId,
+          })}
           onOpen={() => setMarksOpen(true)}
         />
       ) : null}

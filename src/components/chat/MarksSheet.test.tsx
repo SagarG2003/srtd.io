@@ -9,6 +9,8 @@ import {
   MarkSheetRow,
   MarkStrip,
   MarksList,
+  marksListBody,
+  NO_OPEN_MARKS,
   MarksSheet,
   OpenPostSheetRow,
   OpenPostsList,
@@ -236,7 +238,8 @@ describe('MarkStrip: open loops', () => {
         onOpen={() => {}}
       />,
     );
-    expect(client).toContain(`aria-label="${LOOPS_STRIP_ARIA}"`);
+    expect(client).not.toContain('aria-label=');
+    expect(client).toContain(`<span class="sr-only">${LOOPS_STRIP_ARIA}</span>`);
     expect(client).toMatch(/data-loops-count=""[^>]*>3</);
     expect(client).toContain('posts waiting on you');
     expect(client).toContain('commitment');
@@ -264,8 +267,40 @@ describe('MarkStrip: open loops', () => {
     expect(html).not.toContain('data-loops-count');
   });
 
-  it('the aria-label is Open loops in this chat', () => {
+  it('name = visible line plus the sr-only suffix Open loops in this chat (B4)', () => {
     expect(LOOPS_STRIP_ARIA).toBe('Open loops in this chat');
+    const pending = renderToStaticMarkup(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: false, posts: null, side: 'unknown' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(pending).not.toContain('aria-label=');
+    expect(pending).toContain('sr-only');
+  });
+
+  it('a failed first posts read never shows Nothing open (B5)', () => {
+    const noMarks = renderToStaticMarkup(
+      <MarkStrip
+        marks={new Map()}
+        loops={{ ready: true, posts: null, side: 'client' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(noMarks).toContain('data-loops-strip="unknown"');
+    expect(noMarks).not.toContain('Nothing open');
+    expect(noMarks).toContain('min-h-[44px]');
+    const withMarks = renderToStaticMarkup(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: true, posts: null, side: 'client' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(withMarks).toContain('commitment');
+    expect(withMarks).not.toContain('waiting');
+    expect(withMarks).not.toContain('Nothing open');
   });
 });
 
@@ -354,5 +389,18 @@ describe('Open tab posts section', () => {
     };
     expect(OpenPostsList({ ...base, posts: [] })).toBeNull();
     expect(OpenPostsList({ ...base, posts: null })).toBeNull();
+  });
+});
+
+describe('marks section body (B3)', () => {
+  it('posts listed and no open mark: the muted No open marks line, not the empty state', () => {
+    expect(marksListBody('open', 0, 2)).toBe('no-open-marks');
+    expect(NO_OPEN_MARKS).toBe('No open marks');
+  });
+
+  it('both empty keeps the EmptyState; rows win; History ignores posts', () => {
+    expect(marksListBody('open', 0, 0)).toBe('empty');
+    expect(marksListBody('open', 3, 2)).toBe('rows');
+    expect(marksListBody('history', 0, 2)).toBe('empty');
   });
 });

@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Client } from '@srtdio/rpc';
 import { POST_CHANGED_EVENT, REFETCH_AFTER_MS } from '@/components/chat/post-card';
 import {
+  createOpenPostsRunner,
   fetchOpenPosts,
+  mergeOpenPosts,
   watchOpenPosts,
+  type OpenPostsData,
   type OpenPostRow,
   type OpenPostsReads,
 } from '@/lib/chat/use-open-posts';
@@ -85,20 +88,152 @@ describe('fetchOpenPosts: query plan', () => {
     expect(data).toEqual({ posts: [row()], count: 140 });
   });
 
-  it('a failed count falls back to the rows; a failed list is null; never throws', async () => {
+  it('a failed read is null on its side; never throws', async () => {
     const fail = { ok: false as const, error: { code: 'unknown' as const, message: 'x' } };
     const a = await fetchOpenPosts({} as Client, WS, {
-      list: async () => ({ ok: true, data: [row(), row({ id: 'p2' })] }),
+      list: async () => ({ ok: true, data: [row()] }),
       count: async () => fail,
     });
-    expect(a).toEqual({ posts: [row(), row({ id: 'p2' })], count: 2 });
+    expect(a).toEqual({ posts: [row()], count: null });
     const b = await fetchOpenPosts({} as Client, WS, {
       list: async () => {
         throw new Error('network');
       },
-      count: async () => fail,
+      count: async () => ({ ok: true, data: 4 }),
     });
-    expect(b).toEqual({ posts: null, count: null });
+    expect(b).toEqual({ posts: null, count: 4 });
+  });
+});
+
+describe('mergeOpenPosts: failed reads (B5)', () => {
+  const good = { posts: [row()], count: 3, failed: false };
+
+  it('a good list replaces; a failed count falls back to the rows', () => {
+    expect(mergeOpenPosts(null, { posts: [row()], count: 9 })).toEqual({
+      posts: [row()],
+      count: 9,
+      failed: false,
+    });
+    expect(mergeOpenPosts(good, { posts: [], count: null })).toEqual({
+      posts: [],
+      count: 0,
+      failed: false,
+    });
+  });
+
+  it('failed first list read is failed (never a known zero), with or without a count', () => {
+    expect(mergeOpenPosts(null, { posts: null, count: null })).toEqual({
+      posts: null,
+      count: null,
+      failed: true,
+    });
+    expect(mergeOpenPosts(null, { posts: null, count: 0 }).failed).toBe(true);
+  });
+
+  it('a refetch whose list fails keeps the old list and takes a good count', () => {
+    expect(mergeOpenPosts(good, { posts: null, count: 5 })).toEqual({
+      posts: [row()],
+      count: 5,
+      failed: false,
+    });
+    expect(mergeOpenPosts(good, { posts: null, count: null })).toEqual(good);
+  });
+});
+
+/** A fetch whose rounds settle only when the test says so. */
+function deferredFetch() {
+  const pending: Array<{ key: string; resolve: (d: OpenPostsData) => void }> = [];
+  let active = 0;
+  let maxActive = 0;
+  const fetch = vi.fn(
+    (key: string) =>
+      new Promise<OpenPostsData>((resolve) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        pending.push({
+          key,
+          resolve: (d) => {
+            active -= 1;
+            resolve(d);
+          },
+        });
+      }),
+  );
+  const settleNext = async (data: OpenPostsData = { posts: [], count: 0 }): Promise<void> => {
+    pending.shift()?.resolve(data);
+    await new Promise((r) => setTimeout(r, 0));
+  };
+  return { fetch, pending, settleNext, maxActive: () => maxActive };
+}
+
+describe('createOpenPostsRunner: one round in flight (B2)', () => {
+  it('three triggers in a burst produce two rounds total, never concurrent', async () => {
+    const d = deferredFetch();
+    const onSettle = vi.fn();
+    const runner = createOpenPostsRunner({ fetch: d.fetch, onSettle, now: () => 5 });
+    runner.request('a');
+    runner.request('a');
+    runner.request('a');
+    expect(d.fetch).toHaveBeenCalledTimes(1);
+    await d.settleNext();
+    expect(d.fetch).toHaveBeenCalledTimes(2);
+    await d.settleNext();
+    expect(d.fetch).toHaveBeenCalledTimes(2);
+    expect(d.maxActive()).toBe(1);
+    expect(onSettle).toHaveBeenCalledTimes(2);
+  });
+
+  it('fetchedAt is null before the first round and the start time after', () => {
+    const d = deferredFetch();
+    let now = 42;
+    const runner = createOpenPostsRunner({ fetch: d.fetch, onSettle: vi.fn(), now: () => now });
+    expect(runner.fetchedAt()).toBeNull();
+    runner.request('a');
+    now = 99;
+    expect(runner.fetchedAt()).toBe(42);
+  });
+
+  it('a visibility change during the first fetch does not start a second round', async () => {
+    const d = deferredFetch();
+    const runner = createOpenPostsRunner({ fetch: d.fetch, onSettle: vi.fn(), now: () => 1_000 });
+    const win = new EventTarget();
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+    const stop = watchOpenPosts(
+      { window: win, document: doc },
+      { fetchedAt: runner.fetchedAt, now: () => 1_500, refetch: () => runner.request('a') },
+    );
+    runner.request('a');
+    doc.dispatchEvent(new Event('visibilitychange'));
+    await d.settleNext();
+    expect(d.fetch).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('a thread switch mid-round waits, drops the old result, then reads the new key', async () => {
+    const d = deferredFetch();
+    const onSettle = vi.fn();
+    const runner = createOpenPostsRunner({ fetch: d.fetch, onSettle, now: () => 0 });
+    runner.request('a');
+    runner.request('b');
+    expect(d.fetch).toHaveBeenCalledTimes(1);
+    await d.settleNext();
+    expect(onSettle).not.toHaveBeenCalled();
+    expect(d.fetch).toHaveBeenLastCalledWith('b');
+    await d.settleNext();
+    expect(onSettle).toHaveBeenCalledWith('b', { posts: [], count: 0 });
+    expect(d.maxActive()).toBe(1);
+  });
+
+  it('dispose drops results and stops follow-up rounds', async () => {
+    const d = deferredFetch();
+    const onSettle = vi.fn();
+    const runner = createOpenPostsRunner({ fetch: d.fetch, onSettle, now: () => 0 });
+    runner.request('a');
+    runner.request('a');
+    runner.dispose();
+    await d.settleNext();
+    expect(onSettle).not.toHaveBeenCalled();
+    expect(d.fetch).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -119,6 +254,15 @@ describe('watchOpenPosts: refetch rules', () => {
     stop();
     t.window.dispatchEvent(new CustomEvent(POST_CHANGED_EVENT));
     expect(refetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('no visibility refetch before any round has started', () => {
+    const t = targets();
+    const refetch = vi.fn();
+    const stop = watchOpenPosts(t, { fetchedAt: () => null, now: () => 1e12, refetch });
+    t.document.dispatchEvent(new Event('visibilitychange'));
+    expect(refetch).not.toHaveBeenCalled();
+    stop();
   });
 
   it('refetches on visible only after more than 60 s since the last fetch', () => {

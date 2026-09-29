@@ -207,6 +207,17 @@ describe('open loops strip label', () => {
     expect(NOTHING_OPEN).toBe('Nothing open between you');
   });
 
+  it('failed posts read (posts null): marks-only, never Nothing open (B5)', () => {
+    expect(loopsStripLabel({ posts: null, side: 'client', marks: some })).toEqual({
+      count: 5,
+      text: markStripLabel(some),
+      empty: false,
+    });
+    const none0 = loopsStripLabel({ posts: null, side: 'agency', marks: none });
+    expect(none0).toEqual({ count: 0, text: '', empty: false });
+    expect(none0.text).not.toBe(NOTHING_OPEN);
+  });
+
   it('sheet headings follow the side', () => {
     expect(openPostsHeading('client')).toBe('Posts waiting on you');
     expect(openPostsHeading('agency')).toBe('Posts waiting on client');
