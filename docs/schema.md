@@ -303,7 +303,7 @@ Marks: chat_message_marks, one per message, types commitment/decision (commitmen
 
 chat_message_edit: own message only, body only, 15 min window from created_at, blocked when marked or deleted; sets edited_at.
 chat_message_delete: own messages only, 30 min window from created_at, blocked when marked.
-Tombstone: delete sets deleted_at and keeps the row.
+Tombstone: delete sets deleted_at, wipes every content column (body, mentions, attachment_asset_ids, attachment_meta, shared_post_ids, shared_brief_ids set to null) and keeps the row, so members still read it and render "Message deleted". Existing deleted rows were wiped the same way. Recorded in 20260929120000_chat_delete_tombstone.sql.
 
 Forward: forwarded_from_message_id, same workspace only, source must be readable by the sender. Clear for me: chat_channel_clears(channel_id, user_id, cleared_at); the chat_messages read policy hides rows at or before the caller's cleared_at; other members unaffected.
 
@@ -319,7 +319,7 @@ chat_channel_member(p_channel_id text, p_user_id uuid) RETURNS boolean, SQL STAB
 
 PK (id, created_at). Fields: id text (the client-generated uuid_v7, stored as text), channel_id FK chat_channels ON DELETE CASCADE, workspace_id FK, sender_user_id nullable FK auth.users.id, body nullable (1 to 5000 chars when present), mentions jsonb nullable, attachment_asset_ids uuid[] nullable, agora_event_id text NULLABLE (null for every row written by chat_message_send; only legacy mirror rows carry a value), created_at (server-stamped now()), edited_at / deleted_at nullable. Unique (agora_event_id, created_at). Indexes: chat_messages_channel_created_idx (channel_id, created_at desc, id) for history pagination, chat_messages_id_idx (id) for the idempotent lookup, plus the baseline channel / sender / workspace indexes. Partitions: monthly through 2028_12 plus a DEFAULT (section 11).
 
-RLS: chat_messages_select_channel_member (SELECT to authenticated) USING deleted_at IS NULL AND chat_channel_member(channel_id, auth.uid()). The former workspace-wide chat_messages_select_member policy is dropped. No direct INSERT/UPDATE/DELETE policies.
+RLS: chat_messages_select_channel_member (SELECT to authenticated) USING chat_channel_member(channel_id, auth.uid()) AND created_at > chat_cleared_at(channel_id, auth.uid()). It no longer filters deleted_at: deleted rows stay readable to members as wiped tombstones (20260929120000_chat_delete_tombstone.sql); outsiders still read nothing. The former workspace-wide chat_messages_select_member policy is dropped. No direct INSERT/UPDATE/DELETE policies.
 
 chat_message_send(p_id uuid, p_channel_id text, p_trace_id uuid, p_body text default null, p_mentions jsonb default null, p_attachment_asset_ids uuid[] default null) RETURNS chat_messages, SECURITY DEFINER (search_path='', EXECUTE to authenticated only): the only write path. Requires auth.uid(), p_id and p_trace_id; raises 'message has no body and no attachments' when the trimmed body is empty and there are no attachments, 'body exceeds 5000 characters' past the cap, and 'not a member of this chat' unless chat_channel_member. Takes pg_advisory_xact_lock(hashtext(p_id)) and, when a row with that id already exists, returns it unchanged (idempotent retry); otherwise inserts with sender_user_id = auth.uid(), created_at = now(), agora_event_id null, and returns the new row.
 

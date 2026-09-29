@@ -7,6 +7,7 @@ import {
   applyReactionOp,
   compareMessages,
   applyEdit,
+  applyEditFromRow,
   DELETED_MESSAGE_LABEL,
   deleteEventExt,
   editEventExt,
@@ -480,6 +481,36 @@ describe('list transitions', () => {
     expect(merged[0]?.provisionalTime).toBe(false);
     expect(merged[0]?.attachments[0]?.name).toBe('p.png');
     expect(merged[0]?.reactions).toEqual([{ emoji: '👍', count: 1, mine: true }]);
+  });
+
+  it('mergeFetched tombstones a provisional live card whose delete event was missed', () => {
+    const live = mine({
+      id: 'm1',
+      mine: false,
+      provisionalTime: true,
+      body: 'look',
+      attachments: [{ assetId: 'a1', name: 'p.png', mime: 'image/png' }],
+      sharedPostIds: ['p1'],
+      sharedBriefIds: ['b1'],
+      reply: { id: 'm0', authorUserId: ME, preview: 'hi' },
+      reactions: [{ emoji: '👍', count: 1, mine: true }],
+    });
+    const fetched = rowToThreadMessage(
+      row({ id: 'm1', body: null, deleted_at: '2026-09-22T10:02:00Z' }),
+      ME,
+    );
+    const [merged] = mergeFetched([live], [fetched]);
+    expect(merged).toMatchObject({
+      id: 'm1',
+      deleted: true,
+      body: '',
+      attachments: [],
+      sharedPostIds: [],
+      sharedBriefIds: [],
+      reply: null,
+      reactions: [],
+      provisionalTime: false,
+    });
   });
 
   it('mergeFetched leaves a recorded message alone and inserts new ids in order', () => {
@@ -1072,6 +1103,18 @@ describe('edit and delete: mapping, merge and live events', () => {
       editedAt: '2026-09-22T10:01:00Z',
       fromUserId: PEER,
     });
+  });
+
+  it('applyEditFromRow applies the stored body, not the live payload, and ignores unchanged rows', () => {
+    const a = mine({ id: 'a', body: 'old' });
+    const stored = row({ id: 'a', sender_user_id: ME, body: 'stored', edited_at: 'e1' });
+    // The Agora payload claimed a different body; only the row counts.
+    const out = applyEditFromRow([a], stored);
+    expect(out[0]).toMatchObject({ body: 'stored', editedAt: 'e1' });
+    expect(applyEditFromRow(out, stored)).toBe(out);
+    const unedited = [a];
+    expect(applyEditFromRow(unedited, row({ id: 'a', body: 'x', edited_at: null }))).toBe(unedited);
+    expect(applyEditFromRow(unedited, row({ id: 'nope', edited_at: 'e1' }))).toBe(unedited);
   });
 
   it('applyEdit updates body and edited_at only, refreshes quotes, and skips tombstones', () => {

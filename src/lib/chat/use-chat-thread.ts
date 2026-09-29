@@ -22,6 +22,7 @@ import { newMessageId } from '@/lib/chat/message-id';
 import { createCmdMessage, createTextMessage } from '@/lib/chat/message-factory';
 import {
   loadLatestMessages,
+  loadMessageById,
   loadMessagesByIds,
   loadNewerMessages,
   loadOlderMessages,
@@ -51,6 +52,7 @@ import { findInOlderPages, type FindOlderOutcome } from '@/lib/chat/marks';
 import { createInFlightGuard, recordThenSignal } from '@/lib/chat/thread-actions';
 import {
   applyEdit,
+  applyEditFromRow,
   applyReactionOp,
   hydrateReplies,
   markMessagesDeleted,
@@ -381,15 +383,30 @@ export function useChatThread(params: {
         setMessages((prev) => markMessagesDeleted(prev, own));
         onMessagesDeletedRef.current?.(channelId, own);
       },
-      onEdit: ({ messageId, body, editedAt, fromUserId }) => {
+      // The edit renders from the re-read row (like live messages), never the
+      // Agora payload; a missing (deleted, unreadable) or unchanged row is ignored.
+      onEdit: ({ messageId, fromUserId }) => {
         if (channelRef.current !== channelId) return;
         const target = messagesRef.current.find((m) => m.id === messageId);
         if (target === undefined || target.senderUserId !== fromUserId) return;
-        setMessages((prev) => applyEdit(prev, { messageId, body, editedAt }));
+        void loadMessageById(db, messageId).then((lookup) => {
+          if (!lookup.ok) {
+            logger.warn('chat: live edit verification failed, ignored', {
+              message_id: messageId,
+              error: lookup.error.message,
+            });
+            return;
+          }
+          if (!lookup.data.found) return;
+          const stored = lookup.data.row;
+          if (channelRef.current !== channelId || stored.channel_id !== channelId) return;
+          if (stored.sender_user_id !== fromUserId) return;
+          setMessages((prev) => applyEditFromRow(prev, stored));
+        });
       },
     });
     return unsubscribe;
-  }, [client, channelId, currentUserId, verifier, foldRows]);
+  }, [db, client, channelId, currentUserId, verifier, foldRows]);
 
   // Catch-up from Postgres, never gated on the Agora state: rows newer than the
   // newest recorded message (paging past the 200 cap), or the latest page when
