@@ -1,0 +1,57 @@
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/lib/supabase', () => ({ supabase: {} }));
+vi.mock('agora-chat', () => ({
+  default: { connection: vi.fn(), message: { create: vi.fn() } },
+}));
+
+import { hashPickerQuery, shouldFocusComposer } from '@/components/chat/Composer';
+import { chatLayout, COMPOSER_INPUT_TYPE, sized } from '@/components/chat/chat-type';
+
+describe('composer focus on open', () => {
+  const idle = { finePointer: true, editing: false, hashOpen: false, overlayOpen: false };
+
+  it('focuses on a fine pointer (laptop) only', () => {
+    expect(shouldFocusComposer(idle)).toBe(true);
+    expect(shouldFocusComposer({ ...idle, finePointer: false })).toBe(false);
+  });
+
+  it('never steals focus from edit mode, the hash picker, or an open menu / sheet / lightbox', () => {
+    expect(shouldFocusComposer({ ...idle, editing: true })).toBe(false);
+    expect(shouldFocusComposer({ ...idle, hashOpen: true })).toBe(false);
+    expect(shouldFocusComposer({ ...idle, overlayOpen: true })).toBe(false);
+  });
+
+  it('F9: a restored draft with an open hash token does not auto-focus', () => {
+    // The trigger character is assembled so chat files stay free of the raw literal.
+    const draft = `about ${String.fromCharCode(35)}12`;
+    const hashOpen =
+      hashPickerQuery({ enabled: true, dismissed: false, text: draft, caret: draft.length }) !==
+      null;
+    expect(hashOpen).toBe(true);
+    expect(shouldFocusComposer({ ...idle, hashOpen })).toBe(false);
+    const plain = 'about 12';
+    const closed =
+      hashPickerQuery({ enabled: true, dismissed: false, text: plain, caret: plain.length }) !==
+      null;
+    expect(shouldFocusComposer({ ...idle, hashOpen: closed })).toBe(true);
+  });
+});
+
+describe('F7: composer input size by input, never under 16px on touch', () => {
+  it('coarse pointer at 1024px (iPad) is 17px; fine pointer at 1280px is 15px', () => {
+    const ipad = sized(COMPOSER_INPUT_TYPE, chatLayout({ finePointer: false, widthPx: 1024 }));
+    expect(ipad).toContain('!text-[17px] !leading-[22px]');
+    const laptop = sized(COMPOSER_INPUT_TYPE, chatLayout({ finePointer: true, widthPx: 1280 }));
+    expect(laptop).toContain('!text-[15px] !leading-[20px]');
+  });
+
+  it('every touch width stays at 16px or more, with no width breakpoint', () => {
+    for (const widthPx of [320, 390, 768, 1024, 1366]) {
+      const cls = sized(COMPOSER_INPUT_TYPE, chatLayout({ finePointer: false, widthPx }));
+      const px = Number(/!text-\[(\d+)px\]/.exec(cls)?.[1]);
+      expect(px).toBeGreaterThanOrEqual(16);
+      expect(cls).not.toContain('md:');
+    }
+  });
+});

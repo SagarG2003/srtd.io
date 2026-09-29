@@ -7,7 +7,7 @@
 import type { DomainError, Result } from '@srtdio/rpc';
 import type { PostCardRow } from '../../../packages/posts/src/reads';
 import type { StageTransitionInput } from '../../../packages/posts/src/stage-machine';
-import { formatMessageTime, formatShortDate } from '@/lib/chat/time-format';
+import { formatClockTime, formatShortDate } from '@/lib/chat/time-format';
 import type { ViewerSide } from '@/lib/chat/viewer-role';
 import { formatLabel } from '@/lib/post-detail-presentation';
 import { friendlyTransitionError } from '@/lib/post-transition-errors';
@@ -209,15 +209,15 @@ export interface DetailRow {
   value: string;
 }
 
-/** "Oct 2 14:05" in the workspace zone, or '' for an unparseable instant. */
+/** "Oct 2 2:05 pm" (device hour cycle, workspace zone), or '' for an unparseable instant. */
 function dateTime(iso: string, timeZone: string): string {
   const date = formatShortDate(iso, timeZone);
-  return date === '' ? '' : `${date} ${formatMessageTime(iso, timeZone)}`;
+  return date === '' ? '' : `${date} ${formatClockTime(iso, timeZone)}`;
 }
 
 /**
  * The rows after Stage: target date, format (with "· N slides" past one item),
- * and the approval. With an approver on record the value is "Name · Oct 2 14:05";
+ * and the approval. With an approver on record the value is "Name · Oct 2 2:05 pm";
  * an approved post with no approver reads the date it entered approved.
  */
 export function detailRows(

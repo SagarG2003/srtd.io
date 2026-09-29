@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // The card must never obtain a navigator: a tap opens the sheet instead.
 const navigate = vi.hoisted(() => vi.fn());
@@ -31,6 +31,21 @@ import {
   indexPostsById,
   sharedPostViews,
 } from '@/components/chat/post-card';
+
+/** Pin the device locale: Intl.DateTimeFormat with no locale resolves to `locale`. */
+function deviceLocale(locale: string): void {
+  const Real = Intl.DateTimeFormat;
+  vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (
+    requested?: string | string[],
+    options?: Intl.DateTimeFormatOptions,
+  ) {
+    return new Real(requested ?? locale, options);
+  } as typeof Intl.DateTimeFormat);
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('NotVisibleCard', () => {
   const html = renderToStaticMarkup(<NotVisibleCard />);
@@ -158,19 +173,24 @@ describe('SharedPostCardList', () => {
   });
 
   it('approved footer: first name and time, else the stage date fallback', () => {
-    const named = render(
-      ['p1'],
-      [
-        cardRow('p1', {
-          stage: 'approved',
-          approved_by: 'u1',
-          approved_at: '2026-09-21T14:05:00Z',
-        }),
-      ],
-      {},
-      new Map([['u1', 'Asha Rao']]),
-    );
-    expect(named).toContain('Approved by Asha · Sep 21 14:05');
+    const named = (): string =>
+      render(
+        ['p1'],
+        [
+          cardRow('p1', {
+            stage: 'approved',
+            approved_by: 'u1',
+            approved_at: '2026-09-21T14:05:00Z',
+          }),
+        ],
+        {},
+        new Map([['u1', 'Asha Rao']]),
+      );
+    deviceLocale('en-IN');
+    expect(named()).toContain('Approved by Asha · Sep 21 2:05 pm');
+    vi.restoreAllMocks();
+    deviceLocale('en-GB');
+    expect(named()).toContain('Approved by Asha · Sep 21 14:05');
     const fallback = render(['p1'], [cardRow('p1', { stage: 'approved' })]);
     expect(fallback).toContain('Approved · Sep 20');
   });

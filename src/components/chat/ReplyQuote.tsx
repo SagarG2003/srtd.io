@@ -6,6 +6,12 @@
 
 import type { ReactElement, ReactNode } from 'react';
 import { cn } from '@/lib/cn';
+import {
+  QUOTE_AUTHOR_TYPE,
+  QUOTE_TEXT_TYPE,
+  sized,
+  type ChatLayout,
+} from '@/components/chat/chat-type';
 
 export const REPLY_QUOTE_BOX = 'flex min-w-0 gap-2 overflow-hidden rounded-md bg-panel-3';
 
@@ -17,6 +23,7 @@ function quoteLines(
   preview: string,
   tone: QuoteTone,
   deleted: boolean,
+  inBubble: ChatLayout | undefined,
 ): ReactElement {
   return (
     <>
@@ -30,7 +37,8 @@ function quoteLines(
       <span className="flex min-w-0 flex-1 flex-col py-1 pr-2">
         <span
           className={cn(
-            'line-clamp-1 [overflow-wrap:anywhere] text-xs font-medium',
+            'line-clamp-1 [overflow-wrap:anywhere]',
+            inBubble !== undefined ? sized(QUOTE_AUTHOR_TYPE, inBubble) : 'text-xs font-medium',
             tone === 'warn' ? 'text-warn' : 'text-accent',
           )}
         >
@@ -39,7 +47,8 @@ function quoteLines(
         <span
           data-quote-deleted={deleted ? '' : undefined}
           className={cn(
-            'line-clamp-2 [overflow-wrap:anywhere] text-xs',
+            'line-clamp-2 [overflow-wrap:anywhere]',
+            inBubble !== undefined ? sized(QUOTE_TEXT_TYPE, inBubble) : 'text-xs',
             deleted ? 'italic text-fg-3' : 'text-fg-2',
           )}
         >
@@ -65,9 +74,15 @@ export function ReplyQuoteBox(props: {
   tone?: QuoteTone;
   /** The quoted message was deleted: the preview reads italic and muted. */
   deleted?: boolean;
+  /**
+   * Inside a bubble: the chat type scale's quote sizes for this layout (the
+   * composer bars keep theirs).
+   */
+  inBubble?: ChatLayout | undefined;
 }): ReactElement {
   const tone = props.tone ?? 'accent';
   const deleted = props.deleted === true;
+  const inBubble = props.inBubble;
   if (props.onJump !== undefined) {
     const onJump = props.onJump;
     return (
@@ -80,13 +95,13 @@ export function ReplyQuoteBox(props: {
         }}
         className={cn(REPLY_QUOTE_BOX, 'min-h-[44px] w-full text-left', props.className)}
       >
-        {quoteLines(props.author, props.preview, tone, deleted)}
+        {quoteLines(props.author, props.preview, tone, deleted, inBubble)}
       </button>
     );
   }
   return (
     <div className={cn(REPLY_QUOTE_BOX, 'items-center', props.className)}>
-      {quoteLines(props.author, props.preview, tone, deleted)}
+      {quoteLines(props.author, props.preview, tone, deleted, inBubble)}
       {props.trailing}
     </div>
   );

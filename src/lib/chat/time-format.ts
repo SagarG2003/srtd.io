@@ -2,9 +2,10 @@
 // as the fallback when the workspace has none).
 // Every formatter takes an explicit IANA zone and hands it to
 // Intl.DateTimeFormat, the same approach src/lib/list-sort.ts (civilDate) and
-// src/lib/brief-groups.ts (formatRaisedDay) use for briefs. 'en-US' is the
-// reference locale so the output is identical whatever the browser's locale,
-// and parts are re-assembled by type so part order never drifts between engines.
+// src/lib/brief-groups.ts (formatRaisedDay) use for briefs. Dates use 'en-US'
+// as the reference locale so the output is identical whatever the browser's
+// locale, with parts re-assembled by type so part order never drifts between
+// engines; the chat clock time (formatClockTime) follows the device locale.
 
 /**
  * The browser's IANA zone, the fallback when the workspace has none (a viewer's
@@ -53,21 +54,23 @@ function instantOf(value: string | number): Date | undefined {
 }
 
 /**
- * A message's clock time in the workspace zone, e.g. "14:05". 24-hour, zero
- * padded, so the bubble footer keeps a fixed width. An unparseable input renders
- * as an empty string rather than reaching Intl.format (which would throw).
+ * The one clock time every chat surface shows (bubble meta, last seen, the
+ * image viewer), in the workspace zone and the DEVICE locale's hour cycle:
+ * "2:05 pm" on an en-IN device, "14:05" on en-GB. hour12 is never forced.
+ * `locale` is for tests; the app passes none. Unparseable input is ''.
  */
-export function formatMessageTime(createdAt: string | number, timeZone: string): string {
+export function formatClockTime(
+  createdAt: string | number,
+  timeZone: string,
+  locale?: string,
+): string {
   const instant = instantOf(createdAt);
   if (instant === undefined) return '';
-  const parts = new Intl.DateTimeFormat('en-US', {
+  return new Intl.DateTimeFormat(locale, {
     timeZone: safeTimeZone(timeZone),
-    hour: '2-digit',
+    hour: 'numeric',
     minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(instant);
-  const read = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
-  return `${read('hour')}:${read('minute')}`;
+  }).format(instant);
 }
 
 /**

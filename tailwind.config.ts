@@ -39,7 +39,16 @@ export default {
         'overlay-dot': 'var(--overlay-dot)',
       },
       fontFamily: {
-        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+        sans: [
+          'Inter',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          'sans-serif',
+          '"Apple Color Emoji"',
+          '"Segoe UI Emoji"',
+          '"Segoe UI Symbol"',
+          '"Noto Color Emoji"',
+        ],
         mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
       },
       transitionDuration: {

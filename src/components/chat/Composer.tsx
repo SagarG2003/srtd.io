@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactElement, SyntheticEvent } from 'react';
 import { logger } from '@/lib/logger';
 import { Button } from '@/components/ui/Button';
@@ -43,8 +43,21 @@ import { readBriefIdsByNumbers } from '@/lib/chat/briefs';
 import { APP_ENTITY_ROUTES, classify, currentOrigin, tokenize } from '@/lib/chat/message-links';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
+import { clearDraft, EMPTY_DRAFT, getDraft, setDraft, type DraftFile } from '@/lib/chat/drafts';
+import { COMPOSER_INPUT_TYPE, sized, useChatLayout } from '@/components/chat/chat-type';
 
 interface ComposerProps {
+  /**
+   * The open chat's Sorted channel id. The composer starts from this chat's
+   * draft (text, caret, cards, files) on its first render and writes back as it
+   * changes; absent keeps no draft.
+   */
+  channelId?: string | undefined;
+  /**
+   * Focus the input once on mount (a laptop's fine pointer, never touch), unless
+   * a menu, sheet or lightbox is open over the thread.
+   */
+  focusOnMount?: boolean | undefined;
   /**
    * Queues the trimmed text plus any picked files (local attachments that upload
    * in the background) and shared posts and briefs. Synchronous: uploads,
@@ -123,6 +136,16 @@ export function editSendDecision(input: {
   if (next === '' && !input.hasOtherContent) return 'empty';
   if (next === input.initialText.trim()) return 'unchanged';
   return 'send';
+}
+
+/**
+ * The text leaving an edit restores: this channel's own draft from the map, or
+ * the session's saved text when the map has none. Never another chat's. Pure
+ * over the draft map.
+ */
+export function editRestoreText(channelId: string, savedText: string | undefined): string {
+  const draft = getDraft(channelId);
+  return draft.text !== '' ? draft.text : (savedText ?? '');
 }
 
 /** The composer's edit session: which message, and the draft to restore after. */
@@ -255,10 +278,28 @@ export function hashPickerQuery(input: {
 }
 
 /** One accepted picked file, shown as a removable chip until Send. */
-export interface Pending {
-  id: string;
-  file: File;
-  previewUrl: string | null;
+export type Pending = DraftFile;
+
+/** Surfaces open over the thread that the composer must not take focus from. */
+const OVERLAY_SELECTOR = '[aria-modal="true"], [role="menu"], [role="dialog"]';
+
+/**
+ * Whether the composer takes focus on open: a fine pointer only (no keyboard
+ * pops on touch), and never while editing, the hash picker, or a menu / sheet /
+ * lightbox is open. Pure.
+ */
+export function shouldFocusComposer(input: {
+  finePointer: boolean;
+  editing: boolean;
+  hashOpen: boolean;
+  overlayOpen: boolean;
+}): boolean {
+  return input.finePointer && !input.editing && !input.hashOpen && !input.overlayOpen;
+}
+
+/** Whether a menu, sheet or lightbox is open in the document. */
+function overlayOpen(): boolean {
+  return typeof document !== 'undefined' && document.querySelector(OVERLAY_SELECTOR) !== null;
 }
 
 let pendingSeq = 0;
@@ -484,16 +525,20 @@ export function composerCanSend(input: {
  * logged, surfaced as a toast, and the draft is kept.
  */
 export function Composer(props: ComposerProps): ReactElement {
-  const [text, setText] = useState('');
-  const [pending, setPending] = useState<Pending[]>([]);
-  const [sharedPosts, setSharedPosts] = useState<PostCardFields[]>([]);
-  const [sharedBriefs, setSharedBriefs] = useState<BriefCardFields[]>([]);
+  const channelId = props.channelId;
+  // First render starts from this chat's draft (never an effect), so a switch
+  // paints the right text and chips on its first frame.
+  const [initial] = useState(() => (channelId !== undefined ? getDraft(channelId) : EMPTY_DRAFT));
+  const [text, setText] = useState(initial.text);
+  const [pending, setPending] = useState<Pending[]>(initial.pendingFiles);
+  const [sharedPosts, setSharedPosts] = useState<PostCardFields[]>(initial.sharedPosts);
+  const [sharedBriefs, setSharedBriefs] = useState<BriefCardFields[]>(initial.sharedBriefs);
   const [menuOpen, setMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [resolvingLinks, setResolvingLinks] = useState(false);
   // The caret, read on every change and selection, drives the hash picker.
-  const [caret, setCaret] = useState(0);
+  const [caret, setCaret] = useState(initial.caret);
   // Escape closes the hash picker until the caret leaves the token.
   const [hashDismissed, setHashDismissed] = useState(false);
   // Editing: the draft to restore after, and whether the edit is being recorded.
@@ -504,6 +549,8 @@ export function Composer(props: ComposerProps): ReactElement {
   const { workspaceId, workspaceKey } = useWorkspace();
   const recorder = useAudioRecorder();
   const toast = useToast();
+  // 17px on every touch device (never under 16, so iOS never zooms), 15px on a laptop.
+  const layout = useChatLayout();
 
   const formRef = useRef<HTMLFormElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -521,6 +568,14 @@ export function Composer(props: ComposerProps): ReactElement {
           sharedBriefCount: sharedBriefs.length,
         });
 
+  // Write the draft back as it changes (not while editing: the map keeps the
+  // draft typed before the edit, which is what leaving the edit restores).
+  const editingNow = editing !== undefined;
+  useEffect(() => {
+    if (channelId === undefined || editingNow) return;
+    setDraft(channelId, { text, caret, pendingFiles: pending, sharedPosts, sharedBriefs });
+  }, [channelId, editingNow, text, caret, pending, sharedPosts, sharedBriefs]);
+
   // Enter / leave editing once per message id: the text swaps (and comes back
   // after), the caret goes to the end. Before paint, so the old text never shows.
   const textRef = useRef(text);
@@ -530,7 +585,11 @@ export function Composer(props: ComposerProps): ReactElement {
     const step = editTransition(editSessionRef.current, editing, textRef.current);
     editSessionRef.current = step.session;
     if (step.text === undefined) return;
-    const next = step.text;
+    // Leaving an edit restores this chat's own draft (the composer is per chat).
+    const next =
+      step.session === null && channelId !== undefined
+        ? editRestoreText(channelId, step.text)
+        : step.text;
     setText(next);
     setCaret(next.length);
     setEditBusy(false);
@@ -689,7 +748,9 @@ export function Composer(props: ComposerProps): ReactElement {
       return;
     }
     // The preview URLs now belong to the bubble (revoked when it goes).
+    if (channelId !== undefined) clearDraft(channelId);
     setText('');
+    setCaret(0);
     setPending([]);
     setSharedPosts([]);
     setSharedBriefs([]);
@@ -762,6 +823,30 @@ export function Composer(props: ComposerProps): ReactElement {
     text,
     caret,
   });
+
+  // Laptop: the cursor sits in the composer when a chat opens (once, on mount),
+  // unless a restored draft reopened the hash picker.
+  const focusOnMount = props.focusOnMount === true;
+  const hashOpenOnMount = hashQuery !== null;
+  useEffect(() => {
+    if (
+      !shouldFocusComposer({
+        finePointer: focusOnMount,
+        editing: editingNow,
+        hashOpen: hashOpenOnMount,
+        overlayOpen: overlayOpen(),
+      })
+    ) {
+      return;
+    }
+    const el = textareaRef.current;
+    if (el === null) return;
+    el.focus({ preventScroll: true });
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
+    // Once per mount (a chat open or switch); later focus is the user's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // A pick drops the hash token from the text and brings the post in.
   function pickHashPost(post: PostCardFields): void {
@@ -941,6 +1026,7 @@ export function Composer(props: ComposerProps): ReactElement {
             ) : null}
 
             <Textarea
+              ref={textareaRef}
               value={text}
               onChange={(event) => {
                 setText(event.target.value);
@@ -956,6 +1042,7 @@ export function Composer(props: ComposerProps): ReactElement {
               )}
               rows={1}
               compact
+              className={sized(COMPOSER_INPUT_TYPE, layout)}
             />
             {showMic ? (
               <Button

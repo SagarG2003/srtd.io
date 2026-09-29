@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import type { KeyboardEvent, MouseEvent, ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar } from '@/components/ui/Avatar';
@@ -31,6 +38,30 @@ import {
 import { sortChannelsByRecency } from '@/lib/chat/sort-conversations';
 import { formatRelativeTime } from '@/lib/chat/format-relative-time';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
+import { draftText, draftsVersion, subscribeDrafts } from '@/lib/chat/drafts';
+import {
+  CHAT_LIST_NAME_TYPE,
+  CHAT_LIST_PREVIEW_TYPE,
+  CHAT_LIST_TIME_TYPE,
+  DRAFT_PREFIX_TYPE,
+  sized,
+  useChatLayout,
+  type ChatLayout,
+} from '@/components/chat/chat-type';
+
+/** Per-channel draft text lookup ('' when the chat has no draft). */
+type DraftLookup = (channelId: string) => string;
+
+/** The label before a chat's unsent draft in its preview line. */
+export const DRAFT_PREFIX = 'Draft: ';
+
+/**
+ * The draft a row previews: a chat's non-empty draft text, only while that chat
+ * is not the one open (the open chat shows its draft in the composer). Pure.
+ */
+export function rowDraft(draft: string, open: boolean): string | null {
+  return !open && draft.trim() !== '' ? draft : null;
+}
 
 /** Per-channel store lookup the cards read (preview, time, unread). */
 type SummaryLookup = (channelId: string) => ConversationSummary | undefined;
@@ -80,6 +111,8 @@ interface ChannelListBodyProps extends Omit<ChannelListProps, 'status' | 'onRetr
   nowMs?: number;
   /** Present while select mode is on: rows show a leading check and tap toggles. */
   selecting?: { selectedIds: ReadonlySet<string>; onToggle: (channelId: string) => void };
+  /** Unsent draft text per chat; absent in pure tests (no drafts). */
+  draftFor?: DraftLookup;
   /** A row was long-pressed (or right-clicked): open its menu at the row. */
   onLongPress?: (channel: ChannelSummary, rect: DOMRect | null) => void;
 }
@@ -124,6 +157,10 @@ export function channelListView(props: ChannelListBodyProps): ReactElement {
             channel={channel}
             selected={channel.channelId === props.selectedChannelId}
             summary={summaryFor(channel.channelId)}
+            draft={rowDraft(
+              props.draftFor?.(channel.channelId) ?? '',
+              channel.channelId === props.selectedChannelId,
+            )}
             nowMs={nowMs}
             timeZone={timeZone}
             onSelect={props.onSelect}
@@ -267,16 +304,21 @@ function channelAvatar(channel: ChannelSummary): ReactElement {
 export function channelRowBody(props: {
   channel: ChannelSummary;
   summary: ConversationSummary | undefined;
+  /** The chat's unsent draft (not open): the preview reads "Draft: <text>". */
+  draft?: string | null;
   nowMs: number;
   timeZone: string;
   selecting: boolean;
   checked: boolean;
+  /** The size table (input-based, as the thread). */
+  layout: ChatLayout;
 }): ReactElement {
-  const { channel, summary } = props;
+  const { channel, summary, layout } = props;
   const hasMessage = summary !== undefined && summary.lastMessageTs > 0;
   const unread = summary?.unread ?? 0;
   const isUnread = unread > 0;
   const preview = hasMessage ? previewLine(summary) : 'No messages yet';
+  const draft = props.draft ?? null;
   const time = hasMessage
     ? formatRelativeTime(summary.lastMessageTs, props.nowMs, props.timeZone)
     : '';
@@ -287,17 +329,15 @@ export function channelRowBody(props: {
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="flex items-baseline gap-2">
           <span
-            className={cn(
-              'min-w-0 flex-1 truncate text-[16px] leading-tight text-fg',
-              isUnread ? 'font-semibold' : 'font-medium',
-            )}
+            className={cn('min-w-0 flex-1 truncate text-fg', sized(CHAT_LIST_NAME_TYPE, layout))}
           >
             {channel.title}
           </span>
           {time !== '' ? (
             <span
               className={cn(
-                'shrink-0 font-mono text-xs tabular-nums',
+                'shrink-0',
+                sized(CHAT_LIST_TIME_TYPE, layout),
                 isUnread ? 'text-accent' : 'text-fg-3',
               )}
             >
@@ -306,14 +346,28 @@ export function channelRowBody(props: {
           ) : null}
         </span>
         <span className="flex items-center gap-2">
-          <span
-            className={cn(
-              'min-w-0 flex-1 truncate text-sm',
-              hasMessage ? 'text-fg-2' : 'text-fg-3',
-            )}
-          >
-            {preview}
-          </span>
+          {draft !== null ? (
+            <span
+              data-draft-preview=""
+              className={cn(
+                'min-w-0 flex-1 truncate text-fg-2',
+                sized(CHAT_LIST_PREVIEW_TYPE, layout),
+              )}
+            >
+              <span className={cn('text-accent', DRAFT_PREFIX_TYPE)}>{DRAFT_PREFIX}</span>
+              {draft}
+            </span>
+          ) : (
+            <span
+              className={cn(
+                'min-w-0 flex-1 truncate',
+                sized(CHAT_LIST_PREVIEW_TYPE, layout),
+                hasMessage ? 'text-fg-2' : 'text-fg-3',
+              )}
+            >
+              {preview}
+            </span>
+          )}
           {isUnread ? <CountBadge count={unread} className="shrink-0" /> : null}
         </span>
       </span>
@@ -332,6 +386,8 @@ export function ChannelCard(props: {
   channel: ChannelSummary;
   selected: boolean;
   summary: ConversationSummary | undefined;
+  /** The chat's unsent draft when it is not open; null or absent shows the last message. */
+  draft?: string | null;
   nowMs: number;
   timeZone: string;
   onSelect: (channel: ChannelSummary) => void;
@@ -344,6 +400,7 @@ export function ChannelCard(props: {
   const rowRef = useRef<HTMLButtonElement>(null);
   const selecting = props.onToggle !== undefined;
   const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
+  const layout = useChatLayout();
   const menuEnabled = !selecting && props.onLongPress !== undefined;
   const openMenu = (anchor?: DOMRect): void => {
     if (selecting || props.onLongPress === undefined) return;
@@ -396,10 +453,12 @@ export function ChannelCard(props: {
         {channelRowBody({
           channel,
           summary,
+          draft: props.draft ?? null,
           nowMs: props.nowMs,
           timeZone: props.timeZone,
           selecting,
           checked,
+          layout,
         })}
       </button>
       {menuEnabled && hoverMenu ? (
@@ -431,6 +490,8 @@ interface ChannelListContentProps extends ChannelListProps {
   select?: ChannelSelectMode;
   /** Row long-press; absent disables the row menu. */
   onLongPress?: (channel: ChannelSummary, rect: DOMRect | null) => void;
+  /** Unsent draft text per chat; absent in pure tests (no drafts). */
+  draftFor?: DraftLookup;
 }
 
 /**
@@ -543,6 +604,7 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
                 onSelect: props.onSelect,
                 onNewChat: props.onNewChat,
                 summaryFor,
+                ...(props.draftFor !== undefined ? { draftFor: props.draftFor } : {}),
                 ...(selecting !== undefined
                   ? {
                       selecting: {
@@ -713,6 +775,13 @@ export function ChannelList(props: ChannelListProps): ReactElement {
     (channelId) => selectHidden(state, channelId),
     [state],
   );
+  // Drafts live outside React; re-read the rows whenever one changes.
+  const drafts = useSyncExternalStore(subscribeDrafts, draftsVersion, draftsVersion);
+  const draftFor = useCallback<DraftLookup>(
+    (channelId) => draftText(channelId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [drafts],
+  );
   const onDeleteChats = props.onDeleteChats;
   const closeMenu = useCallback(() => setMenu(null), []);
   const exitSelect = (): void => {
@@ -744,6 +813,7 @@ export function ChannelList(props: ChannelListProps): ReactElement {
         onSearchChange: setSearch,
         summaryFor,
         isHidden,
+        draftFor,
         nowMs: Date.now(),
         ...(onDeleteChats !== undefined
           ? {

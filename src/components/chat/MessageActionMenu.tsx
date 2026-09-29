@@ -77,6 +77,11 @@ interface MessageActionMenuProps {
   currentReaction: string | null;
   /** Offers the reaction row (a recorded message); false hides it. */
   canReact?: boolean;
+  /**
+   * The laptop smiley beside a bubble: only the reactions row, no action rows.
+   * Escape, the backdrop, scroll and resize close it like the full menu.
+   */
+  reactionsOnly?: boolean;
   canCopy: boolean;
   onReact: (emoji: string) => void;
   onReply: () => void;
@@ -483,8 +488,12 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
 
   if (!open || anchor === null) return null;
 
-  const items =
-    view === 'mark' ? markSubmenuItems(props, () => setView('main')) : messageMenuItems(props);
+  const reactionsOnly = props.reactionsOnly === true;
+  const items = reactionsOnly
+    ? []
+    : view === 'mark'
+      ? markSubmenuItems(props, () => setView('main'))
+      : messageMenuItems(props);
   const run = (item: MessageMenuItem): void => {
     if (item.kind !== 'action') return;
     if (item.key === 'mark') {
@@ -540,7 +549,10 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
         {props.canReact !== false && view === 'main' ? (
           <div
             data-menu-reactions=""
-            className="mb-1 flex items-center justify-between border-b border-border pb-1"
+            className={cn(
+              'flex items-center justify-between',
+              !reactionsOnly && 'mb-1 border-b border-border pb-1',
+            )}
           >
             {QUICK_REACTIONS.map((emoji) => (
               <button
@@ -548,6 +560,7 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
                 type="button"
                 aria-label={`React ${emoji}`}
                 aria-pressed={emoji === currentReaction}
+                {...(reactionsOnly ? { 'data-menu-item': `react-${emoji}` } : {})}
                 onClick={() => {
                   onReact(emoji);
                   onClose();
