@@ -13,6 +13,8 @@ import {
   pruneThreadSelection,
   runForward,
   selectedForForward,
+  threadSelectable,
+  threadSelectionRole,
   sendToLabel,
   toggleForwardTarget,
 } from '@/lib/chat/forward';
@@ -59,6 +61,7 @@ describe('forwardable messages', () => {
     expect(canForward(msg({ state: 'sent' }))).toBe(true);
     expect(canForward(msg({ state: 'sending' }))).toBe(false);
     expect(canForward(msg({ state: 'failed' }))).toBe(false);
+    expect(canForward(msg({ state: 'sent', deleted: true }))).toBe(false);
   });
 
   it('keeps thread order and drops unrecorded bubbles', () => {
@@ -91,6 +94,24 @@ describe('thread selection (Forward any, Delete own only)', () => {
 
   it('prunes to loaded, recorded messages of any sender', () => {
     const pruned = pruneThreadSelection(new Set(['own', 'peer', 'pending', 'gone']), messages);
+    expect([...pruned].sort()).toEqual(['own', 'peer']);
+  });
+
+  it('rows: own marked shows the lock, peer and own unmarked are selectable, deleted and pending nothing', () => {
+    expect(threadSelectionRole(msg({ id: 'own', mine: true }), marks)).toBe('selectable');
+    expect(threadSelectionRole(msg({ id: 'peer', mine: false }), marks)).toBe('selectable');
+    expect(threadSelectionRole(msg({ id: 'marked', mine: true }), marks)).toBe('locked');
+    expect(threadSelectionRole(msg({ id: 'marked', mine: false }), marks)).toBe('selectable');
+    expect(threadSelectionRole(msg({ id: 'pending', mine: true, state: 'sending' }), marks)).toBe(
+      'none',
+    );
+    expect(threadSelectionRole(msg({ id: 'd', mine: true, deleted: true }), marks)).toBe('none');
+    expect(threadSelectable(msg({ id: 'marked', mine: true }), marks)).toBe(false);
+  });
+
+  it('prunes deleted messages and own marked ones (with marks) from the selection', () => {
+    const list = [...messages, msg({ id: 'd', mine: true, deleted: true })];
+    const pruned = pruneThreadSelection(new Set(['own', 'peer', 'marked', 'd']), list, marks);
     expect([...pruned].sort()).toEqual(['own', 'peer']);
   });
 

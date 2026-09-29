@@ -33,8 +33,12 @@ import {
   CARD_NOT_LOADED_TOAST,
   filterEmptyLabel,
   openPostFilter,
+  EDITED_LABEL,
   MessageBubble,
   messageTimeSource,
+  rowSelection,
+  SELECTED_ROW_TINT,
+  tombstoneClass,
   OWN_BUBBLE_CONTENT,
   SwipeReplyIcon,
   THREAD_LIST_CLASS,
@@ -304,7 +308,7 @@ describe('MessageBubble time and state', () => {
 });
 
 describe('bubble shell', () => {
-  const base = { sending: false, failed: false, checked: false, voiceOnly: false };
+  const base = { sending: false, failed: false, voiceOnly: false };
 
   it('own is the bubble-own fill with accent-fg ink, peer is panel-2; no border', () => {
     const own = bubbleClass({ ...base, mine: true, tail: true });
@@ -649,7 +653,7 @@ describe('MessageBubble keyboard and hover actions', () => {
     const focus = vi.fn();
     const querySelector = vi.fn(() => ({ focus }));
     expect(focusFirstMenuItem({ querySelector })).toBe(true);
-    expect(querySelector).toHaveBeenCalledWith('[data-menu-items] button');
+    expect(querySelector).toHaveBeenCalledWith('[data-menu-item]');
     expect(focus).toHaveBeenCalledWith({ preventScroll: true });
     expect(focusFirstMenuItem(null)).toBe(false);
   });
@@ -929,7 +933,6 @@ describe('image album and viewer', () => {
       tail: true,
       sending: false,
       failed: false,
-      checked: false,
       voiceOnly: false,
       album: true,
     });
@@ -1109,7 +1112,6 @@ describe('bubble text sizes', () => {
       tail: false,
       sending: false,
       failed: false,
-      checked: false,
       voiceOnly: false,
     });
     expect(cls).toContain('px-3 py-2');
@@ -1915,5 +1917,188 @@ describe('open loops first paint waits for marks (B1)', () => {
       posts: null,
       side: 'client',
     });
+  });
+});
+
+describe('tombstones, edited label and the neutral selection', () => {
+  const noop = (): void => {};
+  const press = {
+    handlers: {
+      onPointerDown: noop,
+      onPointerMove: noop,
+      onPointerUp: noop,
+      onPointerCancel: noop,
+    },
+    onContextMenu: noop,
+    consumeClick: () => false,
+    onKeyOpen: noop,
+    onMore: noop,
+  };
+  function render(
+    message: ThreadMessage,
+    over: Partial<Parameters<typeof MessageBubble>[0]> = {},
+  ): ReactElement {
+    return MessageBubble({
+      message,
+      profiles: PROFILES,
+      cache,
+      presignEnabled: false,
+      showTicks: true,
+      isGroup: false,
+      head: true,
+      tail: true,
+      timeZone: 'UTC',
+      onBadgeClick: noop,
+      press,
+      swipe: {},
+      ...over,
+    });
+  }
+  function all(root: ReactNode): ReactElement<Record<string, unknown>>[] {
+    const out: ReactElement<Record<string, unknown>>[] = [];
+    walk(root, (el) => out.push(el as ReactElement<Record<string, unknown>>));
+    return out;
+  }
+
+  const tomb = makeMessage({
+    id: 'gone',
+    body: '',
+    deleted: true,
+    reactions: [{ emoji: '👍', count: 2, mine: false }],
+  });
+
+  it('a deleted message is a bordered, muted, italic bubble with the ban glyph and "Message deleted"', () => {
+    for (const mine of [false, true]) {
+      const root = render({ ...tomb, mine });
+      const html = renderStrip(root);
+      expect(html).toContain('Message deleted');
+      expect(html).toContain('data-tombstone');
+      expect(html).toContain('<circle');
+      expect(root.props).toMatchObject({ 'data-deleted': '' });
+      const cls = tombstoneClass({ mine, tail: true });
+      expect(cls).toContain('border border-border');
+      expect(cls).toContain('italic');
+      expect(cls).toContain('text-fg-3');
+      expect(cls).toContain(mine ? 'rounded-br-[4px]' : 'rounded-bl-[4px]');
+      expect(String(root.props.className)).toContain(mine ? 'flex-row-reverse' : 'flex-row');
+    }
+  });
+
+  it('a tombstone has no menu, no swipe-reply, no reactions and no checkbox', () => {
+    const root = render(tomb, {
+      selection: { role: 'none', checked: false, onToggle: noop },
+    });
+    const els = all(root);
+    expect(els.some((el) => el.props.onPointerDown !== undefined)).toBe(false);
+    expect(els.some((el) => el.props.onContextMenu !== undefined)).toBe(false);
+    expect(els.some((el) => el.props['data-more'] !== undefined)).toBe(false);
+    expect(els.some((el) => el.type === SwipeReplyIcon)).toBe(false);
+    expect(els.some((el) => el.props.tabIndex !== undefined)).toBe(false);
+    expect(renderStrip(root)).not.toContain('👍');
+    expect(renderStrip(root)).not.toContain('role="checkbox"');
+  });
+
+  it('a deleted card message shows the tombstone, not the card', () => {
+    const root = render({ ...tomb, sharedPostIds: [] });
+    expect(all(root).some((el) => el.type === SharedPostCards)).toBe(false);
+  });
+
+  it('a tombstone keeps its run slot: grouping is unchanged', () => {
+    const t0 = Date.parse(CREATED_AT);
+    const list = [
+      makeMessage({ id: 'a', time: t0 }),
+      makeMessage({ id: 'b', time: t0 + 1000, deleted: true, body: '' }),
+      makeMessage({ id: 'c', time: t0 + 2000 }),
+    ];
+    const rows = threadRows(list, t0, 'UTC').filter(
+      (r): r is Extract<ThreadRow, { kind: 'message' }> => r.kind === 'message',
+    );
+    expect(rows.map((r) => [r.message.id, r.head, r.tail])).toEqual([
+      ['a', true, false],
+      ['b', false, false],
+      ['c', false, true],
+    ]);
+  });
+
+  it('a reply to a deleted message quotes "Message deleted", italic and muted', () => {
+    const reply = makeMessage({
+      id: 'r',
+      reply: { id: 'gone', authorUserId: 'peer-1', preview: 'Message deleted' },
+      parentDeleted: true,
+    });
+    const quote = all(render(reply)).find((el) => el.type === ReplyQuoteBox);
+    expect(quote?.props).toMatchObject({ preview: 'Message deleted', deleted: true });
+    const html = renderStrip(quote as ReactElement);
+    expect(html).toMatch(/italic text-fg-3[^>]*>Message deleted</);
+  });
+
+  it('an edited message shows a muted "edited" label, also read before the time', () => {
+    const edited = makeMessage({ editedAt: '2026-09-22T18:50:00Z' });
+    const html = renderStrip(render(edited));
+    expect(html).toMatch(/data-edited=""[^>]*text-fg-3[^>]*>edited</);
+    expect(bubbleTimeLabel(edited, 'UTC')).toBe(`${EDITED_LABEL}, 18:45`);
+    expect(renderStrip(render(makeMessage({})))).not.toContain('data-edited');
+    expect(renderStrip(render({ ...tomb, editedAt: 'x' }))).not.toContain('data-edited');
+  });
+
+  it('a checked row gets the neutral full-width tint; no accent ring on the bubble', () => {
+    const checked = render(makeMessage({ mine: true }), {
+      selection: { role: 'selectable', checked: true, onToggle: noop },
+    });
+    const els = all(checked);
+    const tint = els.find((el) => el.props['data-selected-tint'] !== undefined);
+    expect(tint?.props.className).toBe(SELECTED_ROW_TINT);
+    expect(SELECTED_ROW_TINT).toContain('absolute inset-0');
+    expect(SELECTED_ROW_TINT).toContain('bg-panel-3 opacity-60');
+    expect(String(checked.props.className)).toContain('relative isolate');
+    const bubble = els.find((el) => el.props['data-bubble'] !== undefined);
+    // Only the keyboard focus ring (focus-visible:) may name the accent.
+    const classes = String(bubble?.props.className).split(' ');
+    expect(classes).not.toContain('ring-accent');
+    expect(classes).not.toContain('ring-2');
+    expect(classes.filter((c) => c.includes('accent') && !c.startsWith('focus-visible:'))).toEqual([
+      'text-accent-fg',
+    ]);
+    expect(renderStrip(checked)).not.toContain('ring-2 ring-accent ring-offset');
+
+    const unchecked = render(makeMessage({ mine: true }), {
+      selection: { role: 'selectable', checked: false, onToggle: noop },
+    });
+    expect(all(unchecked).some((el) => el.props['data-selected-tint'] !== undefined)).toBe(false);
+  });
+
+  it('rowSelection: own marked shows the lock, deleted is not selectable', () => {
+    const marks = new Map<string, ChatMark>([
+      [
+        'marked',
+        {
+          messageId: 'marked',
+          channelId: 'c',
+          type: 'commitment',
+          priority: null,
+          markedAt: 't',
+          resolved: false,
+          resolvedBy: null,
+          resolvedAt: null,
+        },
+      ],
+    ]);
+    const selection = { selected: new Set<string>(), onToggle: noop };
+    expect(rowSelection(makeMessage({ id: 'marked', mine: true }), selection, marks).role).toBe(
+      'locked',
+    );
+    expect(rowSelection(makeMessage({ id: 'x', mine: true }), selection, marks).role).toBe(
+      'selectable',
+    );
+    expect(rowSelection(makeMessage({ id: 'p', mine: false }), selection, marks).role).toBe(
+      'selectable',
+    );
+    expect(
+      rowSelection(makeMessage({ id: 'd', mine: true, deleted: true }), selection, marks).role,
+    ).toBe('none');
+    const lockedRow = render(makeMessage({ id: 'marked', mine: true }), {
+      selection: { role: 'locked', checked: false, onToggle: noop },
+    });
+    expect(renderStrip(lockedRow)).toContain('data-select-lock');
   });
 });

@@ -42,7 +42,13 @@ import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
 import type { ChannelSummary, ChatProfile } from '@/lib/chat-reads';
-import { breaksRun, isTimeGap, replyPreview, type ThreadMessage } from '@/lib/chat/thread';
+import {
+  breaksRun,
+  DELETED_MESSAGE_LABEL,
+  isTimeGap,
+  replyPreview,
+  type ThreadMessage,
+} from '@/lib/chat/thread';
 import { classifyAttachment, splitAlbum, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
 import { formatMessageTime } from '@/lib/chat/time-format';
@@ -54,7 +60,7 @@ import {
 } from '@/lib/chat/swipe-reply';
 import type { PresignCache } from '@/lib/asset-presign';
 import { roleLabel } from '@/components/pages/settings/members-data';
-import { Composer, type ComposerSend } from '@/components/chat/Composer';
+import { Composer, type ComposerSend, type EditingDraft } from '@/components/chat/Composer';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
 import {
   ImageLightbox,
@@ -69,7 +75,11 @@ import {
   type PostRefPost,
 } from '@/components/chat/PostRefChip';
 import { FilterStrip } from '@/components/chat/FilterStrip';
-import { MessageActionMenu } from '@/components/chat/MessageActionMenu';
+import {
+  BanGlyph,
+  MessageActionMenu,
+  ownMessageActions,
+} from '@/components/chat/MessageActionMenu';
 import { SharedBriefCards } from '@/components/chat/BriefCard';
 import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
 import {
@@ -81,7 +91,7 @@ import {
 import { useOpenPosts, type UseOpenPosts } from '@/lib/chat/use-open-posts';
 import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { ContactSheet } from '@/components/chat/ContactSheet';
-import { SelectionBar } from '@/components/chat/SelectionBar';
+import { SelectionBar, deleteOneConfirm } from '@/components/chat/SelectionBar';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { withDaySeparators } from '@/components/chat/day-separators';
 import { ForwardPicker, type ForwardSendResult } from '@/components/chat/ForwardPicker';
@@ -92,6 +102,7 @@ import {
   pruneThreadSelection,
   selectedForForward,
   threadSelectable,
+  threadSelectionRole,
 } from '@/lib/chat/forward';
 import {
   markMenuOptions,
@@ -164,6 +175,14 @@ interface MessageThreadProps {
   /** Delete own messages for everyone; absent hides "Select". */
   onDeleteMessages?: (
     messageIds: readonly string[],
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  /**
+   * Edit the body of an own message; absent hides "Edit". Resolves ok, or the
+   * mapped failure copy ("Edit window has closed (15 min)", ...).
+   */
+  onEditMessage?: (
+    messageId: string,
+    body: string,
   ) => Promise<{ ok: true } | { ok: false; message: string }>;
   /** Load older pages until a message is present (jump-to). */
   onEnsureLoaded?: (messageId: string) => Promise<FindOlderOutcome>;
@@ -658,7 +677,16 @@ export function messageTimeSource(
 export function bubbleTimeLabel(message: ThreadMessage, timeZone: string): string {
   if (message.state === 'sending') return 'Sending';
   if (message.state === 'failed') return message.filesMissing === true ? FILES_MISSING : 'Not sent';
-  return formatMessageTime(messageTimeSource(message), timeZone);
+  const time = formatMessageTime(messageTimeSource(message), timeZone);
+  return isEdited(message) ? `${EDITED_LABEL}, ${time}` : time;
+}
+
+/** The muted label an edited message shows (before its time). */
+export const EDITED_LABEL = 'edited';
+
+/** Whether a message shows the "edited" label: a live message whose body was edited. */
+export function isEdited(message: Pick<ThreadMessage, 'editedAt' | 'deleted'>): boolean {
+  return message.deleted !== true && message.editedAt != null;
 }
 
 /** The status of a send whose picked files did not survive a reload. */
@@ -723,7 +751,6 @@ export function bubbleClass(state: {
   tail: boolean;
   sending: boolean;
   failed: boolean;
-  checked: boolean;
   voiceOnly: boolean;
   /** Image album: 3px padding around the album, at least 240px wide. */
   album?: boolean;
@@ -736,9 +763,22 @@ export function bubbleClass(state: {
     state.tail && (state.mine ? 'rounded-br-[4px]' : 'rounded-bl-[4px]'),
     state.sending && 'opacity-70',
     state.failed && 'border border-bad',
-    state.checked && 'ring-2 ring-accent ring-offset-2 ring-offset-bg',
   );
 }
+
+/**
+ * A deleted message's bubble: same side, radius and tail as a live one, but a
+ * hairline border on no fill, muted italic ink, and no focus (no menu).
+ */
+export function tombstoneClass(state: { mine: boolean; tail: boolean }): string {
+  return cn(
+    'relative flex min-w-0 select-none items-center gap-1.5 rounded-[18px] border border-border px-3 py-2 text-[15px] italic text-fg-3',
+    state.tail && (state.mine ? 'rounded-br-[4px]' : 'rounded-bl-[4px]'),
+  );
+}
+
+/** A checked row's neutral tint: panel-3 at partial opacity across the full row. */
+export const SELECTED_ROW_TINT = 'pointer-events-none absolute inset-0 -z-10 bg-panel-3 opacity-60';
 
 /**
  * Own-bubble inner content (reply quote, file chips, shared cards, voice note)
@@ -897,18 +937,48 @@ export function MessageBubble(props: {
     onTalkAbout: props.postRefs?.onTalkAbout,
     onShowPost: props.postRefs?.onShowPost,
   };
+  const rowClass = cn(
+    'group flex items-start gap-2 px-4',
+    head ? (props.afterLabel === true ? 'pt-0' : 'pt-2.5') : 'pt-0.5',
+    mine ? 'flex-row-reverse' : 'flex-row',
+  );
+  if (message.deleted === true) {
+    // A tombstone keeps its side, time slot and run grouping; nothing else.
+    return (
+      <li data-msg-id={message.id} data-state={message.state} data-deleted="" className={rowClass}>
+        {showMeta ? (
+          <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" />
+        ) : null}
+        {gutter ? <span className="w-[26px] shrink-0" aria-hidden="true" /> : null}
+        <div className={cn('flex min-w-0 max-w-[76%] flex-col gap-1', mine && 'items-end')}>
+          {showMeta ? <span className="text-sm font-medium text-fg">{name}</span> : null}
+          <div
+            data-bubble=""
+            data-tombstone=""
+            role="group"
+            aria-label={`${mine ? 'Your message' : `Message from ${name}`}, deleted, ${bubbleTimeLabel(message, timeZone)}`}
+            className={tombstoneClass({ mine, tail })}
+          >
+            <BanGlyph size={16} />
+            <span>{DELETED_MESSAGE_LABEL}</span>
+          </div>
+        </div>
+      </li>
+    );
+  }
+  const checked = selection?.checked === true;
+  const parentDeleted = message.parentDeleted === true;
   return (
     <li
       data-msg-id={message.id}
       data-state={message.state}
       data-selection={selection?.role}
-      className={cn(
-        'group flex items-start gap-2 px-4',
-        head ? (props.afterLabel === true ? 'pt-0' : 'pt-2.5') : 'pt-0.5',
-        mine ? 'flex-row-reverse' : 'flex-row',
-        hasReactions && 'mb-3',
-      )}
+      data-checked={checked ? '' : undefined}
+      className={cn(rowClass, hasReactions && 'mb-3', checked && 'relative isolate')}
     >
+      {checked ? (
+        <span aria-hidden="true" data-selected-tint="" className={SELECTED_ROW_TINT} />
+      ) : null}
       {selection?.role === 'selectable' ? (
         <SelectCheckbox checked={selection.checked} onToggle={selection.onToggle} />
       ) : null}
@@ -950,7 +1020,6 @@ export function MessageBubble(props: {
               tail,
               sending,
               failed,
-              checked: selection?.checked === true,
               voiceOnly,
               album,
             }),
@@ -969,21 +1038,22 @@ export function MessageBubble(props: {
             {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
           </div>
           <div data-bubble-content="" className={cn('contents', mine && OWN_BUBBLE_CONTENT)}>
-            {chip?.kind === 'chip' ? (
+            {chip?.kind === 'chip' && !parentDeleted ? (
               <PostRefChip
                 post={chip.post}
                 workspaceKey={chip.workspaceKey}
                 onTap={chip.onTap}
                 className={album ? 'mx-[9px]' : '-mb-1.5 -mt-2'}
               />
-            ) : chip === undefined && reply !== null ? (
+            ) : (chip === undefined || parentDeleted) && reply !== null ? (
               <ReplyQuoteBox
                 author={
                   reply.authorUserId !== null
                     ? (profiles.get(reply.authorUserId)?.displayName ?? 'Member')
                     : 'Member'
                 }
-                preview={reply.preview}
+                preview={parentDeleted ? DELETED_MESSAGE_LABEL : reply.preview}
+                deleted={parentDeleted}
                 onJump={() => props.onJumpToMessage?.(reply.id)}
                 className={cn(BUBBLE_QUOTE_TEXT, album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1')}
               />
@@ -1050,7 +1120,16 @@ export function MessageBubble(props: {
             </button>
           ) : null}
         </div>
-        {status !== null ? <StatusLine status={status} /> : null}
+        {isEdited(message) ? (
+          <span className="flex items-center gap-1.5">
+            <span data-edited="" className="text-[11px] text-fg-3">
+              {EDITED_LABEL}
+            </span>
+            {status !== null ? <StatusLine status={status} /> : null}
+          </span>
+        ) : status !== null ? (
+          <StatusLine status={status} />
+        ) : null}
       </div>
       {onMore !== undefined ? (
         <button
@@ -1238,7 +1317,8 @@ function MessageRow(props: {
   tail: boolean;
   afterLabel: boolean;
   timeZone: string;
-  onOpen: (message: ThreadMessage, rect: DOMRect | null) => void;
+  /** Open the menu: its anchor rect and the pressed bubble (drawn above the dim). */
+  onOpen: (message: ThreadMessage, rect: DOMRect | null, held: HTMLElement | null) => void;
   onRetry?: (messageId: string) => void;
   onJumpToMessage?: (messageId: string) => void;
   mark: ChatMark | undefined;
@@ -1297,7 +1377,7 @@ function MessageRow(props: {
     if (selecting) return;
     // The menu's backdrop takes the trailing pointerup, so no click to swallow.
     clearClickSuppression();
-    props.onOpen(props.message, anchor);
+    props.onOpen(props.message, anchor, bubbleRef.current);
   }
   const onContextMenu = (e: MouseEvent): void => {
     e.preventDefault();
@@ -1361,7 +1441,7 @@ function MessageRow(props: {
       {...(props.selection !== undefined ? { selection: props.selection } : {})}
       onOpenImage={(index) => props.onOpenImage(props.message, index)}
       postRefs={props.postRefs}
-      onBadgeClick={() => props.onOpen(props.message, bubbleRect())}
+      onBadgeClick={() => props.onOpen(props.message, bubbleRect(), bubbleRef.current)}
     />
   );
 }
@@ -1417,6 +1497,10 @@ function ThreadBody(
     onStartSelect?: (message: ThreadMessage) => void;
     /** Menu "Forward" picked; absent hides it. */
     onForwardMessage?: (message: ThreadMessage) => void;
+    /** Menu "Edit" picked; absent hides it. */
+    onEditMessage?: (message: ThreadMessage) => void;
+    /** Menu "Delete" picked (the caller confirms); absent hides it. */
+    onDeleteMessage?: (message: ThreadMessage) => void;
     onChangePriority?: (messageId: string) => void;
     /** A jump-to request (seq makes a repeat of the same id fire again). */
     jumpRequest: { id: string; seq: number } | null;
@@ -1432,9 +1516,23 @@ function ThreadBody(
   },
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
-  const [menu, setMenu] = useState<{ message: ThreadMessage; rect: DOMRect | null } | null>(null);
+  // The open menu: its message, anchor, held bubble and the moment it opened
+  // (the edit and delete windows are judged then, not re-evaluated live).
+  const [menu, setMenu] = useState<{
+    message: ThreadMessage;
+    rect: DOMRect | null;
+    held: HTMLElement | null;
+    openedAt: number;
+  } | null>(null);
   // The thread's one image viewer: which message's album, at which image.
   const [viewer, setViewer] = useState<{ messageId: string; index: number } | null>(null);
+  // A message deleted (live, or by us) while its menu is open closes the menu.
+  const menuId = menu?.message.id ?? null;
+  useEffect(() => {
+    if (menuId === null) return;
+    const current = props.messages.find((m) => m.id === menuId);
+    if (current === undefined || current.deleted === true) setMenu(null);
+  }, [props.messages, menuId]);
   const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
   const reducedMotion = useMediaQuery(REDUCED_MOTION_QUERY);
   const toast = useToast();
@@ -1554,6 +1652,10 @@ function ThreadBody(
     );
   }
   const nowMs = Date.now();
+  const menuOwn =
+    menu !== null
+      ? ownMessageActions(menu.message, props.marks.get(menu.message.id), menu.openedAt)
+      : { canEdit: false, canDelete: false, lockedByMark: false };
   const viewerMessage =
     viewer !== null ? props.messages.find((m) => m.id === viewer.messageId) : undefined;
   const viewerData =
@@ -1603,7 +1705,10 @@ function ThreadBody(
               tail={row.tail}
               afterLabel={afterLabel}
               timeZone={props.timeZone}
-              onOpen={(m, rect) => setMenu({ message: m, rect })}
+              onOpen={(m, rect, held) => {
+                if (m.deleted === true) return;
+                setMenu({ message: m, rect, held, openedAt: Date.now() });
+              }}
               onOpenImage={(m, index) => setViewer({ messageId: m.id, index })}
               hoverMenu={hoverMenu}
               reducedMotion={reducedMotion}
@@ -1620,7 +1725,7 @@ function ThreadBody(
                 : {})}
               {...(props.selection !== undefined
                 ? {
-                    selection: rowSelection(row.message, props.selection),
+                    selection: rowSelection(row.message, props.selection, props.marks),
                   }
                 : {})}
               {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
@@ -1642,7 +1747,19 @@ function ThreadBody(
         open={menu !== null}
         onClose={() => setMenu(null)}
         anchor={menu?.rect ?? null}
+        held={menu?.held ?? null}
         mine={menu?.message.mine ?? false}
+        canReact={menu !== null && menu.message.state === 'sent'}
+        markedAs={menu !== null ? (props.marks.get(menu.message.id)?.type ?? null) : null}
+        canEdit={props.onEditMessage !== undefined && menuOwn.canEdit}
+        onEdit={() => {
+          if (menu) props.onEditMessage?.(menu.message);
+        }}
+        canDelete={props.onDeleteMessage !== undefined && menuOwn.canDelete}
+        onDelete={() => {
+          if (menu) props.onDeleteMessage?.(menu.message);
+        }}
+        lockedByMark={menuOwn.lockedByMark}
         currentReaction={menu ? (menu.message.reactions.find((r) => r.mine)?.emoji ?? null) : null}
         canCopy={menu ? menu.message.body.trim() !== '' : false}
         markOptions={
@@ -1735,13 +1852,17 @@ export function threadSkeleton(): ReactElement {
   );
 }
 
-/** Selection-mode state for one row: any recorded message can be checked. */
-function rowSelection(
+/**
+ * Selection-mode state for one row: an own marked message shows the lock, any
+ * other recorded, live message can be checked, deleted and pending ones nothing.
+ */
+export function rowSelection(
   message: ThreadMessage,
   selection: { selected: ReadonlySet<string>; onToggle: (id: string) => void },
+  marks: Map<string, ChatMark>,
 ): RowSelection {
   return {
-    role: threadSelectable(message) ? 'selectable' : 'none',
+    role: threadSelectionRole(message, marks),
     checked: selection.selected.has(message.id),
     onToggle: () => selection.onToggle(message.id),
   };
@@ -1785,6 +1906,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const [priorityBusy, setPriorityBusy] = useState(false);
   const [jumpRequest, setJumpRequest] = useState<{ id: string; seq: number } | null>(null);
   const [forwardFor, setForwardFor] = useState<ThreadMessage[] | null>(null);
+  // The own message being edited in the composer, and the one awaiting its delete confirm.
+  const [editing, setEditing] = useState<EditingDraft | null>(null);
+  const [deleteFor, setDeleteFor] = useState<ThreadMessage | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   // A conversation switch leaves selection mode and closes the marks surfaces.
   useEffect(() => {
@@ -1797,8 +1922,18 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setForwardFor(null);
     setAboutDraft(null);
     setFilterPostId(null);
+    setEditing(null);
+    setDeleteFor(null);
     cardWait.clear();
   }, [props.title, cardWait]);
+
+  // The message being edited was deleted or left the thread: stop editing it.
+  const editingId = editing?.messageId ?? null;
+  useEffect(() => {
+    if (editingId === null) return;
+    const target = props.messages.find((m) => m.id === editingId);
+    if (target === undefined || target.deleted === true) setEditing(null);
+  }, [props.messages, editingId]);
 
   // Unmount: stop waiting on a share's card.
   useEffect(() => () => cardWait.clear(), [cardWait]);
@@ -1821,6 +1956,26 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   };
 
   const onDeleteMessages = props.onDeleteMessages;
+  const onEditMessage = props.onEditMessage;
+  const startEdit = (message: ThreadMessage): void => {
+    setEditing({
+      messageId: message.id,
+      initialText: message.body,
+      hasOtherContent:
+        message.attachments.length > 0 ||
+        message.sharedPostIds.length > 0 ||
+        message.sharedBriefIds.length > 0,
+    });
+  };
+  const confirmDeleteOne = async (): Promise<void> => {
+    const target = deleteFor;
+    if (target === null || onDeleteMessages === undefined || deleteBusy) return;
+    setDeleteBusy(true);
+    const result = await onDeleteMessages([target.id]);
+    setDeleteBusy(false);
+    setDeleteFor(null);
+    if (!result.ok) toast.show({ title: result.message });
+  };
   const onForward = props.onForward;
   const forwardChannels = props.forwardChannels;
   const canForwardHere = onForward !== undefined && forwardChannels !== undefined;
@@ -1921,10 +2076,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // Selection, jumps and the forward source read the list that is on screen.
   useEffect(() => {
     setSelected((prev) => {
-      const next = pruneThreadSelection(prev, shownMessages);
+      const next = pruneThreadSelection(prev, shownMessages, marks);
       return next.size === prev.size ? prev : next;
     });
-  }, [shownMessages]);
+  }, [shownMessages, marks]);
   const messagesById = useMemo(() => new Map(shownMessages.map((m) => [m.id, m])), [shownMessages]);
   const markedMessages = props.markedMessages;
   const messageFor = useCallback(
@@ -2084,11 +2239,14 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         {...(onDeleteMessages !== undefined && !selecting
           ? {
               onStartSelect: (message: ThreadMessage) => {
+                setEditing(null);
                 setSelecting(true);
-                setSelected(threadSelectable(message) ? new Set([message.id]) : new Set());
+                setSelected(threadSelectable(message, marks) ? new Set([message.id]) : new Set());
               },
+              onDeleteMessage: (message: ThreadMessage) => setDeleteFor(message),
             }
           : {})}
+        {...(onEditMessage !== undefined && !selecting ? { onEditMessage: startEdit } : {})}
         {...(canForwardHere && !selecting
           ? { onForwardMessage: (message: ThreadMessage) => setForwardFor([message]) }
           : {})}
@@ -2153,8 +2311,25 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           onBringPost={bringPost}
           {...(canAttach ? { uploadFile } : {})}
           {...(canTranscribe ? { transcribe } : {})}
+          {...(editing !== null && onEditMessage !== undefined
+            ? {
+                editing,
+                onEdit: async (text: string) => {
+                  const result = await onEditMessage(editing.messageId, text);
+                  if (result.ok) setEditing(null);
+                  return result;
+                },
+              }
+            : {})}
+          onCancelEdit={() => setEditing(null)}
         />
       )}
+      {deleteOneConfirm({
+        open: deleteFor !== null,
+        busy: deleteBusy,
+        onCancel: () => setDeleteFor(null),
+        onConfirm: () => void confirmDeleteOne(),
+      })}
       {props.marks !== undefined &&
       props.onResolveMark !== undefined &&
       props.onReopenMark !== undefined ? (

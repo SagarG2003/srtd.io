@@ -6,8 +6,12 @@ import {
   isTimeGap,
   applyReactionOp,
   compareMessages,
+  applyEdit,
+  DELETED_MESSAGE_LABEL,
   deleteEventExt,
+  editEventExt,
   hydrateReplies,
+  markMessagesDeleted,
   mapLiveTextMessage,
   markEventExt,
   missingReplyIds,
@@ -745,7 +749,7 @@ describe('delete and mark live events', () => {
     expect(parseLiveEvent({ sorted_event: 'mark' })).toEqual({ kind: 'unknown' });
   });
 
-  it('receivers drop deleted ids: onDelete fires with the ids and removeMessages drops them', () => {
+  it('onDelete fires with the ids; removeMessages drops ids (a Remove of a lost send)', () => {
     const handlers: Record<string, AgoraChat.EventHandlerType> = {};
     const connection = fakeConnection({
       addEventHandler: vi.fn((id: string, handler: AgoraChat.EventHandlerType) => {
@@ -870,5 +874,228 @@ describe('breaksRun / isTimeGap', () => {
   it('never counts an unusable time as a gap', () => {
     expect(isTimeGap({ time: 0 }, own(30))).toBe(false);
     expect(isTimeGap(own(0), { time: 0 })).toBe(false);
+  });
+});
+
+describe('edit and delete: mapping, merge and live events', () => {
+  it('rowToThreadMessage maps edited_at, and a deleted row to a content-free tombstone', () => {
+    const edited = rowToThreadMessage(row({ edited_at: '2026-09-22T10:05:00+00:00' }), ME);
+    expect(edited.editedAt).toBe('2026-09-22T10:05:00+00:00');
+    expect(edited.deleted).toBe(false);
+    expect(rowToThreadMessage(row({}), ME).editedAt).toBeNull();
+
+    // The DB nulls every content column on a deleted row; the mapping never renders content.
+    const tomb = rowToThreadMessage(
+      row({
+        sender_user_id: ME,
+        deleted_at: '2026-09-22T10:06:00+00:00',
+        body: null,
+        reply_to_message_id: 'm0',
+        forwarded_from_message_id: 'src',
+      }),
+      ME,
+      {
+        attachments: [{ assetId: 'a', name: 'x', mime: 'image/png' }],
+        sharedPostIds: ['p'],
+        reply: null,
+      },
+    );
+    expect(tomb).toMatchObject({
+      id: 'm1',
+      deleted: true,
+      mine: true,
+      body: '',
+      attachments: [],
+      sharedPostIds: [],
+      sharedBriefIds: [],
+      reply: null,
+      reactions: [],
+      createdAt: '2026-09-22T10:00:00.123456+00:00',
+      state: 'sent',
+    });
+    expect(tomb.forwarded).toBeUndefined();
+  });
+
+  it('mergeFetched replaces a loaded message whose edited_at changed, keeping reactions and quote', () => {
+    const loaded = mine({
+      id: 'a',
+      body: 'old',
+      editedAt: null,
+      reactions: [{ emoji: '👍', count: 1, mine: false }],
+      reply: { id: 'q', authorUserId: PEER, preview: 'resolved' },
+    });
+    const fetched = { ...loaded, body: 'new', editedAt: '2026-09-22T10:01:00Z', reactions: [] };
+    const [merged] = mergeFetched(
+      [loaded],
+      [{ ...fetched, reply: { id: 'q', authorUserId: null, preview: '' } }],
+    );
+    expect(merged?.body).toBe('new');
+    expect(merged?.editedAt).toBe('2026-09-22T10:01:00Z');
+    expect(merged?.reactions).toEqual(loaded.reactions);
+    expect(merged?.reply?.preview).toBe('resolved');
+
+    // Same edited_at: the loaded message is left alone.
+    const same = [mine({ id: 'b', body: 'kept', editedAt: 'e1' })];
+    expect(mergeFetched(same, [mine({ id: 'b', body: 'other', editedAt: 'e1' })])[0]?.body).toBe(
+      'kept',
+    );
+  });
+
+  it('mergeFetched turns a loaded message into a tombstone when the row comes back deleted', () => {
+    const loaded = mine({
+      id: 'a',
+      body: 'hi',
+      reactions: [{ emoji: '👍', count: 1, mine: true }],
+    });
+    const reply = mine({
+      id: 'r',
+      time: loaded.time + 1,
+      reply: { id: 'a', authorUserId: ME, preview: 'hi' },
+    });
+    const tombRow = rowToThreadMessage(
+      row({ id: 'a', sender_user_id: ME, body: null, deleted_at: '2026-09-22T10:02:00Z' }),
+      ME,
+    );
+    const merged = mergeFetched([loaded, reply], [tombRow]);
+    expect(merged[0]).toMatchObject({ id: 'a', deleted: true, body: '', reactions: [] });
+    expect(merged[1]?.reply?.preview).toBe(DELETED_MESSAGE_LABEL);
+    expect(merged[1]?.parentDeleted).toBe(true);
+  });
+
+  it('a deleted row survives a reload: history rows map to tombstones in place', () => {
+    const rows = [
+      row({ id: 'a', created_at: '2026-09-22T10:00:00Z' }),
+      row({
+        id: 'b',
+        created_at: '2026-09-22T10:00:01Z',
+        body: null,
+        deleted_at: '2026-09-22T10:03:00Z',
+      }),
+      row({ id: 'c', created_at: '2026-09-22T10:00:02Z', reply_to_message_id: 'b' }),
+    ];
+    const fetched = rows.map((r) => rowToThreadMessage(r, ME));
+    const list = hydrateReplies(mergeFetched([], fetched), [], true);
+    expect(list.map((m) => [m.id, m.deleted])).toEqual([
+      ['a', false],
+      ['b', true],
+      ['c', false],
+    ]);
+    expect(list[2]?.reply?.preview).toBe(DELETED_MESSAGE_LABEL);
+    expect(list[2]?.parentDeleted).toBe(true);
+  });
+
+  it('hydrateReplies reads a quoted deleted row (by-ids read) as "Message deleted"', () => {
+    const reply = mine({ id: 'r', reply: { id: 'gone', authorUserId: null, preview: '' } });
+    const quoted = rowToThreadMessage(
+      row({ id: 'gone', body: null, deleted_at: '2026-09-22T10:03:00Z' }),
+      ME,
+    );
+    const [out] = hydrateReplies([reply], [quoted], true);
+    expect(out?.reply).toEqual({ id: 'gone', authorUserId: PEER, preview: DELETED_MESSAGE_LABEL });
+    expect(out?.parentDeleted).toBe(true);
+  });
+
+  it('markMessagesDeleted keeps the slot, clears content and reactions, and updates quotes', () => {
+    const a = mine({
+      id: 'a',
+      body: 'x',
+      reactions: [{ emoji: '👍', count: 1, mine: true }],
+      forwarded: true,
+    });
+    const b = mine({
+      id: 'b',
+      time: a.time + 1,
+      reply: { id: 'a', authorUserId: ME, preview: 'x' },
+    });
+    const list = markMessagesDeleted([a, b], ['a']);
+    expect(list.map((m) => m.id)).toEqual(['a', 'b']);
+    expect(list[0]).toMatchObject({ deleted: true, body: '', reactions: [], time: a.time });
+    expect(list[0]?.forwarded).toBeUndefined();
+    expect(list[1]?.reply?.preview).toBe(DELETED_MESSAGE_LABEL);
+    expect(markMessagesDeleted(list, ['a'])).toBe(list);
+    expect(markMessagesDeleted(list, ['nope'])).toBe(list);
+  });
+
+  it('parses the live edit event: one id, the body and edited_at', () => {
+    const ext = editEventExt({ messageId: 'a', body: 'new', editedAt: '2026-09-22T10:01:00Z' });
+    expect(ext).toEqual({
+      sorted_event: 'edit',
+      message_ids: ['a'],
+      body: 'new',
+      edited_at: '2026-09-22T10:01:00Z',
+    });
+    expect(parseLiveEvent(ext)).toEqual({
+      kind: 'edit',
+      messageId: 'a',
+      body: 'new',
+      editedAt: '2026-09-22T10:01:00Z',
+    });
+    for (const bad of [
+      { sorted_event: 'edit', message_ids: [], body: 'x', edited_at: '2026-09-22T10:01:00Z' },
+      {
+        sorted_event: 'edit',
+        message_ids: ['a', 'b'],
+        body: 'x',
+        edited_at: '2026-09-22T10:01:00Z',
+      },
+      { sorted_event: 'edit', message_ids: ['a'], edited_at: '2026-09-22T10:01:00Z' },
+      { sorted_event: 'edit', message_ids: ['a'], body: 'x', edited_at: 'nope' },
+    ]) {
+      expect(parseLiveEvent(bad)).toEqual({ kind: 'unknown' });
+    }
+  });
+
+  it('subscribeIncoming routes an edit to onEdit with the mapped sender', () => {
+    const handlers: Record<string, AgoraChat.EventHandlerType> = {};
+    const connection = fakeConnection({
+      addEventHandler: vi.fn((id: string, handler: AgoraChat.EventHandlerType) => {
+        handlers[id] = handler;
+      }),
+    });
+    const onEdit = vi.fn();
+    subscribeIncoming({
+      connection,
+      channelId: CHANNEL,
+      currentUserId: ME,
+      onMessage: vi.fn(),
+      onIgnored: vi.fn(),
+      onReaction: vi.fn(),
+      onRead: vi.fn(),
+      onEdit,
+    });
+    handlers[THREAD_EVENT_HANDLER_ID]?.onCmdMessage?.(
+      cmd({ ext: editEventExt({ messageId: 'a', body: 'b', editedAt: '2026-09-22T10:01:00Z' }) }),
+    );
+    expect(onEdit).toHaveBeenCalledWith({
+      messageId: 'a',
+      body: 'b',
+      editedAt: '2026-09-22T10:01:00Z',
+      fromUserId: PEER,
+    });
+  });
+
+  it('applyEdit updates body and edited_at only, refreshes quotes, and skips tombstones', () => {
+    const a = mine({
+      id: 'a',
+      body: 'old',
+      attachments: [{ assetId: 'x', name: 'x.png', mime: 'image/png' }],
+      sharedPostIds: ['p'],
+    });
+    const r = mine({
+      id: 'r',
+      time: a.time + 1,
+      reply: { id: 'a', authorUserId: ME, preview: 'old' },
+    });
+    const out = applyEdit([a, r], { messageId: 'a', body: 'new', editedAt: 'e' });
+    expect(out[0]).toMatchObject({
+      body: 'new',
+      editedAt: 'e',
+      attachments: a.attachments,
+      sharedPostIds: ['p'],
+    });
+    expect(out[1]?.reply?.preview).toBe('new');
+    const tomb = markMessagesDeleted([a], ['a']);
+    expect(applyEdit(tomb, { messageId: 'a', body: 'x', editedAt: 'e' })).toBe(tomb);
+    expect(applyEdit([a], { messageId: 'nope', body: 'x', editedAt: 'e' })).toEqual([a]);
   });
 });

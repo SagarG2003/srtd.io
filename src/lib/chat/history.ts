@@ -10,6 +10,13 @@
 // cursor, and catch-up after a reconnect reads everything newer than the newest
 // loaded pair. Reactions come as one IN query over the loaded ids, never one
 // per message.
+//
+// Deleted rows: RLS returns them to members with every content column nulled.
+// The reads that feed the thread (latest, older, catch-up, jump, quoted ids)
+// keep them so they render as tombstones. The live verifier (loadMessageById,
+// which also gates the store's unread bumps) and the conversation previews
+// keep the deleted_at filter: a deleted message is never counted or shown as
+// a chat's last line.
 
 import type { Client, Result } from '@srtdio/rpc';
 import type { Database } from '@srtdio/schemas';
@@ -68,7 +75,6 @@ export async function loadLatestMessages(
     .from('chat_messages')
     .select(MESSAGE_COLUMNS)
     .eq('channel_id', channelId)
-    .is('deleted_at', null)
     .order('created_at', { ascending: false })
     .order('id', { ascending: false })
     .limit(HISTORY_PAGE_SIZE);
@@ -86,7 +92,6 @@ export async function loadOlderMessages(
     .from('chat_messages')
     .select(MESSAGE_COLUMNS)
     .eq('channel_id', channelId)
-    .is('deleted_at', null)
     .or(olderThanFilter(cursor))
     .order('created_at', { ascending: false })
     .order('id', { ascending: false })
@@ -105,7 +110,6 @@ export async function loadNewerMessages(
     .from('chat_messages')
     .select(MESSAGE_COLUMNS)
     .eq('channel_id', channelId)
-    .is('deleted_at', null)
     .or(newerThanFilter(cursor))
     .order('created_at', { ascending: true })
     .order('id', { ascending: true })
@@ -137,7 +141,10 @@ export async function loadMessageById(
   return { ok: true, data: row === null ? { found: false } : { found: true, row } };
 }
 
-/** Rows for a batch of ids (quoted messages of replies); one IN query, empty in, empty out. */
+/**
+ * Rows for a batch of ids (quoted messages of replies); one IN query, empty in,
+ * empty out. Deleted rows are included so a quote reads "Message deleted".
+ */
 export async function loadMessagesByIds(
   client: Client,
   messageIds: readonly string[],
@@ -146,8 +153,7 @@ export async function loadMessagesByIds(
   const res = await client
     .from('chat_messages')
     .select(MESSAGE_COLUMNS)
-    .in('id', [...messageIds])
-    .is('deleted_at', null);
+    .in('id', [...messageIds]);
   if (res.error) return fail(`loadMessagesByIds: ${res.error.message}`);
   return { ok: true, data: (res.data ?? []) as ChatMessageRow[] };
 }

@@ -107,7 +107,19 @@ export interface ThreadMessage {
    * "Photos not sent" and offers Remove only. Absent is the same as false.
    */
   filesMissing?: boolean;
+  /** Server edited_at when the body was edited; absent is the same as null. */
+  editedAt?: string | null;
+  /**
+   * Deleted for everyone: renders as a tombstone ("Message deleted") with no
+   * content, reactions, menu, swipe-reply or selection. Absent is the same as false.
+   */
+  deleted?: boolean;
+  /** This is a reply whose quoted message was deleted; absent is the same as false. */
+  parentDeleted?: boolean;
 }
+
+/** The label a tombstone and a quote of a deleted message read. */
+export const DELETED_MESSAGE_LABEL = 'Message deleted';
 
 /**
  * The connection surface the thread drives: the Foundation ChatConnection plus
@@ -180,6 +192,7 @@ export type LiveEvent =
   | { kind: 'read'; channelId: string; messageId: string }
   | { kind: 'mark'; messageId: string }
   | { kind: 'delete'; messageIds: string[] }
+  | { kind: 'edit'; messageId: string; body: string; editedAt: string }
   | { kind: 'unknown' };
 
 /** Read a live signal off a command message's `ext`; 'unknown' for anything else. */
@@ -192,6 +205,19 @@ export function parseLiveEvent(ext: unknown): LiveEvent {
     if (!Array.isArray(ids)) return { kind: 'unknown' };
     const messageIds = ids.filter((id): id is string => typeof id === 'string' && id !== '');
     return messageIds.length > 0 ? { kind: 'delete', messageIds } : { kind: 'unknown' };
+  }
+  if (event === 'edit') {
+    const ids = record.message_ids;
+    const body = record.body;
+    const editedAt = record.edited_at;
+    if (!Array.isArray(ids) || ids.length !== 1) return { kind: 'unknown' };
+    const id: unknown = ids[0];
+    if (typeof id !== 'string' || id === '') return { kind: 'unknown' };
+    if (typeof body !== 'string') return { kind: 'unknown' };
+    if (typeof editedAt !== 'string' || Number.isNaN(Date.parse(editedAt))) {
+      return { kind: 'unknown' };
+    }
+    return { kind: 'edit', messageId: id, body, editedAt };
   }
   const messageId = record.message_id;
   if (typeof messageId !== 'string' || messageId === '') return { kind: 'unknown' };
@@ -238,9 +264,23 @@ export function markEventExt(input: { messageId: string }): Record<string, unkno
   return { [LIVE_EVENT_KEY]: 'mark', message_id: input.messageId };
 }
 
-/** Build the `ext` for a live delete signal (receivers drop these ids). */
+/** Build the `ext` for a live delete signal (receivers turn these ids into tombstones). */
 export function deleteEventExt(input: { messageIds: readonly string[] }): Record<string, unknown> {
   return { [LIVE_EVENT_KEY]: 'delete', message_ids: [...input.messageIds] };
+}
+
+/** Build the `ext` for a live edit signal: one id, the recorded body and edited_at. */
+export function editEventExt(input: {
+  messageId: string;
+  body: string;
+  editedAt: string;
+}): Record<string, unknown> {
+  return {
+    [LIVE_EVENT_KEY]: 'edit',
+    message_ids: [input.messageId],
+    body: input.body,
+    edited_at: input.editedAt,
+  };
 }
 
 /** Sender-side content the row does not carry, kept from the local send. */
@@ -266,6 +306,7 @@ export function rowToThreadMessage(
   local?: LocalMessageContent,
 ): ThreadMessage {
   const senderUserId = row.sender_user_id;
+  if (row.deleted_at !== null) return tombstoneFromRow(row, currentUserId);
   const attachments =
     local !== undefined && local.attachments.length > 0
       ? [...local.attachments]
@@ -297,9 +338,56 @@ export function rowToThreadMessage(
     state: 'sent',
     status: 'sent',
     reactions: [],
+    editedAt: row.edited_at,
+    deleted: false,
     ...(row.forwarded_from_message_id != null && row.forwarded_from_message_id !== ''
       ? { forwarded: true }
       : {}),
+  };
+}
+
+/** A deleted row: keeps its id, sender, time and side; no content of any kind. */
+function tombstoneFromRow(row: ChatMessageRow, currentUserId: string): ThreadMessage {
+  const senderUserId = row.sender_user_id;
+  return {
+    id: row.id,
+    senderUserId,
+    body: '',
+    createdAt: row.created_at,
+    time: Date.parse(row.created_at),
+    provisionalTime: false,
+    mine: senderUserId !== null && senderUserId === currentUserId,
+    attachments: [],
+    sharedPostIds: [],
+    sharedBriefIds: [],
+    reply: null,
+    state: 'sent',
+    status: 'sent',
+    reactions: [],
+    editedAt: row.edited_at,
+    deleted: true,
+  };
+}
+
+/** The same message as a tombstone: content, reactions and quote cleared. */
+function asTombstone(message: ThreadMessage): ThreadMessage {
+  return {
+    id: message.id,
+    senderUserId: message.senderUserId,
+    body: '',
+    createdAt: message.createdAt,
+    time: message.time,
+    provisionalTime: message.provisionalTime,
+    mine: message.mine,
+    attachments: [],
+    sharedPostIds: [],
+    sharedBriefIds: [],
+    reply: null,
+    state: message.state,
+    status: message.status,
+    reactions: [],
+    editedAt: message.editedAt ?? null,
+    deleted: true,
   };
 }
 
@@ -358,6 +446,13 @@ export function hydrateReplies(
     if (quoted === undefined) {
       return settle ? { ...m, reply: { ...m.reply, preview: 'Message' } } : m;
     }
+    if (quoted.deleted === true) {
+      return {
+        ...m,
+        reply: { id: quoted.id, authorUserId: quoted.senderUserId, preview: DELETED_MESSAGE_LABEL },
+        parentDeleted: true,
+      };
+    }
     return {
       ...m,
       reply: { id: quoted.id, authorUserId: quoted.senderUserId, preview: replyPreview(quoted) },
@@ -414,11 +509,43 @@ export function compareMessages(a: ThreadMessage, b: ThreadMessage): number {
   return 0;
 }
 
+/** True when a fetched row's edit or delete state differs from the loaded message. */
+function changedOnRecord(existing: ThreadMessage, incoming: ThreadMessage): boolean {
+  return (
+    (existing.editedAt ?? null) !== (incoming.editedAt ?? null) ||
+    (existing.deleted === true) !== (incoming.deleted === true)
+  );
+}
+
+/**
+ * Point every reply quote at a deleted message to the tombstone label; replies
+ * to live messages are unchanged. The same list when nothing changes.
+ */
+function syncDeletedQuotes(messages: ThreadMessage[]): ThreadMessage[] {
+  const deleted = new Set(messages.filter((m) => m.deleted === true).map((m) => m.id));
+  if (deleted.size === 0) return messages;
+  let changed = false;
+  const next = messages.map((m) => {
+    if (m.reply === null || !deleted.has(m.reply.id) || m.parentDeleted === true) return m;
+    changed = true;
+    const quoted: ThreadMessage = {
+      ...m,
+      reply: { ...m.reply, preview: DELETED_MESSAGE_LABEL },
+      parentDeleted: true,
+    };
+    delete quoted.parentSharedPostIds;
+    return quoted;
+  });
+  return changed ? next : messages;
+}
+
 /**
  * Fold rows fetched from Postgres into the list. A fetched row replaces a
  * provisional entry with the same id (server time wins) while keeping the
- * richer live content and the local reaction/read state; an id already backed
- * by the record is left alone; new ids are inserted in order.
+ * richer live content and the local reaction/read state. An id already backed
+ * by the record is left alone unless its edited_at or deleted_at changed: an
+ * edit takes the new body (keeping reactions, read state and the resolved
+ * quote), a delete turns it into a tombstone. New ids are inserted in order.
  */
 export function mergeFetched(messages: ThreadMessage[], fetched: ThreadMessage[]): ThreadMessage[] {
   const byId = new Map(messages.map((m) => [m.id, m]));
@@ -428,7 +555,16 @@ export function mergeFetched(messages: ThreadMessage[], fetched: ThreadMessage[]
       byId.set(incoming.id, incoming);
       continue;
     }
-    if (!existing.provisionalTime) continue;
+    if (!existing.provisionalTime) {
+      if (!changedOnRecord(existing, incoming)) continue;
+      byId.set(
+        incoming.id,
+        incoming.deleted === true
+          ? asTombstone({ ...existing, editedAt: incoming.editedAt ?? null })
+          : { ...existing, body: incoming.body, editedAt: incoming.editedAt ?? null },
+      );
+      continue;
+    }
     byId.set(incoming.id, {
       ...incoming,
       attachments: existing.attachments.length > 0 ? existing.attachments : incoming.attachments,
@@ -437,11 +573,11 @@ export function mergeFetched(messages: ThreadMessage[], fetched: ThreadMessage[]
       sharedBriefIds:
         existing.sharedBriefIds.length > 0 ? existing.sharedBriefIds : incoming.sharedBriefIds,
       reply: existing.reply ?? incoming.reply,
-      reactions: existing.reactions,
+      reactions: incoming.deleted === true ? [] : existing.reactions,
       status: existing.status,
     });
   }
-  return [...byId.values()].sort(compareMessages);
+  return syncDeletedQuotes([...byId.values()].sort(compareMessages));
 }
 
 /** Append a live message, ignoring a duplicate id (already fetched or echoed). */
@@ -459,7 +595,42 @@ export function upsertMessage(messages: ThreadMessage[], message: ThreadMessage)
   return next.sort(compareMessages);
 }
 
-/** Drop messages by id (deleted for everyone); the same list when none match. */
+/**
+ * Turn messages into tombstones by id (deleted for everyone): content,
+ * reactions and quote cleared locally, time slot and side kept, and replies
+ * quoting them read "Message deleted". The same list when none match.
+ */
+export function markMessagesDeleted(
+  messages: ThreadMessage[],
+  ids: readonly string[],
+): ThreadMessage[] {
+  const hit = new Set(ids);
+  if (!messages.some((m) => hit.has(m.id) && m.deleted !== true)) return messages;
+  return syncDeletedQuotes(
+    messages.map((m) => (hit.has(m.id) && m.deleted !== true ? asTombstone(m) : m)),
+  );
+}
+
+/**
+ * Apply a recorded edit: the body and edited_at of one loaded, live message
+ * change (attachments, cards and mentions stay); reply quotes of it refresh.
+ * The same list when the id is not loaded or is a tombstone.
+ */
+export function applyEdit(
+  messages: ThreadMessage[],
+  input: { messageId: string; body: string; editedAt: string },
+): ThreadMessage[] {
+  const existing = messages.find((m) => m.id === input.messageId);
+  if (existing === undefined || existing.deleted === true) return messages;
+  const edited: ThreadMessage = { ...existing, body: input.body, editedAt: input.editedAt };
+  return upsertMessage(messages, edited).map((m) =>
+    m.reply !== null && m.reply.id === input.messageId && m.parentDeleted !== true
+      ? { ...m, reply: { ...m.reply, preview: replyPreview(edited) } }
+      : m,
+  );
+}
+
+/** Drop messages by id; the same list when none match. */
 export function removeMessages(messages: ThreadMessage[], ids: readonly string[]): ThreadMessage[] {
   const drop = new Set(ids);
   if (!messages.some((m) => drop.has(m.id))) return messages;
@@ -680,9 +851,16 @@ export function subscribeIncoming(params: {
   onRead: (input: { messageId: string; fromUserId: string }) => void;
   /** A sender deleted their messages for everyone; ids are globally unique. */
   onDelete?: (input: { messageIds: string[]; fromUserId: string }) => void;
+  /** A sender edited one of their messages (the body and edited_at as recorded). */
+  onEdit?: (input: {
+    messageId: string;
+    body: string;
+    editedAt: string;
+    fromUserId: string;
+  }) => void;
 }): () => void {
   const { connection, channelId, currentUserId, onMessage, onIgnored, onReaction, onRead } = params;
-  const { onDelete } = params;
+  const { onDelete, onEdit } = params;
   const senderOf = (from: string | undefined): string | undefined => {
     if (from === undefined) return undefined;
     const mapped = userIdFromAgoraUsername(from);
@@ -708,6 +886,15 @@ export function subscribeIncoming(params: {
       }
       if (event.kind === 'delete') {
         onDelete?.({ messageIds: event.messageIds, fromUserId });
+        return;
+      }
+      if (event.kind === 'edit') {
+        onEdit?.({
+          messageId: event.messageId,
+          body: event.body,
+          editedAt: event.editedAt,
+          fromUserId,
+        });
         return;
       }
       // Mark signals are consumed by the marks subscription (subscribeMarkEvents).
