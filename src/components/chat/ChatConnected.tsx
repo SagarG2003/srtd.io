@@ -112,7 +112,8 @@ function ownSend(message: ThreadMessage): boolean {
  * already painted (`painted`, so a switch or a retry never takes one away) and
  * my own sends (their unresolved names draw inert until they arrive). An own
  * send releases every row held ahead of it in the same pass, so it always
- * paints below them. The same array comes back when nothing is held. Pure.
+ * paints below them. An older page's rows release together as one batch.
+ * The same array comes back when nothing is held. Pure.
  */
 export function paintableMessages(
   messages: ThreadMessage[],
@@ -122,10 +123,19 @@ export function paintableMessages(
 ): ThreadMessage[] {
   const settled = (id: string): boolean =>
     isKnown(id) || reads.unknown.has(id) || reads.failed.has(id);
+  // An older page (unpainted rows above the first painted one) releases as
+  // one batch: all of it once every row in it has settled, else none of it.
+  const firstPainted = messages.findIndex((m) => painted.has(m.id));
+  const olderSettled =
+    firstPainted > 0 &&
+    messages.slice(0, firstPainted).every((m) => ownSend(m) || rowNameIds(m).every(settled));
   const shown = new Set<string>();
   let held: string[] = [];
-  for (const m of messages) {
-    if (ownSend(m)) {
+  for (const [index, m] of messages.entries()) {
+    if (index < firstPainted && !ownSend(m)) {
+      if (olderSettled) shown.add(m.id);
+      else held.push(m.id);
+    } else if (ownSend(m)) {
       // My own send never paints above rows held ahead of it: they release
       // now, in order (unresolved names draw inert), and my row paints last.
       for (const id of held) shown.add(id);
@@ -245,14 +255,12 @@ export async function deepLinkAfterRefresh(
 ): Promise<ReturnType<typeof deepLinkStep>> {
   const step = deepLinkStep(params, roster);
   if (step.open !== null) return step;
-  const next = await withReadTimeout(
-    async (): Promise<Result<readonly ChannelSummary[]>> => {
-      const list = await reload();
-      return list !== null
-        ? { ok: true, data: list }
-        : { ok: false, error: { code: 'unknown', message: 'roster reload failed' } };
-    },
-  );
+  const next = await withReadTimeout(async (): Promise<Result<readonly ChannelSummary[]>> => {
+    const list = await reload();
+    return list !== null
+      ? { ok: true, data: list }
+      : { ok: false, error: { code: 'unknown', message: 'roster reload failed' } };
+  });
   return deepLinkStep(params, next.ok ? next.data : []);
 }
 

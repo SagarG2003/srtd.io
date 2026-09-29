@@ -28,6 +28,7 @@ import {
 } from '@/components/chat/ChatConnected';
 import {
   initialJumpDue,
+  olderPageAnchorStep,
   profileNameOf,
   renderBodyWithMentions,
 } from '@/components/chat/MessageThread';
@@ -426,6 +427,49 @@ describe('J1 an own send releases the rows held ahead of it', () => {
   });
 });
 
+describe('J6 an older page releases as one batch without moving the viewport', () => {
+  beforeEach(() => resetMentionNames());
+
+  it('J6 older page held then released keeps the anchor row at the same offset', () => {
+    const known: Profiles = new Map([['sender', profile('sender', 'Sam')]]);
+    const anchorRow = message({ id: 'p1', body: 'on screen' });
+    const o1 = message({ id: 'o1', body: 'resolved' });
+    const o2 = message({ id: 'o2', body: `for @[${ANA}]` });
+    const onScreen = new Set(['p1']);
+    // Held: no row of the page paints alone, not even the resolved one.
+    expect(paint([o1, o2, anchorRow], known, NO_NAME_READS, onScreen).map((m) => m.id)).toEqual([
+      'p1',
+    ]);
+    // A layout model: the anchor row sits below whatever is prepended above it;
+    // its offset in the viewport is rowTop - scrollTop.
+    let scrollTop = 0;
+    let scrollHeight = 1_000;
+    let rowTop = 0;
+    const offset0 = rowTop - scrollTop;
+    let anchor: number | null = scrollHeight;
+    // A live row lands below while the page is held: no scroll, the anchor re-bases.
+    scrollHeight += 80;
+    let step = olderPageAnchorStep({ anchorHeight: anchor, prepended: false, scrollHeight });
+    expect(step.scrollBy).toBe(0);
+    anchor = step.anchorHeight;
+    expect(anchor).toBe(1_080);
+    // Released: the whole page paints together, and the compensation lands in that render.
+    const released: Profiles = new Map([...known, [ANA, profile(ANA, 'Ana')]]);
+    expect(paint([o1, o2, anchorRow], released, NO_NAME_READS, onScreen).map((m) => m.id)).toEqual([
+      'o1',
+      'o2',
+      'p1',
+    ]);
+    const pageHeight = 400;
+    scrollHeight += pageHeight;
+    rowTop += pageHeight;
+    step = olderPageAnchorStep({ anchorHeight: anchor ?? 0, prepended: true, scrollHeight });
+    expect(step).toEqual({ scrollBy: pageHeight, anchorHeight: null });
+    scrollTop += step.scrollBy;
+    expect(rowTop - scrollTop).toBe(offset0);
+  });
+});
+
 describe('H4 a held row keeps later rows behind it', () => {
   beforeEach(() => resetMentionNames());
 
@@ -554,9 +598,7 @@ describe('J5 a deep-link refresh applies only on the same page', () => {
     expect(deepLinkRefreshOutcome(found, started, switched)).toBe('discard');
     expect(deepLinkRefreshOutcome(absent, started, switched)).toBe('discard');
     // Unmounted, or a different ?channel=, discards too.
-    expect(deepLinkRefreshOutcome(absent, started, { ...started, mounted: false })).toBe(
-      'discard',
-    );
+    expect(deepLinkRefreshOutcome(absent, started, { ...started, mounted: false })).toBe('discard');
     expect(deepLinkRefreshOutcome(found, started, { ...started, channel: 'other' })).toBe(
       'discard',
     );

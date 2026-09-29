@@ -2327,6 +2327,8 @@ function ThreadBody(
   // The scroll height before an older page was requested, so the prepended rows
   // do not move what the reader was looking at.
   const anchorHeightRef = useRef<number | null>(null);
+  // The first row at the last new-rows pass: a change means an older page painted.
+  const firstIdRef = useRef<string | null>(props.messages[0]?.id ?? null);
   const newestIdRef = useRef<string | null>(null);
   // The newest message last seen by the pin, to tell an own send from a re-render.
   const lastIdRef = useRef<string | null>(null);
@@ -2479,6 +2481,9 @@ function ThreadBody(
     const el = listRef.current;
     if (el === null || props.messages.length === 0) return;
     const last = props.messages[props.messages.length - 1];
+    const first = props.messages[0]?.id ?? null;
+    const prepended = first !== firstIdRef.current;
+    firstIdRef.current = first;
     if (pendingJumpRef.current !== null) {
       anchorHeightRef.current = null;
       if (reveal(pendingJumpRef.current, JUMP_HIGHLIGHT_MS)) pendingJumpRef.current = null;
@@ -2486,11 +2491,20 @@ function ThreadBody(
     }
     if (anchorHeightRef.current !== null) {
       const anchor = anchorHeightRef.current;
-      programScroll((list) => {
-        list.scrollTop += list.scrollHeight - anchor;
+      // The older page may still be held: the compensation waits for the
+      // render its rows paint in, so the viewport never moves.
+      const step = olderPageAnchorStep({
+        anchorHeight: anchor,
+        prepended,
+        scrollHeight: el.scrollHeight,
       });
-      anchorHeightRef.current = null;
-      return;
+      anchorHeightRef.current = step.anchorHeight;
+      if (step.scrollBy !== 0) {
+        programScroll((list) => {
+          list.scrollTop += step.scrollBy;
+        });
+      }
+      if (step.anchorHeight === null) return;
     }
     const newestChanged = last !== undefined && last.id !== lastIdRef.current;
     stickRef.current = intentAfterNewest({
@@ -2892,6 +2906,24 @@ export function forwardEntersSelection(
   selectionAvailable: boolean,
 ): boolean {
   return selectionAvailable && threadSelectable(message);
+}
+
+/**
+ * One new-rows pass while an older-page load holds its anchor (the list's
+ * scrollHeight when the load began). When the older rows painted (the first
+ * row changed) the list scrolls by the height they added and the anchor is
+ * done. Otherwise (the page is still held; rows changed below) nothing scrolls
+ * and the anchor re-bases on the current height, so later growth below never
+ * counts toward the compensation. Pure.
+ */
+export function olderPageAnchorStep(input: {
+  anchorHeight: number;
+  prepended: boolean;
+  scrollHeight: number;
+}): { scrollBy: number; anchorHeight: number | null } {
+  if (input.prepended)
+    return { scrollBy: input.scrollHeight - input.anchorHeight, anchorHeight: null };
+  return { scrollBy: 0, anchorHeight: input.scrollHeight };
 }
 
 /** The slice of the thread list selection anchoring reads (the <ul>, or a test fake). */
