@@ -133,10 +133,13 @@ export async function loadChannelMembers(
 export function mentionGone(
   load: ChannelMembersLoad | null,
   selfId: string | null,
+  workspaceId: string | null,
 ): (userId: string) => boolean {
-  if (load === null || !load.ok) return (userId) => userId !== selfId && isFormerMember(userId);
+  // Only this workspace's former flags count: one learned elsewhere never drops anyone here.
+  const former = (userId: string): boolean => isFormerMember(workspaceId, userId);
+  if (load === null || !load.ok) return (userId) => userId !== selfId && former(userId);
   const ids = new Set(load.members.map((m) => m.userId));
-  return (userId) => userId !== selfId && (!ids.has(userId) || isFormerMember(userId));
+  return (userId) => userId !== selfId && (!ids.has(userId) || former(userId));
 }
 
 const READERS: ChannelMemberReaders = {
@@ -169,7 +172,7 @@ export function useChannelMembersState(input: ChannelMembersInput): ChannelMembe
       })
       .then((next) => {
         if (cancelled) return;
-        if (next.ok) rememberMentionNames(next.members);
+        if (next.ok) rememberMentionNames(workspaceId, next.members);
         setLoaded({ key, load: next });
       });
     return () => {

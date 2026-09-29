@@ -49,6 +49,7 @@ import {
 import {
   knownMentionName,
   mentionIds,
+  mentionNamesIn,
   rememberMentionProfiles,
   resolveMentionPreview,
 } from '@/lib/chat/mentions';
@@ -237,9 +238,9 @@ export async function routeGlobalCmd(ext: unknown, deps: GlobalCmdDeps): Promise
   if (deleted.length > 0) deps.onDeleted(deleted);
 }
 
-/** A body with @[uuid] tokens as list text: "@Name" (the registry's names). */
-export function previewMentionText(text: string): string {
-  return resolveMentionPreview(text, knownMentionName);
+/** A body with @[uuid] tokens as list text: "@Name" (this workspace's registry names). */
+export function previewMentionText(text: string, workspaceId: string | null): string {
+  return resolveMentionPreview(text, mentionNamesIn(workspaceId));
 }
 
 /**
@@ -252,9 +253,11 @@ export function previewMentionText(text: string): string {
 export async function rememberBodyNames(
   bodies: readonly string[],
   readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>>,
+  workspaceId: string,
 ): Promise<void> {
+  // Unknown FOR THIS WORKSPACE: a name learned in another one never counts.
   const ids = [...new Set(bodies.flatMap(mentionIds))].filter(
-    (id) => knownMentionName(id) === undefined,
+    (id) => knownMentionName(workspaceId, id) === undefined,
   );
   if (ids.length === 0) return;
   const result = await withReadTimeout((signal) => readNames(ids, signal));
@@ -262,7 +265,7 @@ export async function rememberBodyNames(
     logger.warn('chat store: mention names read failed', { error: result.error.message });
     return;
   }
-  rememberMentionProfiles(result.data);
+  rememberMentionProfiles(workspaceId, result.data);
 }
 
 /**
@@ -272,27 +275,32 @@ export async function rememberBodyNames(
 export async function resolvePreviewMentions(
   previews: Result<ConversationPreview[]>,
   readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>>,
+  workspaceId: string,
 ): Promise<Result<ConversationPreview[]>> {
   if (!previews.ok) return previews;
   await rememberBodyNames(
     previews.data.map((p) => p.body),
     readNames,
+    workspaceId,
   );
   return {
     ok: true,
-    data: previews.data.map((p) => ({ ...p, body: previewMentionText(p.body) })),
+    data: previews.data.map((p) => ({ ...p, body: previewMentionText(p.body, workspaceId) })),
   };
 }
 
 /** The last-line previews with their mention names resolved. */
 function readPreviews(workspaceId: string): Promise<Result<ConversationPreview[]>> {
   return loadConversationPreviews(supabase, workspaceId).then((result) =>
-    resolvePreviewMentions(result, (ids, signal) =>
-      readMentionProfiles(supabase, {
-        workspaceId,
-        userIds: ids,
-        ...(signal !== undefined ? { signal } : {}),
-      }),
+    resolvePreviewMentions(
+      result,
+      (ids, signal) =>
+        readMentionProfiles(supabase, {
+          workspaceId,
+          userIds: ids,
+          ...(signal !== undefined ? { signal } : {}),
+        }),
+      workspaceId,
     ),
   );
 }
@@ -411,10 +419,13 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     setState((prev) => store.markRead(prev, channelId));
   }, []);
 
-  const updateOwnMessage = useCallback((channelId: string, text: string, ts: number) => {
-    const line = previewMentionText(text);
-    setState((prev) => store.updateOwnMessage(prev, { channelId, text: line, ts }));
-  }, []);
+  const updateOwnMessage = useCallback(
+    (channelId: string, text: string, ts: number) => {
+      const line = previewMentionText(text, workspaceId);
+      setState((prev) => store.updateOwnMessage(prev, { channelId, text: line, ts }));
+    },
+    [workspaceId],
+  );
 
   const clearConversation = useCallback((channelId: string, clearedAtMs: number) => {
     senderRef.current?.dropChannel(channelId);
@@ -611,7 +622,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
               store.updateOwnMessage(prev, {
                 channelId,
                 messageId: message.id,
-                text: previewMentionText(message.body),
+                text: previewMentionText(message.body, scopeKey.workspaceId),
                 ts: message.time,
               }),
             );
@@ -695,15 +706,18 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         if (summary === undefined) return;
         // Names first (one batched read for unknown ids), so the line and the
         // toast read "@Name" from their first paint.
-        await rememberBodyNames([row.body ?? ''], (ids, signal) =>
-          readMentionProfiles(supabase, {
-            workspaceId: row.workspace_id,
-            userIds: ids,
-            ...(signal !== undefined ? { signal } : {}),
-          }),
+        await rememberBodyNames(
+          [row.body ?? ''],
+          (ids, signal) =>
+            readMentionProfiles(supabase, {
+              workspaceId: row.workspace_id,
+              userIds: ids,
+              ...(signal !== undefined ? { signal } : {}),
+            }),
+          row.workspace_id,
         );
         const text = store.previewText({
-          body: previewMentionText(row.body ?? ''),
+          body: previewMentionText(row.body ?? '', row.workspace_id),
           hasAttachments:
             (row.attachment_asset_ids ?? []).length > 0 ||
             (row.shared_post_ids ?? []).length > 0 ||

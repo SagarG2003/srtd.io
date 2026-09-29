@@ -18,6 +18,7 @@ import { isNearBottom } from '@/lib/chat/scroll';
 import {
   ALL_MENTION,
   isFormerMember,
+  isUnconfirmedMember,
   knownMentionName,
   mentionIds,
   mentionLabel,
@@ -1191,15 +1192,20 @@ const MENTION_HIT =
   "relative before:absolute before:left-1/2 before:top-1/2 before:h-[44px] before:w-full before:min-w-[44px] before:-translate-x-1/2 before:-translate-y-1/2 before:content-['']";
 
 /**
- * The thread's mention name lookup: the batched profiles, then the mention
- * registry. A former member (read without an active membership) resolves to
- * nothing, so their mention reads "@Unknown member" and is inert.
+ * The thread's mention name lookup: the batched profiles, then this
+ * workspace's mention registry. A former member (read without an active
+ * membership) resolves to nothing, so their mention reads "@Unknown member"
+ * and is inert; so does one whose membership read failed (unconfirmed), the
+ * failed-read behaviour, until a read confirms them.
  */
-export function profileNameOf(profiles: Map<string, ChatProfile>): NameOf {
+export function profileNameOf(
+  profiles: Map<string, ChatProfile>,
+  workspaceId: string | null,
+): NameOf {
   return (userId) =>
-    isFormerMember(userId)
+    isFormerMember(workspaceId, userId) || isUnconfirmedMember(workspaceId, userId)
       ? undefined
-      : (profiles.get(userId)?.displayName ?? knownMentionName(userId));
+      : (profiles.get(userId)?.displayName ?? knownMentionName(workspaceId, userId));
 }
 
 /**
@@ -1378,6 +1384,8 @@ export function MessageBubble(props: {
   viewerUserId?: string | undefined;
   /** Tappable @mentions; absent draws them inert. */
   mentions?: BubbleMentions | undefined;
+  /** The open workspace: mention names resolve from its registry only. */
+  workspaceId?: string | null | undefined;
   /** The in-bubble meta; computed from the message when absent. */
   meta?: BubbleMeta;
   onBadgeClick: () => void;
@@ -1503,7 +1511,7 @@ export function MessageBubble(props: {
   const body = (
     <p className={bodyText(layout)}>
       {renderBodyWithMentions(message.body, mine, {
-        nameOf: profileNameOf(profiles),
+        nameOf: profileNameOf(profiles, props.workspaceId ?? null),
         viewerUserId: props.viewerUserId ?? null,
         mentions: selection === undefined ? props.mentions : undefined,
         mentionedMe: mentionsMe(message, props.viewerUserId ?? null, isGroup),
@@ -1600,7 +1608,10 @@ export function MessageBubble(props: {
                 preview={
                   parentDeleted
                     ? deletedMessageLabel({ mine: quotedMine })
-                    : resolveMentionText(reply.preview, profileNameOf(profiles))
+                    : resolveMentionText(
+                        reply.preview,
+                        profileNameOf(profiles, props.workspaceId ?? null),
+                      )
                 }
                 deleted={parentDeleted}
                 inBubble={layout}
@@ -1898,6 +1909,8 @@ function MessageRow(props: {
   layout: ChatLayout;
   viewerUserId?: string | undefined;
   mentions?: BubbleMentions | undefined;
+  /** The open workspace: mention names resolve from its registry only. */
+  workspaceId?: string | null | undefined;
   meta: BubbleMeta;
   /**
    * Open the menu: its anchor rect and the pressed bubble (drawn above the dim);
@@ -2033,6 +2046,7 @@ function MessageRow(props: {
       layout={props.layout}
       viewerUserId={props.viewerUserId}
       mentions={props.mentions}
+      workspaceId={props.workspaceId}
       meta={props.meta}
       bubbleRef={bubbleRef}
       rowRef={rowRef}
@@ -2296,6 +2310,8 @@ function ThreadBody(
     viewerUserId?: string | undefined;
     /** Tappable @mentions in bubbles. */
     mentions?: BubbleMentions | undefined;
+    /** The open workspace: mention names resolve from its registry only. */
+    workspaceId?: string | null | undefined;
     presignEnabled: boolean;
     showTicks: boolean;
     isGroup: boolean;
@@ -2756,6 +2772,7 @@ function ThreadBody(
               layout={props.layout}
               viewerUserId={props.viewerUserId}
               mentions={props.mentions}
+              workspaceId={props.workspaceId}
               meta={row.meta}
               onOpen={(m, rect, held, reactionsOnly) => {
                 if (m.deleted === true) return;
@@ -2862,7 +2879,10 @@ function ThreadBody(
         onCopy={() => {
           if (menu) {
             void navigator.clipboard?.writeText(
-              resolveMentionText(menu.message.body, profileNameOf(props.profiles)),
+              resolveMentionText(
+                menu.message.body,
+                profileNameOf(props.profiles, props.workspaceId ?? null),
+              ),
             );
             toast.show({ title: 'Message copied' });
           }
@@ -3522,9 +3542,12 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     (id: string): ThreadMessage | undefined => {
       const message = messagesById.get(id) ?? markedMessages?.get(id);
       if (message === undefined) return undefined;
-      return { ...message, body: resolveMentionText(message.body, profileNameOf(profiles)) };
+      return {
+        ...message,
+        body: resolveMentionText(message.body, profileNameOf(profiles, workspaceId)),
+      };
     },
-    [messagesById, markedMessages, profiles],
+    [messagesById, markedMessages, profiles, workspaceId],
   );
 
   // The About post resolved to nothing (RLS, failed read): drop it and say so.
@@ -3695,6 +3718,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         layout={layout}
         viewerUserId={props.currentUserId}
         mentions={props.mentions}
+        workspaceId={workspaceId}
         marks={marks}
         jumpRequest={jumpRequest}
         {...(props.onEnsureLoaded !== undefined ? { onEnsureLoaded: props.onEnsureLoaded } : {})}
@@ -3814,7 +3838,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
                   isGroup: props.isGroup === true,
                   ...(props.mentionGone !== undefined ? { gone: props.mentionGone } : {}),
                   selfId: props.currentUserId ?? null,
-                  nameOf: profileNameOf(props.profiles),
+                  nameOf: profileNameOf(props.profiles, workspaceId),
                 },
               }
             : {})}

@@ -213,8 +213,11 @@ export async function readProfiles(
 
 /** A mentioned person's profile, and whether they are a current workspace member. */
 export interface MentionProfile extends ChatProfile {
-  /** An active, non-removed workspace_members row in this workspace. */
-  member: boolean;
+  /**
+   * An active, non-removed workspace_members row in this workspace; null when
+   * the membership read failed (unknown: nobody is marked former for it).
+   */
+  member: boolean | null;
 }
 
 /**
@@ -238,19 +241,30 @@ export async function readActiveMemberIds(
 /**
  * Profiles for mentioned ids, each marked with current membership: the users
  * IN read and the workspace_members IN read run in the same pass (users RLS
- * lets an ex-member's profile be read, so a name alone proves nothing). Either
- * read failing fails the whole read.
+ * lets an ex-member's profile be read, so a name alone proves nothing). Only a
+ * failed users read fails the whole read; a failed membership read still
+ * returns the profiles, with membership unknown (null).
  */
 export async function readMentionProfiles(
   client: Client,
-  params: { workspaceId: string; userIds: string[]; signal?: AbortSignal },
+  params: { workspaceId: string; userIds: string[]; signal?: AbortSignal; timeoutMs?: number },
 ): Promise<Result<MentionProfile[]>> {
+  // With timeoutMs each read gets its own budget (in parallel), so a hung
+  // membership read cannot take the profiles down with it.
+  const bounded = <T>(run: (signal?: AbortSignal) => Promise<Result<T>>): Promise<Result<T>> =>
+    params.timeoutMs !== undefined ? withReadTimeout(run, params.timeoutMs) : run(params.signal);
   const [profiles, active] = await Promise.all([
-    readProfiles(client, params.userIds, params.signal),
-    readActiveMemberIds(client, params),
+    bounded((signal) => readProfiles(client, params.userIds, signal)),
+    bounded((signal) =>
+      readActiveMemberIds(client, {
+        workspaceId: params.workspaceId,
+        userIds: params.userIds,
+        ...(signal !== undefined ? { signal } : {}),
+      }),
+    ),
   ]);
   if (!profiles.ok) return profiles;
-  if (!active.ok) return active;
+  if (!active.ok) return { ok: true, data: profiles.data.map((p) => ({ ...p, member: null })) };
   const members = new Set(active.data);
   return {
     ok: true,

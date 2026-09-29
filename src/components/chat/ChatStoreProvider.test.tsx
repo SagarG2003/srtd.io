@@ -475,6 +475,7 @@ describe('chat list mentions', () => {
     const result = await resolvePreviewMentions(
       { ok: true, data: [preview(`hi @[${ANA}]`), preview(`and @[${GONE}] @[${ANA}]`)] },
       readNames,
+      'w1',
     );
     expect(readNames).toHaveBeenCalledTimes(1);
     expect(readNames).toHaveBeenCalledWith([ANA, GONE], expect.any(AbortSignal));
@@ -483,15 +484,15 @@ describe('chat list mentions', () => {
       'and @Unknown member @Ana',
     ]);
     // Known names need no second read.
-    await resolvePreviewMentions({ ok: true, data: [preview(`@[${ANA}]`)] }, readNames);
+    await resolvePreviewMentions({ ok: true, data: [preview(`@[${ANA}]`)] }, readNames, 'w1');
     expect(readNames).toHaveBeenCalledTimes(1);
   });
 
   it('own sends, forwards and the Draft line read "@Name"', () => {
     resetMentionNames();
-    rememberMentionNames([{ userId: ANA, displayName: 'Ana' }]);
-    expect(previewMentionText(`ok @[${ANA}]`)).toBe('ok @Ana');
-    expect(draftLine(`draft @[${ANA}] @[${GONE}]`)).toBe('draft @Ana @Unknown member');
+    rememberMentionNames('w1', [{ userId: ANA, displayName: 'Ana' }]);
+    expect(previewMentionText(`ok @[${ANA}]`, 'w1')).toBe('ok @Ana');
+    expect(draftLine(`draft @[${ANA}] @[${GONE}]`, 'w1')).toBe('draft @Ana @Unknown member');
     resetMentionNames();
   });
 });

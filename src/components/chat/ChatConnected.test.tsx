@@ -11,6 +11,7 @@ vi.mock('@/lib/logger', () => ({
 }));
 
 import {
+  applyMentionProfileRead,
   applyProfileRead,
   CHAT_UNAVAILABLE_TOAST,
   deepLinkAfterRefresh,
@@ -44,13 +45,14 @@ import {
 import { findInOlderPages } from '@/lib/chat/marks';
 import {
   isFormerMember,
+  isUnconfirmedMember,
   knownMentionName,
   rememberMentionProfiles,
   resetMentionNames,
   resolveMentionText,
   serializeMentions,
 } from '@/lib/chat/mentions';
-import { previewMentionText } from '@/components/chat/ChatStoreProvider';
+import { previewMentionText, rememberBodyNames } from '@/components/chat/ChatStoreProvider';
 import { draftLine } from '@/components/chat/ChannelList';
 import { composerBodyFor } from '@/components/chat/Composer';
 import { mentionGone } from '@/components/chat/use-channel-members';
@@ -168,7 +170,7 @@ function paint(
 ): ThreadMessage[] {
   return paintableMessages(
     messages,
-    (id) => profiles.has(id) || knownMentionName(id) !== undefined,
+    (id) => profiles.has(id) || knownMentionName('w1', id) !== undefined,
     reads,
     painted,
   );
@@ -194,7 +196,7 @@ function bubbleHtml(message: ThreadMessage, profiles: Profiles): string {
   return renderToStaticMarkup(
     <p>
       {renderBodyWithMentions(message.body, false, {
-        nameOf: profileNameOf(profiles),
+        nameOf: profileNameOf(profiles, 'w1'),
         viewerUserId: 'me',
         mentions: { peerUserId: null, onOpen: () => {} },
       })}
@@ -796,9 +798,9 @@ describe('B1 a readable profile is not membership', () => {
       ['Eve', false],
     ]);
     // What ChatConnected's profile effect does with the read.
-    rememberMentionProfiles(result.data);
+    rememberMentionProfiles('w1', result.data);
     const profiles: Profiles = new Map(result.data.map((p) => [p.userId, p]));
-    expect(isFormerMember(EX)).toBe(true);
+    expect(isFormerMember('w1', EX)).toBe(true);
 
     const body = `hi @[${ANA}] and @[${EX}]`;
     const row = message({ id: 'm2', body });
@@ -813,18 +815,20 @@ describe('B1 a readable profile is not membership', () => {
     expect(html).not.toContain('Eve');
     expect(html.match(/<button/g)).toHaveLength(1);
     // Copy, list preview, draft line.
-    expect(resolveMentionText(body, profileNameOf(profiles))).toBe('hi @Ana and @Unknown member');
-    expect(previewMentionText(body)).toBe('hi @Ana and @Unknown member');
-    expect(draftLine(body)).toBe('hi @Ana and @Unknown member');
+    expect(resolveMentionText(body, profileNameOf(profiles, 'w1'))).toBe(
+      'hi @Ana and @Unknown member',
+    );
+    expect(previewMentionText(body, 'w1')).toBe('hi @Ana and @Unknown member');
+    expect(draftLine(body, 'w1')).toBe('hi @Ana and @Unknown member');
 
     // Edit box: the ex-member shows "@Unknown member" and drops on save, even
     // when the chat's member read failed (the profile read already settled it).
     for (const load of [{ ok: true as const, members: [] }, { ok: false as const }]) {
-      const gone = mentionGone(load, 'me');
+      const gone = mentionGone(load, 'me', 'w1');
       const shown = composerBodyFor(
         { text: body, caret: body.length },
         true,
-        profileNameOf(profiles),
+        profileNameOf(profiles, 'w1'),
         gone,
       );
       expect(shown.text).toBe('hi @Ana and @Unknown member');
@@ -851,7 +855,184 @@ describe('B1 a readable profile is not membership', () => {
   it('B1 a failed profile read keeps the existing behaviour: kept, inert, not marked former', async () => {
     const reads = applyProfileRead(NO_NAME_READS, [EX], failed);
     expect(reads.failed.has(EX)).toBe(true);
-    expect(isFormerMember(EX)).toBe(false);
-    expect(mentionGone({ ok: false }, 'me')(EX)).toBe(false);
+    expect(isFormerMember('w1', EX)).toBe(false);
+    expect(mentionGone({ ok: false }, 'me', 'w1')(EX)).toBe(false);
   });
+});
+
+/**
+ * A client whose users read returns the given profiles and whose
+ * workspace_members read answers per workspace (eq workspace_id): the active
+ * ids there, an error ('fail') or never ('hang').
+ */
+function perWorkspaceClient(
+  users: Record<string, unknown>[],
+  members: Record<string, string[] | 'fail' | 'hang'>,
+): Client {
+  return {
+    from: (table: string) => {
+      let workspaceId = '';
+      const query = {
+        select: () => query,
+        eq: (col: string, value: string) => {
+          if (col === 'workspace_id') workspaceId = value;
+          return query;
+        },
+        is: () => query,
+        in: () => query,
+        abortSignal: () => query,
+        then: (resolve: (value: unknown) => unknown) => {
+          if (table === 'users') return Promise.resolve({ data: users, error: null }).then(resolve);
+          const answer = members[workspaceId] ?? [];
+          if (answer === 'hang') return new Promise(() => undefined);
+          if (answer === 'fail') {
+            return Promise.resolve({ data: null, error: { message: 'down' } }).then(resolve);
+          }
+          const data = answer.map((id) => ({ user_id: id, role: 'client' }));
+          return Promise.resolve({ data, error: null }).then(resolve);
+        },
+      };
+      return query;
+    },
+  } as unknown as Client;
+}
+
+/** A body's bubble as drawn in one workspace's thread (peer bubble, tappable mentions). */
+function bubbleIn(body: string, profiles: Profiles, workspaceId: string): string {
+  return renderToStaticMarkup(
+    <p>
+      {renderBodyWithMentions(body, false, {
+        nameOf: profileNameOf(profiles, workspaceId),
+        viewerUserId: 'me',
+        mentions: { peerUserId: null, onOpen: () => {} },
+      })}
+    </p>,
+  );
+}
+
+describe('W1 mention state is per workspace', () => {
+  beforeEach(() => resetMentionNames());
+
+  it('W1 active in A, removed from B: B reads "@Unknown member" everywhere, A keeps the name, A->B->A re-reads nothing wrongly', async () => {
+    const client = perWorkspaceClient([{ id: ANA, display_name: 'Ana', avatar_url: null }], {
+      wa: [ANA],
+      wb: [],
+    });
+    const body = `hi @[${ANA}]`;
+    // A then B, each through its own read and its own registry.
+    const inA = await readMentionProfiles(client, { workspaceId: 'wa', userIds: [ANA] });
+    const inB = await readMentionProfiles(client, { workspaceId: 'wb', userIds: [ANA] });
+    if (!inA.ok || !inB.ok) throw new Error('reads failed');
+    rememberMentionProfiles('wa', inA.data);
+    rememberMentionProfiles('wb', inB.data);
+    const profilesA: Profiles = new Map(inA.data.map((p) => [p.userId, p]));
+    const profilesB: Profiles = new Map(inB.data.map((p) => [p.userId, p]));
+
+    // B: list preview, draft line, live line and thread all read "@Unknown member".
+    expect(previewMentionText(body, 'wb')).toBe('hi @Unknown member');
+    expect(draftLine(body, 'wb')).toBe('hi @Unknown member');
+    const bHtml = bubbleIn(body, profilesB, 'wb');
+    expect(bHtml).toContain('@Unknown member');
+    expect(bHtml).not.toContain('<button');
+    expect(mentionGone(null, 'me', 'wb')(ANA)).toBe(true);
+
+    // A: the name stays, tappable; B's former flag never drops or hides them here.
+    expect(previewMentionText(body, 'wa')).toBe('hi @Ana');
+    expect(draftLine(body, 'wa')).toBe('hi @Ana');
+    const aHtml = bubbleIn(body, profilesA, 'wa');
+    expect(aHtml).toContain('@Ana');
+    expect(aHtml).toContain('<button');
+    expect(isFormerMember('wa', ANA)).toBe(false);
+    expect(mentionGone(null, 'me', 'wa')(ANA)).toBe(false);
+    expect(mentionGone({ ok: false }, 'me', 'wa')(ANA)).toBe(false);
+
+    // Switching A -> B -> A: A's known name needs no read; B re-reads its own
+    // unknown (former) id, and its answer never leaks into A.
+    const readerFor = (workspaceId: string) =>
+      vi.fn(async (ids: string[], signal?: AbortSignal) =>
+        readMentionProfiles(client, {
+          workspaceId,
+          userIds: ids,
+          ...(signal !== undefined ? { signal } : {}),
+        }),
+      );
+    const readA = readerFor('wa');
+    const readB = readerFor('wb');
+    await rememberBodyNames([body], readA, 'wa');
+    expect(readA).not.toHaveBeenCalled();
+    await rememberBodyNames([body], readB, 'wb');
+    expect(readB).toHaveBeenCalledTimes(1);
+    expect(previewMentionText(body, 'wb')).toBe('hi @Unknown member');
+    await rememberBodyNames([body], readA, 'wa');
+    expect(readA).not.toHaveBeenCalled();
+    expect(previewMentionText(body, 'wa')).toBe('hi @Ana');
+    // A workspace never read knows nothing from A or B.
+    expect(previewMentionText(body, 'wc')).toBe('hi @Unknown member');
+    expect(isFormerMember('wc', ANA)).toBe(false);
+  });
+});
+
+describe('W4 a failed membership half keeps the profiles', () => {
+  beforeEach(() => resetMentionNames());
+
+  const users = [
+    { id: BEN, display_name: 'Ben', avatar_url: 'https://cdn.example/ben.png' },
+    { id: ANA, display_name: 'Ana', avatar_url: null },
+  ];
+
+  for (const members of ['fail', 'hang'] as const) {
+    it(`W4 members read ${members === 'fail' ? 'fails' : 'times out'}, users read succeeds: sender name/avatar shown, mentions keep failed-read behaviour`, async () => {
+      vi.useFakeTimers();
+      try {
+        const client = perWorkspaceClient(users, { w1: members });
+        const ids = [BEN, ANA];
+        const pending = readMentionProfiles(client, {
+          workspaceId: 'w1',
+          userIds: ids,
+          timeoutMs: READ_TIMEOUT_MS,
+        });
+        await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+        const result = await pending;
+        // Not a failed read: the profiles come back, membership unknown.
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.data.map((p) => p.member)).toEqual([null, null]);
+
+        // What ChatConnected's profile effect does with it.
+        rememberMentionProfiles('w1', result.data);
+        const profiles: Profiles = new Map(result.data.map((p) => [p.userId, p]));
+        const reads = applyMentionProfileRead(NO_NAME_READS, ids, result);
+
+        // The sender's name and avatar are stored as before.
+        expect(profiles.get(BEN)?.displayName).toBe('Ben');
+        expect(profiles.get(BEN)?.avatarUrl).toBe('https://cdn.example/ben.png');
+
+        // Mentions: failed (retried), never unknown, nobody marked former, no drops.
+        expect([...reads.failed].sort()).toEqual([...ids].sort());
+        expect(reads.unknown.size).toBe(0);
+        expect(isFormerMember('w1', ANA)).toBe(false);
+        expect(isUnconfirmedMember('w1', ANA)).toBe(true);
+        expect(mentionGone({ ok: false }, 'me', 'w1')(ANA)).toBe(false);
+        const row = message({ id: 'w4', body: `ping @[${ANA}]` });
+        expect(paint([row], profiles, reads)).toEqual([row]);
+        const html = bubbleIn(row.body, profiles, 'w1');
+        expect(html).toContain('@Unknown member');
+        expect(html).not.toContain('<button');
+        // The composer keeps the mention and still sends it.
+        const shown = composerBodyFor(
+          { text: row.body, caret: row.body.length },
+          true,
+          profileNameOf(profiles, 'w1'),
+          mentionGone({ ok: false }, 'me', 'w1'),
+        );
+        expect(serializeMentions(shown.text, shown.picks)).toBe(`ping @[${ANA}]`);
+
+        // A later read that confirms membership names them again.
+        rememberMentionProfiles('w1', [{ userId: ANA, displayName: 'Ana', member: true }]);
+        expect(bubbleIn(row.body, profiles, 'w1')).toContain('@Ana');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
 });

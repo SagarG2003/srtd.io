@@ -3225,7 +3225,7 @@ describe('@mentions in bubbles', () => {
     [ME, { userId: ME, displayName: 'Me Person', avatarUrl: null }],
     [BEN, { userId: BEN, displayName: 'Ben', avatarUrl: null }],
   ]);
-  const nameOf = profileNameOf(names);
+  const nameOf = profileNameOf(names, 'w1');
   const body = `hi @[${BEN}], @[${ME}] and @[${GONE}]`;
 
   function markup(mine: boolean, onOpen = vi.fn(), peerUserId: string | null = null): string {
@@ -3409,7 +3409,7 @@ describe('A3 "@all" renders bold, as a mention of me for recipients, and inert',
     return renderStrip(
       <p>
         {renderBodyWithMentions('@[all] standup', mine, {
-          nameOf: profileNameOf(names),
+          nameOf: profileNameOf(names, 'w1'),
           viewerUserId: 'me',
           mentions: { peerUserId: null, onOpen: vi.fn() },
           // J8: the tint follows the stored mentions; a group recipient is in them.
@@ -3437,7 +3437,7 @@ describe('A3 "@all" renders bold, as a mention of me for recipients, and inert',
   });
 
   it('A3 list preview and draft line draw "@all" bold', () => {
-    const html = renderStrip(<span>{boldAllMentions(draftLine('@[all] ship it'))}</span>);
+    const html = renderStrip(<span>{boldAllMentions(draftLine('@[all] ship it', 'w1'))}</span>);
     expect(html).toContain('<span data-mention-all="" class="font-bold">@all</span> ship it');
     expect(boldAllMentions('no everyone here')).toBe('no everyone here');
   });
@@ -3470,7 +3470,7 @@ describe('A3 "@all" renders bold, as a mention of me for recipients, and inert',
 });
 
 describe('J7 only a real "@[all]" token draws bold', () => {
-  const nameOf = profileNameOf(new Map());
+  const nameOf = profileNameOf(new Map(), 'w1');
   const bubble = (body: string): string =>
     renderStrip(
       <p>
@@ -3528,9 +3528,9 @@ describe('J7 only a real "@[all]" token draws bold', () => {
       />,
     );
   const list = (raw: string): string =>
-    renderStrip(<span>{boldAllMentions(previewMentionText(raw))}</span>);
+    renderStrip(<span>{boldAllMentions(previewMentionText(raw, 'w1'))}</span>);
   const draft = (raw: string): string =>
-    renderStrip(<span>{boldAllMentions(draftLine(raw))}</span>);
+    renderStrip(<span>{boldAllMentions(draftLine(raw, 'w1'))}</span>);
 
   it('J7 plain "@all" not bold in list, draft line, Activity or bubble; the token is bold in all four', () => {
     const plain = '@all standup';
@@ -3553,7 +3553,7 @@ describe('J7 only a real "@[all]" token draws bold', () => {
 });
 
 describe('J8 the mention-of-me tint follows the stored mentions', () => {
-  const nameOf = profileNameOf(new Map());
+  const nameOf = profileNameOf(new Map(), 'w1');
   const render = (
     m: Pick<ThreadMessage, 'body' | 'mine' | 'mentions' | 'forwarded'>,
     isGroup: boolean,

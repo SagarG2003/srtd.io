@@ -40,7 +40,7 @@ import { sortChannelsByRecency } from '@/lib/chat/sort-conversations';
 import { formatRelativeTime } from '@/lib/chat/format-relative-time';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { draftText, draftsVersion, subscribeDrafts } from '@/lib/chat/drafts';
-import { knownMentionName, resolveMentionPreview, splitAllMentions } from '@/lib/chat/mentions';
+import { mentionNamesIn, resolveMentionPreview, splitAllMentions } from '@/lib/chat/mentions';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import {
   CHAT_LIST_NAME_TYPE,
@@ -68,9 +68,12 @@ export function rowDraft(draft: string, open: boolean): string | null {
   return !open && draft.trim() !== '' ? draft : null;
 }
 
-/** A stored draft as its list line: its @[uuid] tokens read "@Name". Pure over the registry. */
-export function draftLine(stored: string): string {
-  return resolveMentionPreview(stored, knownMentionName);
+/**
+ * A stored draft as its list line: its @[uuid] tokens read "@Name" from this
+ * workspace's registry only. Pure over the registry.
+ */
+export function draftLine(stored: string, workspaceId: string | null): string {
+  return resolveMentionPreview(stored, mentionNamesIn(workspaceId));
 }
 
 /** A list line with each real "@all" token drawn bold (the ink stays the line's own). */
@@ -125,6 +128,8 @@ interface ChannelListProps {
    * absent hides long-press delete and the Select control.
    */
   onDeleteChats?: (channels: ChannelSummary[]) => Promise<ClearRunResult<ChannelSummary>>;
+  /** The open workspace: a Draft line resolves names from its registry only. */
+  workspaceId?: string | null;
 }
 
 interface ChannelListBodyProps extends Omit<ChannelListProps, 'status' | 'onRetry'> {
@@ -853,6 +858,7 @@ export function deleteChatsConfirm(props: {
 
 /** Scrollable channel list pane with the shared search/create header. */
 export function ChannelList(props: ChannelListProps): ReactElement {
+  const listWorkspaceId = props.workspaceId ?? null;
   const [search, setSearch] = useState('');
   const [selecting, setSelecting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -872,9 +878,9 @@ export function ChannelList(props: ChannelListProps): ReactElement {
   // Drafts live outside React; re-read the rows whenever one changes.
   const drafts = useSyncExternalStore(subscribeDrafts, draftsVersion, draftsVersion);
   const draftFor = useCallback<DraftLookup>(
-    (channelId) => draftLine(draftText(channelId)),
+    (channelId) => draftLine(draftText(channelId), listWorkspaceId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [drafts],
+    [drafts, listWorkspaceId],
   );
   const onDeleteChats = props.onDeleteChats;
   const closeMenu = useCallback(() => setMenu(null), []);

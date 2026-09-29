@@ -356,52 +356,102 @@ export function displayCaret(body: string, caret: number, nameOf: NameOf): numbe
 }
 
 // --- name registry -----------------------------------------------------------
+//
+// One registry per workspace: a name, a former flag or an unconfirmed flag
+// learned in one workspace is never read in another. Every read and write
+// names its workspace; a null workspace reads nothing and writes nothing.
 
-const names = new Map<string, string>();
-// Ids a successful read found without an active workspace membership: their
-// mentions read "@Unknown member" (inert) even though their profile resolves.
-const former = new Set<string>();
+interface MentionRegistry {
+  names: Map<string, string>;
+  // Ids a successful read found without an active workspace membership: their
+  // mentions read "@Unknown member" (inert) even though their profile resolves.
+  former: Set<string>;
+  // Ids whose profile read but whose membership read failed: nothing is known
+  // yet, so their mentions keep the failed-read behaviour (inert, retried).
+  unconfirmed: Set<string>;
+}
 
-/** Remember current members' display names (a member read, or a pick). */
+const registries = new Map<string, MentionRegistry>();
+
+function registryFor(workspaceId: string): MentionRegistry {
+  let registry = registries.get(workspaceId);
+  if (registry === undefined) {
+    registry = { names: new Map(), former: new Set(), unconfirmed: new Set() };
+    registries.set(workspaceId, registry);
+  }
+  return registry;
+}
+
+/** Remember current members' display names in one workspace (a member read, or a pick). */
 export function rememberMentionNames(
+  workspaceId: string | null,
   entries: Iterable<{ userId: string; displayName: string }>,
 ): void {
+  if (workspaceId === null) return;
+  const registry = registryFor(workspaceId);
   for (const entry of entries) {
     if (entry.displayName !== '' && entry.userId !== ALL_MENTION) {
-      names.set(entry.userId.toLowerCase(), entry.displayName);
-      former.delete(entry.userId.toLowerCase());
+      const id = entry.userId.toLowerCase();
+      registry.names.set(id, entry.displayName);
+      registry.former.delete(id);
+      registry.unconfirmed.delete(id);
     }
   }
 }
 
 /**
- * Remember a mention profile read: a current member's name is kept; anyone
- * else is marked a former member, so their mentions read "@Unknown member".
+ * Remember a mention profile read in one workspace: a current member's name
+ * is kept; a confirmed non-member is marked former, so their mentions read
+ * "@Unknown member". Membership unknown (null: its read failed) marks nobody
+ * former and drops nothing already known.
  */
 export function rememberMentionProfiles(
-  entries: Iterable<{ userId: string; displayName: string; member: boolean }>,
+  workspaceId: string | null,
+  entries: Iterable<{ userId: string; displayName: string; member: boolean | null }>,
 ): void {
+  if (workspaceId === null) return;
+  const registry = registryFor(workspaceId);
   for (const entry of entries) {
-    if (entry.member) {
-      rememberMentionNames([entry]);
-    } else {
-      names.delete(entry.userId.toLowerCase());
-      former.add(entry.userId.toLowerCase());
+    const id = entry.userId.toLowerCase();
+    if (entry.member === true) {
+      rememberMentionNames(workspaceId, [entry]);
+    } else if (entry.member === false) {
+      registry.names.delete(id);
+      registry.unconfirmed.delete(id);
+      registry.former.add(id);
+    } else if (!registry.names.has(id) && !registry.former.has(id)) {
+      registry.unconfirmed.add(id);
     }
   }
 }
 
-/** Whether a successful read found this id without an active membership. */
-export function isFormerMember(userId: string): boolean {
-  return former.has(userId.toLowerCase());
+/** Whether a successful read found this id without an active membership in this workspace. */
+export function isFormerMember(workspaceId: string | null, userId: string): boolean {
+  return (
+    workspaceId !== null && (registries.get(workspaceId)?.former.has(userId.toLowerCase()) ?? false)
+  );
 }
 
-/** A remembered current member's display name, or undefined. */
-export const knownMentionName: NameOf = (userId) =>
-  isFormerMember(userId) ? undefined : names.get(userId.toLowerCase());
+/** Whether this id's membership in this workspace is still unknown (its membership read failed). */
+export function isUnconfirmedMember(workspaceId: string | null, userId: string): boolean {
+  return (
+    workspaceId !== null &&
+    (registries.get(workspaceId)?.unconfirmed.has(userId.toLowerCase()) ?? false)
+  );
+}
 
-/** Test-only: forget every remembered name. */
+/** A remembered current member's display name in this workspace, or undefined. */
+export function knownMentionName(workspaceId: string | null, userId: string): string | undefined {
+  if (workspaceId === null || isFormerMember(workspaceId, userId)) return undefined;
+  return registries.get(workspaceId)?.names.get(userId.toLowerCase());
+}
+
+/** The registry's name lookup for one workspace. */
+export function mentionNamesIn(workspaceId: string | null): NameOf {
+  return (userId) => knownMentionName(workspaceId, userId);
+}
+
+/** Test-only: forget every remembered name in every workspace. */
 export function resetMentionNames(): void {
-  names.clear();
-  former.clear();
+  registries.clear();
 }

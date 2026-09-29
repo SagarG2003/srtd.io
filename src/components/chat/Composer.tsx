@@ -164,10 +164,10 @@ export interface ComposerMentions {
   nameOf: NameOf;
 }
 
-/** The name lookup for stored tokens: the chat's own, then the registry. */
-function mentionNameOf(mentions: ComposerMentions | undefined): NameOf {
+/** The name lookup for stored tokens: the chat's own, then this workspace's registry. */
+function mentionNameOf(mentions: ComposerMentions | undefined, workspaceId: string | null): NameOf {
   const own = mentions?.nameOf;
-  return (userId) => own?.(userId) ?? knownMentionName(userId);
+  return (userId) => own?.(userId) ?? knownMentionName(workspaceId, userId);
 }
 
 /**
@@ -702,7 +702,8 @@ export function Composer(props: ComposerProps): ReactElement {
   // The draft stores the serialized body (tokens), so its mention map survives
   // a chat switch; the textarea shows "@Name" and the picks come back with it.
   // Until this chat's names are in, a body with tokens stays held (verbatim).
-  const nameOf = mentionNameOf(props.mentions);
+  const { workspaceId, workspaceKey } = useWorkspace();
+  const nameOf = mentionNameOf(props.mentions, workspaceId);
   const namesReady = props.mentions?.ready !== false;
   const gone = props.mentions?.gone;
   const [restored] = useState(() => composerBodyFor(initial, namesReady, nameOf, gone));
@@ -728,7 +729,6 @@ export function Composer(props: ComposerProps): ReactElement {
   const [editBusy, setEditBusy] = useState(false);
   const editing = props.editing;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const { workspaceId, workspaceKey } = useWorkspace();
   const recorder = useAudioRecorder();
   const toast = useToast();
   // 17px on every touch device (never under 16, so iOS never zooms), 15px on a laptop.
@@ -1070,7 +1070,7 @@ export function Composer(props: ComposerProps): ReactElement {
   function pickMention(member: MentionMember | undefined): void {
     if (member === undefined) return;
     const next = insertMention(text, caret, member.displayName);
-    rememberMentionNames([member]);
+    rememberMentionNames(workspaceId, [member]);
     setPicks((prev) => addPick(prev, { userId: member.userId, name: member.displayName }));
     setText(next.text);
     setCaret(next.caret);

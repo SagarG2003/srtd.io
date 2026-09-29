@@ -8,9 +8,11 @@ import { useWorkspace } from '@/lib/workspace-context';
 import {
   listGroupMemberIds,
   readMentionProfiles,
+  READ_TIMEOUT_MS,
   withReadTimeout,
   type ChannelSummary,
   type ChatProfile,
+  type MentionProfile,
 } from '@/lib/chat-reads';
 import { targetFromSummary, type ChannelTarget, type ThreadMessage } from '@/lib/chat/thread';
 import { generateTraceId } from '@/lib/trace';
@@ -96,6 +98,8 @@ export function rowNameIds(message: ThreadMessage): string[] {
   return ids;
 }
 
+const NO_PROFILES: Map<string, ChatProfile> = new Map();
+
 const NOTHING_PAINTED: ReadonlySet<string> = new Set();
 
 /** An own bubble not yet in the record (optimistic or in the outbox). */
@@ -146,6 +150,26 @@ export function paintableMessages(
     else held.push(m.id);
   }
   return shown.size === messages.length ? messages : messages.filter((m) => shown.has(m.id));
+}
+
+/**
+ * Fold a mention profile read in: like applyProfileRead, except a read whose
+ * membership half failed (member null) counts as failed for every asked id, so
+ * their mentions keep the failed-read behaviour (inert, retried) while the
+ * profiles themselves are kept for senders. Pure.
+ */
+export function applyMentionProfileRead(
+  reads: NameReads,
+  requested: readonly string[],
+  result: Result<MentionProfile[]>,
+): NameReads {
+  if (result.ok && result.data.some((p) => p.member === null)) {
+    return applyProfileRead(reads, requested, {
+      ok: false,
+      error: { code: 'unknown', message: 'membership unknown' },
+    });
+  }
+  return applyProfileRead(reads, requested, result);
 }
 
 /**
@@ -338,7 +362,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const timeZone = workspaceTimeZone(workspace?.timezone);
 
   const [selected, setSelected] = useState<ChannelSummary | null>(null);
-  const [profiles, setProfiles] = useState<Map<string, ChatProfile>>(new Map());
+  // The thread's profiles belong to one workspace: another workspace starts
+  // from none, so names and membership are read again there.
+  const [profileState, setProfileState] = useState<{
+    workspaceId: string;
+    profiles: Map<string, ChatProfile>;
+  }>(() => ({ workspaceId, profiles: new Map() }));
+  const profiles = profileState.workspaceId === workspaceId ? profileState.profiles : NO_PROFILES;
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [groupInfoOpen, setGroupInfoOpen] = useState(false);
   // An Activity mention's ?message=: the thread opens with it in view.
@@ -659,8 +689,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // and a live row or an older page is held until the read for its names
   // settles, so no mention ever paints as "@Unknown member" and then swaps.
   const firstPageIn = !thread.loading && threadCurrent;
-  const [nameReads, setNameReads] = useState<NameReads>(NO_NAME_READS);
-  const inFlight = useRef(new Set<string>());
+  const [nameReadState, setNameReadState] = useState<{ workspaceId: string; reads: NameReads }>(
+    () => ({ workspaceId, reads: NO_NAME_READS }),
+  );
+  const nameReads = nameReadState.workspaceId === workspaceId ? nameReadState.reads : NO_NAME_READS;
+  // Reads in flight, per workspace: a switch starts a fresh set, so the new
+  // workspace never waits on (or skips) ids asked for in the old one.
+  const inFlight = useRef({ workspaceId, ids: new Set<string>() });
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -677,33 +712,50 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   useEffect(() => {
     const retry = retryFailedFor !== null && retryFailedFor === selectedChannelId;
     if (retry) setRetryFailedFor(null);
+    if (inFlight.current.workspaceId !== workspaceId) {
+      inFlight.current = { workspaceId, ids: new Set() };
+    }
+    const flight = inFlight.current.ids;
     const ids = idsToRead(
       profileIdsNeeded(thread.messages, selected?.peerUserId ?? null, profiles),
       nameReads,
-      inFlight.current,
+      flight,
       retry,
     );
     if (ids.length === 0) return;
-    for (const id of ids) inFlight.current.add(id);
+    for (const id of ids) flight.add(id);
     // A hang is a failed read after 5s (and a rejection is one at once), so a
     // held row, the first page and the initial jump always go on. Membership
     // comes in the same pass: a readable profile is not proof of membership.
-    void withReadTimeout((signal) =>
-      readMentionProfiles(supabase, { workspaceId, userIds: ids, signal }),
-    ).then((result) => {
-      for (const id of ids) inFlight.current.delete(id);
-      if (!mounted.current) return;
+    // Each of the two reads has its own 5s budget (in parallel): a failed or
+    // hung membership read still stores the profiles, with membership unknown.
+    const forWorkspace = workspaceId;
+    void readMentionProfiles(supabase, {
+      workspaceId: forWorkspace,
+      userIds: ids,
+      timeoutMs: READ_TIMEOUT_MS,
+    }).then((result) => {
+      for (const id of ids) flight.delete(id);
+      // An answer for a workspace no longer open is dropped.
+      if (!mounted.current || workspaceIdRef.current !== forWorkspace) return;
       if (!result.ok) {
         logger.warn('chat: profile read failed', { error: result.error.message });
       } else {
-        rememberMentionProfiles(result.data);
-        setProfiles((prev) => {
-          const next = new Map(prev);
+        rememberMentionProfiles(forWorkspace, result.data);
+        setProfileState((prev) => {
+          const next = new Map(prev.workspaceId === forWorkspace ? prev.profiles : undefined);
           for (const profile of result.data) next.set(profile.userId, profile);
-          return next;
+          return { workspaceId: forWorkspace, profiles: next };
         });
       }
-      setNameReads((prev) => applyProfileRead(prev, ids, result));
+      setNameReadState((prev) => ({
+        workspaceId: forWorkspace,
+        reads: applyMentionProfileRead(
+          prev.workspaceId === forWorkspace ? prev.reads : NO_NAME_READS,
+          ids,
+          result,
+        ),
+      }));
     });
   }, [
     thread.messages,
@@ -724,13 +776,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const threadMessages = useMemo(() => {
     const rows = paintableMessages(
       thread.messages,
-      (id) => profiles.has(id) || knownMentionName(id) !== undefined,
+      (id) => profiles.has(id) || knownMentionName(workspaceId, id) !== undefined,
       nameReads,
       painted.current,
     );
     for (const row of rows) painted.current.add(row.id);
     return rows;
-  }, [thread.messages, profiles, nameReads]);
+  }, [thread.messages, profiles, nameReads, workspaceId]);
   const namesReady = namesSettled === selectedChannelId;
 
   // The @ picker's people: the group's members, or the DM's other person.
@@ -779,6 +831,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
             onNewChat={() => setNewChatOpen(true)}
             timeZone={timeZone}
             onDeleteChats={onDeleteChats}
+            workspaceId={workspaceId}
           />
         </div>
       ) : null}
@@ -820,7 +873,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               onForward={thread.forward}
               onEnsureLoaded={thread.ensureLoaded}
               mentionMembers={mentionMembers}
-              mentionGone={mentionGone(membersLoad, currentUserId)}
+              mentionGone={mentionGone(membersLoad, currentUserId, workspaceId)}
               mentions={{
                 peerUserId: selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
                 onOpen: onOpenMention,

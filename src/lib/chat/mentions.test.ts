@@ -168,9 +168,9 @@ describe('draft carets', () => {
 
 describe('name registry', () => {
   it('remembers names from batched reads', () => {
-    expect(knownMentionName(ANA)).toBeUndefined();
-    rememberMentionNames([{ userId: ANA, displayName: 'Ana Roy' }]);
-    expect(knownMentionName(ANA)).toBe('Ana Roy');
+    expect(knownMentionName('w1', ANA)).toBeUndefined();
+    rememberMentionNames('w1', [{ userId: ANA, displayName: 'Ana Roy' }]);
+    expect(knownMentionName('w1', ANA)).toBe('Ana Roy');
   });
 });
 

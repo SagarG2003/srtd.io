@@ -92,13 +92,13 @@ describe('H1 member-list reads time out and settle as failed', () => {
       const load = await pending;
       // Settled (not null), so the composer's hold releases; a failure confirms no one gone.
       expect(load).toEqual({ ok: false });
-      expect(mentionGone(load, ME)(ANA)).toBe(false);
+      expect(mentionGone(load, ME, 'w')(ANA)).toBe(false);
       const stored = `hi @[${ANA}] `;
       const shown = composerBodyFor(
         { text: stored, caret: stored.length },
         true,
         () => undefined,
-        mentionGone(load, ME),
+        mentionGone(load, ME, 'w'),
       );
       expect(shown.held).toBe(false);
       expect(shown.text).toBe('hi @Unknown member ');
@@ -160,8 +160,8 @@ describe('H1 member-list reads time out and settle as failed', () => {
       ok: true as const,
       members: [{ userId: 'a', displayName: 'A', avatarUrl: null, role: 'agency' }],
     };
-    expect(mentionGone(load, ME)('ex')).toBe(true);
-    expect(mentionGone(load, ME)('a')).toBe(false);
-    expect(mentionGone(null, ME)('ex')).toBe(false);
+    expect(mentionGone(load, ME, 'w')('ex')).toBe(true);
+    expect(mentionGone(load, ME, 'w')('a')).toBe(false);
+    expect(mentionGone(null, ME, 'w')('ex')).toBe(false);
   });
 });
