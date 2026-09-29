@@ -283,6 +283,8 @@ RLS enabled (not forced). One policy only: folders_select_member (SELECT, role P
 
 PK id. Fields: workspace_id FK, name ^[A-Za-z0-9 -]{1,40}$, created_by FK, created_at, deleted_at nullable. Unique (workspace_id, lower(name)) where not deleted.
 
+avatar_url text nullable, check avatar_url IS NULL OR ~ '^https?://' (groups_avatar_url_check); set via group_avatar_set (permission = creator or workspace owner/admin, same as group_rename); NULL clears.
+
 ### group_members
 
 PK (group_id, user_id). Fields: workspace_id FK, joined_at. user_id FK auth.users.id.
@@ -291,7 +293,7 @@ Group auto-archives (deleted_at set) when its last member leaves or is removed. 
 
 ### Group + channel procs (A2a)
 
-Six SECURITY DEFINER procs (search_path='', EXECUTE to authenticated only): group_create, group_rename, group_member_add, group_member_remove, group_leave, dm_channel_ensure. group_create also seeds the group chat_channels row; dm_channel_ensure upserts the dm channel. Gating: group_create / dm_channel_ensure require an active workspace member; group_rename / group_member_add / group_member_remove require the group creator or a workspace owner/admin; group_leave is self only.
+Seven SECURITY DEFINER procs (search_path='', EXECUTE to authenticated only): group_create, group_rename, group_avatar_set, group_member_add, group_member_remove, group_leave, dm_channel_ensure. group_create also seeds the group chat_channels row; dm_channel_ensure upserts the dm channel. Gating: group_create / dm_channel_ensure require an active workspace member; group_rename / group_avatar_set / group_member_add / group_member_remove require the group creator or a workspace owner/admin; group_leave is self only.
 
 ## 7. Chat (Postgres record)
 
