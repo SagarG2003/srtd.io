@@ -1186,7 +1186,7 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
       expect(await deletedAt(a)).not.toBeNull();
       expect(await deletedAt(b)).not.toBeNull();
       // Deleted rows stay member-visible as tombstones with every content column wiped.
-      const wiped = await adminGeneric
+      const wiped = await bClient
         .from('chat_messages')
         .select(
           'body, mentions, attachment_asset_ids, attachment_meta, shared_post_ids, shared_brief_ids',
@@ -1204,6 +1204,7 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
         },
       ]);
       expect(await visibleRowCount(ownerClient, 'chat_messages', [['id', a]])).toBe(1);
+      expect(await visibleRowCount(outsiderClient, 'chat_messages', [['id', a]])).toBe(0);
     });
 
     it("raises on another member's message and deletes nothing", async () => {

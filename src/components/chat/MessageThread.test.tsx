@@ -62,7 +62,7 @@ import { Link } from 'react-router-dom';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
 import { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
-import type { ThreadMessage } from '@/lib/chat/thread';
+import { markMessagesDeleted, type ThreadMessage } from '@/lib/chat/thread';
 import { PostRefChip } from '@/components/chat/PostRefChip';
 import { SharedPostCards } from '@/components/chat/PostCard';
 import {
@@ -1999,8 +1999,15 @@ describe('tombstones, edited label and the neutral selection', () => {
   });
 
   it('a deleted card message shows the tombstone, not the card', () => {
-    const root = render({ ...tomb, sharedPostIds: [] });
+    const card = makeMessage({ id: 'card', body: '', sharedPostIds: ['post-1'] });
+    expect(all(render(card)).some((el) => el.type === SharedPostCards)).toBe(true);
+    const [deleted] = markMessagesDeleted([card], ['card']);
+    if (deleted === undefined) throw new Error('expected the deleted card');
+    const root = render(deleted);
     expect(all(root).some((el) => el.type === SharedPostCards)).toBe(false);
+    const html = renderStrip(root);
+    expect(html).toContain('data-tombstone');
+    expect(html).toContain('Message deleted');
   });
 
   it('a tombstone keeps its run slot: grouping is unchanged', () => {

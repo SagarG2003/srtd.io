@@ -565,6 +565,11 @@ export function mergeFetched(messages: ThreadMessage[], fetched: ThreadMessage[]
       );
       continue;
     }
+    if (incoming.deleted === true) {
+      // A delete missed live: the row wins outright, no live content survives.
+      byId.set(incoming.id, asTombstone({ ...incoming, status: existing.status }));
+      continue;
+    }
     byId.set(incoming.id, {
       ...incoming,
       attachments: existing.attachments.length > 0 ? existing.attachments : incoming.attachments,
@@ -573,7 +578,7 @@ export function mergeFetched(messages: ThreadMessage[], fetched: ThreadMessage[]
       sharedBriefIds:
         existing.sharedBriefIds.length > 0 ? existing.sharedBriefIds : incoming.sharedBriefIds,
       reply: existing.reply ?? incoming.reply,
-      reactions: incoming.deleted === true ? [] : existing.reactions,
+      reactions: existing.reactions,
       status: existing.status,
     });
   }
@@ -628,6 +633,19 @@ export function applyEdit(
       ? { ...m, reply: { ...m.reply, preview: replyPreview(edited) } }
       : m,
   );
+}
+
+/**
+ * Apply a live edit from the message's re-read row, never the Agora payload.
+ * A row that was never edited, or whose body and edited_at the list already
+ * shows, changes nothing (the same list).
+ */
+export function applyEditFromRow(messages: ThreadMessage[], row: ChatMessageRow): ThreadMessage[] {
+  const existing = messages.find((m) => m.id === row.id);
+  if (existing === undefined || row.edited_at === null || row.deleted_at !== null) return messages;
+  const body = row.body ?? '';
+  if (existing.body === body && existing.editedAt === row.edited_at) return messages;
+  return applyEdit(messages, { messageId: row.id, body, editedAt: row.edited_at });
 }
 
 /** Drop messages by id; the same list when none match. */
