@@ -99,6 +99,27 @@ export function editChannelType(target: ChannelTarget | null): 'dm' | 'group' | 
 }
 
 /**
+ * The exact input editMessage hands runEdit: the edit itself plus the chat's
+ * type from the open chat's live target (absent when there is none). Pure.
+ */
+export function editRunInput(input: {
+  channelId: string;
+  messageId: string;
+  body: string;
+  traceId: string;
+  target: ChannelTarget | null;
+}): Parameters<typeof runEdit>[1] {
+  const channelType = editChannelType(input.target);
+  return {
+    channelId: input.channelId,
+    messageId: input.messageId,
+    body: input.body,
+    traceId: input.traceId,
+    ...(channelType !== undefined ? { channelType } : {}),
+  };
+}
+
+/**
  * Page older history for a jump under one budget: when it runs out, the page
  * read in flight is aborted (its signal), no later page is handed to `onPage`,
  * and the jump ends as 'error'. `onDone` runs once it ends, however it ends.
@@ -944,7 +965,6 @@ export function useChatThread(params: {
       const traceId = generateTraceId();
       const connection = clientRef.current;
       const liveTarget = targetRef.current;
-      const channelType = editChannelType(liveTarget);
       const result = await runEdit(
         {
           client: db,
@@ -971,13 +991,7 @@ export function useChatThread(params: {
           onSignalFailed: (error) =>
             logger.warn('chat: edit signal failed', { trace_id: traceId, error: String(error) }),
         },
-        {
-          channelId: forChannel,
-          messageId,
-          body,
-          traceId,
-          ...(channelType !== undefined ? { channelType } : {}),
-        },
+        editRunInput({ channelId: forChannel, messageId, body, traceId, target: liveTarget }),
       );
       if (result.ok) return { ok: true };
       logger.warn('chat: edit failed', {

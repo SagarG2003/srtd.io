@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import type { Client, Result } from '@srtdio/rpc';
 
@@ -13,6 +11,7 @@ import { runDelete, runEdit } from '@/lib/chat/delete-flow';
 import {
   applyRevalidatedRows,
   editChannelType,
+  editRunInput,
   newlyTombstoned,
   recheckLoaded,
   REVALIDATE_WINDOW_MS,
@@ -526,13 +525,45 @@ describe('H2 / A4 edit mentions', () => {
     // A group keeps "all"; an unknown target leaves the type unset.
     expect(editChannelType({ targetId: 'g', chatType: 'groupChat' })).toBe('group');
     expect(editChannelType(null)).toBeUndefined();
-    // editMessage passes it to runEdit.
-    const source = readFileSync(
-      fileURLToPath(new URL('./use-chat-thread.ts', import.meta.url)),
-      'utf8',
+  });
+
+  it('W2 editRunInput (what editMessage hands runEdit): DM, group and null targets', async () => {
+    const base = { channelId: 'c1', messageId: 'm1', body: `@[all] and @[${ANA}]`, traceId: 't' };
+    const dmInput = editRunInput({ ...base, target: { targetId: 'peer', chatType: 'singleChat' } });
+    expect(dmInput).toEqual({ ...base, channelType: 'dm' });
+    expect(editRunInput({ ...base, target: { targetId: 'g', chatType: 'groupChat' } })).toEqual({
+      ...base,
+      channelType: 'group',
+    });
+    const none = editRunInput({ ...base, target: null });
+    expect(none).toEqual(base);
+    expect('channelType' in none).toBe(false);
+    // The DM input edits without "all", in one call.
+    const dm = rpcSequence([
+      { data: { id: 'm1', body: base.body, edited_at: 'now' }, error: null },
+    ]);
+    await runEdit(editDeps(dm), dmInput);
+    expect(dm).toHaveBeenCalledTimes(1);
+    expect(argsOf(dm, 0).p_mentions).toEqual([ANA]);
+  });
+
+  it('W3 DM edit with a null target, "@[all]" plus a peer mention: final p_mentions keeps the peer uuid', async () => {
+    const body = `@[all] and @[${ANA}]`;
+    const rpc = rpcSequence([
+      { data: null, error: { message: 'everyone mention works only in groups' } },
+      { data: { id: 'm1', body, edited_at: 'now' }, error: null },
+    ]);
+    const recheck = vi.fn(async () => ({ ok: true as const, data: [ANA] }));
+    const result = await runEdit(
+      editDeps(rpc, recheck),
+      editRunInput({ channelId: 'c1', messageId: 'm1', body, traceId: 't', target: null }),
     );
-    expect(source).toContain('const channelType = editChannelType(liveTarget);');
-    expect(source).toContain('...(channelType !== undefined ? { channelType } : {}),');
+    expect(result.ok).toBe(true);
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(argsOf(rpc, 0).p_mentions).toEqual([ANA, 'all']);
+    // "all" drops first; the peer stays, with no re-read needed.
+    expect(argsOf(rpc, 1).p_mentions).toEqual([ANA]);
+    expect(recheck).not.toHaveBeenCalled();
   });
 
   it('A4 edit passes "all" while the token is present and omits it once removed', async () => {

@@ -18,7 +18,13 @@
 import type { Client } from '@srtdio/rpc';
 import { deleteMessagesRecord, editFailureCopy, editMessageRecord } from '@/lib/chat/record';
 import { deleteEventExt, editEventExt, type ChatMessageRow } from '@/lib/chat/thread';
-import { isMentionRefusal, mentionTargets, mentionsAfterRefusal } from '@/lib/chat/mentions';
+import {
+  ALL_MENTION,
+  isEveryoneRefusal,
+  isMentionRefusal,
+  mentionTargets,
+  mentionsAfterRefusal,
+} from '@/lib/chat/mentions';
 import { recheck } from '@/lib/chat/send-flow';
 import { readChannelMemberIds } from '@/lib/chat-reads';
 import type { Result } from '@srtdio/rpc';
@@ -91,8 +97,20 @@ export async function runEdit(
       traceId: input.traceId,
       ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     });
-  const mentions = mentionTargets(input.body, input.channelType);
+  let mentions = mentionTargets(input.body, input.channelType);
   let result = await edit(mentions);
+  // As runSend: the chat's type was unknown and "all" went out in a DM: drop
+  // only "all" and edit with the people first; a further refusal takes the
+  // ladder below.
+  if (
+    !result.ok &&
+    input.channelType === undefined &&
+    mentions.includes(ALL_MENTION) &&
+    isEveryoneRefusal(result.message)
+  ) {
+    mentions = mentions.filter((id) => id !== ALL_MENTION);
+    result = await edit(mentions);
+  }
   if (!result.ok && mentions.length > 0 && isMentionRefusal(result.message)) {
     const read =
       deps.recheckMentions ??
