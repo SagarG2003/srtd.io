@@ -100,3 +100,33 @@ export function deleteMessagesConfirm(props: {
     />
   );
 }
+
+/** The single-message delete confirm (the action menu's Delete). */
+export const DELETE_ONE_TITLE = 'Delete message?';
+export const DELETE_ONE_MESSAGE = 'It is removed for everyone in this chat.';
+export const DELETE_ONE_CONFIRM = 'Delete for everyone';
+
+/**
+ * The single-message delete confirm, or null when closed. Hook-free so the
+ * confirm and cancel wiring are unit tested by calling the dialog's handlers.
+ */
+export function deleteOneConfirm(props: {
+  open: boolean;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): ReactElement | null {
+  if (!props.open) return null;
+  return (
+    <ConfirmDialog
+      title={DELETE_ONE_TITLE}
+      message={DELETE_ONE_MESSAGE}
+      confirmLabel={DELETE_ONE_CONFIRM}
+      busyLabel="Deleting"
+      destructive
+      busy={props.busy}
+      onCancel={props.onCancel}
+      onConfirm={props.onConfirm}
+    />
+  );
+}

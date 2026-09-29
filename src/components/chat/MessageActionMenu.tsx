@@ -1,94 +1,283 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ActionRow } from '@/components/ui';
-import { IconCheck, IconCopy, IconForward, IconPin, IconReply } from '@/components/ui/icons';
-import { popoverClass } from '@/components/ui/popover-classes';
-import { markMenuLabel, type MarkType } from '@/lib/chat/marks';
+import {
+  IconCheck,
+  IconChevronLeft,
+  IconChevronRight,
+  IconCopy,
+  IconEdit,
+  IconForward,
+  IconPin,
+  IconReply,
+  IconTrash,
+} from '@/components/ui/icons';
+import { POPOVER_PANEL } from '@/components/ui/popover-classes';
+import { MARK_TONE } from '@/components/chat/MarkBits';
+import { TYPE_LABEL, type ChatMark, type MarkType } from '@/lib/chat/marks';
+import type { ThreadMessage } from '@/lib/chat/thread';
 import { cn } from '@/lib/cn';
 
 /** Quick-react row offered when a message's action menu is opened. */
 export const QUICK_REACTIONS = ['👍', '❤️', '😂', '🆗', '🙏'] as const;
 
+/** An own message can be edited this long after its server created_at. */
+export const EDIT_WINDOW_MS = 15 * 60 * 1000;
+
+/** An own message can be deleted for everyone this long after its server created_at. */
+export const DELETE_WINDOW_MS = 30 * 60 * 1000;
+
+/** The one disabled line an own marked message shows in place of Edit and Delete. */
+export const MARKED_LOCKED_LABEL = "Marked messages can't be edited or deleted";
+
+/** The own-message rows a message offers when its menu opens. */
+export interface OwnMessageActions {
+  canEdit: boolean;
+  canDelete: boolean;
+  /** Own, recorded and marked: the single disabled "can't be edited or deleted" line. */
+  lockedByMark: boolean;
+}
+
+/**
+ * Edit and Delete for one message at `nowMs` (the moment the menu opens). Only
+ * the caller's own recorded, live, unmarked message qualifies; the windows run
+ * from the server created_at (a pending message has none, so neither row
+ * shows). Edit also needs a body: attachments, cards and mentions are never
+ * editable. Mirrors chat_message_edit / chat_message_delete. Pure.
+ */
+export function ownMessageActions(
+  message: Pick<ThreadMessage, 'mine' | 'state' | 'createdAt' | 'body' | 'deleted'>,
+  mark: ChatMark | undefined,
+  nowMs: number,
+): OwnMessageActions {
+  const none = { canEdit: false, canDelete: false, lockedByMark: false };
+  if (!message.mine || message.state !== 'sent' || message.deleted === true) return none;
+  if (mark !== undefined) return { ...none, lockedByMark: true };
+  if (message.createdAt === '') return none;
+  const created = Date.parse(message.createdAt);
+  if (Number.isNaN(created)) return none;
+  const age = nowMs - created;
+  return {
+    canEdit: message.body.trim() !== '' && age <= EDIT_WINDOW_MS,
+    canDelete: age <= DELETE_WINDOW_MS,
+    lockedByMark: false,
+  };
+}
+
 interface MessageActionMenuProps {
   open: boolean;
   onClose: () => void;
   anchor: DOMRect | null;
+  /**
+   * The pressed bubble: a copy of it is drawn above the dimmed thread, in its
+   * own colours, at its on-screen rect.
+   */
+  held?: HTMLElement | null;
   mine: boolean;
   currentReaction: string | null;
+  /** Offers the reaction row (a recorded message); false hides it. */
+  canReact?: boolean;
   canCopy: boolean;
   onReact: (emoji: string) => void;
   onReply: () => void;
   onCopy: () => void;
-  /** "Mark as ..." options for this message; empty for a marked (frozen) one. */
+  /** Types the "Mark as" submenu offers; empty hides the row. */
   markOptions?: readonly MarkType[];
   onMark?: (type: MarkType) => void;
+  /** The message's mark type when it carries one: "Marked as <type>", not interactive. */
+  markedAs?: MarkType | null;
   /** Offers "Forward" (a recorded message, anyone's). */
   canForward?: boolean;
   onForward?: () => void;
+  /** Offers "Edit" (see ownMessageActions). */
+  canEdit?: boolean;
+  onEdit?: () => void;
+  /** Offers "Delete" (see ownMessageActions). */
+  canDelete?: boolean;
+  onDelete?: () => void;
+  /** Own marked message: the single disabled line in place of Edit and Delete. */
+  lockedByMark?: boolean;
   /** Offers "Select" (multi-select forward and delete). */
   canSelect?: boolean;
   onSelect?: () => void;
 }
 
-/** One row of the message action menu. */
-export interface MessageMenuItem {
-  key: string;
-  label: string;
-  icon: ReactNode;
-  run: () => void;
+/** One entry of the message action menu. */
+export type MessageMenuItem =
+  | {
+      kind: 'action';
+      key: string;
+      label: string;
+      icon: ReactNode;
+      run: () => void;
+      /** Text in the bad token (Delete). */
+      danger?: boolean;
+      /** Muted note at the right ("15 min"). */
+      hint?: string;
+      /** Opens the in-place submenu instead of running and closing. */
+      submenu?: boolean;
+      /** A colour dot in place of the icon (the mark types). */
+      dot?: MarkType;
+    }
+  | { kind: 'note'; key: string; label: string; icon: ReactNode }
+  | { kind: 'divider'; key: string };
+
+type MenuItemProps = Pick<
+  MessageActionMenuProps,
+  | 'canCopy'
+  | 'onReply'
+  | 'onCopy'
+  | 'markOptions'
+  | 'onMark'
+  | 'markedAs'
+  | 'canForward'
+  | 'onForward'
+  | 'canEdit'
+  | 'onEdit'
+  | 'canDelete'
+  | 'onDelete'
+  | 'lockedByMark'
+  | 'canSelect'
+  | 'onSelect'
+>;
+
+/** The ban glyph (circle with a slash) for tombstones and the locked line. */
+export function BanGlyph(props: { size?: number }): ReactElement {
+  const size = props.size ?? 18;
+  return (
+    <svg
+      aria-hidden="true"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M6 6l12 12" />
+    </svg>
+  );
 }
 
 /**
- * The action rows in display order: Reply, Forward, the "Mark as ..." items,
- * Select, Copy. Pure (no hooks) so the order is unit-tested without a DOM.
+ * The main view in display order: Reply, Forward, Copy, "Mark as" (or the
+ * static "Marked as <type>"), Edit, Delete (or the locked line), then Select
+ * under a divider. Rows that do not apply are not rendered. Pure (no hooks) so
+ * the row set is unit-tested without a DOM.
  */
-export function messageMenuItems(
-  props: Pick<
-    MessageActionMenuProps,
-    | 'canCopy'
-    | 'onReply'
-    | 'onCopy'
-    | 'markOptions'
-    | 'onMark'
-    | 'canForward'
-    | 'onForward'
-    | 'canSelect'
-    | 'onSelect'
-  >,
-): MessageMenuItem[] {
+export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
   const items: MessageMenuItem[] = [
-    { key: 'reply', label: 'Reply', icon: <IconReply />, run: props.onReply },
+    { kind: 'action', key: 'reply', label: 'Reply', icon: <IconReply />, run: props.onReply },
   ];
   if (props.canForward === true) {
     items.push({
+      kind: 'action',
       key: 'forward',
       label: 'Forward',
       icon: <IconForward />,
       run: () => props.onForward?.(),
     });
   }
-  for (const type of props.markOptions ?? []) {
+  if (props.canCopy) {
     items.push({
-      key: `mark-${type}`,
-      label: markMenuLabel(type),
-      icon: <IconPin />,
-      run: () => props.onMark?.(type),
+      kind: 'action',
+      key: 'copy',
+      label: 'Copy',
+      icon: <IconCopy />,
+      run: props.onCopy,
     });
   }
-  if (props.canSelect === true) {
+  if (props.markedAs != null) {
     items.push({
+      kind: 'note',
+      key: 'marked',
+      label: `Marked as ${TYPE_LABEL[props.markedAs]}`,
+      icon: <IconPin />,
+    });
+  } else if ((props.markOptions ?? []).length > 0) {
+    items.push({
+      kind: 'action',
+      key: 'mark',
+      label: 'Mark as',
+      icon: <IconPin />,
+      run: () => {},
+      submenu: true,
+    });
+  }
+  if (props.lockedByMark === true) {
+    items.push({ kind: 'note', key: 'locked', label: MARKED_LOCKED_LABEL, icon: <BanGlyph /> });
+  } else {
+    if (props.canEdit === true) {
+      items.push({
+        kind: 'action',
+        key: 'edit',
+        label: 'Edit',
+        icon: <IconEdit />,
+        hint: '15 min',
+        run: () => props.onEdit?.(),
+      });
+    }
+    if (props.canDelete === true) {
+      items.push({
+        kind: 'action',
+        key: 'delete',
+        label: 'Delete',
+        icon: <IconTrash />,
+        hint: '30 min',
+        danger: true,
+        run: () => props.onDelete?.(),
+      });
+    }
+  }
+  if (props.canSelect === true) {
+    items.push({ kind: 'divider', key: 'select-divider' });
+    items.push({
+      kind: 'action',
       key: 'select',
       label: 'Select',
       icon: <IconCheck />,
       run: () => props.onSelect?.(),
     });
   }
-  if (props.canCopy) {
-    items.push({ key: 'copy', label: 'Copy', icon: <IconCopy />, run: props.onCopy });
-  }
   return items;
 }
+
+/** The "Mark as" submenu: Back, then each offered type with its colour dot. */
+export function markSubmenuItems(
+  props: Pick<MessageActionMenuProps, 'markOptions' | 'onMark'>,
+  onBack: () => void,
+): MessageMenuItem[] {
+  return [
+    {
+      kind: 'action',
+      key: 'back',
+      label: 'Back',
+      icon: <IconChevronLeft />,
+      run: onBack,
+      submenu: true,
+    },
+    ...(props.markOptions ?? []).map(
+      (type): MessageMenuItem => ({
+        kind: 'action',
+        key: `mark-${type}`,
+        label: TYPE_LABEL[type],
+        icon: null,
+        dot: type,
+        run: () => props.onMark?.(type),
+      }),
+    ),
+  ];
+}
+
+/** The dot colour per mark type (the badge's tone). */
+const DOT_CLASS: Record<string, string> = {
+  good: 'bg-good',
+  accent: 'bg-accent',
+  warn: 'bg-warn',
+};
 
 /** Whether a keydown while the menu is open closes it. */
 export function menuClosesOnKey(key: string): boolean {
@@ -106,10 +295,74 @@ interface MenuRoot {
  * menu's own scroll-to-close listener from firing.
  */
 export function focusFirstMenuItem(root: MenuRoot | null): boolean {
-  const first = root?.querySelector('[data-menu-items] button') ?? null;
+  const first = root?.querySelector('[data-menu-item]') ?? null;
   if (first === null) return false;
   first.focus({ preventScroll: true });
   return true;
+}
+
+/** One row of the menu box: 50px, 17px text, the icon (or dot) left, a muted hint or chevron right. */
+function MenuRow(props: {
+  item: MessageMenuItem;
+  onRun: (item: MessageMenuItem) => void;
+}): ReactElement {
+  const item = props.item;
+  if (item.kind === 'divider') {
+    return <div role="separator" className="mx-1 my-1 border-t border-border" />;
+  }
+  if (item.kind === 'note') {
+    return (
+      <div
+        role="menuitem"
+        aria-disabled="true"
+        data-menu-note={item.key}
+        className="flex min-h-[50px] items-center gap-3 px-3 text-[15px] text-fg-3"
+      >
+        <span className="flex w-5 shrink-0 justify-center">{item.icon}</span>
+        <span className="min-w-0">{item.label}</span>
+      </div>
+    );
+  }
+  const icon =
+    item.dot !== undefined ? (
+      <span
+        aria-hidden="true"
+        className={cn('h-2.5 w-2.5 rounded-full', DOT_CLASS[MARK_TONE[item.dot]])}
+      />
+    ) : (
+      item.icon
+    );
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      data-menu-item={item.key}
+      onClick={() => props.onRun(item)}
+      className={cn(
+        'flex min-h-[50px] w-full items-center gap-3 rounded-lg px-3 text-left text-[17px] transition-colors',
+        'hover:bg-panel-2 focus:outline-none focus-visible:bg-panel-2',
+        item.danger === true ? 'text-bad' : 'text-fg',
+      )}
+    >
+      <span
+        className={cn(
+          'flex w-5 shrink-0 items-center justify-center',
+          item.danger === true ? 'text-bad' : 'text-fg-2',
+        )}
+      >
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      {item.hint !== undefined ? (
+        <span className="shrink-0 text-[13px] text-fg-3">{item.hint}</span>
+      ) : null}
+      {item.submenu === true && item.key !== 'back' ? (
+        <span className="shrink-0 text-fg-3">
+          <IconChevronRight />
+        </span>
+      ) : null}
+    </button>
+  );
 }
 
 interface Coords {
@@ -119,20 +372,30 @@ interface Coords {
 
 /**
  * Floating, anchored action menu opened by long-press (touch), right-click, the
- * hover ⋯ control (pointer devices) or Enter / Space on a focused bubble. It
- * focuses the first action row on open and hands focus back to whatever held
- * it (the bubble or the ⋯ button) on close. Renders into document.body via a portal (mirrors Sheet.tsx)
- * so it escapes the scrolling thread. Position is computed from the pressed
- * bubble's rect in a two-pass layout effect: the container is measured while
- * hidden, then placed above (or below when there is no room) and aligned to the
- * bubble's side. Closes on backdrop click, Escape, scroll, or resize. All
- * colours are design tokens, so light and dark stay at parity.
+ * hover ⋯ control (pointer devices) or Enter / Space on a focused bubble. One
+ * box: the quick reactions on top (hairline under them), then the action rows.
+ * "Mark as" swaps the rows for its submenu in place (no slide). While open, a
+ * 55% black backdrop dims the thread and a copy of the held bubble sits above
+ * it in its own colours. It focuses the first row on open and hands focus back
+ * on close. Renders into document.body via a portal (mirrors Sheet.tsx) so it
+ * escapes the scrolling thread. Position is computed from the anchor rect in a
+ * two-pass layout effect: measured while hidden, then placed above (or below
+ * when there is no room) and aligned to the bubble's side. Closes on backdrop
+ * click, Escape, scroll, or resize. Motion is opacity + scale only. All colours
+ * are design tokens, so light and dark stay at parity.
  */
 export function MessageActionMenu(props: MessageActionMenuProps): ReactElement | null {
-  const { open, onClose, anchor, mine, currentReaction, onReact } = props;
+  const { open, onClose, anchor, mine, currentReaction, onReact, held } = props;
   const containerRef = useRef<HTMLDivElement>(null);
+  const heldRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<Coords | null>(null);
+  const [heldRect, setHeldRect] = useState<DOMRect | null>(null);
   const [shown, setShown] = useState(false);
+  const [view, setView] = useState<'main' | 'mark'>('main');
+
+  useEffect(() => {
+    if (!open) setView('main');
+  }, [open]);
 
   useLayoutEffect(() => {
     if (!open || anchor === null) {
@@ -151,7 +414,24 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     const rawLeft = mine ? anchor.right - width : anchor.left;
     const left = Math.max(8, Math.min(rawLeft, window.innerWidth - width - 8));
     setCoords({ top, left });
-  }, [open, anchor, mine]);
+  }, [open, anchor, mine, view]);
+
+  // The held bubble: a static copy (no handlers, not focusable) at its rect.
+  useLayoutEffect(() => {
+    const slot = heldRef.current;
+    if (!open || held == null || !held.isConnected) {
+      setHeldRect(null);
+      slot?.replaceChildren();
+      return;
+    }
+    setHeldRect(held.getBoundingClientRect());
+    if (slot === null) return;
+    const copy = held.cloneNode(true) as HTMLElement;
+    copy.removeAttribute('tabindex');
+    copy.style.transform = '';
+    copy.style.transition = '';
+    slot.replaceChildren(copy);
+  }, [open, held]);
 
   // Entrance motion: flip to the shown state after the menu mounts so the
   // opacity + scale transition runs (no translate, no rotate).
@@ -180,6 +460,12 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     };
   }, [open, placed]);
 
+  // The submenu swap moves focus to its first row (Back), and back again.
+  useEffect(() => {
+    if (!open || !placed) return;
+    focusFirstMenuItem(containerRef.current);
+  }, [open, placed, view]);
+
   useEffect(() => {
     if (!open) return;
     function onKeyDown(event: KeyboardEvent): void {
@@ -197,14 +483,52 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
 
   if (!open || anchor === null) return null;
 
+  const items =
+    view === 'mark' ? markSubmenuItems(props, () => setView('main')) : messageMenuItems(props);
+  const run = (item: MessageMenuItem): void => {
+    if (item.kind !== 'action') return;
+    if (item.key === 'mark') {
+      setView('mark');
+      return;
+    }
+    if (item.key === 'back') {
+      item.run();
+      return;
+    }
+    item.run();
+    onClose();
+  };
+
   return createPortal(
     <>
-      <div className="fixed inset-0 z-40" onClick={onClose} />
+      <div
+        data-menu-backdrop=""
+        className={cn(
+          'fixed inset-0 z-40 bg-black/55 transition-opacity duration-fast',
+          shown ? 'opacity-100' : 'opacity-0',
+        )}
+        onClick={onClose}
+      />
+      <div
+        ref={heldRef}
+        aria-hidden="true"
+        data-menu-held=""
+        className="pointer-events-none fixed z-40 flex"
+        style={
+          heldRect !== null
+            ? { top: heldRect.top, left: heldRect.left, width: heldRect.width }
+            : { visibility: 'hidden' }
+        }
+      />
       <div
         ref={containerRef}
+        role="menu"
+        aria-label="Message actions"
+        data-menu-items=""
         className={cn(
-          'fixed z-50 flex flex-col gap-2 transition-[opacity,transform] duration-fast',
-          mine ? 'items-end origin-bottom-right' : 'items-start origin-bottom-left',
+          'fixed z-50 w-[260px] max-w-[calc(100vw-16px)]',
+          POPOVER_PANEL,
+          mine ? 'origin-bottom-right' : 'origin-bottom-left',
           shown ? 'scale-100 opacity-100 ease-enter' : 'scale-[0.96] opacity-0 ease-exit',
         )}
         style={{
@@ -213,43 +537,34 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
           visibility: coords === null ? 'hidden' : 'visible',
         }}
       >
-        <div className="inline-flex gap-1 rounded-full border border-border-strong bg-panel p-1 shadow-2xl">
-          {QUICK_REACTIONS.map((emoji) => (
-            <button
-              key={emoji}
-              type="button"
-              aria-label={`React ${emoji}`}
-              onClick={() => {
-                onReact(emoji);
-                onClose();
-              }}
-              className={cn(
-                'flex h-11 w-11 items-center justify-center rounded-full text-xl hover:bg-panel-2',
-                emoji === currentReaction && 'bg-accent-soft',
-              )}
-            >
-              <span aria-hidden="true">{emoji}</span>
-            </button>
-          ))}
-        </div>
-        <div
-          role="menu"
-          aria-label="Message actions"
-          data-menu-items=""
-          className={cn('min-w-[200px]', popoverClass(true))}
-        >
-          {messageMenuItems(props).map((item) => (
-            <ActionRow
-              key={item.key}
-              icon={item.icon}
-              label={item.label}
-              onClick={() => {
-                item.run();
-                onClose();
-              }}
-            />
-          ))}
-        </div>
+        {props.canReact !== false && view === 'main' ? (
+          <div
+            data-menu-reactions=""
+            className="mb-1 flex items-center justify-between border-b border-border pb-1"
+          >
+            {QUICK_REACTIONS.map((emoji) => (
+              <button
+                key={emoji}
+                type="button"
+                aria-label={`React ${emoji}`}
+                aria-pressed={emoji === currentReaction}
+                onClick={() => {
+                  onReact(emoji);
+                  onClose();
+                }}
+                className={cn(
+                  'flex h-11 w-11 items-center justify-center rounded-full text-xl hover:bg-panel-2',
+                  emoji === currentReaction && 'bg-panel-3',
+                )}
+              >
+                <span aria-hidden="true">{emoji}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {items.map((item) => (
+          <MenuRow key={item.key} item={item} onRun={run} />
+        ))}
       </div>
     </>,
     document.body,

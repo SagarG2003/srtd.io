@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactElement, SyntheticEvent } from 'react';
 import { logger } from '@/lib/logger';
 import { Button } from '@/components/ui/Button';
@@ -80,6 +80,109 @@ interface ComposerProps {
    * the hash picker off.
    */
   onBringPost?: ((postId: string) => void) | undefined;
+  /**
+   * Editing an own message: the text becomes `initialText` (once per
+   * messageId), the editing bar replaces the reply and About bars, and Send
+   * calls onEdit instead of onSend. `hasOtherContent` (attachments or cards)
+   * lets the body go empty; a text-only message cannot.
+   */
+  editing?: EditingDraft | undefined;
+  /** The editing bar's X: leave editing; the composer restores the earlier draft. */
+  onCancelEdit?: (() => void) | undefined;
+  /** Record the edited body; resolves ok, or the mapped failure copy to show. */
+  onEdit?: ((text: string) => Promise<{ ok: true } | { ok: false; message: string }>) | undefined;
+}
+
+/** The message being edited, as the composer takes it. */
+export interface EditingDraft {
+  messageId: string;
+  initialText: string;
+  hasOtherContent?: boolean;
+}
+
+/** Toast when an edit would leave a text-only message empty. */
+export const EDIT_EMPTY_TOAST = "Message can't be empty";
+
+/** The editing bar's first line. */
+export const EDITING_BAR_TITLE = 'Editing your message';
+
+/** The composer placeholder while editing. */
+export const EDIT_PLACEHOLDER = 'Edit message';
+
+/**
+ * What Send does while editing: 'empty' (a text-only message cannot go
+ * empty: toast, nothing sent), 'unchanged' (the same body: leave editing, no
+ * write) or 'send'. Pure.
+ */
+export function editSendDecision(input: {
+  text: string;
+  initialText: string;
+  hasOtherContent: boolean;
+}): 'empty' | 'unchanged' | 'send' {
+  const next = input.text.trim();
+  if (next === '' && !input.hasOtherContent) return 'empty';
+  if (next === input.initialText.trim()) return 'unchanged';
+  return 'send';
+}
+
+/** The composer's edit session: which message, and the draft to restore after. */
+export interface EditSession {
+  messageId: string;
+  savedText: string;
+}
+
+/**
+ * Step the edit session when the `editing` prop changes. Entering (or
+ * switching to another message) sets the text to its initialText and keeps
+ * the draft typed before editing started (the first one, across switches);
+ * leaving restores that draft. `text` is undefined when it stays as is. Pure.
+ */
+export function editTransition(
+  session: EditSession | null,
+  editing: EditingDraft | undefined,
+  currentText: string,
+): { session: EditSession | null; text: string | undefined } {
+  const nextId = editing?.messageId ?? null;
+  if (nextId === (session?.messageId ?? null)) return { session, text: undefined };
+  if (editing === undefined) {
+    return { session: null, text: session?.savedText ?? undefined };
+  }
+  return {
+    session: { messageId: editing.messageId, savedText: session?.savedText ?? currentText },
+    text: editing.initialText,
+  };
+}
+
+/**
+ * Which bars sit above the input: while editing only the editing bar; the
+ * reply and About bars come back after.
+ */
+export function composerBars(input: { editing: boolean; reply: boolean; about: boolean }): {
+  editing: boolean;
+  reply: boolean;
+  about: boolean;
+} {
+  if (input.editing) return { editing: true, reply: false, about: false };
+  return { editing: false, reply: input.reply, about: input.about };
+}
+
+/**
+ * The editing bar: the reply bar's grammar with a 3px warn rule, "Editing your
+ * message" over the message's current text, and a 44px X that cancels.
+ */
+export function EditingBar(props: { text: string; onCancel: () => void }): ReactElement {
+  return (
+    <ReplyQuoteBox
+      author={EDITING_BAR_TITLE}
+      preview={props.text}
+      tone="warn"
+      trailing={
+        <IconButton label="Cancel editing" className="shrink-0" onClick={props.onCancel}>
+          <IconX size={16} />
+        </IconButton>
+      }
+    />
+  );
 }
 
 /** The hash picker's trigger, assembled so chat stays free of the raw literal. */
@@ -89,7 +192,12 @@ const HASH = String.fromCharCode(35);
  * The composer placeholder: "Message about KEY-N" while About is up, else a
  * nudge towards the hash post picker ("Reply, ..." while a reply draft is up).
  */
-export function composerPlaceholder(aboutRef: string | null, replying = false): string {
+export function composerPlaceholder(
+  aboutRef: string | null,
+  replying = false,
+  editing = false,
+): string {
+  if (editing) return EDIT_PLACEHOLDER;
   if (aboutRef !== null) return `Message about ${aboutRef}`;
   return `${replying ? 'Reply' : 'Message'}, or ${HASH} for a post`;
 }
@@ -388,6 +496,10 @@ export function Composer(props: ComposerProps): ReactElement {
   const [caret, setCaret] = useState(0);
   // Escape closes the hash picker until the caret leaves the token.
   const [hashDismissed, setHashDismissed] = useState(false);
+  // Editing: the draft to restore after, and whether the edit is being recorded.
+  const editSessionRef = useRef<EditSession | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
+  const editing = props.editing;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const { workspaceId, workspaceKey } = useWorkspace();
   const recorder = useAudioRecorder();
@@ -397,14 +509,41 @@ export function Composer(props: ComposerProps): ReactElement {
   const photoInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const canAttach = props.uploadFile !== undefined && !props.disabled;
-  const canSend = composerCanSend({
-    disabled: props.disabled || resolvingLinks,
-    text,
-    fileCount: pending.length,
-    sharedPostCount: sharedPosts.length,
-    sharedBriefCount: sharedBriefs.length,
-  });
+  const canAttach = props.uploadFile !== undefined && !props.disabled && editing === undefined;
+  const canSend =
+    editing !== undefined
+      ? !props.disabled && !editBusy
+      : composerCanSend({
+          disabled: props.disabled || resolvingLinks,
+          text,
+          fileCount: pending.length,
+          sharedPostCount: sharedPosts.length,
+          sharedBriefCount: sharedBriefs.length,
+        });
+
+  // Enter / leave editing once per message id: the text swaps (and comes back
+  // after), the caret goes to the end. Before paint, so the old text never shows.
+  const textRef = useRef(text);
+  textRef.current = text;
+  const editingId = editing?.messageId;
+  useLayoutEffect(() => {
+    const step = editTransition(editSessionRef.current, editing, textRef.current);
+    editSessionRef.current = step.session;
+    if (step.text === undefined) return;
+    const next = step.text;
+    setText(next);
+    setCaret(next.length);
+    setEditBusy(false);
+    if (step.session === null) return;
+    const el = textareaRef.current ?? formRef.current?.querySelector('textarea') ?? null;
+    if (el === null) return;
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(next.length, next.length);
+    });
+    // Only the id drives the session; initialText is read once per id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingId]);
 
   const menuItems = useMemo(
     () =>
@@ -470,9 +609,42 @@ export function Composer(props: ComposerProps): ReactElement {
     formRef.current?.requestSubmit();
   }
 
+  function submitEdit(draft: EditingDraft): void {
+    const decision = editSendDecision({
+      text,
+      initialText: draft.initialText,
+      hasOtherContent: draft.hasOtherContent === true,
+    });
+    if (decision === 'empty') {
+      toast.show({ title: EDIT_EMPTY_TOAST });
+      return;
+    }
+    if (decision === 'unchanged' || props.onEdit === undefined) {
+      props.onCancelEdit?.();
+      return;
+    }
+    setEditBusy(true);
+    void props
+      .onEdit(text)
+      .catch((error: unknown) => {
+        logger.error('chat composer: edit threw', { error: String(error) });
+        return { ok: false as const, message: "Couldn't edit, try again" };
+      })
+      .then((result) => {
+        // Success: the parent leaves editing and the earlier draft comes back.
+        if (editSessionRef.current?.messageId !== draft.messageId) return;
+        setEditBusy(false);
+        if (!result.ok) toast.show({ title: result.message });
+      });
+  }
+
   function submit(event: FormEvent): void {
     event.preventDefault();
     if (!canSend) return;
+    if (editing !== undefined) {
+      submitEdit(editing);
+      return;
+    }
     const draft: LinkCardDraft = {
       text,
       sharedPostIds: sharedPosts.map((post) => post.id),
@@ -585,7 +757,7 @@ export function Composer(props: ComposerProps): ReactElement {
   }
 
   const hashQuery = hashPickerQuery({
-    enabled: props.onBringPost !== undefined && !props.disabled,
+    enabled: props.onBringPost !== undefined && !props.disabled && editing === undefined,
     dismissed: hashDismissed,
     text,
     caret,
@@ -608,8 +780,14 @@ export function Composer(props: ComposerProps): ReactElement {
 
   const aboutRef = props.about != null ? postRefKey(workspaceKey, props.about.number) : null;
 
+  const bars = composerBars({
+    editing: editing !== undefined,
+    reply: props.reply != null,
+    about: props.about !== undefined,
+  });
+
   const showMic = shouldShowMic({
-    hasUpload: props.uploadFile !== undefined,
+    hasUpload: props.uploadFile !== undefined && editing === undefined,
     disabled: props.disabled,
     text,
     attachmentCount: pending.length,
@@ -640,11 +818,15 @@ export function Composer(props: ComposerProps): ReactElement {
         </div>
       ) : null}
 
-      {props.about !== undefined ? (
+      {bars.editing && editing !== undefined ? (
+        <EditingBar text={editing.initialText} onCancel={() => props.onCancelEdit?.()} />
+      ) : null}
+
+      {bars.about && props.about !== undefined ? (
         <AboutBar post={props.about} refLabel={aboutRef} onCancel={() => props.onCancelAbout?.()} />
       ) : null}
 
-      {props.reply != null ? (
+      {bars.reply && props.reply != null ? (
         <ReplyQuoteBox
           author={props.reply.authorName}
           preview={props.reply.quote.preview}
@@ -660,7 +842,8 @@ export function Composer(props: ComposerProps): ReactElement {
         />
       ) : null}
 
-      {pending.length > 0 || sharedPosts.length > 0 || sharedBriefs.length > 0 ? (
+      {editing === undefined &&
+      (pending.length > 0 || sharedPosts.length > 0 || sharedBriefs.length > 0) ? (
         <ul className="flex flex-wrap gap-2">
           {pending.map((item) => (
             <PendingChip
@@ -766,7 +949,11 @@ export function Composer(props: ComposerProps): ReactElement {
               }}
               onSelect={trackCaret}
               onKeyDown={handleKeyDown}
-              placeholder={composerPlaceholder(aboutRef, props.reply != null)}
+              placeholder={composerPlaceholder(
+                aboutRef,
+                props.reply != null,
+                editing !== undefined,
+              )}
               rows={1}
               compact
             />
@@ -786,11 +973,20 @@ export function Composer(props: ComposerProps): ReactElement {
                 type="submit"
                 variant="primary"
                 size="lg"
-                aria-label="Send"
+                aria-label={editing !== undefined ? 'Save edit' : 'Send'}
+                aria-busy={editBusy || undefined}
                 className="w-11 shrink-0 px-0"
                 disabled={!canSend}
               >
-                <IconSend size={18} />
+                {editBusy ? (
+                  <span
+                    aria-hidden="true"
+                    data-edit-spinner=""
+                    className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"
+                  />
+                ) : (
+                  <IconSend size={18} />
+                )}
               </Button>
             )}
           </>

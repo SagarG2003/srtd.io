@@ -5,6 +5,8 @@ import {
   chunkIds,
   clearChannelRecord,
   deleteMessagesRecord,
+  editFailureCopy,
+  editMessageRecord,
   removeReactionRecord,
   reopenMarkRecord,
   resolveMarkRecord,
@@ -410,5 +412,75 @@ describe('clearChannelRecord', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('editMessageRecord', () => {
+  const edited = { ...row, body: 'fixed', edited_at: '2026-09-22T10:05:00+00:00' };
+
+  it('calls chat_message_edit with typed args and the explicit trace id, returning the row', async () => {
+    const { client, rpc, abortSignal } = makeClient({ data: edited, error: null });
+    const result = await editMessageRecord({
+      client,
+      channelId: CHANNEL,
+      messageId: ID,
+      body: '  fixed  ',
+      traceId: 'trace-1',
+    });
+    expect(rpc).toHaveBeenCalledWith('chat_message_edit', {
+      p_message_id: ID,
+      p_channel_id: CHANNEL,
+      p_body: 'fixed',
+      p_trace_id: 'trace-1',
+    });
+    expect(abortSignal).toHaveBeenCalledOnce();
+    expect(result).toEqual({ ok: true, row: edited });
+  });
+
+  it('returns the proc error, and an empty response as an error', async () => {
+    const failed = await editMessageRecord({
+      client: makeClient({ data: null, error: { message: 'edit window has closed' } }).client,
+      channelId: CHANNEL,
+      messageId: ID,
+      body: 'x',
+      traceId: 't',
+    });
+    expect(failed).toEqual({ ok: false, reason: 'error', message: 'edit window has closed' });
+    const empty = await editMessageRecord({
+      client: makeClient({ data: null, error: null }).client,
+      channelId: CHANNEL,
+      messageId: ID,
+      body: 'x',
+      traceId: 't',
+    });
+    expect(empty.ok).toBe(false);
+  });
+
+  it('aborts after 10 s (or the override) and reports a timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = editMessageRecord({
+        client: makeClient('hang').client,
+        channelId: CHANNEL,
+        messageId: ID,
+        body: 'x',
+        traceId: 't',
+        timeoutMs: 50,
+      });
+      await vi.advanceTimersByTimeAsync(60);
+      const result = await pending;
+      expect(!result.ok && result.reason).toBe('timeout');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('maps the proc errors to the user copy', () => {
+    expect(editFailureCopy('edit window has closed')).toBe('Edit window has closed (15 min)');
+    expect(editFailureCopy('marked messages cannot be edited')).toBe(
+      "Marked messages can't be edited",
+    );
+    expect(editFailureCopy('deleted messages cannot be edited')).toBe("Couldn't edit, try again");
+    expect(editFailureCopy('AbortError')).toBe("Couldn't edit, try again");
   });
 });

@@ -1,11 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Client } from '@srtdio/rpc';
 import {
+  DELETED_MESSAGE_LABEL,
+  hydrateReplies,
+  rowToThreadMessage,
+  type ChatMessageRow,
+} from '@/lib/chat/thread';
+import {
   aggregateReactions,
   CATCH_UP_LIMIT,
   HISTORY_PAGE_SIZE,
   latestPerChannel,
+  loadConversationPreviews,
   loadLatestMessages,
+  loadMessageById,
+  loadMessagesByIds,
   loadNewerMessages,
   loadOlderMessages,
   loadPeerReadCursor,
@@ -82,7 +91,8 @@ describe('loadLatestMessages', () => {
 
     expect(argsOf(calls, 'from')).toEqual([['chat_messages']]);
     expect(argsOf(calls, 'eq')).toEqual([['channel_id', CHANNEL]]);
-    expect(argsOf(calls, 'is')).toEqual([['deleted_at', null]]);
+    // Deleted rows come back as tombstones (the thread renders them).
+    expect(argsOf(calls, 'is')).toEqual([]);
     expect(argsOf(calls, 'order')).toEqual([
       ['created_at', { ascending: false }],
       ['id', { ascending: false }],
@@ -254,5 +264,79 @@ describe('latestPerChannel', () => {
         createdAt: 't2',
       },
     ]);
+  });
+});
+
+describe('deleted rows: returned where the thread renders them, filtered where they count', () => {
+  const tombstone: Partial<ChatMessageRow> = {
+    id: 'gone',
+    channel_id: CHANNEL,
+    workspace_id: 'ws',
+    sender_user_id: ME,
+    body: null,
+    mentions: null,
+    attachment_asset_ids: null,
+    attachment_meta: null,
+    shared_post_ids: null,
+    shared_brief_ids: null,
+    reply_to_message_id: null,
+    forwarded_from_message_id: null,
+    agora_event_id: null,
+    created_at: '2026-09-22T10:00:01+00:00',
+    edited_at: null,
+    deleted_at: '2026-09-22T10:05:00+00:00',
+  };
+
+  it('latest, older, catch-up and by-ids reads carry no deleted_at filter', async () => {
+    const reads: Array<(client: Client) => Promise<unknown>> = [
+      (c) => loadLatestMessages(c, CHANNEL),
+      (c) => loadOlderMessages(c, CHANNEL, CURSOR),
+      (c) => loadNewerMessages(c, CHANNEL, CURSOR),
+      (c) => loadMessagesByIds(c, ['gone']),
+    ];
+    for (const read of reads) {
+      const { client, calls } = makeClient({ data: [], error: null });
+      await read(client);
+      expect(argsOf(calls, 'is')).toEqual([]);
+    }
+  });
+
+  it('the live verifier and the conversation previews keep the deleted_at filter', async () => {
+    const verify = makeClient({ data: null, error: null });
+    await loadMessageById(verify.client, 'gone');
+    expect(argsOf(verify.calls, 'is')).toEqual([['deleted_at', null]]);
+    const previews = makeClient({ data: [], error: null });
+    await loadConversationPreviews(previews.client, 'ws');
+    expect(argsOf(previews.calls, 'is')).toEqual([['deleted_at', null]]);
+  });
+
+  it('after a reload a deleted row renders as a tombstone and a quote of it reads "Message deleted"', async () => {
+    const reply: Partial<ChatMessageRow> = {
+      ...tombstone,
+      id: 'r',
+      sender_user_id: 'peer',
+      body: 'answer',
+      created_at: '2026-09-22T10:00:02+00:00',
+      reply_to_message_id: 'gone',
+      deleted_at: null,
+    };
+    // Newest-first, as PostgREST returns the latest page.
+    const page = await loadLatestMessages(
+      makeClient({ data: [reply, tombstone], error: null }).client,
+      CHANNEL,
+    );
+    expect(page.ok).toBe(true);
+    if (!page.ok) return;
+    const messages = page.data.rows.map((row) => rowToThreadMessage(row, ME));
+    const [tomb, answer] = hydrateReplies(messages, [], true);
+    expect(tomb).toMatchObject({
+      id: 'gone',
+      deleted: true,
+      mine: true,
+      body: '',
+      attachments: [],
+    });
+    expect(answer?.reply?.preview).toBe(DELETED_MESSAGE_LABEL);
+    expect(answer?.parentDeleted).toBe(true);
   });
 });

@@ -9,7 +9,7 @@ vi.mock('agora-chat', () => ({
 
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { DELETE_CHATS_MESSAGE, deleteChatsConfirm } from '@/components/chat/ChannelList';
-import { deleteMessagesConfirm } from '@/components/chat/SelectionBar';
+import { deleteMessagesConfirm, deleteOneConfirm } from '@/components/chat/SelectionBar';
 import type { ChannelSummary } from '@/lib/chat-reads';
 
 type DialogProps = {
@@ -105,6 +105,31 @@ describe('delete messages confirm', () => {
       title: 'Delete 2 messages?',
       confirmLabel: 'Delete',
       destructive: true,
+    });
+    props.onConfirm();
+    expect(onConfirm).toHaveBeenCalledOnce();
+    props.onCancel();
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+});
+
+describe('delete one message confirm (the action menu Delete)', () => {
+  it('renders nothing while closed', () => {
+    expect(
+      deleteOneConfirm({ open: false, busy: false, onCancel: vi.fn(), onConfirm: vi.fn() }),
+    ).toBeNull();
+  });
+
+  it('is a destructive "Delete for everyone" dialog that runs on confirm and closes on cancel', () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    const props = dialog(deleteOneConfirm({ open: true, busy: false, onCancel, onConfirm }));
+    expect(props).toMatchObject({
+      title: 'Delete message?',
+      message: 'It is removed for everyone in this chat.',
+      confirmLabel: 'Delete for everyone',
+      destructive: true,
+      busy: false,
     });
     props.onConfirm();
     expect(onConfirm).toHaveBeenCalledOnce();

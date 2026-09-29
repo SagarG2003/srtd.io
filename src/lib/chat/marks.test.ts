@@ -119,6 +119,7 @@ describe('marks menu', () => {
   it('an unrecorded message cannot be marked', () => {
     expect(markMenuOptions(message({ state: 'sending' }), undefined)).toEqual([]);
     expect(markMenuOptions(message({ state: 'failed' }), undefined)).toEqual([]);
+    expect(markMenuOptions(message({ deleted: true }), undefined)).toEqual([]);
   });
 });
 
@@ -328,6 +329,10 @@ describe('selection mode', () => {
     expect(selectionRole(message({ id: 'marked' }), marks)).toBe('locked');
     expect(selectionRole(message({ id: 'resolved' }), marks)).toBe('locked');
     expect(selectionRole(message({ id: 'sending', state: 'sending' }), marks)).toBe('none');
+  });
+
+  it('a deleted own message is never selectable', () => {
+    expect(selectionRole(message({ id: 'own', deleted: true }), marks)).toBe('none');
   });
 
   it('toggles and prunes ids that stopped being selectable', () => {

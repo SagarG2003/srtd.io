@@ -340,6 +340,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               onReopenMark={marks.reopen}
               currentUserId={currentUserId}
               onDeleteMessages={thread.deleteMessages}
+              onEditMessage={thread.editMessage}
               forwardChannels={roster}
               onForward={thread.forward}
               onEnsureLoaded={thread.ensureLoaded}

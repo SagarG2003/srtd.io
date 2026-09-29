@@ -8,7 +8,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import {
   AboutBar,
+  composerBars,
   composerCanSend,
+  EDIT_EMPTY_TOAST,
+  EDIT_PLACEHOLDER,
+  EDITING_BAR_TITLE,
+  EditingBar,
+  editSendDecision,
+  editTransition,
   composerPlaceholder,
   hashPickerQuery,
   dispatchSend,
@@ -376,5 +383,92 @@ describe('About bar while its post loads (F14)', () => {
     }
     (close?.props as { onClick: () => void }).onClick();
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('editing mode', () => {
+  it('the editing bar: warn rule, "Editing your message" over the old text, a 44px X that cancels', () => {
+    const html = renderToStaticMarkup(<EditingBar text="old words" onCancel={() => {}} />);
+    expect(html).toContain('w-[3px]');
+    expect(html).toContain('bg-warn');
+    expect(html).not.toContain('bg-accent');
+    expect(html).toMatch(new RegExp(`text-warn[^>]*>${EDITING_BAR_TITLE}<`));
+    expect(html).toContain('old words');
+    expect(html).toContain('aria-label="Cancel editing"');
+
+    const onCancel = vi.fn();
+    const stack: ReactNode[] = [EditingBar({ text: 'x', onCancel })];
+    let close: ReactElement | null = null;
+    while (stack.length > 0 && close === null) {
+      const node = stack.pop();
+      if (Array.isArray(node)) stack.push(...(node as ReactNode[]));
+      else if (isValidElement(node)) {
+        if (node.type === IconButton) close = node;
+        else {
+          const props = node.props as { children?: ReactNode; trailing?: ReactNode };
+          stack.push(props.children, props.trailing);
+        }
+      }
+    }
+    (close?.props as { onClick: () => void }).onClick();
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the reply and About bars while editing; they come back after', () => {
+    expect(composerBars({ editing: true, reply: true, about: true })).toEqual({
+      editing: true,
+      reply: false,
+      about: false,
+    });
+    expect(composerBars({ editing: false, reply: true, about: true })).toEqual({
+      editing: false,
+      reply: true,
+      about: true,
+    });
+  });
+
+  it('the placeholder reads "Edit message" and the hash picker is off while editing', () => {
+    expect(composerPlaceholder('GBL-14', true, true)).toBe(EDIT_PLACEHOLDER);
+    expect(EDIT_PLACEHOLDER).toBe('Edit message');
+    // The composer passes enabled: false while editing.
+    expect(hashPickerQuery({ enabled: false, dismissed: false, text: `${HASH}la`, caret: 3 })).toBe(
+      null,
+    );
+  });
+
+  it('takes initialText once per message id and restores the earlier draft on cancel', () => {
+    const start = editTransition(null, { messageId: 'a', initialText: 'old' }, 'my draft');
+    expect(start).toEqual({ session: { messageId: 'a', savedText: 'my draft' }, text: 'old' });
+    // A re-render with the same id never resets what the user typed.
+    expect(editTransition(start.session, { messageId: 'a', initialText: 'old' }, 'old!')).toEqual({
+      session: start.session,
+      text: undefined,
+    });
+    // Switching to another message keeps the first draft to restore.
+    const other = editTransition(start.session, { messageId: 'b', initialText: 'b text' }, 'old!');
+    expect(other).toEqual({ session: { messageId: 'b', savedText: 'my draft' }, text: 'b text' });
+    // X (or a successful edit): the draft from before editing comes back.
+    expect(editTransition(other.session, undefined, 'b text!')).toEqual({
+      session: null,
+      text: 'my draft',
+    });
+    // Not editing: nothing changes.
+    expect(editTransition(null, undefined, 'x')).toEqual({ session: null, text: undefined });
+  });
+
+  it('empty text on a text-only message does not send; unchanged text leaves without a write', () => {
+    expect(EDIT_EMPTY_TOAST).toBe("Message can't be empty");
+    expect(editSendDecision({ text: '  ', initialText: 'hi', hasOtherContent: false })).toBe(
+      'empty',
+    );
+    expect(editSendDecision({ text: '', initialText: 'caption', hasOtherContent: true })).toBe(
+      'send',
+    );
+    expect(editSendDecision({ text: ' hi ', initialText: 'hi', hasOtherContent: false })).toBe(
+      'unchanged',
+    );
+    expect(editSendDecision({ text: 'hi there', initialText: 'hi', hasOtherContent: false })).toBe(
+      'send',
+    );
   });
 });

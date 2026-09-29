@@ -46,12 +46,14 @@ import {
   runForward,
 } from '@/lib/chat/forward';
 import type { ChannelSummary } from '@/lib/chat-reads';
-import { runDelete } from '@/lib/chat/delete-flow';
+import { runDelete, runEdit } from '@/lib/chat/delete-flow';
 import { findInOlderPages, type FindOlderOutcome } from '@/lib/chat/marks';
 import { createInFlightGuard, recordThenSignal } from '@/lib/chat/thread-actions';
 import {
+  applyEdit,
   applyReactionOp,
   hydrateReplies,
+  markMessagesDeleted,
   markReadUpTo,
   markReadUpToMessage,
   mergeFetched,
@@ -108,6 +110,15 @@ export interface UseChatThread {
    */
   deleteMessages: (
     messageIds: readonly string[],
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  /**
+   * Edit the body of an own message: recorded first, then the bubble shows the
+   * returned row and peers are signalled live. A failure returns the user copy
+   * ("Edit window has closed (15 min)", ...); the bubble never changes then.
+   */
+  editMessage: (
+    messageId: string,
+    body: string,
   ) => Promise<{ ok: true } | { ok: false; message: string }>;
   /**
    * Make sure a message is loaded: 'found' when it already is or an older page
@@ -172,7 +183,7 @@ export function useChatThread(params: {
   onOwnMessage?: (channelId: string, text: string, ts: number) => void;
   /** Called after each catch-up so the caller can refresh unread counts and marks. */
   onCaughtUp?: () => void;
-  /** Called when messages of the open channel were deleted (by us or live by a peer). */
+  /** Called when messages of the open channel were deleted (by us or live by a peer); they stay as tombstones. */
   onMessagesDeleted?: (channelId: string, messageIds: readonly string[]) => void;
   /** Per-channel unrecorded sends and their background sender (the chat store's). */
   outbox: ChannelOutbox;
@@ -359,11 +370,22 @@ export function useChatThread(params: {
         if (fromUserId === currentUserId) return;
         setMessages((prev) => markReadUpToMessage(prev, messageId));
       },
-      onDelete: ({ messageIds }) => {
+      // A sender can only delete or edit their own messages: ids of anyone
+      // else's are ignored (the record is truth on the next load either way).
+      onDelete: ({ messageIds, fromUserId }) => {
         if (channelRef.current !== channelId) return;
-        const present = messagesRef.current.some((m) => messageIds.includes(m.id));
-        setMessages((prev) => removeMessages(prev, messageIds));
-        if (present) onMessagesDeletedRef.current?.(channelId, messageIds);
+        const own = messagesRef.current
+          .filter((m) => messageIds.includes(m.id) && m.senderUserId === fromUserId)
+          .map((m) => m.id);
+        if (own.length === 0) return;
+        setMessages((prev) => markMessagesDeleted(prev, own));
+        onMessagesDeletedRef.current?.(channelId, own);
+      },
+      onEdit: ({ messageId, body, editedAt, fromUserId }) => {
+        if (channelRef.current !== channelId) return;
+        const target = messagesRef.current.find((m) => m.id === messageId);
+        if (target === undefined || target.senderUserId !== fromUserId) return;
+        setMessages((prev) => applyEdit(prev, { messageId, body, editedAt }));
       },
     });
     return unsubscribe;
@@ -700,9 +722,9 @@ export function useChatThread(params: {
       const result = await runDelete(
         {
           client: db,
-          removeLocal: (ids) => {
+          markDeletedLocal: (ids) => {
             if (channelRef.current === forChannel) {
-              setMessages((prev) => removeMessages(prev, ids));
+              setMessages((prev) => markMessagesDeleted(prev, ids));
             }
             onMessagesDeletedRef.current?.(forChannel, ids);
           },
@@ -726,6 +748,52 @@ export function useChatThread(params: {
         trace_id: traceId,
         deleted: result.deleted.length,
         error: result.message,
+      });
+      return { ok: false, message: result.message };
+    },
+    [db],
+  );
+
+  const editMessage = useCallback<UseChatThread['editMessage']>(
+    async (messageId, body) => {
+      const forChannel = channelRef.current;
+      if (forChannel === null) return { ok: false, message: "Couldn't edit, try again" };
+      const traceId = generateTraceId();
+      const connection = clientRef.current;
+      const liveTarget = targetRef.current;
+      const result = await runEdit(
+        {
+          client: db,
+          applyLocal: (row) => {
+            if (channelRef.current !== forChannel) return;
+            setMessages((prev) =>
+              applyEdit(prev, {
+                messageId: row.id,
+                body: row.body ?? '',
+                editedAt: row.edited_at ?? new Date().toISOString(),
+              }),
+            );
+          },
+          signal:
+            connection !== null && liveTarget !== null
+              ? (ext) =>
+                  sendSignal({
+                    connection: asSignalConnection(connection),
+                    target: liveTarget,
+                    createCmd: createCmdMessage,
+                    ext,
+                  })
+              : undefined,
+          onSignalFailed: (error) =>
+            logger.warn('chat: edit signal failed', { trace_id: traceId, error: String(error) }),
+        },
+        { channelId: forChannel, messageId, body, traceId },
+      );
+      if (result.ok) return { ok: true };
+      logger.warn('chat: edit failed', {
+        trace_id: traceId,
+        message_id: messageId,
+        error: result.error,
       });
       return { ok: false, message: result.message };
     },
@@ -789,6 +857,7 @@ export function useChatThread(params: {
     send,
     forward,
     deleteMessages,
+    editMessage,
     ensureLoaded,
     retry,
     toggleReaction,

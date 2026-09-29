@@ -145,10 +145,10 @@ export function markMenuLabel(type: MarkType): string {
  * are frozen; a pending priority changes from its badge, not the menu).
  */
 export function markMenuOptions(
-  message: Pick<ThreadMessage, 'state'>,
+  message: Pick<ThreadMessage, 'state' | 'deleted'>,
   mark: ChatMark | undefined,
 ): MarkType[] {
-  if (message.state !== 'sent') return [];
+  if (message.state !== 'sent' || message.deleted === true) return [];
   return mark === undefined ? [...MARK_TYPES] : [];
 }
 
@@ -396,13 +396,13 @@ export type SelectionRole = 'selectable' | 'locked' | 'none';
 /**
  * Selection mode shows a checkbox only on the caller's own recorded, unmarked
  * messages; own marked messages (any mark, resolved included, as the proc
- * blocks them) show a lock; everything else shows nothing.
+ * blocks them) show a lock; everything else (deleted ones included) shows nothing.
  */
 export function selectionRole(
-  message: Pick<ThreadMessage, 'id' | 'mine' | 'state'>,
+  message: Pick<ThreadMessage, 'id' | 'mine' | 'state' | 'deleted'>,
   marks: Map<string, ChatMark>,
 ): SelectionRole {
-  if (!message.mine || message.state !== 'sent') return 'none';
+  if (!message.mine || message.state !== 'sent' || message.deleted === true) return 'none';
   return marks.has(message.id) ? 'locked' : 'selectable';
 }
 

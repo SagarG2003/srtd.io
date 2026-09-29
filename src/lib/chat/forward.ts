@@ -10,16 +10,16 @@ import { filterChannelsByName } from '@/lib/channel-filter';
 import { sortChannelsByRecency, type RecencySummary } from '@/lib/chat/sort-conversations';
 import { buildAttachmentMeta } from '@/lib/chat/attachments';
 import { previewText } from '@/lib/chat/chat-store';
-import { selectionRole, type ChatMark } from '@/lib/chat/marks';
+import { selectionRole, type ChatMark, type SelectionRole } from '@/lib/chat/marks';
 import type { SendRecordParams } from '@/lib/chat/record';
 import { compareMessages, type ThreadMessage } from '@/lib/chat/thread';
 
 /**
- * Only a recorded message can be forwarded: a sending or failed bubble has no
- * row yet, and a deleted message has left the thread (and the history reads).
+ * Only a recorded, live message can be forwarded: a sending or failed bubble
+ * has no row yet, and a deleted one is a tombstone with no content.
  */
-export function canForward(message: Pick<ThreadMessage, 'state'>): boolean {
-  return message.state === 'sent';
+export function canForward(message: Pick<ThreadMessage, 'state' | 'deleted'>): boolean {
+  return message.state === 'sent' && message.deleted !== true;
 }
 
 /** The forwardable messages among `messages`, in thread (original) order. */
@@ -27,17 +27,36 @@ export function forwardableInOrder(messages: readonly ThreadMessage[]): ThreadMe
   return messages.filter(canForward).sort(compareMessages);
 }
 
-/** Selection mode in the thread: any recorded message can be checked. */
-export function threadSelectable(message: Pick<ThreadMessage, 'state'>): boolean {
-  return canForward(message);
+const NO_MARKS: Map<string, ChatMark> = new Map();
+
+/**
+ * How a row takes part in thread selection: an own marked message shows the
+ * lock (selectionRole), any other recorded, live message can be checked
+ * (Forward takes anyone's), and pending, failed and deleted ones show nothing.
+ */
+export function threadSelectionRole(
+  message: Pick<ThreadMessage, 'id' | 'mine' | 'state' | 'deleted'>,
+  marks: Map<string, ChatMark> = NO_MARKS,
+): SelectionRole {
+  if (selectionRole(message, marks) === 'locked') return 'locked';
+  return canForward(message) ? 'selectable' : 'none';
 }
 
-/** Keep only selected ids that are still loaded and forwardable. */
+/** Selection mode in the thread: whether the row can be checked. */
+export function threadSelectable(
+  message: Pick<ThreadMessage, 'id' | 'mine' | 'state' | 'deleted'>,
+  marks: Map<string, ChatMark> = NO_MARKS,
+): boolean {
+  return threadSelectionRole(message, marks) === 'selectable';
+}
+
+/** Keep only selected ids that are still loaded and selectable. */
 export function pruneThreadSelection(
   selected: ReadonlySet<string>,
   messages: readonly ThreadMessage[],
+  marks: Map<string, ChatMark> = NO_MARKS,
 ): Set<string> {
-  const allowed = new Set(messages.filter(threadSelectable).map((m) => m.id));
+  const allowed = new Set(messages.filter((m) => threadSelectable(m, marks)).map((m) => m.id));
   return new Set([...selected].filter((id) => allowed.has(id)));
 }
 

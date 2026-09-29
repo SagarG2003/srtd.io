@@ -314,14 +314,15 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
       expect(await ownReadCount(ownerClient, 'chat_messages', match)).toBe(seeded);
     });
 
-    it('soft-deleted messages are hidden even from a participant', async () => {
+    it('soft-deleted messages stay visible to a participant as a tombstone, never to outsiders', async () => {
       const id = await seedMessage(adminGeneric, dmChannelId, wsA.id, owner.id);
       const upd = await adminGeneric
         .from('chat_messages')
-        .update({ deleted_at: partitionTimestamp })
+        .update({ deleted_at: partitionTimestamp, body: null })
         .eq('id', id);
       expect(upd.error).toBeNull();
-      expect(await visibleRowCount(bClient, 'chat_messages', [['id', id]])).toBe(0);
+      expect(await visibleRowCount(bClient, 'chat_messages', [['id', id]])).toBe(1);
+      expect(await visibleRowCount(outsiderClient, 'chat_messages', [['id', id]])).toBe(0);
     });
   });
 
@@ -1184,8 +1185,25 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
       expect(res.error).toBeNull();
       expect(await deletedAt(a)).not.toBeNull();
       expect(await deletedAt(b)).not.toBeNull();
-      // Soft-deleted rows drop out of the member-visible history.
-      expect(await visibleRowCount(ownerClient, 'chat_messages', [['id', a]])).toBe(0);
+      // Deleted rows stay member-visible as tombstones with every content column wiped.
+      const wiped = await adminGeneric
+        .from('chat_messages')
+        .select(
+          'body, mentions, attachment_asset_ids, attachment_meta, shared_post_ids, shared_brief_ids',
+        )
+        .eq('id', a);
+      expect(wiped.error).toBeNull();
+      expect(wiped.data).toEqual([
+        {
+          body: null,
+          mentions: null,
+          attachment_asset_ids: null,
+          attachment_meta: null,
+          shared_post_ids: null,
+          shared_brief_ids: null,
+        },
+      ]);
+      expect(await visibleRowCount(ownerClient, 'chat_messages', [['id', a]])).toBe(1);
     });
 
     it("raises on another member's message and deletes nothing", async () => {

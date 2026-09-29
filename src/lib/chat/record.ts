@@ -1,7 +1,8 @@
 // Postgres writes for chat, through the SECURITY DEFINER procs that are the
 // only write paths: chat_message_send (the record, called BEFORE Agora),
 // chat_reaction_add / chat_reaction_remove, chat_read_cursor_set,
-// chat_mark_set / chat_mark_resolve / chat_mark_reopen, chat_message_delete and
+// chat_mark_set / chat_mark_resolve / chat_mark_reopen, chat_message_edit,
+// chat_message_delete and
 // chat_channel_clear (delete a chat for the caller only). The actor
 // is auth.uid() server-side (never passed), and the trace id is the explicit
 // p_trace_id parameter of every proc (minted with uuid_v7 at the user action,
@@ -102,6 +103,59 @@ export async function sendMessageRecord(params: SendRecordParams): Promise<SendR
   } finally {
     clearTimeout(timer);
   }
+}
+
+export interface EditRecordParams {
+  client: Client;
+  channelId: string;
+  messageId: string;
+  /** The new body; sent as typed (the proc refuses an empty one on a text-only message). */
+  body: string;
+  traceId: string;
+  /** Override for tests; defaults to SEND_TIMEOUT_MS. */
+  timeoutMs?: number;
+}
+
+export type EditRecordResult = SendRecordResult;
+
+/**
+ * Edit the body of an own message via chat_message_edit with an abort timeout.
+ * The proc enforces owner, the 15 minute window, not marked and not deleted,
+ * and returns the updated row (edited_at set). Never throws: a timeout,
+ * transport error or proc exception resolves to { ok: false } with the raw
+ * message, which {@link editFailureCopy} maps for the user.
+ */
+export async function editMessageRecord(params: EditRecordParams): Promise<EditRecordResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? SEND_TIMEOUT_MS);
+  const args: Functions['chat_message_edit']['Args'] = {
+    p_message_id: params.messageId,
+    p_channel_id: params.channelId,
+    p_body: params.body.trim(),
+    p_trace_id: params.traceId,
+  };
+  const reason = (): 'timeout' | 'error' => (controller.signal.aborted ? 'timeout' : 'error');
+  try {
+    const { data, error } = await params.client
+      .rpc('chat_message_edit', args)
+      .abortSignal(controller.signal);
+    if (error) return { ok: false, reason: reason(), message: error.message };
+    if (data === null || data === undefined) {
+      return { ok: false, reason: 'error', message: 'chat_message_edit returned no row' };
+    }
+    return { ok: true, row: data as ChatMessageRow };
+  } catch (error) {
+    return { ok: false, reason: reason(), message: String(error) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** User-facing copy for a failed edit, mapped from the proc's exception text. */
+export function editFailureCopy(message: string): string {
+  if (/edit window has closed/i.test(message)) return 'Edit window has closed (15 min)';
+  if (/marked messages cannot be edited/i.test(message)) return "Marked messages can't be edited";
+  return "Couldn't edit, try again";
 }
 
 /** A void proc outcome; the message is the raw error for logging. */
