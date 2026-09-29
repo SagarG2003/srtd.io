@@ -55,6 +55,7 @@ import {
   filterMentionMembers,
   insertMention,
   knownMentionName,
+  mentionIds,
   mentionQuery,
   rememberMentionNames,
   resolveMentionText,
@@ -145,6 +146,12 @@ interface ComposerProps {
 /** What the composer needs for @ mentions. */
 export interface ComposerMentions {
   members: readonly MentionMember[];
+  /**
+   * False while this chat's member list (and so the name registry) is still
+   * loading: a stored body's tokens are then kept untouched, never dropped as
+   * unknown. Absent counts as ready.
+   */
+  ready?: boolean;
   selfId: string | null;
   nameOf: NameOf;
 }
@@ -165,6 +172,25 @@ export function restoreDraftText(
 ): { text: string; caret: number; picks: MentionPick[] } {
   const restored = deserializeMentions(stored.text, nameOf);
   return { ...restored, caret: displayCaret(stored.text, stored.caret, nameOf) };
+}
+
+/**
+ * The composer's state for a stored body (a restored draft, an edit's text, the
+ * draft after an edit): with the chat's names ready, tokens become "@Name" and
+ * picks as restoreDraftText does. Before that, a body with tokens is held: the
+ * text stays the serialized body verbatim with no picks (so it serializes back
+ * unchanged and its mentions still send), and deserializes once names settle.
+ * A token still unknown after that (an ex-member) drops. Pure.
+ */
+export function composerBodyFor(
+  stored: { text: string; caret: number },
+  ready: boolean,
+  nameOf: NameOf,
+): { text: string; caret: number; picks: MentionPick[]; held: boolean } {
+  if (!ready && mentionIds(stored.text).length > 0) {
+    return { text: stored.text, caret: stored.caret, picks: [], held: true };
+  }
+  return { ...restoreDraftText(stored, nameOf), held: false };
 }
 
 /**
@@ -665,10 +691,13 @@ export function Composer(props: ComposerProps): ReactElement {
   const [initial] = useState(() => (channelId !== undefined ? getDraft(channelId) : EMPTY_DRAFT));
   // The draft stores the serialized body (tokens), so its mention map survives
   // a chat switch; the textarea shows "@Name" and the picks come back with it.
+  // Until this chat's names are in, a body with tokens stays held (verbatim).
   const nameOf = mentionNameOf(props.mentions);
-  const [restored] = useState(() => restoreDraftText(initial, nameOf));
+  const namesReady = props.mentions?.ready !== false;
+  const [restored] = useState(() => composerBodyFor(initial, namesReady, nameOf));
   const [text, setText] = useState(restored.text);
   const [picks, setPicks] = useState<MentionPick[]>(restored.picks);
+  const [held, setHeld] = useState(restored.held);
   const [pending, setPending] = useState<Pending[]>(initial.pendingFiles);
   const [sharedPosts, setSharedPosts] = useState<PostCardFields[]>(initial.sharedPosts);
   const [sharedBriefs, setSharedBriefs] = useState<BriefCardFields[]>(initial.sharedBriefs);
@@ -740,22 +769,34 @@ export function Composer(props: ComposerProps): ReactElement {
       step.session === null && channelId !== undefined
         ? editRestoreText(channelId, step.text)
         : step.text;
-    const shown = deserializeMentions(stored, nameOf);
-    const next = shown.text;
-    setText(next);
+    const shown = composerBodyFor({ text: stored, caret: stored.length }, namesReady, nameOf);
+    setText(shown.text);
     setPicks(shown.picks);
-    setCaret(next.length);
+    setCaret(shown.caret);
+    setHeld(shown.held);
     setEditBusy(false);
     if (step.session === null) return;
     const el = textareaRef.current ?? formRef.current?.querySelector('textarea') ?? null;
     if (el === null) return;
     requestAnimationFrame(() => {
       el.focus();
-      el.setSelectionRange(next.length, next.length);
+      el.setSelectionRange(el.value.length, el.value.length);
     });
     // Only the id drives the session; initialText is read once per id.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingId]);
+
+  // The chat's names settled: a held body becomes "@Name" text and its picks.
+  useLayoutEffect(() => {
+    if (!held || !namesReady) return;
+    const shown = composerBodyFor({ text, caret }, true, nameOf);
+    setText(shown.text);
+    setPicks(shown.picks);
+    setCaret(shown.caret);
+    setHeld(false);
+    // Only the settle drives this; the held text and caret are read then.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [held, namesReady]);
 
   const menuItems = useMemo(
     () =>
@@ -982,6 +1023,8 @@ export function Composer(props: ComposerProps): ReactElement {
   function trackCaret(event: SyntheticEvent<HTMLTextAreaElement>): void {
     const el = event.currentTarget;
     textareaRef.current = el;
+    // A held body's caret stays in its stored coordinates until it settles.
+    if (held) return;
     const next = el.selectionStart ?? el.value.length;
     setCaret(next);
     if (caretHashQuery(el.value, next) === null) setHashDismissed(false);
@@ -997,7 +1040,7 @@ export function Composer(props: ComposerProps): ReactElement {
 
   // The @ picker's rows: this chat's people matching the typed run, never me.
   const openMention =
-    props.mentions !== undefined && !props.disabled && !mentionDismissed
+    props.mentions !== undefined && !props.disabled && !mentionDismissed && !held
       ? mentionQuery(text, caret)
       : null;
   const mentionRows =
@@ -1234,7 +1277,8 @@ export function Composer(props: ComposerProps): ReactElement {
 
             <Textarea
               ref={textareaRef}
-              value={text}
+              value={held ? resolveMentionText(text, nameOf) : text}
+              readOnly={held}
               onChange={(event) => {
                 setText(event.target.value);
                 setMentionActive(0);

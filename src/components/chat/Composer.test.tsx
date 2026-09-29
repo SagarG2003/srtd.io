@@ -9,6 +9,7 @@ import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import {
   AboutBar,
   composerBars,
+  composerBodyFor,
   composerCanSend,
   EDIT_EMPTY_TOAST,
   EDIT_PLACEHOLDER,
@@ -38,6 +39,8 @@ import { stripHashToken } from '@/lib/chat/post-refs';
 import { IconButton } from '@/components/ui/IconButton';
 import { postRefKey } from '@/components/chat/PostRefChip';
 import { getDraft, resetDrafts, setDraft } from '@/lib/chat/drafts';
+import { runEdit } from '@/lib/chat/delete-flow';
+import type { Client } from '@srtdio/rpc';
 import {
   deserializeMentions,
   mentionIds,
@@ -623,5 +626,67 @@ describe('@ mentions in the composer', () => {
     );
     expect(bar).toContain('ping @Ben');
     expect(bar).not.toContain('@[');
+  });
+});
+
+describe('F4 draft restore and edit keep mentions whose names are still loading', () => {
+  const ANA = '11111111-1111-4111-8111-111111111111';
+  const EX = '33333333-3333-4333-8333-333333333333';
+  const loading = (): string | undefined => undefined;
+  const loaded = (id: string): string | undefined => (id === ANA ? 'Ana' : undefined);
+
+  it('F4 restore draft before members load, then load: mention kept and sent', () => {
+    resetDrafts();
+    const stored = `hi @[${ANA}] `;
+    setDraft('chan-a', { text: stored, caret: stored.length });
+    // Members not settled: the stored body is held verbatim, nothing drops.
+    const held = composerBodyFor(getDraft('chan-a'), false, loading);
+    expect(held.held).toBe(true);
+    expect(held.picks).toEqual([]);
+    // What the composer writes back while held is the stored body, untouched.
+    expect(serializeMentions(held.text, held.picks)).toBe(stored);
+    expect(serializedCaret(held.text, held.caret, held.picks)).toBe(stored.length);
+    // Members settle: "@Ana" with its pick; the send carries the mention.
+    const shown = composerBodyFor({ text: held.text, caret: held.caret }, true, loaded);
+    expect(shown).toEqual({
+      text: 'hi @Ana ',
+      caret: 'hi @Ana '.length,
+      picks: [{ userId: ANA, name: 'Ana' }],
+      held: false,
+    });
+    expect(mentionIds(serializeMentions(shown.text, shown.picks))).toEqual([ANA]);
+    // After settle an id still unknown (ex-member) may drop.
+    const ex = composerBodyFor({ text: `x @[${EX}]`, caret: 0 }, true, loaded);
+    expect(ex.picks).toEqual([]);
+    resetDrafts();
+  });
+
+  it('F4 enter edit before members load: mention kept and sent in p_mentions', async () => {
+    const initialText = `fix @[${ANA}] please`;
+    const held = composerBodyFor({ text: initialText, caret: initialText.length }, false, loading);
+    expect(held.held).toBe(true);
+    expect(held.text).toBe(initialText);
+    const shown = composerBodyFor({ text: held.text, caret: held.caret }, true, loaded);
+    expect(shown.text).toBe('fix @Ana please');
+    const edited = `${shown.text} now`;
+    const body = serializeMentions(edited, shown.picks);
+    expect(editSendDecision({ text: body, initialText, hasOtherContent: false })).not.toBe(
+      'unchanged',
+    );
+    const rpc = vi.fn(() => ({
+      abortSignal: () =>
+        Promise.resolve({ data: { id: 'm1', body, edited_at: 'now' }, error: null }),
+    }));
+    await runEdit(
+      {
+        client: { rpc } as unknown as Client,
+        applyLocal: () => undefined,
+        signal: undefined,
+        onSignalFailed: () => undefined,
+      },
+      { channelId: 'c1', messageId: 'm1', body, traceId: 't' },
+    );
+    const args = (rpc.mock.calls[0] as unknown as [string, Record<string, unknown>])[1];
+    expect(args.p_mentions).toEqual([ANA]);
   });
 });

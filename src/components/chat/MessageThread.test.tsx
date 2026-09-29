@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -3310,5 +3312,81 @@ describe('@mentions in bubbles', () => {
     expect(renderBodyWithMentions('plain', false, { nameOf, viewerUserId: ME })).toEqual(
       renderMessageBody('plain', false),
     );
+  });
+});
+
+describe('F5 mentions are bold and the peer ink clears 4.5:1 in both themes', () => {
+  // Read the theme tokens straight from src/index.css (read only). The hex sign
+  // is built from its char code so this chat file stays hash-free.
+  const css = readFileSync(fileURLToPath(new URL('../../index.css', import.meta.url)), 'utf8');
+  const HASH = String.fromCharCode(35);
+
+  function tokens(selector: string): Map<string, string> {
+    const start = css.indexOf(`${selector} {`);
+    const body = css.slice(start, css.indexOf('}', start));
+    const out = new Map<string, string>();
+    const pattern = new RegExp(`--([\\w-]+):\\s*${HASH}([0-9a-f]{6});`, 'gi');
+    for (const match of body.matchAll(pattern)) out.set(match[1] ?? '', match[2] ?? '');
+    return out;
+  }
+
+  function rgb(hex: string): number[] {
+    return [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  }
+
+  function luminance(channels: number[]): number {
+    const [r = 0, g = 0, b = 0] = channels.map((v) => {
+      const c = v / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+
+  function ratio(a: number[], b: number[]): number {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return ((hi ?? 0) + 0.05) / ((lo ?? 0) + 0.05);
+  }
+
+  /** accent-soft: the accent at 10% (light) / 16% (dark) over the peer bubble. */
+  function tint(accent: number[], alpha: number, under: number[]): number[] {
+    return accent.map((v, i) => Math.round(alpha * v + (1 - alpha) * (under[i] ?? 0)));
+  }
+
+  const light = tokens(':root');
+  const dark = tokens('.dark');
+  const at = (theme: Map<string, string>, name: string): number[] => rgb(theme.get(name) ?? '');
+
+  it('F5 peer mention ink (accent-hover) on the peer bubble (panel-2) is at least 4.5:1, light and dark', () => {
+    expect(mentionClass(false, false)).toContain('text-accent-hover');
+    const lightRatio = ratio(at(light, 'accent-hover'), at(light, 'panel-2'));
+    const darkRatio = ratio(at(dark, 'accent-hover'), at(dark, 'panel-2'));
+    expect(lightRatio).toBeGreaterThanOrEqual(4.5);
+    expect(darkRatio).toBeGreaterThanOrEqual(4.5);
+    expect(lightRatio.toFixed(2)).toBe('5.32');
+    expect(darkRatio.toFixed(2)).toBe('5.58');
+    // The accent the peer mention used before fails (4.23 light, 4.48 dark).
+    expect(ratio(at(light, 'accent'), at(light, 'panel-2'))).toBeLessThan(4.5);
+    expect(ratio(at(dark, 'accent'), at(dark, 'panel-2'))).toBeLessThan(4.5);
+    // A mention of me also sits on accent-soft: the ink still clears 4.5:1 there.
+    const selfLight = ratio(
+      at(light, 'accent-hover'),
+      tint(at(light, 'accent'), 0.1, at(light, 'panel-2')),
+    );
+    const selfDark = ratio(
+      at(dark, 'accent-hover'),
+      tint(at(dark, 'accent'), 0.16, at(dark, 'panel-2')),
+    );
+    expect(selfLight).toBeGreaterThanOrEqual(4.5);
+    expect(selfDark).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('F5 every mention is font-bold in own and peer bubbles; a mention of me adds accent-soft', () => {
+    for (const mine of [true, false]) {
+      expect(mentionClass(mine, false)).toContain('font-bold');
+      expect(mentionClass(mine, true)).toContain('font-bold');
+      expect(mentionClass(mine, true)).toContain('bg-accent-soft');
+      expect(mentionClass(mine, false)).not.toContain('bg-accent-soft');
+    }
+    expect(mentionClass(true, false)).toContain('text-accent-fg');
   });
 });

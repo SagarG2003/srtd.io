@@ -262,12 +262,17 @@ interface MessageThreadProps {
     messages: readonly ThreadMessage[],
     targets: ChannelSummary[],
   ) => Promise<ForwardSendResult>;
-  /** The @ picker's people for this chat (never the viewer); absent turns @ off. */
-  mentionMembers?: readonly MentionMember[];
+  /**
+   * The @ picker's people for this chat (never the viewer); absent turns @ off.
+   * Null while they load: the composer keeps a stored body's tokens untouched.
+   */
+  mentionMembers?: readonly MentionMember[] | null;
   /** Bubble @mentions: tap opens a DM with that person (never me or our DM's peer). */
   mentions?: BubbleMentions;
   /** Open with this message in view (an Activity mention); a miss toasts, the chat stays at the bottom. */
   initialMessageId?: string | null;
+  /** The thread took initialMessageId (its jump runs, found or miss): the caller drops it. */
+  onInitialJumpTaken?: () => void;
 }
 
 /** Users who asked for less motion: the swipe resets without a spring. */
@@ -1093,6 +1098,19 @@ export function renderMessageBody(
   });
 }
 
+/**
+ * Whether the thread takes its initial (Activity) jump now: there is one, it
+ * was not taken yet, and the rows are on screen (the skeleton has no row to
+ * reveal, so a jump then would be lost). Pure.
+ */
+export function initialJumpDue(input: {
+  messageId: string | null;
+  done: boolean;
+  bodyLoading: boolean;
+}): boolean {
+  return input.messageId !== null && !input.done && !input.bodyLoading;
+}
+
 /** What a bubble needs to make its @mentions tappable. */
 export interface BubbleMentions {
   /** The DM's other person: a mention of them inside our DM does nothing. */
@@ -1110,12 +1128,17 @@ export interface MentionRenderContext {
 }
 
 /**
- * A mention's ink inside a bubble: the link colour of that bubble type (accent-fg
- * on own, accent on peer), bold when it is me. Tokens only, so light and dark
- * stay at parity.
+ * A mention's ink inside a bubble, always bold: accent-fg on own, accent-hover
+ * on peer (the accent family token that clears 4.5:1 on panel-2 in both
+ * themes). A mention of me also sits on the accent-soft tint. Tokens only, so
+ * light and dark stay at parity.
  */
 export function mentionClass(mine: boolean, self: boolean): string {
-  return cn(mine ? 'text-accent-fg' : 'text-accent', self ? 'font-bold' : 'font-medium');
+  return cn(
+    'font-bold',
+    mine ? 'text-accent-fg' : 'text-accent-hover',
+    self && 'rounded-sm bg-accent-soft',
+  );
 }
 
 /** A 44x44 hit area centred on the inline name, without changing the line box. */
@@ -3314,16 +3337,6 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   });
   const jumpTo = (id: string): void =>
     setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
-  // Opened from an Activity mention: once the first page is in, jump to that
-  // message through the same path (older pages load as needed; a miss toasts
-  // and the chat stays at the bottom). Once per open.
-  const initialMessageId = props.initialMessageId ?? null;
-  const initialJumpDone = useRef(false);
-  useEffect(() => {
-    if (initialJumpDone.current || initialMessageId === null || props.loading) return;
-    initialJumpDone.current = true;
-    setJumpRequest({ id: initialMessageId, seq: 1 });
-  }, [initialMessageId, props.loading]);
   // Jumps from the marks and contact sheets can land outside the filter.
   const jumpToAll = (id: string): void => {
     setFilterPostId(null);
@@ -3370,6 +3383,23 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelKey, props.messages, parentIndex, chipSettled, hydrationTick]);
   const onScreen = admitted.rows;
+  // Opened from an Activity mention: once the first page is on screen (not the
+  // skeleton, so the row can be revealed), jump to that message through the
+  // same path (older pages load via ensureLoaded; a miss toasts and the chat
+  // stays at the bottom). Once per open; the caller then drops it, so reopening
+  // the chat later never jumps again.
+  const initialMessageId = props.initialMessageId ?? null;
+  const initialJumpDone = useRef(false);
+  const bodyLoading = props.loading || (filterPostId === null && holdingFirstPage(admitted.gate));
+  const onInitialJumpTaken = props.onInitialJumpTaken;
+  useEffect(() => {
+    const id = initialMessageId;
+    if (id === null) return;
+    if (!initialJumpDue({ messageId: id, done: initialJumpDone.current, bodyLoading })) return;
+    initialJumpDone.current = true;
+    setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
+    onInitialJumpTaken?.();
+  }, [initialMessageId, bodyLoading, onInitialJumpTaken]);
   const gatedIndex = useMemo(() => parentIndexOf(onScreen), [onScreen]);
   const shownMessages = useMemo(
     () => (filterPostId !== null ? filterRows(props.messages, filterPostId) : onScreen),
@@ -3620,7 +3650,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         onShowPost={showPost}
         filtering={filterPostId !== null}
         filterRef={filterPost != null ? postRefKey(workspaceKey, filterPost.number) : null}
-        loading={props.loading || (filterPostId === null && holdingFirstPage(admitted.gate))}
+        loading={bodyLoading}
         profiles={props.profiles}
         cache={presignCache}
         presignEnabled={presignEnabled}
@@ -3687,7 +3717,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           {...(props.mentionMembers !== undefined
             ? {
                 mentions: {
-                  members: props.mentionMembers,
+                  members: props.mentionMembers ?? [],
+                  ready: props.mentionMembers !== null,
                   selfId: props.currentUserId ?? null,
                   nameOf: profileNameOf(props.profiles),
                 },

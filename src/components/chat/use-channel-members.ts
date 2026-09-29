@@ -70,22 +70,27 @@ const READERS: ChannelMemberReaders = {
   members: (workspaceId, userIds) => readChatMembers(supabase, { workspaceId, userIds }),
 };
 
-/** The mention picker's people for the open chat ([] until loaded). */
-export function useChannelMembers(input: ChannelMembersInput): MentionMember[] {
-  const [members, setMembers] = useState<MentionMember[]>([]);
+/**
+ * The mention picker's people for the open chat: null until the list for THIS
+ * chat has settled (loaded, or failed to []), so the composer knows when its
+ * names are in; a previous chat's list never counts.
+ */
+export function useChannelMembers(input: ChannelMembersInput): MentionMember[] | null {
+  const [loaded, setLoaded] = useState<{ key: string; members: MentionMember[] } | null>(null);
   const { workspaceId, currentUserId, groupId, peerUserId } = input;
+  const key = [workspaceId, currentUserId, groupId, peerUserId].join('|');
   useEffect(() => {
     let cancelled = false;
     void loadChannelMembers({ workspaceId, currentUserId, groupId, peerUserId }, READERS).then(
       (next) => {
         if (cancelled) return;
         rememberMentionNames(next);
-        setMembers(next);
+        setLoaded({ key, members: next });
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, currentUserId, groupId, peerUserId]);
-  return members;
+  }, [key, workspaceId, currentUserId, groupId, peerUserId]);
+  return loaded !== null && loaded.key === key ? loaded.members : null;
 }

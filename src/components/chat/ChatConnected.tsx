@@ -32,8 +32,9 @@ import { GroupInfoSheet } from '@/components/chat/GroupInfoSheet';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import { startDmChannel } from '@/components/chat/chat-actions';
 import { useChannelMembers } from '@/components/chat/use-channel-members';
-import { mentionIds, rememberMentionNames } from '@/lib/chat/mentions';
+import { knownMentionName, mentionIds, rememberMentionNames } from '@/lib/chat/mentions';
 import { useToast } from '@/components/ui/toast';
+import type { Result } from '@srtdio/rpc';
 
 interface ChatConnectedProps {
   client: ChatConnection | null;
@@ -65,11 +66,93 @@ export function profileIdsNeeded(
   };
   for (const message of messages) {
     add(message.senderUserId);
-    for (const id of mentionIds(message.body)) add(id);
-    if (message.reply !== null) for (const id of mentionIds(message.reply.preview)) add(id);
+    for (const id of rowNameIds(message)) add(id);
   }
   add(peerUserId);
   return [...needed];
+}
+
+/**
+ * Where the thread's profile reads left each id they asked about. `unknown`:
+ * a read succeeded without it (an ex-member); it renders "@Unknown member" for
+ * good and is never read again. `failed`: its last read failed; it renders
+ * "@Unknown member" inert for now and rides along on the next read.
+ */
+export interface NameReads {
+  unknown: ReadonlySet<string>;
+  failed: ReadonlySet<string>;
+}
+
+export const NO_NAME_READS: NameReads = { unknown: new Set(), failed: new Set() };
+
+/** The ids a row's first paint names: its @mentions, its quote's author and the quote's @mentions. */
+export function rowNameIds(message: ThreadMessage): string[] {
+  const ids = mentionIds(message.body);
+  if (message.reply !== null) {
+    if (message.reply.authorUserId !== null) ids.push(message.reply.authorUserId);
+    ids.push(...mentionIds(message.reply.preview));
+  }
+  return ids;
+}
+
+/**
+ * The rows that may paint: each id a row names is known, or its read settled
+ * (unknown or failed). A row still waiting on a read is held back, so a live
+ * row or an older page never paints "@Unknown member" and then changes. The
+ * same array comes back when nothing is held. Pure.
+ */
+export function paintableMessages(
+  messages: ThreadMessage[],
+  isKnown: (userId: string) => boolean,
+  reads: NameReads,
+): ThreadMessage[] {
+  const settled = (id: string): boolean =>
+    isKnown(id) || reads.unknown.has(id) || reads.failed.has(id);
+  const held = messages.filter((m) => !rowNameIds(m).every(settled));
+  if (held.length === 0) return messages;
+  return messages.filter((m) => !held.includes(m));
+}
+
+/**
+ * The ids the next batched read asks for: every needed id never read (and not
+ * in flight), plus, alongside them, the ones whose last read failed (a retry).
+ * Empty when nothing new is needed, so a failure never loops. Pure.
+ */
+export function idsToRead(
+  needed: readonly string[],
+  reads: NameReads,
+  inFlight: ReadonlySet<string>,
+): string[] {
+  const fresh = needed.filter(
+    (id) => !reads.unknown.has(id) && !reads.failed.has(id) && !inFlight.has(id),
+  );
+  if (fresh.length === 0) return [];
+  const retry = [...reads.failed].filter((id) => !inFlight.has(id) && !fresh.includes(id));
+  return [...fresh, ...retry];
+}
+
+/**
+ * Fold one read's outcome in. Success: the ids it did not return are unknown
+ * (ex-members) and none of the asked ids stays failed. Failure: the asked ids
+ * are failed, never unknown, so the next read retries them. Pure.
+ */
+export function applyProfileRead(
+  reads: NameReads,
+  requested: readonly string[],
+  result: Result<ChatProfile[]>,
+): NameReads {
+  const failed = new Set(reads.failed);
+  if (!result.ok) {
+    for (const id of requested) failed.add(id);
+    return { unknown: reads.unknown, failed };
+  }
+  const returned = new Set(result.data.map((p) => p.userId));
+  const unknown = new Set(reads.unknown);
+  for (const id of requested) {
+    failed.delete(id);
+    if (!returned.has(id)) unknown.add(id);
+  }
+  return { unknown, failed };
 }
 
 /**
@@ -83,6 +166,39 @@ export function messageParamTarget(
   const messageId = params.get('message');
   if (channelId === null || channelId === '' || messageId === null || messageId === '') return null;
   return { channelId, messageId };
+}
+
+/** The toast when a deep link names a chat that is not in my list. */
+export const CHAT_UNAVAILABLE_TOAST = "That chat isn't available";
+
+/**
+ * What a ?channel= deep link does once the roster is ready: open that chat
+ * (with its ?message= jump, if any), or, when the chat is not in my list, say
+ * so and stay on the list (no jump is kept). Pure.
+ */
+export function deepLinkStep(
+  params: URLSearchParams,
+  roster: readonly ChannelSummary[],
+): {
+  open: ChannelSummary | null;
+  jump: { channelId: string; messageId: string } | null;
+  unavailable: boolean;
+} {
+  const channelId = params.get('channel');
+  const found = roster.find((c) => c.channelId === channelId) ?? null;
+  return {
+    open: found,
+    jump: found !== null ? messageParamTarget(params) : null,
+    unavailable: found === null,
+  };
+}
+
+/** The jump the open chat takes: the pending one only while it is for this chat. Pure. */
+export function initialJumpFor(
+  pending: { channelId: string; messageId: string } | null,
+  channelId: string,
+): string | null {
+  return pending?.channelId === channelId ? pending.messageId : null;
 }
 
 /** What opening a DM from a tapped mention needs. */
@@ -194,6 +310,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // roster is ready, once per distinct id. The param stays while the thread is
   // open; an id not in the roster is stripped so the chrome comes back.
   const selectedFromParam = useRef<string | null>(null);
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
   useEffect(() => {
     if (loadStatus !== 'ready') return;
     const channel = searchParams.get('channel');
@@ -203,11 +321,10 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     }
     if (selectedFromParam.current === channel) return;
     selectedFromParam.current = channel;
-    const found = roster.find((c) => c.channelId === channel);
+    const step = deepLinkStep(searchParams, roster);
     // ?message= is consumed once: the thread takes it, the url drops it.
-    const jump = messageParamTarget(searchParams);
-    if (jump !== null) {
-      if (found !== undefined) setPendingJump(jump);
+    if (step.jump !== null) setPendingJump(step.jump);
+    if (searchParams.has('message')) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -218,8 +335,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       );
     }
     if (selectedRef.current?.channelId === channel) return;
-    if (found !== undefined) setSelected(found);
-    else writeChannelParam(null);
+    if (step.open !== null) {
+      setSelected(step.open);
+      return;
+    }
+    writeChannelParam(null);
+    toastRef.current.show({ title: CHAT_UNAVAILABLE_TOAST });
   }, [loadStatus, roster, searchParams, setSearchParams, writeChannelParam]);
 
   // A ?channel= that disappears by any route other than closeChannel (browser
@@ -392,36 +513,61 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
 
   // Resolve sender and @mention display info in one batched read per set of
   // new ids (no N+1). The first page of a chat is held until its names are in,
-  // so no mention ever paints as "@Unknown member" and then swaps.
+  // and a live row or an older page is held until the read for its names
+  // settles, so no mention ever paints as "@Unknown member" and then swaps.
   const firstPageIn = !thread.loading && threadCurrent;
+  const [nameReads, setNameReads] = useState<NameReads>(NO_NAME_READS);
+  const inFlight = useRef(new Set<string>());
+  const mounted = useRef(true);
   useEffect(() => {
-    const needed = profileIdsNeeded(thread.messages, selected?.peerUserId ?? null, profiles);
-    const settle = (): void => {
-      if (firstPageIn) setNamesSettled(selectedChannelId);
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
     };
-    if (needed.length === 0) {
-      settle();
-      return;
-    }
-    let cancelled = false;
-    void readProfiles(supabase, needed).then((result) => {
-      if (cancelled) return;
-      settle();
+  }, []);
+  // Opening a chat retries the ids whose last read failed.
+  useEffect(() => {
+    setNameReads((prev) => (prev.failed.size === 0 ? prev : { ...prev, failed: new Set() }));
+  }, [selectedChannelId]);
+  const needed = profileIdsNeeded(thread.messages, selected?.peerUserId ?? null, profiles);
+  const unsettled = needed.filter((id) => !nameReads.unknown.has(id) && !nameReads.failed.has(id));
+  useEffect(() => {
+    const ids = idsToRead(
+      profileIdsNeeded(thread.messages, selected?.peerUserId ?? null, profiles),
+      nameReads,
+      inFlight.current,
+    );
+    if (ids.length === 0) return;
+    for (const id of ids) inFlight.current.add(id);
+    void readProfiles(supabase, ids).then((result) => {
+      for (const id of ids) inFlight.current.delete(id);
+      if (!mounted.current) return;
       if (!result.ok) {
         logger.warn('chat: profile read failed', { error: result.error.message });
-        return;
+      } else {
+        rememberMentionNames(result.data);
+        setProfiles((prev) => {
+          const next = new Map(prev);
+          for (const profile of result.data) next.set(profile.userId, profile);
+          return next;
+        });
       }
-      rememberMentionNames(result.data);
-      setProfiles((prev) => {
-        const next = new Map(prev);
-        for (const profile of result.data) next.set(profile.userId, profile);
-        return next;
-      });
+      setNameReads((prev) => applyProfileRead(prev, ids, result));
     });
-    return () => {
-      cancelled = true;
-    };
-  }, [thread.messages, selected, profiles, firstPageIn, selectedChannelId]);
+  }, [thread.messages, selected, profiles, nameReads]);
+  const firstPageSettled = firstPageIn && unsettled.length === 0;
+  useEffect(() => {
+    if (firstPageSettled) setNamesSettled(selectedChannelId);
+  }, [firstPageSettled, selectedChannelId]);
+  const threadMessages = useMemo(
+    () =>
+      paintableMessages(
+        thread.messages,
+        (id) => profiles.has(id) || knownMentionName(id) !== undefined,
+        nameReads,
+      ),
+    [thread.messages, profiles, nameReads],
+  );
   const namesReady = namesSettled === selectedChannelId;
 
   // The @ picker's people: the group's members, or the DM's other person.
@@ -482,7 +628,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               {...(!isGroup ? { role: selected.role ?? null } : {})}
               isGroup={isGroup}
               profiles={profiles}
-              messages={threadCurrent ? thread.messages : NO_MESSAGES}
+              messages={threadCurrent ? threadMessages : NO_MESSAGES}
               loading={thread.loading || !threadCurrent || !namesReady}
               loadingOlder={thread.loadingOlder}
               hasMore={thread.hasMore}
@@ -512,9 +658,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                 peerUserId: selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
                 onOpen: onOpenMention,
               }}
-              initialMessageId={
-                pendingJump?.channelId === selected.channelId ? pendingJump.messageId : null
-              }
+              initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
+              onInitialJumpTaken={() => setPendingJump(null)}
               showTicks={selected.channelType === 'dm'}
               {...(selected.peerUserId != null ? { presence } : {})}
               {...(isDesktop ? {} : { onBack })}
