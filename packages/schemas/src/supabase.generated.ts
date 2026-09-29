@@ -4829,6 +4829,7 @@ export type Database = {
       }
       groups: {
         Row: {
+          avatar_url: string | null
           created_at: string
           created_by: string | null
           deleted_at: string | null
@@ -4837,6 +4838,7 @@ export type Database = {
           workspace_id: string
         }
         Insert: {
+          avatar_url?: string | null
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
@@ -4845,6 +4847,7 @@ export type Database = {
           workspace_id: string
         }
         Update: {
+          avatar_url?: string | null
           created_at?: string
           created_by?: string | null
           deleted_at?: string | null
@@ -8020,6 +8023,10 @@ export type Database = {
           p_trace_id: string
         }
         Returns: string
+      }
+      group_avatar_set: {
+        Args: { p_avatar_url: string; p_group_id: string; p_trace_id: string }
+        Returns: undefined
       }
       group_create: {
         Args: {
