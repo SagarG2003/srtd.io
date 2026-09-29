@@ -22,6 +22,8 @@ import { PostPicker } from '@/components/chat/PostPicker';
 import { PendingChip } from '@/components/chat/PendingChip';
 import { PostRefThumb, postRefKey, type PostRefPost } from '@/components/chat/PostRefChip';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
+import { cn } from '@/lib/cn';
+import { editFailureCopy } from '@/lib/chat/record';
 import { briefStatusLabel, toggleBrief, type BriefCardFields } from '@/lib/chat/briefs';
 import { togglePost } from '@/components/chat/post-picker';
 import { attachmentMenuItems } from '@/lib/chat/attachment-menu';
@@ -44,7 +46,13 @@ import { APP_ENTITY_ROUTES, classify, currentOrigin, tokenize } from '@/lib/chat
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { clearDraft, EMPTY_DRAFT, getDraft, setDraft, type DraftFile } from '@/lib/chat/drafts';
-import { COMPOSER_INPUT_TYPE, sized, useChatLayout } from '@/components/chat/chat-type';
+import { deletedMessageLabel } from '@/lib/chat/thread';
+import {
+  COMPOSER_INPUT_TYPE,
+  NO_TOUCH_SELECT,
+  sized,
+  useChatLayout,
+} from '@/components/chat/chat-type';
 
 interface ComposerProps {
   /**
@@ -74,8 +82,13 @@ interface ComposerProps {
   transcribe?: ((blob: Blob) => Promise<TranscribeResult>) | undefined;
   /** Called on each keystroke so the parent can broadcast a throttled typing signal. */
   onTyping?: (() => void) | undefined;
-  /** The active reply draft; renders the preview bar above the chips when present. */
-  reply?: { authorName: string; quote: ReplyQuote } | undefined;
+  /**
+   * The active reply draft; renders the preview bar above the chips when
+   * present. `deleted` (the quoted message was deleted) reads deletedMessageLabel.
+   */
+  reply?: { authorName: string; quote: ReplyQuote; deleted?: true } | undefined;
+  /** The viewer's user id: a reply to their own deleted message reads "You deleted". */
+  viewerUserId?: string | undefined;
   /** Clears the active reply draft (cancel button, and after a successful send). */
   onCancelReply?: (() => void) | undefined;
   /**
@@ -104,6 +117,20 @@ interface ComposerProps {
   onCancelEdit?: (() => void) | undefined;
   /** Record the edited body; resolves ok, or the mapped failure copy to show. */
   onEdit?: ((text: string) => Promise<{ ok: true } | { ok: false; message: string }>) | undefined;
+}
+
+/**
+ * The reply bar's preview line: the quote's text, or deletedMessageLabel once
+ * the quoted message was deleted ("You deleted this message" when it was the
+ * viewer's own). Pure.
+ */
+export function replyBarPreview(
+  reply: { quote: ReplyQuote; deleted?: true },
+  viewerUserId: string | undefined,
+): string {
+  if (reply.deleted !== true) return reply.quote.preview;
+  const mine = reply.quote.authorUserId !== null && reply.quote.authorUserId === viewerUserId;
+  return deletedMessageLabel({ mine });
 }
 
 /** The message being edited, as the composer takes it. */
@@ -241,7 +268,10 @@ export function AboutBar(props: {
     <div
       data-about-bar={post?.id ?? ''}
       data-about-loading={post === null ? '' : undefined}
-      className="flex min-w-0 items-center gap-2 overflow-hidden rounded-md bg-panel-3"
+      className={cn(
+        'flex min-w-0 items-center gap-2 overflow-hidden rounded-md bg-panel-3',
+        NO_TOUCH_SELECT,
+      )}
     >
       <span className="w-[3px] shrink-0 self-stretch rounded-full bg-accent" aria-hidden="true" />
       {post !== null ? (
@@ -263,6 +293,46 @@ export function AboutBar(props: {
         <IconX size={16} />
       </IconButton>
     </div>
+  );
+}
+
+/** The toast when a send (a voice note's upload included) fails; raw text is only logged. */
+export const SEND_FAILED_COPY = "Couldn't send, try again";
+
+/** The pre-check's own lines (size, type, photo-only): known copy, shown as is. */
+const ATTACH_REJECT_COPY: ReadonlySet<string> = new Set([
+  'Files up to 100MB only',
+  "This file type isn't supported",
+  'Photos must be an image file',
+]);
+
+/** The toast for a file the pre-check refused: its known line, else a fixed one. */
+export function attachRejectCopy(message: string): string {
+  return ATTACH_REJECT_COPY.has(message) ? message : "Couldn't add that file, try again";
+}
+
+/**
+ * The reply bar above the input: the quote (or the deleted label) and a 44px
+ * cancel. Like the About bar it never selects text or shows the iOS callout on
+ * a long-press; only the textarea and search inputs stay selectable.
+ */
+export function ReplyBar(props: {
+  reply: { authorName: string; quote: ReplyQuote; deleted?: true };
+  viewerUserId: string | undefined;
+  onCancel: () => void;
+}): ReactElement {
+  return (
+    <ReplyQuoteBox
+      author={props.reply.authorName}
+      preview={replyBarPreview(props.reply, props.viewerUserId)}
+      deleted={props.reply.deleted === true}
+      className={NO_TOUCH_SELECT}
+      trailing={
+        <IconButton label="Cancel reply" className="shrink-0" onClick={props.onCancel}>
+          <IconX size={16} />
+        </IconButton>
+      }
+    />
   );
 }
 
@@ -621,7 +691,7 @@ export function Composer(props: ComposerProps): ReactElement {
       // The Photo path is image-only; the File path takes the full allowlist.
       const check = imageOnly ? precheckImage(file) : precheckFile(file);
       if (!check.ok) {
-        toast.show({ title: check.message });
+        toast.show({ title: attachRejectCopy(check.message) });
         continue;
       }
       const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null;
@@ -693,7 +763,7 @@ export function Composer(props: ComposerProps): ReactElement {
         // Success: the parent leaves editing and the earlier draft comes back.
         if (editSessionRef.current?.messageId !== draft.messageId) return;
         setEditBusy(false);
-        if (!result.ok) toast.show({ title: result.message });
+        if (!result.ok) toast.show({ title: editFailureCopy(result.message) });
       });
   }
 
@@ -785,7 +855,8 @@ export function Composer(props: ComposerProps): ReactElement {
         ? await props.uploadFile(file)
         : ({ ok: false, message: 'Upload is unavailable.' } as const);
     if (!up.ok) {
-      toast.show({ title: up.message });
+      logger.warn('chat composer: voice upload failed', { error: up.message });
+      toast.show({ title: SEND_FAILED_COPY });
       setVoiceBusy(false);
       return;
     }
@@ -912,18 +983,10 @@ export function Composer(props: ComposerProps): ReactElement {
       ) : null}
 
       {bars.reply && props.reply != null ? (
-        <ReplyQuoteBox
-          author={props.reply.authorName}
-          preview={props.reply.quote.preview}
-          trailing={
-            <IconButton
-              label="Cancel reply"
-              className="shrink-0"
-              onClick={() => props.onCancelReply?.()}
-            >
-              <IconX size={16} />
-            </IconButton>
-          }
+        <ReplyBar
+          reply={props.reply}
+          viewerUserId={props.viewerUserId}
+          onCancel={() => props.onCancelReply?.()}
         />
       ) : null}
 

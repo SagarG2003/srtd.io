@@ -154,8 +154,36 @@ export async function editMessageRecord(params: EditRecordParams): Promise<EditR
 /** User-facing copy for a failed edit, mapped from the proc's exception text. */
 export function editFailureCopy(message: string): string {
   if (/edit window has closed/i.test(message)) return 'Edit window has closed (15 min)';
-  if (/marked messages cannot be edited/i.test(message)) return "Marked messages can't be edited";
+  // Also matches its own copy, so mapping twice is harmless.
+  if (/marked messages (cannot|can't) be edited/i.test(message)) {
+    return "Marked messages can't be edited";
+  }
   return "Couldn't edit, try again";
+}
+
+/** User-facing copy for a failed mark; the raw proc text is only ever logged. */
+export const MARK_FAILED_COPY = "Couldn't mark, try again";
+
+/**
+ * User-facing copy for a failed delete, mapped from the proc's exception text
+ * the same way edits are. Anything else (transport errors included) reads the
+ * generic line, so raw error text never reaches a toast.
+ */
+export function deleteFailureCopy(message: string): string {
+  if (/from the last 30 minutes can be deleted/i.test(message)) {
+    return 'Delete window has closed (30 min)';
+  }
+  if (/marked messages cannot be deleted/i.test(message)) return "Marked messages can't be deleted";
+  return "Couldn't delete, try again";
+}
+
+/**
+ * The toast for a chunked delete that stopped at a failing chunk: how many of
+ * the selection were deleted, or the mapped failure when none were.
+ */
+export function deleteOutcomeCopy(deleted: number, total: number, message: string): string {
+  if (deleted === 0) return deleteFailureCopy(message);
+  return `Deleted ${deleted} of ${total}. Couldn't delete the rest, try again`;
 }
 
 /** A void proc outcome; the message is the raw error for logging. */

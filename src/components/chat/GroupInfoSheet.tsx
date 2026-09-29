@@ -143,6 +143,21 @@ export function GroupInfoNotice(): ReactElement {
   );
 }
 
+/** Under the kept member list when its re-read failed: the line is the retry. */
+export function MembersRefreshNotice(props: { onRetry: () => void }): ReactElement {
+  return (
+    <button
+      type="button"
+      role="status"
+      data-members-refresh=""
+      onClick={props.onRetry}
+      className={`mt-1 flex min-h-[44px] w-full items-center px-1 text-left text-fg-2 underline-offset-2 hover:underline ${SHEET_NOTICE_TYPE}`}
+    >
+      {MEMBERS_REFRESH_FAILED}
+    </button>
+  );
+}
+
 interface GroupInfoSheetProps {
   open: boolean;
   onClose: () => void;
@@ -156,10 +171,26 @@ interface GroupInfoSheetProps {
   onLeft: () => void;
 }
 
-interface MembersState {
+export interface MembersState {
   options: MemberOption[];
   loading: boolean;
   error: string | null;
+}
+
+/** The line when the member list could not be re-read after an add or remove. */
+export const MEMBERS_REFRESH_FAILED = "Couldn't refresh members, try again";
+
+/**
+ * The member list after a refresh (following an add or remove). A failed
+ * re-read keeps the list already shown and flags the failure (the sheet says
+ * so, with a retry); a successful one replaces it. Pure.
+ */
+export function membersAfterRefresh(
+  current: MembersState,
+  next: MembersState,
+): { members: MembersState; refreshFailed: boolean } {
+  if (next.error === null) return { members: next, refreshFailed: false };
+  return { members: current, refreshFailed: true };
 }
 
 /**
@@ -189,6 +220,8 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
   // (the proc stays the authority either way).
   const [canEditInfo, setCanEditInfo] = useState<boolean | null>(null);
   const [infoNotice, setInfoNotice] = useState(false);
+  // The last member re-read (after an add or remove) failed; the list shown is the previous one.
+  const [refreshFailed, setRefreshFailed] = useState(false);
 
   const loadMembers = useCallback(async (): Promise<MembersState> => {
     const ids = await listGroupMemberIds(supabase, { groupId: props.groupId });
@@ -225,6 +258,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     setName(props.groupName);
     setAddId(null);
     setError(null);
+    setRefreshFailed(false);
     setMembers({ options: [], loading: true, error: null });
     void loadMembers().then((next) => {
       if (!cancelled) setMembers(next);
@@ -241,7 +275,9 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
 
   async function refreshMembers(): Promise<void> {
     const next = await loadMembers();
-    setMembers(next);
+    const outcome = membersAfterRefresh(members, next);
+    setMembers(outcome.members);
+    setRefreshFailed(outcome.refreshFailed);
   }
 
   const infoLocked = canEditInfo === false;
@@ -410,6 +446,9 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
                 ))}
               </ul>
             )}
+            {refreshFailed && !members.loading && members.error === null ? (
+              <MembersRefreshNotice onRetry={() => void refreshMembers()} />
+            ) : null}
           </section>
 
           {canManage ? (

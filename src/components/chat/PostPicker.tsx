@@ -38,6 +38,7 @@ import { fetchMemberRole } from '@/lib/chat/viewer-role';
 import { cn } from '@/lib/cn';
 import { formatEntityRef } from '@/lib/entityRef';
 import { formatLabel } from '@/lib/post-detail-presentation';
+import { logger } from '@/lib/logger';
 import { useSession } from '@/lib/session-context';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
@@ -109,6 +110,21 @@ export interface PickerSectionsData {
   olderApprovedCount: number;
 }
 
+/** The picker's error line when a posts read fails; the raw text is only logged. */
+export const POSTS_LOAD_FAILED = "Couldn't load posts, try again";
+
+/** The picker's error line when the briefs read fails; the raw text is only logged. */
+export const BRIEFS_LOAD_FAILED = "Couldn't load briefs, try again";
+
+/** The briefs tab's error line for a read: fixed copy on failure (raw text logged), else null. */
+export function briefsLoadError(
+  result: { ok: true } | { ok: false; error: { message: string } },
+): string | null {
+  if (result.ok) return null;
+  logger.warn('post picker: briefs load failed', { error: result.error.message });
+  return BRIEFS_LOAD_FAILED;
+}
+
 /**
  * Load the default view: review, recent approved and (agency side) drafts, one
  * read each, plus one head-only count of older approved posts, all in parallel.
@@ -134,10 +150,13 @@ export async function loadPickerSections(
     countPostsForPicker(client, { workspaceId, stage: 'approved', enteredBefore: since }),
   ]);
   for (const result of [review, approved, drafts, older]) {
-    if (result !== null && !result.ok) return { ok: false, message: result.error.message };
+    if (result !== null && !result.ok) {
+      logger.warn('post picker: sections load failed', { error: result.error.message });
+      return { ok: false, message: POSTS_LOAD_FAILED };
+    }
   }
   if (!review.ok || !approved.ok || !older.ok || (drafts !== null && !drafts.ok)) {
-    return { ok: false, message: 'Could not load posts' };
+    return { ok: false, message: POSTS_LOAD_FAILED };
   }
   return {
     ok: true,
@@ -179,7 +198,10 @@ export async function loadSearchPage(
     limit: PICKER_PAGE_SIZE,
     withCount: params.cursor === null,
   });
-  if (!result.ok) return { ok: false, message: result.error.message };
+  if (!result.ok) {
+    logger.warn('post picker: search page load failed', { error: result.error.message });
+    return { ok: false, message: POSTS_LOAD_FAILED };
+  }
   return { ok: true, rows: result.data.rows, count: result.data.count };
 }
 
@@ -326,7 +348,7 @@ export function PostPicker(props: PostPickerProps): ReactElement {
       ...(status !== undefined ? { status } : {}),
     }).then((result) => {
       if (cancelled) return;
-      setBriefError(result.ok ? null : result.error.message);
+      setBriefError(briefsLoadError(result));
       setBriefs(result.ok ? result.data : []);
       setBriefLoadedKey(briefRequestKey);
     });

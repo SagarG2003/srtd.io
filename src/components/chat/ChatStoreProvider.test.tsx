@@ -8,11 +8,21 @@ vi.mock('agora-chat', () => ({
   default: { connection: vi.fn(), message: { create: vi.fn() } },
 }));
 
-import { loadChatList, type ChatListReaders } from '@/components/chat/ChatStoreProvider';
+import {
+  handleMessagesDeleted,
+  loadChatList,
+  routeGlobalCmd,
+  type ChatListReaders,
+} from '@/components/chat/ChatStoreProvider';
+import { deleteEventExt, readEventExt, type ChatMessageRow } from '@/lib/chat/thread';
 import { ChannelCard, channelListContent } from '@/components/chat/ChannelList';
 import { EmptyState } from '@/components/ui/EmptyState';
 import type { ChannelSummary } from '@/lib/chat-reads';
 import {
+  applyChannelPreviews,
+  applyPreviews,
+  channelsShowingDeleted,
+  setActive,
   beginLoad,
   initialState,
   loadScope,
@@ -23,6 +33,28 @@ import {
 } from '@/lib/chat/chat-store';
 
 const ME = 'me';
+
+function cmdRow(id: string, deleted: boolean): ChatMessageRow {
+  return {
+    id,
+    channel_id: 'other',
+    workspace_id: 'w1',
+    sender_user_id: 'p',
+    body: deleted ? null : 'words',
+    mentions: null,
+    attachment_asset_ids: null,
+    shared_post_ids: null,
+    shared_brief_ids: null,
+    reply_to_message_id: null,
+    forwarded_from_message_id: null,
+    attachment_meta: null,
+    agora_event_id: null,
+    created_at: '2026-09-22T10:00:00.000000+00:00',
+    edited_at: null,
+    deleted_at: deleted ? '2026-09-22T10:01:00.000000+00:00' : null,
+  };
+}
+
 const SCOPE = loadScope('w1', ME);
 
 function channel(channelId: string, createdAt: string): ChannelSummary {
@@ -233,5 +265,185 @@ describe('loadChatList', () => {
     const transition = await loadChatList(readers(), SCOPE, ME);
     const moved = beginLoad(initialState(), loadScope('w2', ME));
     expect(transition(moved)).toBe(moved);
+  });
+});
+
+describe('D1: the store handles a delete signal for any channel', () => {
+  it('a non-open chat whose line showed the message re-reads it in one batched read', async () => {
+    let state: ChatStoreState = setActive(
+      applyPreviews(
+        {
+          ...initialState(),
+          conversations: {
+            open: { lastMessageText: '', lastMessageTs: 0, unread: 0 },
+            other: { lastMessageText: '', lastMessageTs: 0, unread: 3 },
+          },
+        },
+        [
+          {
+            channelId: 'open',
+            messageId: 'o1',
+            senderUserId: 'p',
+            body: 'open line',
+            hasAttachments: false,
+            createdAt: '1970-01-01T00:00:00.010Z',
+          },
+          {
+            channelId: 'other',
+            messageId: 'x9',
+            senderUserId: 'p',
+            body: 'deleted words',
+            hasAttachments: false,
+            createdAt: '1970-01-01T00:00:00.020Z',
+          },
+        ],
+        ME,
+      ),
+      'open',
+    );
+    const reads = vi.fn(() =>
+      Promise.resolve([
+        {
+          channelId: 'open',
+          messageId: 'o1',
+          senderUserId: 'p',
+          body: 'open line',
+          hasAttachments: false,
+          createdAt: '1970-01-01T00:00:00.010Z',
+        },
+        {
+          channelId: 'other',
+          messageId: 'x8',
+          senderUserId: 'p',
+          body: 'the line before',
+          hasAttachments: false,
+          createdAt: '1970-01-01T00:00:00.015Z',
+        },
+      ]),
+    );
+    const stripDrafts = vi.fn();
+    const stripOutbox = vi.fn();
+    const pending: Promise<void>[] = [];
+    handleMessagesDeleted(
+      {
+        channelsShowing: (ids) => channelsShowingDeleted(state, ids),
+        rereadPreviews: (channelIds) => {
+          pending.push(
+            reads().then((rows) => {
+              state = applyChannelPreviews(state, channelIds, rows, ME);
+            }),
+          );
+        },
+        stripDrafts,
+        stripOutbox,
+      },
+      ['x9', 'x10'],
+    );
+    await Promise.all(pending);
+    expect(reads).toHaveBeenCalledOnce();
+    expect(selectConversation(state, 'other')?.lastMessageText).toBe('the line before');
+    expect(selectConversation(state, 'other')?.unread).toBe(3);
+    expect(selectConversation(state, 'open')?.lastMessageText).toBe('open line');
+    expect(stripDrafts).toHaveBeenCalledWith(['x9', 'x10']);
+    expect(stripOutbox).toHaveBeenCalledWith(['x9', 'x10']);
+  });
+
+  it('a live delete cmd for a non-open chat strips its preview, draft and outbox', async () => {
+    const state: ChatStoreState = setActive(
+      applyPreviews(
+        {
+          ...initialState(),
+          conversations: {
+            open: { lastMessageText: '', lastMessageTs: 0, unread: 0 },
+            other: { lastMessageText: '', lastMessageTs: 0, unread: 0 },
+          },
+        },
+        [
+          {
+            channelId: 'other',
+            messageId: 'x9',
+            senderUserId: 'p',
+            body: 'deleted words',
+            hasAttachments: false,
+            createdAt: '1970-01-01T00:00:00.020Z',
+          },
+        ],
+        ME,
+      ),
+      'open',
+    );
+    const rereadPreviews = vi.fn();
+    const stripDrafts = vi.fn();
+    const stripOutbox = vi.fn();
+    const deps = {
+      channelsShowing: (ids: readonly string[]) => channelsShowingDeleted(state, ids),
+      rereadPreviews,
+      stripDrafts,
+      stripOutbox,
+    };
+    const loadByIds = vi.fn((ids: readonly string[]) =>
+      Promise.resolve<Result<ChatMessageRow[]>>({
+        ok: true,
+        data: ids.map((id) => cmdRow(id, true)),
+      }),
+    );
+    const onDeleted = (ids: readonly string[]): void => handleMessagesDeleted(deps, ids);
+    await routeGlobalCmd(deleteEventExt({ messageIds: ['x9'] }), { loadByIds, onDeleted });
+    await routeGlobalCmd(readEventExt({ channelId: 'other', messageId: 'x9' }), {
+      loadByIds,
+      onDeleted,
+    });
+    expect(loadByIds).toHaveBeenCalledOnce();
+    expect(rereadPreviews).toHaveBeenCalledExactlyOnceWith(['other']);
+    expect(stripDrafts).toHaveBeenCalledExactlyOnceWith(['x9']);
+    expect(stripOutbox).toHaveBeenCalledExactlyOnceWith(['x9']);
+  });
+
+  it('R1: a delete cmd is re-read in one batched read; only ids deleted on record strip', async () => {
+    const loadByIds = vi.fn((ids: readonly string[]) =>
+      Promise.resolve<Result<ChatMessageRow[]>>({
+        ok: true,
+        // 'live' is not deleted, 'gone' is, 'unknown' is not found at all.
+        data: [cmdRow('live', false), cmdRow('gone', true)].filter((r) => ids.includes(r.id)),
+      }),
+    );
+    const onDeleted = vi.fn();
+    await routeGlobalCmd(deleteEventExt({ messageIds: ['live', 'gone', 'unknown', 'gone'] }), {
+      loadByIds,
+      onDeleted,
+    });
+    expect(loadByIds).toHaveBeenCalledOnce();
+    expect(loadByIds.mock.calls[0]?.[0]).toEqual(['live', 'gone', 'unknown']);
+    expect(onDeleted).toHaveBeenCalledExactlyOnceWith(['gone']);
+  });
+
+  it('R1: a cmd naming only a non-deleted id does nothing', async () => {
+    const onDeleted = vi.fn();
+    await routeGlobalCmd(deleteEventExt({ messageIds: ['live'] }), {
+      loadByIds: () => Promise.resolve({ ok: true, data: [cmdRow('live', false)] }),
+      onDeleted,
+    });
+    expect(onDeleted).not.toHaveBeenCalled();
+  });
+
+  it('R1: a failed re-read does nothing', async () => {
+    const onDeleted = vi.fn();
+    await routeGlobalCmd(deleteEventExt({ messageIds: ['gone'] }), {
+      loadByIds: () =>
+        Promise.resolve({ ok: false, error: { code: 'unknown', message: 'nope' } } as Result<
+          ChatMessageRow[]
+        >),
+      onDeleted,
+    });
+    expect(onDeleted).not.toHaveBeenCalled();
+  });
+
+  it('no line shows a deleted id: no read at all', () => {
+    const rereadPreviews = vi.fn();
+    handleMessagesDeleted(
+      { channelsShowing: () => [], rereadPreviews, stripDrafts: vi.fn(), stripOutbox: vi.fn() },
+      ['older'],
+    );
+    expect(rereadPreviews).not.toHaveBeenCalled();
   });
 });

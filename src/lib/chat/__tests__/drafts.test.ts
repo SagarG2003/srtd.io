@@ -8,6 +8,7 @@ import {
   isEmptyDraft,
   resetDrafts,
   setDraft,
+  stripDeletedReplies,
   subscribeDrafts,
 } from '@/lib/chat/drafts';
 
@@ -84,5 +85,30 @@ describe('edit restore', () => {
     // No draft in the map: the session's own saved text, still never B's.
     expect(editRestoreText(A, 'saved')).toBe('saved');
     expect(editRestoreText(A, undefined)).toBe('');
+  });
+});
+
+describe('D1: a deleted message leaves no text in draft replies', () => {
+  it('strips the quote text from every draft (any chat) that quotes it and marks it deleted', () => {
+    setDraft(A, {
+      text: 'my reply',
+      reply: { authorName: 'Asha', quote: { id: 'm1', authorUserId: 'p', preview: 'secret' } },
+    });
+    setDraft(B, {
+      reply: { authorName: 'Ravi', quote: { id: 'm2', authorUserId: 'p', preview: 'fine' } },
+    });
+    const before = draftsVersion();
+    stripDeletedReplies(['m1']);
+    expect(getDraft(A).reply).toEqual({
+      authorName: 'Asha',
+      quote: { id: 'm1', authorUserId: 'p', preview: '' },
+      deleted: true,
+    });
+    expect(getDraft(A).text).toBe('my reply');
+    expect(getDraft(B).reply?.quote.preview).toBe('fine');
+    expect(draftsVersion()).toBe(before + 1);
+    // Idempotent: nothing left to strip, no bump.
+    stripDeletedReplies(['m1']);
+    expect(draftsVersion()).toBe(before + 1);
   });
 });

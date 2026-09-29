@@ -651,15 +651,21 @@ export function applyEdit(
 
 /**
  * Apply a live edit from the message's re-read row, never the Agora payload.
- * A row that was never edited, or whose body and edited_at the list already
- * shows, changes nothing (the same list).
+ * A row that was never edited, or whose edited_at is not newer than the one
+ * the list shows (equal or older: a slower read racing a newer edit), changes
+ * nothing (the same list). Recheck, catch-up and live edits all go through here.
  */
 export function applyEditFromRow(messages: ThreadMessage[], row: ChatMessageRow): ThreadMessage[] {
   const existing = messages.find((m) => m.id === row.id);
   if (existing === undefined || row.edited_at === null || row.deleted_at !== null) return messages;
-  const body = row.body ?? '';
-  if (existing.body === body && existing.editedAt === row.edited_at) return messages;
-  return applyEdit(messages, { messageId: row.id, body, editedAt: row.edited_at });
+  const shown = existing.editedAt ?? null;
+  if (shown === row.edited_at) return messages;
+  if (shown !== null) {
+    const shownMs = Date.parse(shown);
+    const rowMs = Date.parse(row.edited_at);
+    if (!Number.isNaN(shownMs) && (Number.isNaN(rowMs) || rowMs <= shownMs)) return messages;
+  }
+  return applyEdit(messages, { messageId: row.id, body: row.body ?? '', editedAt: row.edited_at });
 }
 
 /** Drop messages by id; the same list when none match. */

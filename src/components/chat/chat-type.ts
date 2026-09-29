@@ -181,3 +181,28 @@ export const BUBBLE_MAX: ChatSize = {
   touch: 'max-w-[76%]',
   laptop: 'max-w-[65%]',
 };
+
+/** A glyph in the emoji picker grid and its group tabs: 24, no line box. */
+export const EMOJI_GLYPH_TYPE = 'text-[24px] leading-none';
+
+/** The emoji picker's search field: 17 touch (never under 16px, no iOS zoom), 14 laptop. */
+export const EMOJI_SEARCH_TYPE: ChatSize = {
+  touch: 'text-[17px] leading-[22px] font-normal',
+  laptop: 'text-[14px] leading-[20px] font-normal',
+};
+
+/** The emoji picker's group heading: 12/16/500, both. */
+export const EMOJI_GROUP_TYPE = 'text-xs font-medium';
+
+/** The reason line under a disabled selection Delete: 13/18, 400 on both. */
+export const SELECTION_REASON_TYPE = 'text-[13px] leading-[18px] font-normal';
+
+/** A touch-first device (phone, tablet): long-press owns the menu, contextmenu is suppressed. */
+export const COARSE_POINTER_QUERY = '(pointer: coarse)';
+
+/**
+ * Never native text selection or the iOS callout on a long-press: the thread
+ * list, every row and bubble, and chat list rows. Inputs (composer, search,
+ * the edit field) never sit inside these, so they keep normal selection.
+ */
+export const NO_TOUCH_SELECT = 'select-none [-webkit-touch-callout:none]';

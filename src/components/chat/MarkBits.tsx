@@ -57,16 +57,36 @@ export function MarkBadge(props: {
   );
 }
 
-/** A 44x44 selection checkbox for one own message. */
-export function SelectCheckbox(props: { checked: boolean; onToggle: () => void }): ReactElement {
+/**
+ * The circle's entrance: it fades in on opacity alone (120ms, none under
+ * reduced motion); nothing around it moves.
+ */
+export const SELECT_CHECK_FADE =
+  'transition-opacity duration-[120ms] motion-reduce:transition-none [@starting-style]:opacity-0';
+
+/**
+ * A 44x44 selection check circle for one message row. In the thread the row
+ * itself takes the tap (anywhere on it toggles), so this is the visible state
+ * and the keyboard stop; `className` places it (the row's left column).
+ */
+export function SelectCheckbox(props: {
+  checked: boolean;
+  onToggle: () => void;
+  className?: string;
+}): ReactElement {
   return (
     <button
       type="button"
       role="checkbox"
       aria-checked={props.checked}
       aria-label={props.checked ? 'Deselect message' : 'Select message'}
+      data-select-circle=""
       onClick={props.onToggle}
-      className="flex h-11 w-11 shrink-0 items-center justify-center self-center rounded-full"
+      className={cn(
+        'flex h-11 w-11 shrink-0 items-center justify-center rounded-full',
+        SELECT_CHECK_FADE,
+        props.className ?? 'self-center',
+      )}
     >
       <SelectCheck checked={props.checked} />
     </button>

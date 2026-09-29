@@ -6,7 +6,19 @@ vi.mock('agora-chat', () => ({
   default: { connection: vi.fn(), message: { create: vi.fn() } },
 }));
 
-import { channelRowBody, channelRowClass } from '@/components/chat/ChannelList';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import {
+  CHANNEL_ROW_BUTTON,
+  ChannelCard,
+  DEFAULT_LIST_INPUT,
+  channelListView,
+  channelRowBody,
+  channelRowClass,
+  chatRowContextMenu,
+  type ChannelListInput,
+} from '@/components/chat/ChannelList';
 import {
   CHAT_LIST_NAME_TYPE,
   CHAT_LIST_PREVIEW_TYPE,
@@ -156,5 +168,67 @@ describe('R2: chat list sizes follow the input, as the thread', () => {
     expect(html).toContain(CHAT_LIST_PREVIEW_TYPE.laptop);
     expect(html).toContain(CHAT_LIST_TIME_TYPE.laptop);
     expect(html).not.toContain('md:');
+  });
+});
+
+describe('D7: chat list rows never select text or show the callout', () => {
+  it('the row and its tap target carry select-none and the no-callout class', () => {
+    for (const cls of ['select-none', '[-webkit-touch-callout:none]']) {
+      expect(row(dm, read).cls.split(' ')).toContain(cls);
+      expect(CHANNEL_ROW_BUTTON.split(' ')).toContain(cls);
+    }
+  });
+
+  it('contextmenu default is prevented on a coarse pointer only', () => {
+    const preventDefault = vi.fn();
+    chatRowContextMenu(true)?.({ preventDefault });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(chatRowContextMenu(false)).toBeUndefined();
+  });
+});
+
+describe('G1: one layout listener per ChannelList, not one per row', () => {
+  function cards(input?: ChannelListInput): ReactElement<Record<string, unknown>>[] {
+    const tree = channelListView({
+      channels: [dm, group],
+      hasChannels: true,
+      selectedChannelId: null,
+      onSelect: () => {},
+      onNewChat: () => {},
+      ...(input !== undefined ? { input } : {}),
+    });
+    const out: ReactElement<Record<string, unknown>>[] = [];
+    const walk = (n: ReactNode): void => {
+      if (Array.isArray(n)) return n.forEach(walk);
+      if (!isValidElement(n)) return;
+      if (n.type === ChannelCard) out.push(n as ReactElement<Record<string, unknown>>);
+      walk((n.props as { children?: ReactNode }).children);
+    };
+    walk(tree);
+    return out;
+  }
+
+  it("every row gets the list's one input object", () => {
+    const input: ChannelListInput = { layout: 'laptop', hoverMenu: true, coarsePointer: false };
+    const rows = cards(input);
+    expect(rows).toHaveLength(2);
+    for (const card of rows) expect(card.props.input).toBe(input);
+    for (const card of cards()) expect(card.props.input).toBe(DEFAULT_LIST_INPUT);
+  });
+
+  it('ChannelCard reads no media query or layout hook of its own', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('./ChannelList.tsx', import.meta.url)),
+      'utf8',
+    );
+    const card = source.slice(
+      source.indexOf('export function ChannelCard('),
+      source.indexOf('interface ChannelListContentProps'),
+    );
+    expect(card).not.toContain('useChatLayout(');
+    expect(card).not.toContain('useMediaQuery(');
+    // The list reads them once.
+    const list = source.slice(source.indexOf('export function ChannelList('));
+    expect(list).toContain('useChannelListInput()');
   });
 });

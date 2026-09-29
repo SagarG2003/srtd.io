@@ -20,6 +20,18 @@ export interface DraftFile {
 export interface DraftReply {
   authorName: string;
   quote: ReplyQuote;
+  /**
+   * The quoted message was deleted for everyone: the quote's text is gone and
+   * the reply bar reads deletedMessageLabel. Absent is the same as false.
+   */
+  deleted?: true;
+}
+
+/** A draft reply whose quoted message was deleted: its text stripped, marked deleted. Pure. */
+export function strippedReply(reply: DraftReply): DraftReply {
+  return reply.deleted === true && reply.quote.preview === ''
+    ? reply
+    : { ...reply, quote: { ...reply.quote, preview: '' }, deleted: true };
 }
 
 export interface ChannelDraft {
@@ -94,6 +106,25 @@ export function setDraft(channelId: string, patch: Partial<ChannelDraft>): void 
 export function clearDraft(channelId: string): void {
   if (!drafts.delete(channelId)) return;
   bump();
+}
+
+/**
+ * Messages became tombstones: every draft reply (any chat) that quotes one
+ * loses the quoted text and is marked deleted. One bump when anything changed.
+ */
+export function stripDeletedReplies(messageIds: readonly string[]): void {
+  if (messageIds.length === 0) return;
+  const hit = new Set(messageIds);
+  let changed = false;
+  for (const [channelId, draft] of drafts) {
+    const reply = draft.reply;
+    if (reply === null || !hit.has(reply.quote.id)) continue;
+    const next = strippedReply(reply);
+    if (next === reply) continue;
+    drafts.set(channelId, { ...draft, reply: next });
+    changed = true;
+  }
+  if (changed) bump();
 }
 
 /** The draft text a chat list row previews; '' when none. */

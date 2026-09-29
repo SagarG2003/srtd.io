@@ -5,6 +5,7 @@ import {
   chunkIds,
   clearChannelRecord,
   deleteMessagesRecord,
+  deleteFailureCopy,
   editFailureCopy,
   editMessageRecord,
   removeReactionRecord,
@@ -482,5 +483,28 @@ describe('editMessageRecord', () => {
     );
     expect(editFailureCopy('deleted messages cannot be edited')).toBe("Couldn't edit, try again");
     expect(editFailureCopy('AbortError')).toBe("Couldn't edit, try again");
+  });
+});
+
+describe('D2: deleteFailureCopy', () => {
+  it('maps each proc refusal to its line, like edit', () => {
+    expect(
+      deleteFailureCopy('only your own messages from the last 30 minutes can be deleted'),
+    ).toBe('Delete window has closed (30 min)');
+    expect(deleteFailureCopy('marked messages cannot be deleted')).toBe(
+      "Marked messages can't be deleted",
+    );
+  });
+
+  it('anything else, transport errors included, reads the generic line (never raw text)', () => {
+    for (const raw of [
+      'TypeError: Failed to fetch',
+      'AbortError: signal is aborted without reason',
+      'not a member of this chat',
+      'select between 1 and 100 messages',
+      '',
+    ]) {
+      expect(deleteFailureCopy(raw)).toBe("Couldn't delete, try again");
+    }
   });
 });

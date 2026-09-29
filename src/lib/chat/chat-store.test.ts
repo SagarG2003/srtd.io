@@ -12,7 +12,14 @@ import {
   outboxDropChannel,
   selectHidden,
   applyIncoming,
+  applyChannelPreviews,
   applyPreviews,
+  applyServerClock,
+  CLOCK_SAMPLER_LIMIT,
+  createClockSampler,
+  channelsShowingDeleted,
+  stripDeletedQuotes,
+  stripPersistedQuotes,
   applyUnreadCounts,
   clearPendingOpen,
   clearPersistedOutbox,
@@ -92,6 +99,7 @@ describe('mergeInitial + applyUnreadCounts', () => {
       lastMessageText: 'hi a',
       lastMessageTs: 30,
       unread: 0,
+      lastMessageId: 'm',
     });
   });
 });
@@ -329,6 +337,7 @@ describe('applyPreviews / previewText', () => {
       lastMessagePrefix: 'You',
       lastMessageTs: 10,
       unread: 1,
+      lastMessageId: 'm1',
     });
     expect(selectConversation(state, 'b')?.lastMessageText).toBe('Attachment');
     expect(previewText({ body: ' ', hasAttachments: false })).toBe('');
@@ -568,5 +577,181 @@ describe('load lifecycle', () => {
       unread: 0,
     });
     expect(next.roster.map((c) => c.channelId)).toEqual(['a', 'b']);
+  });
+});
+
+describe('D1: a delete signal re-reads only the lines that showed the message', () => {
+  const previews = (
+    rows: { channelId: string; messageId: string; body: string; sender?: string }[],
+  ): Parameters<typeof applyPreviews>[1] =>
+    rows.map((r, i) => ({
+      channelId: r.channelId,
+      messageId: r.messageId,
+      senderUserId: r.sender ?? 'x',
+      body: r.body,
+      hasAttachments: false,
+      createdAt: `1970-01-01T00:00:00.0${10 + i}Z`,
+    }));
+
+  it('finds the channels whose line shows a deleted id (any channel, open or not)', () => {
+    const state = setActive(
+      applyPreviews(
+        seeded(),
+        previews([
+          { channelId: 'a', messageId: 'ma', body: 'open chat line' },
+          { channelId: 'b', messageId: 'mb', body: 'secret text' },
+        ]),
+        ME,
+      ),
+      'a',
+    );
+    expect(channelsShowingDeleted(state, ['mb'])).toEqual(['b']);
+    expect(channelsShowingDeleted(state, ['older'])).toEqual([]);
+    expect(channelsShowingDeleted(state, [])).toEqual([]);
+  });
+
+  it('applies the re-read to just those channels; an emptied channel loses its line', () => {
+    const state = applyPreviews(
+      seeded(),
+      previews([
+        { channelId: 'a', messageId: 'ma', body: 'keep me' },
+        { channelId: 'b', messageId: 'mb', body: 'secret text' },
+      ]),
+      ME,
+    );
+    // The re-read: b's newest live message is now an older one of mine.
+    const reread = previews([
+      { channelId: 'a', messageId: 'ma2', body: 'changed elsewhere' },
+      { channelId: 'b', messageId: 'mb0', body: 'earlier line', sender: ME },
+    ]);
+    const next = applyChannelPreviews(state, ['b'], reread, ME);
+    expect(selectConversation(next, 'b')).toMatchObject({
+      lastMessageText: 'earlier line',
+      lastMessagePrefix: 'You',
+      lastMessageId: 'mb0',
+      unread: 2,
+    });
+    expect(selectConversation(next, 'a')?.lastMessageText).toBe('keep me');
+    const emptied = applyChannelPreviews(state, ['b'], [], ME);
+    expect(selectConversation(emptied, 'b')?.lastMessageText).toBe('');
+    expect(selectConversation(emptied, 'b')?.lastMessageId).toBeUndefined();
+    expect(JSON.stringify(emptied)).not.toContain('secret text');
+  });
+
+  it('incoming and own lines carry their message id', () => {
+    const incoming = applyIncoming(seeded(), {
+      channelId: 'b',
+      messageId: 'live-1',
+      senderIsSelf: false,
+      text: 'x',
+      ts: 50,
+    });
+    expect(channelsShowingDeleted(incoming, ['live-1'])).toEqual(['b']);
+    const own = updateOwnMessage(seeded(), {
+      channelId: 'a',
+      messageId: 'own-1',
+      text: 'y',
+      ts: 60,
+    });
+    expect(channelsShowingDeleted(own, ['own-1'])).toEqual(['a']);
+  });
+});
+
+describe('D1: queued sends quoting a deleted message', () => {
+  const quoting = (id: string, quoteId: string): OutboxEntry => ({
+    id,
+    text: 'reply',
+    local: {
+      attachments: [],
+      sharedPostIds: [],
+      reply: { id: quoteId, authorUserId: 'peer', preview: 'the deleted words' },
+    },
+    state: 'sending',
+  });
+
+  it('stripDeletedQuotes clears reply.preview and keeps the reply id', () => {
+    const outbox: Outbox = { a: [quoting('s1', 'gone'), quoting('s2', 'kept')] };
+    const next = stripDeletedQuotes(outbox, new Set(['gone']));
+    expect(next.a?.[0]?.local.reply).toEqual({ id: 'gone', authorUserId: 'peer', preview: '' });
+    expect(next.a?.[1]?.local.reply?.preview).toBe('the deleted words');
+    expect(stripDeletedQuotes(outbox, new Set(['other']))).toBe(outbox);
+  });
+
+  it('stripPersistedQuotes clears the stored preview in place; reply_to stays', () => {
+    const data = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => void data.set(key, value),
+      removeItem: (key: string) => void data.delete(key),
+    };
+    const scope = { workspaceId: 'w', userId: 'u' };
+    writePersistedOutbox(storage, scope, { a: [quoting('s1', 'gone'), quoting('s2', 'kept')] });
+    stripPersistedQuotes(storage, ['gone']);
+    const raw = data.get(OUTBOX_STORAGE_KEY) ?? '';
+    expect(raw).toContain('the deleted words'); // s2 still quotes a live message
+    const restored = readPersistedOutbox(storage, scope);
+    expect(restored.a?.[0]?.local.reply).toEqual({ id: 'gone', authorUserId: 'peer', preview: '' });
+    expect(restored.a?.[1]?.local.reply?.preview).toBe('the deleted words');
+    // Never throws on blocked storage.
+    const blocked = {
+      getItem: () => {
+        throw new Error('blocked');
+      },
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    };
+    expect(() => stripPersistedQuotes(blocked, ['gone'])).not.toThrow();
+  });
+});
+
+describe('D3: server clock offset', () => {
+  it('starts at 0 and is set from an own send ack (server created_at minus the device send time)', () => {
+    expect(initialState().serverClockOffsetMs).toBe(0);
+    const sentAt = Date.parse('2026-09-22T10:00:00.000Z');
+    const next = applyServerClock(initialState(), '2026-09-22T10:02:00.000Z', sentAt);
+    expect(next.serverClockOffsetMs).toBe(120_000);
+    // A bad time keeps it.
+    expect(applyServerClock(next, 'not a time', sentAt)).toBe(next);
+  });
+
+  it('a fresh first attempt samples the clock; a retry and an outbox replay never do', () => {
+    let device = Date.parse('2026-09-22T10:00:00.000Z');
+    const sampler = createClockSampler(() => device);
+    let state = initialState();
+    // Replayed from storage: never marked fresh, so its ack is never applied.
+    expect(sampler.begin('queued')).toBeNull();
+    expect(state.serverClockOffsetMs).toBe(0);
+    // Fresh: applied.
+    sampler.fresh('fresh');
+    const fresh = sampler.begin('fresh');
+    expect(fresh).toBe(device);
+    sampler.settled('fresh');
+    state = applyServerClock(state, '2026-09-22T10:00:03.000Z', fresh as number);
+    expect(state.serverClockOffsetMs).toBe(3000);
+    // A retry of the fresh id hours later: the old created_at must not move it.
+    device += 3 * 60 * 60 * 1000;
+    expect(sampler.begin('fresh')).toBeNull();
+  });
+
+  it('R11: an id leaves the set on its first ack and on its first failure; the set is bounded', () => {
+    const sampler = createClockSampler(() => 1);
+    sampler.fresh('acked');
+    sampler.fresh('failed');
+    expect(sampler.size()).toBe(2);
+    expect(sampler.begin('acked')).toBe(1);
+    sampler.settled('acked');
+    expect(sampler.size()).toBe(1);
+    expect(sampler.begin('failed')).toBe(1);
+    sampler.settled('failed');
+    expect(sampler.size()).toBe(0);
+    // The retry after the failure does not sample.
+    expect(sampler.begin('failed')).toBeNull();
+    for (let i = 0; i < CLOCK_SAMPLER_LIMIT + 50; i += 1) sampler.fresh(`never-attempted-${i}`);
+    expect(sampler.size()).toBe(CLOCK_SAMPLER_LIMIT);
+  });
+
+  it('survives a reload of the list', () => {
+    const withOffset = applyServerClock(initialState(), '1970-01-01T00:00:05.000Z', 0);
+    expect(beginLoad(withOffset, 's').serverClockOffsetMs).toBe(5000);
   });
 });

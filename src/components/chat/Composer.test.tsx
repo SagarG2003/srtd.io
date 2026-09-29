@@ -22,9 +22,14 @@ import {
   draftAttachments,
   hasLinkCards,
   isSendKeydown,
+  replyBarPreview,
+  ReplyBar,
+  attachRejectCopy,
+  SEND_FAILED_COPY,
   shouldShowMic,
   withLinkCards,
 } from '@/components/chat/Composer';
+import { editFailureCopy } from '@/lib/chat/record';
 import { createOutboxSender, type SendOutcome } from '@/lib/chat/send-flow';
 import { canSendAttachmentMessage } from '@/lib/chat/attachments';
 import { stripHashToken } from '@/lib/chat/post-refs';
@@ -470,5 +475,82 @@ describe('editing mode', () => {
     expect(editSendDecision({ text: 'hi there', initialText: 'hi', hasOtherContent: false })).toBe(
       'send',
     );
+  });
+});
+
+describe('D1: the reply bar for a deleted quote', () => {
+  const quote = { id: 'm1', authorUserId: 'peer', preview: 'the words' };
+
+  it('shows the quote text while the message lives', () => {
+    expect(replyBarPreview({ quote }, 'me')).toBe('the words');
+  });
+
+  it('once stripped, reads deletedMessageLabel (own or not), never the old text', () => {
+    const stripped = { quote: { ...quote, preview: '' }, deleted: true as const };
+    expect(replyBarPreview(stripped, 'me')).toBe('This message was deleted');
+    expect(
+      replyBarPreview({ ...stripped, quote: { ...stripped.quote, authorUserId: 'me' } }, 'me'),
+    ).toBe('You deleted this message');
+  });
+});
+
+describe('D7/F10: only the textarea and search inputs stay selectable', () => {
+  const NO_SELECT = ['select-none', '[-webkit-touch-callout:none]'];
+
+  it('the About chip and the reply bar carry select-none and no callout', () => {
+    const about = renderToStaticMarkup(
+      <AboutBar post={null} refLabel={null} onCancel={() => {}} />,
+    );
+    const reply = renderToStaticMarkup(
+      <ReplyBar
+        reply={{ authorName: 'Ann', quote: { id: 'm1', authorUserId: 'a', preview: 'hi' } }}
+        viewerUserId="me"
+        onCancel={() => {}}
+      />,
+    );
+    for (const cls of NO_SELECT) {
+      expect(about).toContain(cls);
+      expect(reply).toContain(cls);
+    }
+  });
+
+  it('the textarea keeps normal selection; nothing clears a selection programmatically', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const source = readFileSync(fileURLToPath(new URL('./Composer.tsx', import.meta.url)), 'utf8');
+    const textarea = source.slice(
+      source.indexOf('<textarea'),
+      source.indexOf('/>', source.indexOf('<textarea')),
+    );
+    expect(textarea).not.toContain('select-none');
+    expect(textarea).not.toContain('NO_TOUCH_SELECT');
+    // The no-select class: its import plus the About and reply bars, nothing else.
+    expect(source.split('NO_TOUCH_SELECT').length - 1).toBe(3);
+    expect(source).not.toContain('select-none');
+    expect(source).not.toContain('removeAllRanges');
+  });
+});
+
+describe('F14: composer toasts never show raw error text', () => {
+  it('a pre-check refusal keeps its known line; anything else is fixed copy', () => {
+    expect(attachRejectCopy('Files up to 100MB only')).toBe('Files up to 100MB only');
+    expect(attachRejectCopy("This file type isn't supported")).toBe(
+      "This file type isn't supported",
+    );
+    expect(attachRejectCopy('TypeError: x is undefined')).toBe("Couldn't add that file, try again");
+  });
+
+  it('an edit failure maps through editFailureCopy (idempotent on its own copy)', () => {
+    expect(editFailureCopy('PGRST: connection reset')).toBe("Couldn't edit, try again");
+    expect(editFailureCopy("Marked messages can't be edited")).toBe(
+      "Marked messages can't be edited",
+    );
+    expect(editFailureCopy('Edit window has closed (15 min)')).toBe(
+      'Edit window has closed (15 min)',
+    );
+  });
+
+  it('a voice upload failure reads the send copy', () => {
+    expect(SEND_FAILED_COPY).toBe("Couldn't send, try again");
   });
 });

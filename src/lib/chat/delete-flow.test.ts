@@ -1,7 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Client } from '@srtdio/rpc';
+import type { Client, Result } from '@srtdio/rpc';
+
+// use-chat-thread's import graph pulls the agora-chat browser SDK; mock it so
+// importing the module in node never touches browser globals.
+vi.mock('agora-chat', () => ({
+  default: { connection: vi.fn(), message: { create: vi.fn() } },
+}));
+
 import { runDelete, runEdit } from '@/lib/chat/delete-flow';
-import { parseLiveEvent } from '@/lib/chat/thread';
+import {
+  applyRevalidatedRows,
+  newlyTombstoned,
+  recheckLoaded,
+  REVALIDATE_WINDOW_MS,
+} from '@/lib/chat/use-chat-thread';
+import { deleteOutcomeCopy } from '@/lib/chat/record';
+import { pruneThreadSelection } from '@/lib/chat/forward';
+import {
+  markMessagesDeleted,
+  parseLiveEvent,
+  type ChatMessageRow,
+  type ThreadMessage,
+} from '@/lib/chat/thread';
 
 function client(fail = false): { client: Client; rpc: ReturnType<typeof vi.fn> } {
   const rpc = vi.fn(() =>
@@ -64,6 +84,71 @@ describe('runDelete', () => {
     await Promise.resolve();
     expect(result).toEqual({ ok: true });
     await vi.waitFor(() => expect(onSignalFailed).toHaveBeenCalledOnce());
+  });
+});
+
+describe('D5: chunked delete, a later chunk fails', () => {
+  const ids = Array.from({ length: 150 }, (_, i) => `m${i}`);
+  const own = (id: string): ThreadMessage => ({
+    id,
+    senderUserId: 'me',
+    body: `body ${id}`,
+    createdAt: '2026-09-22T10:00:00Z',
+    time: 1,
+    provisionalTime: false,
+    mine: true,
+    attachments: [],
+    sharedPostIds: [],
+    sharedBriefIds: [],
+    reply: null,
+    state: 'sent',
+    status: 'sent',
+    reactions: [],
+  });
+
+  it('the first chunk is tombstoned, the failed ids stay selected, and the toast reads "Deleted 100 of 150"', async () => {
+    let call = 0;
+    const rpc = vi.fn(() => {
+      call += 1;
+      return Promise.resolve(
+        call === 2
+          ? { data: null, error: { message: 'network error' } }
+          : { data: null, error: null },
+      );
+    });
+    let thread = ids.map(own);
+    const result = await runDelete(
+      {
+        client: { rpc } as unknown as Client,
+        markDeletedLocal: (chunk) => {
+          thread = markMessagesDeleted(thread, chunk);
+        },
+        signal: undefined,
+        onSignalFailed: vi.fn(),
+      },
+      { channelId: 'c', messageIds: ids, traceId: 't' },
+    );
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ ok: false, message: 'network error', deleted: ids.slice(0, 100) });
+    // Committed chunk: tombstones. Failed chunk: untouched.
+    expect(thread.slice(0, 100).every((m) => m.deleted === true)).toBe(true);
+    expect(thread.slice(100).some((m) => m.deleted === true)).toBe(false);
+    // The selection prunes the tombstones and keeps the failed chunk's ids.
+    const kept = pruneThreadSelection(new Set(ids), thread);
+    expect([...kept]).toEqual(ids.slice(100));
+    const copy = result.ok
+      ? ''
+      : deleteOutcomeCopy(result.deleted.length, ids.length, result.message);
+    expect(copy).toBe("Deleted 100 of 150. Couldn't delete the rest, try again");
+  });
+
+  it('N = 0 uses the mapped delete copy, never the raw error', () => {
+    expect(deleteOutcomeCopy(0, 150, 'marked messages cannot be deleted')).toBe(
+      "Marked messages can't be deleted",
+    );
+    expect(deleteOutcomeCopy(0, 3, 'TypeError: Failed to fetch')).toBe(
+      "Couldn't delete, try again",
+    );
   });
 });
 
@@ -138,5 +223,154 @@ describe('runEdit', () => {
     );
     expect(result).toEqual({ ok: true });
     await vi.waitFor(() => expect(onSignalFailed).toHaveBeenCalledOnce());
+  });
+});
+
+describe('D1: a reload that turns a visible row into a tombstone', () => {
+  const row = (id: string, deleted = false): ThreadMessage => ({
+    id,
+    senderUserId: 'peer',
+    body: deleted ? '' : `body ${id}`,
+    createdAt: '2026-09-22T10:00:00Z',
+    time: 1,
+    provisionalTime: false,
+    mine: false,
+    attachments: [],
+    sharedPostIds: [],
+    sharedBriefIds: [],
+    reply: null,
+    state: 'sent',
+    status: 'sent',
+    reactions: [],
+    ...(deleted ? { deleted: true } : {}),
+  });
+
+  it('reports only the rows that were on screen live and came back deleted', () => {
+    const visible = [row('a'), row('b'), row('gone', true)];
+    const fetched = [row('a', true), row('b'), row('gone', true), row('never-seen', true)];
+    const reportDeleted = vi.fn();
+    const turned = newlyTombstoned(visible, fetched);
+    if (turned.length > 0) reportDeleted('c', turned);
+    expect(reportDeleted).toHaveBeenCalledExactlyOnceWith('c', ['a']);
+    expect(newlyTombstoned(visible, [row('a'), row('b')])).toEqual([]);
+  });
+});
+
+describe('R2: catch-up rechecks loaded rows a missed delete or edit can touch', () => {
+  const NOW = Date.parse('2026-09-29T12:00:00.000Z');
+  const msg = (id: string, ageMs: number, over: Partial<ThreadMessage> = {}): ThreadMessage => ({
+    id,
+    senderUserId: 'p',
+    body: 'original',
+    createdAt: new Date(NOW - ageMs).toISOString(),
+    time: NOW - ageMs,
+    provisionalTime: false,
+    mine: false,
+    attachments: [],
+    sharedPostIds: [],
+    sharedBriefIds: [],
+    reply: null,
+    state: 'sent',
+    status: 'sent',
+    reactions: [],
+    ...over,
+  });
+  const dbRow = (id: string, over: Partial<ChatMessageRow> = {}): ChatMessageRow => ({
+    id,
+    channel_id: 'c',
+    workspace_id: 'w',
+    sender_user_id: 'p',
+    body: 'original',
+    mentions: null,
+    attachment_asset_ids: null,
+    shared_post_ids: null,
+    shared_brief_ids: null,
+    reply_to_message_id: null,
+    forwarded_from_message_id: null,
+    attachment_meta: null,
+    agora_event_id: null,
+    created_at: '2026-09-29T11:50:00.000000+00:00',
+    edited_at: null,
+    deleted_at: null,
+    ...over,
+  });
+  const ok =
+    (rows: ChatMessageRow[]) =>
+    (ids: readonly string[]): Promise<Result<ChatMessageRow[]>> =>
+      Promise.resolve({ ok: true, data: rows.filter((r) => ids.includes(r.id)) });
+
+  it('reads once, only loaded rows within 30 min that are live and recorded', async () => {
+    const list = [
+      msg('old', REVALIDATE_WINDOW_MS + 1),
+      msg('recent', 5 * 60_000),
+      msg('edge', REVALIDATE_WINDOW_MS),
+      msg('tomb', 60_000, { deleted: true }),
+      msg('pending', 1000, { state: 'sending', provisionalTime: true }),
+      msg('failed', 1000, { state: 'failed' }),
+      msg('live-only', 1000, { provisionalTime: true }),
+    ];
+    const load = vi.fn(ok([]));
+    await recheckLoaded(load, list, NOW, 'visible');
+    expect(load).toHaveBeenCalledOnce();
+    expect(load.mock.calls[0]?.[0]).toEqual(['recent', 'edge']);
+  });
+
+  it('no read when no loaded row qualifies', () => {
+    const load = vi.fn(ok([]));
+    expect(
+      recheckLoaded(load, [msg('old', REVALIDATE_WINDOW_MS + 60_000)], NOW, 'connected'),
+    ).toBeNull();
+    expect(recheckLoaded(load, [], NOW, 'connected')).toBeNull();
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('a missed delete turns the row into a tombstone and is reported; a missed edit applies', () => {
+    const list = [msg('a', 60_000), msg('b', 120_000), msg('c', 180_000)];
+    const rows = [
+      dbRow('a', { deleted_at: '2026-09-29T11:59:00+00:00', body: null }),
+      dbRow('b', { body: 'edited', edited_at: '2026-09-29T11:58:30+00:00' }),
+      dbRow('c'),
+      dbRow('other-chat', { channel_id: 'x', deleted_at: '2026-09-29T11:59:00+00:00' }),
+    ];
+    const applied = applyRevalidatedRows(list, rows, 'c');
+    expect(applied.deleted).toEqual(['a']);
+    expect(applied.messages.find((m) => m.id === 'a')?.deleted).toBe(true);
+    const b = applied.messages.find((m) => m.id === 'b');
+    expect(b?.body).toBe('edited');
+    expect(b?.editedAt).toBe('2026-09-29T11:58:30+00:00');
+    expect(applied.messages.find((m) => m.id === 'c')).toBe(list[2]);
+    const reportDeleted = vi.fn();
+    if (applied.deleted.length > 0) reportDeleted('c', applied.deleted);
+    expect(reportDeleted).toHaveBeenCalledExactlyOnceWith('c', ['a']);
+  });
+
+  it('S2: no recheck on the interval; recheck on connected and on foreground', () => {
+    const list = [msg('recent', 5 * 60_000)];
+    const load = vi.fn(ok([]));
+    expect(recheckLoaded(load, list, NOW, 'interval')).toBeNull();
+    expect(load).not.toHaveBeenCalled();
+    for (const reason of ['connected', 'visible', 'online'] as const) {
+      expect(recheckLoaded(load, list, NOW, reason)).not.toBeNull();
+    }
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('S1: an older or equal edited_at is ignored; a newer one applies', () => {
+    const list = [msg('b', 60_000, { body: 'second', editedAt: '2026-09-29T11:58:30.500+00:00' })];
+    const older = dbRow('b', { body: 'first', edited_at: '2026-09-29T11:58:10+00:00' });
+    expect(applyRevalidatedRows(list, [older], 'c').messages).toBe(list);
+    const equal = dbRow('b', { body: 'stale', edited_at: '2026-09-29T11:58:30.500+00:00' });
+    expect(applyRevalidatedRows(list, [equal], 'c').messages).toBe(list);
+    const newer = dbRow('b', { body: 'third', edited_at: '2026-09-29T11:59:00+00:00' });
+    const b = applyRevalidatedRows(list, [newer], 'c').messages.find((m) => m.id === 'b');
+    expect(b?.body).toBe('third');
+    expect(b?.editedAt).toBe('2026-09-29T11:59:00+00:00');
+  });
+
+  it('nothing changed on record: the same list, nothing reported', () => {
+    const list = [msg('a', 60_000)];
+    const applied = applyRevalidatedRows(list, [dbRow('a')], 'c');
+    expect(applied.messages).toBe(list);
+    expect(applied.deleted).toEqual([]);
   });
 });

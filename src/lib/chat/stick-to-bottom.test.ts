@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   anchorAfterOlderLoad,
   distanceFromBottom,
@@ -6,6 +6,8 @@ import {
   intentAfterNewest,
   intentAfterScroll,
   isScrollKey,
+  listenTouchEnd,
+  newRowsAction,
   openingIntent,
   SCROLL_SETTLE_MS,
   sentFromThisDevice,
@@ -291,5 +293,73 @@ describe('R5: an empty or failed older load unsticks the anchor', () => {
     expect(anchorAfterOlderLoad({ anchored: false, loadEnded: true, messagesChanged: false })).toBe(
       false,
     );
+  });
+});
+
+describe('G2: an incoming message never pins mid-flick', () => {
+  it('defers to the settle while a flick moves the list; pins once settled', () => {
+    expect(newRowsAction({ intent: true, flicking: true, ownLocalSend: false })).toBe('defer');
+    expect(newRowsAction({ intent: true, flicking: false, ownLocalSend: false })).toBe('pin');
+    expect(newRowsAction({ intent: false, flicking: false, ownLocalSend: false })).toBe('leave');
+  });
+
+  it('an own local send still pins immediately, even mid-flick', () => {
+    expect(newRowsAction({ intent: true, flicking: true, ownLocalSend: true })).toBe('pin');
+  });
+
+  it('momentum: 100ms after the last touch scroll is still a flick, 150ms is settled', () => {
+    const flicking = (ms: number): boolean =>
+      flickInProgress({ touching: false, msSinceTouchScroll: ms });
+    expect(newRowsAction({ intent: true, flicking: flicking(100), ownLocalSend: false })).toBe(
+      'defer',
+    );
+    expect(
+      newRowsAction({ intent: true, flicking: flicking(SCROLL_SETTLE_MS), ownLocalSend: false }),
+    ).toBe('pin');
+  });
+});
+
+describe('G3: touch ends are heard on the window', () => {
+  it('a touchend or touchcancel anywhere ends the flick; teardown removes both listeners', () => {
+    const listeners = new Map<string, Set<() => void>>();
+    const target = {
+      addEventListener: (type: string, l: () => void) => {
+        const set = listeners.get(type) ?? new Set();
+        set.add(l);
+        listeners.set(type, set);
+      },
+      removeEventListener: (type: string, l: () => void) => listeners.get(type)?.delete(l),
+    };
+    const onEnd = vi.fn();
+    const stop = listenTouchEnd(target, onEnd);
+    // The row under the finger is gone: the event still reaches the window.
+    for (const l of listeners.get('touchend') ?? []) l();
+    for (const l of listeners.get('touchcancel') ?? []) l();
+    expect(onEnd).toHaveBeenCalledTimes(2);
+    stop();
+    expect(listeners.get('touchend')?.size).toBe(0);
+    expect(listeners.get('touchcancel')?.size).toBe(0);
+  });
+});
+
+describe('G5: optimistic own send, then its ack with the same id', () => {
+  it('the thread stays pinned through both', () => {
+    // Opened pinned, then the reader scrolled up a little but not past 120px.
+    let intent = openingIntent();
+    let previous: string | null = 'older';
+    // Tap send: the outbox bubble ('sending') is the new newest.
+    const optimistic = { id: 'own-1', mine: true, state: 'sending' as MessageState };
+    intent = intentAfterNewest({ intent, newest: optimistic, previousNewestId: previous });
+    expect(newRowsAction({ intent, flicking: false, ownLocalSend: true })).toBe('pin');
+    previous = optimistic.id;
+    // The ack: the same id comes back 'sent' with the server created_at.
+    const acked = { id: 'own-1', mine: true, state: 'sent' as MessageState };
+    intent = intentAfterNewest({ intent, newest: acked, previousNewestId: previous });
+    expect(intent).toBe(true);
+    expect(newRowsAction({ intent, flicking: false, ownLocalSend: false })).toBe('pin');
+    // Its re-render resizes the row: still pinned.
+    expect(
+      sizeChangeAction({ intent, pendingJump: false, olderPageRestore: false, flicking: false }),
+    ).toBe('pin');
   });
 });

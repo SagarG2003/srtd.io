@@ -1,10 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelSummary } from '@/lib/chat-reads';
 import type { ChatMark } from '@/lib/chat/marks';
 import type { ThreadMessage } from '@/lib/chat/thread';
 import {
   canDeleteSelection,
   canForward,
+  DELETE_BLOCK_COPY,
+  deleteSelectionBlock,
   forwardFailedMessage,
   forwardPickerChannels,
   forwardPreviewText,
@@ -12,6 +14,7 @@ import {
   forwardableInOrder,
   pruneThreadSelection,
   runForward,
+  scheduleSelectionBoundary,
   selectedForForward,
   threadSelectable,
   threadSelectionRole,
@@ -97,29 +100,122 @@ describe('thread selection (Forward any, Delete own only)', () => {
     expect([...pruned].sort()).toEqual(['own', 'peer']);
   });
 
-  it('rows: own marked shows the lock, peer and own unmarked are selectable, deleted and pending nothing', () => {
-    expect(threadSelectionRole(msg({ id: 'own', mine: true }), marks)).toBe('selectable');
-    expect(threadSelectionRole(msg({ id: 'peer', mine: false }), marks)).toBe('selectable');
-    expect(threadSelectionRole(msg({ id: 'marked', mine: true }), marks)).toBe('locked');
-    expect(threadSelectionRole(msg({ id: 'marked', mine: false }), marks)).toBe('selectable');
-    expect(threadSelectionRole(msg({ id: 'pending', mine: true, state: 'sending' }), marks)).toBe(
-      'none',
-    );
-    expect(threadSelectionRole(msg({ id: 'd', mine: true, deleted: true }), marks)).toBe('none');
-    expect(threadSelectable(msg({ id: 'marked', mine: true }), marks)).toBe(false);
+  it('F8 rows: any recorded message is selectable, marked ones included; deleted and pending nothing', () => {
+    expect(threadSelectionRole(msg({ id: 'own', mine: true }))).toBe('selectable');
+    expect(threadSelectionRole(msg({ id: 'peer', mine: false }))).toBe('selectable');
+    expect(threadSelectionRole(msg({ id: 'marked', mine: true }))).toBe('selectable');
+    expect(threadSelectionRole(msg({ id: 'pending', mine: true, state: 'sending' }))).toBe('none');
+    expect(threadSelectionRole(msg({ id: 'd', mine: true, deleted: true }))).toBe('none');
+    expect(threadSelectable(msg({ id: 'marked', mine: true }))).toBe(true);
   });
 
-  it('prunes deleted messages and own marked ones (with marks) from the selection', () => {
+  it('prunes deleted messages from the selection and keeps marked ones', () => {
     const list = [...messages, msg({ id: 'd', mine: true, deleted: true })];
-    const pruned = pruneThreadSelection(new Set(['own', 'peer', 'marked', 'd']), list, marks);
-    expect([...pruned].sort()).toEqual(['own', 'peer']);
+    const pruned = pruneThreadSelection(new Set(['own', 'peer', 'marked', 'd']), list);
+    expect([...pruned].sort()).toEqual(['marked', 'own', 'peer']);
   });
+
+  // Server time 5 minutes after the fixtures' created_at (inside the window).
+  const NOW = Date.parse('2026-09-22T10:05:00Z');
 
   it('allows delete only when every selected message is own and unmarked', () => {
-    expect(canDeleteSelection(new Set(), messages, marks)).toBe(false);
-    expect(canDeleteSelection(new Set(['own']), messages, marks)).toBe(true);
-    expect(canDeleteSelection(new Set(['own', 'peer']), messages, marks)).toBe(false);
-    expect(canDeleteSelection(new Set(['marked']), messages, marks)).toBe(false);
+    expect(canDeleteSelection(new Set(), messages, marks, NOW)).toBe(false);
+    expect(canDeleteSelection(new Set(['own']), messages, marks, NOW)).toBe(true);
+    expect(canDeleteSelection(new Set(['own', 'peer']), messages, marks, NOW)).toBe(false);
+    expect(canDeleteSelection(new Set(['marked']), messages, marks, NOW)).toBe(false);
+  });
+
+  it('D4: Delete is disabled for an own message older than 30 min, on server time', () => {
+    const late = Date.parse('2026-09-22T10:31:00Z');
+    expect(canDeleteSelection(new Set(['own']), messages, marks, late)).toBe(false);
+    expect(deleteSelectionBlock(new Set(['own']), messages, marks, late)).toBe('old');
+    // Exactly 30 minutes is still inside (the proc's >= now() - 30 min).
+    const edge = Date.parse('2026-09-22T10:30:00Z');
+    expect(canDeleteSelection(new Set(['own']), messages, marks, edge)).toBe(true);
+  });
+
+  it('D4: both reason lines; others wins over age; none at 0 or when allowed', () => {
+    const late = Date.parse('2026-09-22T10:31:00Z');
+    expect(deleteSelectionBlock(new Set(['own', 'peer']), messages, marks, NOW)).toBe('others');
+    expect(deleteSelectionBlock(new Set(['own', 'peer']), messages, marks, late)).toBe('others');
+    expect(deleteSelectionBlock(new Set(), messages, marks, late)).toBeNull();
+    expect(deleteSelectionBlock(new Set(['own']), messages, marks, NOW)).toBeNull();
+    expect(DELETE_BLOCK_COPY.others).toBe('Only your own messages can be deleted');
+    expect(DELETE_BLOCK_COPY.old).toBe("Messages older than 30 min can't be deleted");
+  });
+
+  it('F8: a marked own message disables Delete with its reason; priority others > marked > old', () => {
+    const late = Date.parse('2026-09-22T10:31:00Z');
+    expect(deleteSelectionBlock(new Set(['marked']), messages, marks, NOW)).toBe('marked');
+    expect(DELETE_BLOCK_COPY.marked).toBe("Marked messages can't be deleted");
+    expect(deleteSelectionBlock(new Set(['marked', 'own']), messages, marks, late)).toBe('marked');
+    expect(deleteSelectionBlock(new Set(['marked', 'peer']), messages, marks, NOW)).toBe('others');
+    expect(deleteSelectionBlock(new Set(['own']), messages, marks, late)).toBe('old');
+  });
+
+  it('R7: priority is others > marked > old; there is no sending reason (those rows are never selectable)', () => {
+    const late = Date.parse('2026-09-22T10:31:00Z');
+    expect(Object.keys(DELETE_BLOCK_COPY).sort()).toEqual(['marked', 'old', 'others']);
+    expect(deleteSelectionBlock(new Set(['marked', 'own', 'peer']), messages, marks, late)).toBe(
+      'others',
+    );
+    expect(deleteSelectionBlock(new Set(['marked', 'own']), messages, marks, late)).toBe('marked');
+    expect(deleteSelectionBlock(new Set(['own']), messages, marks, late)).toBe('old');
+    expect(threadSelectable(msg({ id: 'failed', mine: true, state: 'failed' }))).toBe(false);
+    expect(threadSelectable(msg({ id: 'pending', mine: true, state: 'sending' }))).toBe(false);
+  });
+});
+
+describe('F2: the selection Delete window boundary', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('one timeout flips Delete when the earliest selected own message crosses 30 min', () => {
+    vi.useFakeTimers();
+    // Server clock 2 minutes ahead of the device.
+    const offset = 120_000;
+    vi.setSystemTime(Date.parse('2026-09-22T10:20:00Z') - offset);
+    const now = (): number => Date.now() + offset;
+    const list = [
+      msg({ id: 'early', mine: true, createdAt: '2026-09-22T10:00:00Z' }),
+      msg({ id: 'later', mine: true, createdAt: '2026-09-22T10:10:00Z' }),
+    ];
+    const selected = new Set(['early', 'later']);
+    const onBoundary = vi.fn();
+    const noMarks = new Map<string, ChatMark>();
+    expect(deleteSelectionBlock(selected, list, noMarks, now())).toBeNull();
+    scheduleSelectionBoundary({ selected, messages: list, now, onBoundary });
+    expect(vi.getTimerCount()).toBe(1);
+
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(onBoundary).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(onBoundary).toHaveBeenCalledOnce();
+    expect(deleteSelectionBlock(selected, list, noMarks, now())).toBe('old');
+  });
+
+  it('the cancel clears the timer (exit, unmount); nothing is scheduled past the window', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-09-22T10:05:00Z'));
+    const list = [msg({ id: 'own', mine: true })];
+    const cancel = scheduleSelectionBoundary({
+      selected: new Set(['own']),
+      messages: list,
+      now: Date.now,
+      onBoundary: vi.fn(),
+    });
+    expect(vi.getTimerCount()).toBe(1);
+    cancel();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.setSystemTime(Date.parse('2026-09-22T11:00:00Z'));
+    scheduleSelectionBoundary({
+      selected: new Set(['own']),
+      messages: list,
+      now: Date.now,
+      onBoundary: vi.fn(),
+    });
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

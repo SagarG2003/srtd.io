@@ -14,7 +14,7 @@
 // bubble and its Retry payload.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Client } from '@srtdio/rpc';
+import type { Client, Result } from '@srtdio/rpc';
 import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { generateTraceId } from '@/lib/trace';
@@ -29,11 +29,12 @@ import {
   loadPeerReadCursor,
   loadReactions,
 } from '@/lib/chat/history';
-import { browserCatchUpTriggers, catchUpRows } from '@/lib/chat/catch-up';
+import { browserCatchUpTriggers, catchUpRows, type CatchUpReason } from '@/lib/chat/catch-up';
 import { liveVerifierFor, type LiveVerifier } from '@/lib/chat/live-verify';
 import type { ChannelOutbox, OutboxEntry } from '@/lib/chat/chat-store';
 import {
   addReactionRecord,
+  deleteOutcomeCopy,
   removeReactionRecord,
   sendMessageRecord,
   setReadCursorRecord,
@@ -74,6 +75,7 @@ import {
   upsertMessage,
   withOutboxBubbles,
   type ChannelTarget,
+  type ChatMessageRow,
   type ThreadConnection,
   type ThreadMessage,
 } from '@/lib/chat/thread';
@@ -107,12 +109,14 @@ export interface UseChatThread {
   ) => void;
   /**
    * Delete own messages for everyone (chunked at 100 per proc call). Accepted
-   * chunks leave the thread at once and are signalled live; the first failing
-   * chunk stops the run and its proc message is returned.
+   * chunks turn into tombstones at once and are signalled live; the first
+   * failing chunk stops the run. A failure returns the user copy
+   * (deleteOutcomeCopy: "Deleted N of M ..." or the mapped proc error, never
+   * raw text) and the ids that were deleted.
    */
   deleteMessages: (
     messageIds: readonly string[],
-  ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  ) => Promise<{ ok: true } | { ok: false; message: string; deleted: readonly string[] }>;
   /**
    * Edit the body of an own message: recorded first, then the bubble shows the
    * returned row and peers are signalled live. A failure returns the user copy
@@ -160,6 +164,75 @@ function liveTargetFor(channel: ChannelSummary): ChannelTarget | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Ids of rows that were visible (not deleted) and come back from a fetch as
+ * tombstones. Pure.
+ */
+export function newlyTombstoned(
+  visible: readonly ThreadMessage[],
+  fetched: readonly ThreadMessage[],
+): string[] {
+  const live = new Set(visible.filter((m) => m.deleted !== true).map((m) => m.id));
+  return fetched.filter((m) => m.deleted === true && live.has(m.id)).map((m) => m.id);
+}
+
+/**
+ * How far back a catch-up re-reads loaded rows: a message can be deleted for
+ * everyone within 30 min (edited within 15), so an older row can no longer
+ * change and a delete or edit signal missed on it would stay missed.
+ */
+export const REVALIDATE_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * Ids of loaded, recorded, non-tombstone rows created within the revalidate
+ * window: the only rows a missed delete or edit can still touch. Pure.
+ */
+export function revalidationIds(messages: readonly ThreadMessage[], nowMs: number): string[] {
+  const since = nowMs - REVALIDATE_WINDOW_MS;
+  return messages
+    .filter(
+      (m) => m.deleted !== true && m.state === 'sent' && !m.provisionalTime && m.time >= since,
+    )
+    .map((m) => m.id);
+}
+
+/**
+ * The catch-up recheck: one batched read of the revalidation ids, or null (no
+ * read) when none qualify. Only on a 'connected' transition or a foreground
+ * (visible, online) trigger, never on the periodic interval, so an open chat
+ * stays at one read per interval.
+ */
+export function recheckLoaded(
+  load: (ids: readonly string[]) => Promise<Result<ChatMessageRow[]>>,
+  messages: readonly ThreadMessage[],
+  nowMs: number,
+  reason: CatchUpReason,
+): Promise<Result<ChatMessageRow[]>> | null {
+  if (reason === 'interval') return null;
+  const ids = revalidationIds(messages, nowMs);
+  return ids.length > 0 ? load(ids) : null;
+}
+
+/**
+ * Fold re-read rows through the tombstone and applyEditFromRow paths: the new
+ * list plus the ids that turned into tombstones (to report). Rows of another
+ * channel are ignored. Pure.
+ */
+export function applyRevalidatedRows(
+  messages: ThreadMessage[],
+  rows: readonly ChatMessageRow[],
+  channelId: string,
+): { messages: ThreadMessage[]; deleted: string[] } {
+  const own = rows.filter((r) => r.channel_id === channelId);
+  const live = new Set(messages.filter((m) => m.deleted !== true).map((m) => m.id));
+  const deleted = own.filter((r) => r.deleted_at !== null && live.has(r.id)).map((r) => r.id);
+  let next = markMessagesDeleted(messages, deleted);
+  for (const row of own) {
+    if (row.deleted_at === null) next = applyEditFromRow(next, row);
+  }
+  return { messages: next, deleted };
 }
 
 /** The Foundation client is the real connection; widen it to the messaging surface. */
@@ -222,6 +295,11 @@ export function useChatThread(params: {
   onCaughtUpRef.current = onCaughtUp;
   const onMessagesDeletedRef = useRef(params.onMessagesDeleted);
   onMessagesDeletedRef.current = params.onMessagesDeleted;
+  /** Messages became tombstones: tell the caller and the store (drafts, outbox, list line). */
+  const reportDeleted = useCallback((forChannel: string, ids: readonly string[]): void => {
+    onMessagesDeletedRef.current?.(forChannel, ids);
+    outboxRef.current.messagesDeleted(ids);
+  }, []);
   const inFlight = useMemo(() => createInFlightGuard(), []);
   const catchingUpRef = useRef(false);
   const loadingOlderRef = useRef(false);
@@ -301,7 +379,12 @@ export function useChatThread(params: {
         }
       }
       const entries = outboxRef.current.entries(forChannel);
+      // A load, catch-up or reload can turn a row on screen into a tombstone
+      // (its delete signal was missed): report it like a live delete.
+      const turned =
+        channelRef.current === forChannel ? newlyTombstoned(messagesRef.current, fetched) : [];
       setMessages((prev) => withOutboxBubbles(mergeFetched(prev, fetched), entries, currentUserId));
+      if (turned.length > 0) reportDeleted(forChannel, turned);
       if (fetched.length === 0) return;
       void attachReactions(
         fetched.map((m) => m.id),
@@ -309,7 +392,7 @@ export function useChatThread(params: {
       );
       void resolveReplies(fetched, forChannel);
     },
-    [currentUserId, attachReactions, resolveReplies],
+    [currentUserId, attachReactions, resolveReplies, reportDeleted],
   );
 
   // Load the latest page whenever the channel changes. The channel's unrecorded
@@ -381,7 +464,7 @@ export function useChatThread(params: {
           .map((m) => m.id);
         if (own.length === 0) return;
         setMessages((prev) => markMessagesDeleted(prev, own));
-        onMessagesDeletedRef.current?.(channelId, own);
+        reportDeleted(channelId, own);
       },
       // The edit renders from the re-read row (like live messages), never the
       // Agora payload; a missing (deleted, unreadable) or unchanged row is ignored.
@@ -406,52 +489,81 @@ export function useChatThread(params: {
       },
     });
     return unsubscribe;
-  }, [db, client, channelId, currentUserId, verifier, foldRows]);
+  }, [db, client, channelId, currentUserId, verifier, foldRows, reportDeleted]);
 
   // Catch-up from Postgres, never gated on the Agora state: rows newer than the
   // newest recorded message (paging past the 200 cap), or the latest page when
-  // nothing is recorded yet, then the unread refresh. One run at a time.
-  const catchUp = useCallback((): void => {
-    if (catchingUpRef.current) return;
-    const forChannel = channelRef.current;
-    if (forChannel === null) {
-      onCaughtUpRef.current?.();
-      return;
-    }
-    catchingUpRef.current = true;
-    const cursor = newestCursor(messagesRef.current);
-    void (async (): Promise<void> => {
-      try {
-        const outcome = await catchUpRows(
-          {
-            loadLatest: () => loadLatestMessages(db, forChannel),
-            loadNewer: (from) => loadNewerMessages(db, forChannel, from),
-          },
-          cursor,
-        );
-        if (channelRef.current !== forChannel) return;
-        if (!outcome.ok) {
-          logger.warn('chat: catch-up load failed', {
-            channel_id: forChannel,
-            error: outcome.error,
-          });
-        }
-        const fetched = outcome.rows.map((row) => rowToThreadMessage(row, currentUserId));
-        if (fetched.length > 0) foldRows(fetched, forChannel);
-        if (outcome.ok && outcome.latestPage !== undefined) setHasMore(outcome.latestPage.hasMore);
-      } finally {
-        catchingUpRef.current = false;
+  // nothing is recorded yet, plus one batched re-read of loaded rows from the
+  // last 30 min (a delete or edit signal missed on them; on 'connected' and
+  // the foreground triggers only, never the interval), then the unread
+  // refresh. One run at a time.
+  const catchUp = useCallback(
+    (reason: CatchUpReason): void => {
+      if (catchingUpRef.current) return;
+      const forChannel = channelRef.current;
+      if (forChannel === null) {
         onCaughtUpRef.current?.();
+        return;
       }
-    })();
-  }, [db, currentUserId, foldRows]);
+      catchingUpRef.current = true;
+      const cursor = newestCursor(messagesRef.current);
+      // Loaded rows a missed delete or edit can still touch: one batched re-read.
+      const recheck = recheckLoaded(
+        (ids) => loadMessagesByIds(db, ids),
+        messagesRef.current,
+        Date.now(),
+        reason,
+      );
+      void (async (): Promise<void> => {
+        try {
+          const [outcome, rechecked] = await Promise.all([
+            catchUpRows(
+              {
+                loadLatest: () => loadLatestMessages(db, forChannel),
+                loadNewer: (from) => loadNewerMessages(db, forChannel, from),
+              },
+              cursor,
+            ),
+            recheck,
+          ]);
+          if (channelRef.current !== forChannel) return;
+          if (rechecked !== null && !rechecked.ok) {
+            logger.warn('chat: catch-up recheck failed', {
+              channel_id: forChannel,
+              error: rechecked.error.message,
+            });
+          }
+          if (rechecked !== null && rechecked.ok) {
+            const rows = rechecked.data;
+            const { deleted } = applyRevalidatedRows(messagesRef.current, rows, forChannel);
+            setMessages((prev) => applyRevalidatedRows(prev, rows, forChannel).messages);
+            if (deleted.length > 0) reportDeleted(forChannel, deleted);
+          }
+          if (!outcome.ok) {
+            logger.warn('chat: catch-up load failed', {
+              channel_id: forChannel,
+              error: outcome.error,
+            });
+          }
+          const fetched = outcome.rows.map((row) => rowToThreadMessage(row, currentUserId));
+          if (fetched.length > 0) foldRows(fetched, forChannel);
+          if (outcome.ok && outcome.latestPage !== undefined)
+            setHasMore(outcome.latestPage.hasMore);
+        } finally {
+          catchingUpRef.current = false;
+          onCaughtUpRef.current?.();
+        }
+      })();
+    },
+    [db, currentUserId, foldRows, reportDeleted],
+  );
 
   const catchUpRef = useRef(catchUp);
   catchUpRef.current = catchUp;
 
   // Tab visible, browser online, and every 60s while visible (cleared while
   // hidden and on unmount).
-  useEffect(() => browserCatchUpTriggers(() => catchUpRef.current()), []);
+  useEffect(() => browserCatchUpTriggers((reason) => catchUpRef.current(reason)), []);
 
   // Every transition to 'connected'.
   const previousStatusRef = useRef<ChatStatus>(status);
@@ -459,7 +571,7 @@ export function useChatThread(params: {
     const previous = previousStatusRef.current;
     previousStatusRef.current = status;
     if (status !== 'connected' || previous === 'connected') return;
-    catchUpRef.current();
+    catchUpRef.current('connected');
   }, [status]);
 
   const loadOlder = useCallback((): void => {
@@ -743,7 +855,7 @@ export function useChatThread(params: {
             if (channelRef.current === forChannel) {
               setMessages((prev) => markMessagesDeleted(prev, ids));
             }
-            onMessagesDeletedRef.current?.(forChannel, ids);
+            reportDeleted(forChannel, ids);
           },
           signal:
             connection !== null && liveTarget !== null
@@ -766,9 +878,13 @@ export function useChatThread(params: {
         deleted: result.deleted.length,
         error: result.message,
       });
-      return { ok: false, message: result.message };
+      return {
+        ok: false,
+        message: deleteOutcomeCopy(result.deleted.length, messageIds.length, result.message),
+        deleted: result.deleted,
+      };
     },
-    [db],
+    [db, reportDeleted],
   );
 
   const editMessage = useCallback<UseChatThread['editMessage']>(

@@ -3,7 +3,7 @@
 // a reload), so the open thread re-reads the record on its own schedule: when
 // the tab becomes visible, when the browser comes back online, on every
 // transition to 'connected', and every CATCH_UP_INTERVAL_MS while the tab is
-// visible. None of this looks at whether Agora is live. Framework-free and
+// visible. Each run carries its reason. None of this looks at whether Agora is live. Framework-free and
 // fully injected, so both the paging loop and the trigger wiring are
 // unit-tested without a DOM.
 
@@ -55,9 +55,12 @@ export async function catchUpRows(
   return { ok: true, rows, latestPage: undefined };
 }
 
+/** What started a catch-up; the caller decides what each one reads. */
+export type CatchUpReason = 'connected' | 'visible' | 'online' | 'interval';
+
 export interface CatchUpTriggerDeps {
   /** Run one catch-up (the caller guards against overlap). */
-  run: () => void;
+  run: (reason: CatchUpReason) => void;
   isVisible: () => boolean;
   /** Subscribe to visibility changes; returns the unsubscribe. */
   onVisibilityChange: (handler: () => void) => () => void;
@@ -86,20 +89,20 @@ export function startCatchUpTriggers(deps: CatchUpTriggerDeps): () => void {
   const startInterval = (): void => {
     if (active) return;
     handle = deps.setInterval(() => {
-      if (deps.isVisible()) deps.run();
+      if (deps.isVisible()) deps.run('interval');
     }, intervalMs);
     active = true;
   };
   if (deps.isVisible()) startInterval();
   const removeVisibility = deps.onVisibilityChange(() => {
     if (deps.isVisible()) {
-      deps.run();
+      deps.run('visible');
       startInterval();
     } else {
       stopInterval();
     }
   });
-  const removeOnline = deps.onOnline(() => deps.run());
+  const removeOnline = deps.onOnline(() => deps.run('online'));
   return () => {
     stopInterval();
     removeVisibility();
@@ -108,7 +111,7 @@ export function startCatchUpTriggers(deps: CatchUpTriggerDeps): () => void {
 }
 
 /** The browser wiring for startCatchUpTriggers. */
-export function browserCatchUpTriggers(run: () => void): () => void {
+export function browserCatchUpTriggers(run: (reason: CatchUpReason) => void): () => void {
   return startCatchUpTriggers({
     run,
     isVisible: () => document.visibilityState === 'visible',
