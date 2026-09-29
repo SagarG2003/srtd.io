@@ -8,14 +8,16 @@
 // wording never flips after first paint. No realtime: the batch refetches when
 // the tab returns after a minute away, or when a sorted:post-changed event names
 // one of its posts. The cover presigns lazily through the shared thumbnail hook.
+// Tapping a card opens its PostSheet (media, facts, the viewer's action) instead
+// of navigating; the sheet portals above the thread.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { KeyboardEvent, ReactElement } from 'react';
-import { useNavigate } from 'react-router-dom';
+import type { KeyboardEvent, ReactElement, ReactNode, SyntheticEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { Tag, isTagDot } from '@/components/ui/Tag';
 import { IconCheck, IconPlay } from '@/components/ui/icons';
 import { useThumbnail } from '@/components/media/use-thumbnail';
-import { PresignCache } from '@/lib/asset-presign';
+import { PresignCache, type PresignDeps } from '@/lib/asset-presign';
 import { readProfiles } from '@/lib/chat-reads';
 import { formatShortDate, workspaceTimeZone } from '@/lib/chat/time-format';
 import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
@@ -27,6 +29,7 @@ import { formatLabel } from '@/lib/post-detail-presentation';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import type { Client } from '@srtdio/rpc';
+import { PostSheet } from '@/components/chat/PostSheet';
 import { readPostCards, type PostCardRow } from '../../../packages/posts/src/reads';
 import {
   NOT_VISIBLE_BODY,
@@ -35,7 +38,6 @@ import {
   cardFooter,
   indexPostsById,
   mediaPills,
-  postRoute,
   sharedPostViews,
   watchBatchFreshness,
   type SharedPostView,
@@ -137,17 +139,16 @@ function useSharedPosts(postIds: string[]): { views: SharedPostView[]; loading: 
 }
 
 // One presign cache for every shared card in the session: it bounds concurrency
-// and keeps URLs warm across messages. Created on first use, never per card.
+// and keeps URLs warm across messages. Created on first use, never per card. The
+// post sheet shares it, and its deps mint the viewer's download URL.
+const cardPresignDeps: PresignDeps = {
+  endpoint: env.VITE_ASSET_READ_URL ?? null,
+  getAccessToken: async () => (await supabase.auth.getSession()).data.session?.access_token ?? null,
+  fetcher: (input, init) => fetchWithTrace(input, init),
+};
 let cardPresignCache: PresignCache | null = null;
 function sharedCardPresignCache(): PresignCache {
-  if (cardPresignCache === null) {
-    cardPresignCache = new PresignCache({
-      endpoint: env.VITE_ASSET_READ_URL ?? null,
-      getAccessToken: async () =>
-        (await supabase.auth.getSession()).data.session?.access_token ?? null,
-      fetcher: (input, init) => fetchWithTrace(input, init),
-    });
-  }
+  if (cardPresignCache === null) cardPresignCache = new PresignCache(cardPresignDeps);
   return cardPresignCache;
 }
 const PRESIGN_ENABLED = env.VITE_ASSET_READ_URL !== undefined && env.VITE_ASSET_READ_URL !== '';
@@ -218,71 +219,131 @@ function entityRef(workspaceKey: string | null, number: number): string | null {
     : null;
 }
 
+/**
+ * The card's tap and Enter key: both open its sheet, neither navigates (the sheet
+ * carries "Open full post"). Pure so the wiring is tested without a DOM.
+ */
+export function cardTapHandlers(openSheet: () => void): {
+  onClick: () => void;
+  onKeyDown: (e: Pick<KeyboardEvent<HTMLDivElement>, 'key' | 'preventDefault'>) => void;
+} {
+  return {
+    onClick: openSheet,
+    onKeyDown: (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      openSheet();
+    },
+  };
+}
+
 export function PostCardItem(
   props: { view: Extract<SharedPostView, { kind: 'post' }> } & CardContext,
 ): ReactElement {
   const { view, side, workspaceKey, timeZone } = props;
-  const navigate = useNavigate();
   const { post } = view;
   const ref = entityRef(workspaceKey, post.number);
   const footer = cardFooter(post, view.approverName, side, timeZone);
   const target = post.target_date !== null ? formatShortDate(post.target_date, timeZone) : '';
-  const open = (): void => navigate(postRoute(view.postId));
-  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    open();
-  };
+  // The sheet mounts on first open and stays mounted so its exit can animate.
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [sheetMounted, setSheetMounted] = useState(false);
+  const tap = cardTapHandlers(() => {
+    setSheetMounted(true);
+    setSheetOpen(true);
+  });
   return (
-    <div
-      role="link"
-      tabIndex={0}
-      data-msg-link=""
-      aria-label={`Open post ${post.title}`}
-      onClick={open}
-      onKeyDown={onKeyDown}
-      className={cn(POST_CARD, 'cursor-pointer transition-colors hover:bg-panel-2')}
-    >
-      {post.thumbnailAssetVersionId !== null ? (
-        <CardMedia post={post} assetVersionId={post.thumbnailAssetVersionId} entityRef={ref} />
-      ) : null}
-      <div className="flex flex-col gap-1.5 px-3 py-2.5">
-        <span
-          data-card-title=""
-          className="line-clamp-2 text-[15px] font-medium leading-[20px] text-fg"
-          title={post.title}
-        >
-          {post.thumbnailAssetVersionId === null && ref !== null ? (
-            <span data-card-ref="" className="mr-1.5 font-mono text-fg-3">
-              {ref}
-            </span>
-          ) : null}
-          {post.title}
-        </span>
-        <span className="flex items-center gap-1.5 text-xs text-fg-3">
-          <Tag
-            label={stageLabel(post.stage)}
-            {...(isTagDot(post.stage) ? { dot: post.stage } : {})}
-          />
-          {target !== '' ? <span data-card-target="">{target}</span> : null}
-        </span>
-      </div>
+    <>
       <div
-        data-card-footer=""
-        className="flex h-[44px] items-center justify-between gap-2 border-t border-border px-3 text-xs"
+        role="button"
+        tabIndex={0}
+        data-msg-link=""
+        aria-haspopup="dialog"
+        aria-label={`Open post ${post.title}`}
+        onClick={tap.onClick}
+        onKeyDown={tap.onKeyDown}
+        className={cn(POST_CARD, 'cursor-pointer transition-colors hover:bg-panel-2')}
       >
-        <span
-          className={cn(
-            'flex min-w-0 items-center gap-1',
-            footer.accent ? 'font-medium text-accent' : 'text-fg-2',
-          )}
+        {post.thumbnailAssetVersionId !== null ? (
+          <CardMedia post={post} assetVersionId={post.thumbnailAssetVersionId} entityRef={ref} />
+        ) : null}
+        <div className="flex flex-col gap-1.5 px-3 py-2.5">
+          <span
+            data-card-title=""
+            className="line-clamp-2 text-[15px] font-medium leading-[20px] text-fg"
+            title={post.title}
+          >
+            {post.thumbnailAssetVersionId === null && ref !== null ? (
+              <span data-card-ref="" className="mr-1.5 font-mono text-fg-3">
+                {ref}
+              </span>
+            ) : null}
+            {post.title}
+          </span>
+          <span className="flex items-center gap-1.5 text-xs text-fg-3">
+            <Tag
+              label={stageLabel(post.stage)}
+              {...(isTagDot(post.stage) ? { dot: post.stage } : {})}
+            />
+            {target !== '' ? <span data-card-target="">{target}</span> : null}
+          </span>
+        </div>
+        <div
+          data-card-footer=""
+          className="flex h-[44px] items-center justify-between gap-2 border-t border-border px-3 text-xs"
         >
-          {footer.check ? <IconCheck size={14} className="shrink-0 text-good" /> : null}
-          <span className="truncate">{footer.state}</span>
-        </span>
-        <span className="shrink-0 font-medium text-accent">{footer.action}</span>
+          <span
+            className={cn(
+              'flex min-w-0 items-center gap-1',
+              footer.accent ? 'font-medium text-accent' : 'text-fg-2',
+            )}
+          >
+            {footer.check ? <IconCheck size={14} className="shrink-0 text-good" /> : null}
+            <span className="truncate">{footer.state}</span>
+          </span>
+          <span className="shrink-0 font-medium text-accent">{footer.action}</span>
+        </div>
       </div>
-    </div>
+      {sheetMounted ? (
+        <SheetBoundary>
+          <PostSheet
+            open={sheetOpen}
+            onClose={() => setSheetOpen(false)}
+            view={view}
+            side={side}
+            workspaceKey={workspaceKey}
+            timeZone={timeZone}
+            cache={sharedCardPresignCache()}
+            deps={cardPresignDeps}
+            presignEnabled={PRESIGN_ENABLED}
+          />
+        </SheetBoundary>
+      ) : null}
+    </>
+  );
+}
+
+const stop = (e: SyntheticEvent): void => e.stopPropagation();
+
+/**
+ * React events bubble through portals along the component tree, so a tap inside
+ * the sheet would otherwise reach the message bubble (long-press, swipe-reply,
+ * the card's own open). This portal root stops them at the card.
+ */
+function SheetBoundary({ children }: { children: ReactNode }): ReactElement {
+  return createPortal(
+    <div
+      onClick={stop}
+      onPointerDown={stop}
+      onPointerMove={stop}
+      onPointerUp={stop}
+      onPointerCancel={stop}
+      onContextMenu={stop}
+      onKeyDown={stop}
+    >
+      {children}
+    </div>,
+    document.body,
   );
 }
 

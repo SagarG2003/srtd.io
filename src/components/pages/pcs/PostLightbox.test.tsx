@@ -8,7 +8,9 @@ import {
   fitFrameStyle,
   pinPointFromRect,
   placePinFromEvent,
+  createSwipeDismiss,
 } from '@/components/pages/pcs/PostLightbox';
+import { DISMISS_DISTANCE, DISMISS_FLICK_VELOCITY } from '@/components/ui/ImageLightbox';
 import type { LightboxViewProps, StageGestures } from '@/components/pages/pcs/PostLightbox';
 import type { GalleryItem } from '@srtdio/posts';
 
@@ -547,5 +549,94 @@ describe('lightboxView', () => {
         (el) => (el.props as { 'data-testid'?: string })['data-testid'] === 'pins',
       ),
     ).toBe(true);
+  });
+});
+
+describe('swipe-down dismiss', () => {
+  function gesture() {
+    const onDrag = vi.fn();
+    const onClose = vi.fn();
+    return { onDrag, onClose, swipe: createSwipeDismiss({ onDrag, onClose }) };
+  }
+
+  it('mirrors the ImageLightbox constants', () => {
+    expect(DISMISS_DISTANCE).toBe(120);
+    expect(DISMISS_FLICK_VELOCITY).toBe(0.5);
+  });
+
+  it('a slow drag past 120px closes; the viewer follows the finger on Y only', () => {
+    const { onDrag, onClose, swipe } = gesture();
+    swipe.down({ x: 100, y: 100, t: 0 }, true);
+    expect(swipe.move({ x: 102, y: 150, t: 400 })).toBe('y');
+    expect(swipe.dragging()).toBe(true);
+    expect(onDrag).toHaveBeenLastCalledWith(50);
+    swipe.move({ x: 104, y: 230, t: 900 });
+    expect(onDrag).toHaveBeenLastCalledWith(130);
+    swipe.up({ x: 104, y: 230, t: 1000 });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onDrag).toHaveBeenLastCalledWith(0);
+    expect(swipe.dragging()).toBe(false);
+  });
+
+  it('a short, slow drag springs back without closing', () => {
+    const { onDrag, onClose, swipe } = gesture();
+    swipe.down({ x: 0, y: 0, t: 0 }, true);
+    swipe.move({ x: 0, y: 60, t: 500 });
+    swipe.up({ x: 0, y: 60, t: 1000 });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onDrag).toHaveBeenLastCalledWith(0);
+  });
+
+  it('a short downward flick closes', () => {
+    const { onClose, swipe } = gesture();
+    swipe.down({ x: 0, y: 0, t: 0 }, true);
+    swipe.move({ x: 0, y: 40, t: 40 });
+    swipe.up({ x: 0, y: 60, t: 80 });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a horizontal drag is the carousel, never a dismiss', () => {
+    const { onDrag, onClose, swipe } = gesture();
+    swipe.down({ x: 0, y: 0, t: 0 }, true);
+    expect(swipe.move({ x: -200, y: 30, t: 50 })).toBe('x');
+    swipe.up({ x: -300, y: 200, t: 60 });
+    expect(onDrag).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('an upward drag is not a dismiss', () => {
+    const { onClose, swipe } = gesture();
+    swipe.down({ x: 0, y: 200, t: 0 }, true);
+    expect(swipe.move({ x: 0, y: 0, t: 50 })).toBe('x');
+    swipe.up({ x: 0, y: 0, t: 60 });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('zoomed or multi-touch pointers never start a dismiss', () => {
+    const { onClose, swipe } = gesture();
+    swipe.down({ x: 0, y: 0, t: 0 }, false);
+    expect(swipe.move({ x: 0, y: 300, t: 10 })).toBeNull();
+    swipe.up({ x: 0, y: 300, t: 20 });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('cancel springs back mid-drag', () => {
+    const { onDrag, onClose, swipe } = gesture();
+    swipe.down({ x: 0, y: 0, t: 0 }, true);
+    swipe.move({ x: 0, y: 90, t: 50 });
+    swipe.cancel();
+    expect(onDrag).toHaveBeenLastCalledWith(0);
+    swipe.up({ x: 0, y: 300, t: 60 });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('the view moves on translateY only while dragged, and rests untransformed', () => {
+    const rest = elements(lightboxView(props()))[0]!;
+    expect((rest.props as { style?: unknown }).style).toBeUndefined();
+    const dragged = elements(lightboxView(props({ dragY: 64 })))[0]!;
+    expect((dragged.props as { style?: { transform?: string } }).style?.transform).toBe(
+      'translateY(64px)',
+    );
+    expect(className(dragged)).not.toMatch(/\btranslate-|\brotate-/);
   });
 });

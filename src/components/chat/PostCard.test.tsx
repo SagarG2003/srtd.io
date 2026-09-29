@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
+
+// The card must never obtain a navigator: a tap opens the sheet instead.
+const navigate = vi.hoisted(() => vi.fn());
+vi.mock('react-router-dom', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('react-router-dom')>()),
+  useNavigate: () => navigate,
+}));
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import type { Client } from '@srtdio/rpc';
@@ -6,6 +13,7 @@ import type { PostCardRow } from '../../../packages/posts/src/reads';
 import {
   CARD_SKELETON,
   NotVisibleCard,
+  cardTapHandlers,
   POST_CARD,
   SHARED_CARD,
   SharedPostCardList,
@@ -113,12 +121,23 @@ describe('SharedPostCardList', () => {
     expect(html).not.toContain('slides');
   });
 
-  it('is a tappable link the bubble long-press ignores (data-msg-link)', () => {
+  it('is a tappable dialog opener the bubble long-press ignores (data-msg-link)', () => {
     const html = render(['p1'], [cardRow('p1')]);
-    expect(html).toContain('role="link"');
+    expect(html).toContain('role="button"');
+    expect(html).toContain('aria-haspopup="dialog"');
+    expect(html).not.toContain('role="link"');
+    expect(html).not.toMatch(/<a\b|href=/);
     expect(html).toContain('data-msg-link=""');
     expect(html).toContain('tabindex="0"');
     expect(POST_CARD).toContain('bg-panel');
+  });
+
+  it('renders no sheet until tapped, and never reaches for the router', () => {
+    navigate.mockClear();
+    const html = render(['p1'], [cardRow('p1', { stage: 'review' })], { side: 'client' });
+    expect(html).not.toContain('role="dialog"');
+    expect(html).not.toContain('data-post-sheet');
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it('review footer by side', () => {
@@ -223,5 +242,29 @@ describe('loadPostCardBatch', () => {
   it('returns null when the posts read fails', async () => {
     const { client } = makeClient({ posts: { data: null, error: { message: 'boom' } } });
     expect(await loadPostCardBatch(client, 'ws', ['p1'])).toBeNull();
+  });
+});
+
+describe('cardTapHandlers', () => {
+  it('a tap opens the sheet and does not navigate', () => {
+    navigate.mockClear();
+    const openSheet = vi.fn();
+    cardTapHandlers(openSheet).onClick();
+    expect(openSheet).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('Enter opens the sheet (default prevented); other keys do nothing', () => {
+    const openSheet = vi.fn();
+    const handlers = cardTapHandlers(openSheet);
+    const enter = { key: 'Enter', preventDefault: vi.fn() };
+    handlers.onKeyDown(enter);
+    expect(enter.preventDefault).toHaveBeenCalledTimes(1);
+    expect(openSheet).toHaveBeenCalledTimes(1);
+    const space = { key: 'a', preventDefault: vi.fn() };
+    handlers.onKeyDown(space);
+    expect(space.preventDefault).not.toHaveBeenCalled();
+    expect(openSheet).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
   });
 });

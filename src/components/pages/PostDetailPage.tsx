@@ -74,7 +74,8 @@ import {
   postCaptionUpdate,
   postUpdate,
 } from '@srtdio/posts';
-import type { DomainError, GalleryItem, PostDetail, PostUpdateInput, Stage } from '@srtdio/posts';
+import type { GalleryItem, PostDetail, PostUpdateInput, Stage } from '@srtdio/posts';
+import { friendlyTransitionError } from '@/lib/post-transition-errors';
 import { createComment } from '@srtdio/comments';
 import type { Json } from '@srtdio/schemas';
 import { postSoftDelete, stageTransition } from '@srtdio/rpc';
@@ -138,22 +139,6 @@ const STAGE_PILL_LABEL: Record<Stage, string> = {
   parked: 'Parked',
   rejected: 'Rejected',
 };
-
-// Map the proc's domain errors to friendly, inline copy. The proc owns the
-// policy: it raises forbidden_role when the role lacks approve/reject
-// capability and invalid_stage_transition for an illegal move.
-function friendlyTransitionError(error: DomainError): string {
-  switch (error.code) {
-    case 'forbidden_role':
-      return 'You do not have permission to make this change.';
-    case 'invalid_stage_transition':
-      return 'That move is not allowed from the current stage.';
-    case 'workspace_member_only':
-      return 'You must be a member of this workspace to make this change.';
-    default:
-      return 'Something went wrong. Please try again.';
-  }
-}
 
 function formatTargetDate(value: string): string {
   const date = new Date(value);

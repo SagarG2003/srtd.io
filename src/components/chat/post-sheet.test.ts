@@ -1,0 +1,292 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { PostCardRow } from '../../../packages/posts/src/reads';
+import { POST_CHANGED_EVENT } from '@/components/chat/post-card';
+import {
+  CLIENT_REVIEW_HINT,
+  actionLabel,
+  approvedPillLabel,
+  commentToast,
+  confirmCopy,
+  confirmTarget,
+  detailRows,
+  dispatchPostChanged,
+  durationLabel,
+  friendlyCommentError,
+  reelLabel,
+  runStageChange,
+  sheetActions,
+  sheetTitle,
+  stripCounter,
+  successToast,
+  type StageChangeDeps,
+} from '@/components/chat/post-sheet';
+
+function row(over: Partial<PostCardRow> = {}): PostCardRow {
+  return {
+    id: 'p1',
+    number: 12,
+    title: 'Diwali carousel',
+    platform: 'instagram',
+    format: 'carousel',
+    stage: 'review',
+    target_date: '2026-10-02',
+    stage_entered_at: '2026-09-20T10:00:00Z',
+    approved_by: null,
+    approved_at: null,
+    thumbnailAssetVersionId: null,
+    mediaCount: 0,
+    hasVideo: false,
+    ...over,
+  };
+}
+
+const TZ = 'UTC';
+
+describe('sheetActions', () => {
+  it('client in review: approve, comment, open, with the one-at-a-time hint', () => {
+    const set = sheetActions('client', row({ stage: 'review' }), TZ);
+    expect(set.actions).toEqual(['approve', 'comment', 'open_post']);
+    expect(set.hint).toBe(CLIENT_REVIEW_HINT);
+    expect(CLIENT_REVIEW_HINT).toBe('One post at a time. Comments keep it in review.');
+    expect(set.approvedPill).toBe(false);
+  });
+
+  it('client elsewhere: open only; the approved pill only when approved', () => {
+    for (const stage of ['approved', 'parked', 'rejected', 'draft']) {
+      const set = sheetActions('client', row({ stage }), TZ);
+      expect(set.actions).toEqual(['open_post']);
+      expect(set.hint).toBeNull();
+      expect(set.approvedPill).toBe(stage === 'approved');
+    }
+  });
+
+  it('agency in draft: send for review, open in pipeline', () => {
+    const set = sheetActions('agency', row({ stage: 'draft' }), TZ);
+    expect(set.actions).toEqual(['send_review', 'open_pipeline']);
+    expect(set.hint).toBeNull();
+  });
+
+  it('agency elsewhere: open in pipeline; review waits on the client since the stage date', () => {
+    const review = sheetActions('agency', row({ stage: 'review' }), TZ);
+    expect(review.actions).toEqual(['open_pipeline']);
+    expect(review.hint).toBe('Waiting on the client since Sep 20');
+    for (const stage of ['approved', 'parked', 'rejected']) {
+      const set = sheetActions('agency', row({ stage }), TZ);
+      expect(set.actions).toEqual(['open_pipeline']);
+      expect(set.hint).toBeNull();
+      expect(set.approvedPill).toBe(false);
+    }
+  });
+
+  it('an unresolved side is never offered a write', () => {
+    const set = sheetActions('unknown', row({ stage: 'review' }), TZ);
+    expect(set.actions).toEqual(['open_post']);
+  });
+});
+
+describe('labels and copy', () => {
+  it('action labels', () => {
+    expect(actionLabel('approve', 'GBL-12')).toBe('Approve GBL-12');
+    expect(actionLabel('comment', 'GBL-12')).toBe('Comment on this post');
+    expect(actionLabel('open_post', 'GBL-12')).toBe('Open full post');
+    expect(actionLabel('send_review', 'GBL-12')).toBe('Send for review');
+    expect(actionLabel('open_pipeline', 'GBL-12')).toBe('Open in pipeline');
+  });
+
+  it('approved pill names the approver when known', () => {
+    expect(approvedPillLabel('Asha')).toBe('Approved by Asha');
+    expect(approvedPillLabel(null)).toBe('Approved');
+  });
+
+  it('approve confirm names the post, every slide and the target date', () => {
+    const copy = confirmCopy('approve', { ref: 'GBL-12', mediaCount: 5, targetDate: 'Oct 2' });
+    expect(copy.question).toBe('Approve GBL-12, all 5 slides, for Oct 2?');
+    expect(copy.detail).toBe('This is logged as your approval and the agency is notified.');
+    expect(copy.confirmLabel).toBe('Approve GBL-12');
+  });
+
+  it('approve confirm drops the slide and date clauses it has no value for', () => {
+    expect(confirmCopy('approve', { ref: 'GBL-12', mediaCount: 1, targetDate: '' }).question).toBe(
+      'Approve GBL-12, 1 slide?',
+    );
+    expect(confirmCopy('approve', { ref: 'GBL-12', mediaCount: 0, targetDate: '' }).question).toBe(
+      'Approve GBL-12?',
+    );
+  });
+
+  it('send-for-review confirm has its own copy', () => {
+    const copy = confirmCopy('send_review', { ref: 'GBL-12', mediaCount: 3, targetDate: 'Oct 2' });
+    expect(copy.question).toBe('Send GBL-12 to the client for review?');
+    expect(copy.detail).toBe('It leaves draft, and the client can approve it or comment.');
+    expect(copy.confirmLabel).toBe('Send for review');
+  });
+
+  it('confirm targets and toasts', () => {
+    expect(confirmTarget('approve')).toBe('approved');
+    expect(confirmTarget('send_review')).toBe('review');
+    expect(successToast('approve', 'GBL-12')).toBe('GBL-12 approved');
+    expect(successToast('send_review', 'GBL-12')).toBe('GBL-12 sent for review');
+    expect(commentToast('GBL-12')).toBe('Comment added to GBL-12');
+  });
+
+  it('comment errors map to plain copy', () => {
+    expect(friendlyCommentError('invalid_stage')).toBe('Comments open once the post is in review.');
+    expect(friendlyCommentError('mystery')).toBe('Could not add the comment. Please try again.');
+  });
+
+  it('no user-facing copy carries an em-dash', () => {
+    const copy = [
+      CLIENT_REVIEW_HINT,
+      ...Object.values(confirmCopy('approve', { ref: 'K-1', mediaCount: 2, targetDate: 'Oct 2' })),
+      ...Object.values(confirmCopy('send_review', { ref: 'K-1', mediaCount: 2, targetDate: '' })),
+      friendlyCommentError('invalid_stage'),
+      friendlyCommentError('x'),
+    ];
+    for (const line of copy) expect(line).not.toContain('—');
+  });
+
+  it('title is KEY · format label', () => {
+    expect(sheetTitle('GBL-12', 'carousel')).toMatch(/^GBL-12 · \S/);
+  });
+
+  it('strip counter', () => {
+    expect(stripCounter(0, 5)).toBe('1 / 5');
+  });
+});
+
+describe('media labels', () => {
+  it('durationLabel is m:ss', () => {
+    expect(durationLabel(0)).toBe('0:00');
+    expect(durationLabel(9_400)).toBe('0:09');
+    expect(durationLabel(75_000)).toBe('1:15');
+    expect(durationLabel(null)).toBe('');
+    expect(durationLabel(-1)).toBe('');
+  });
+
+  it('reelLabel only for a video-format post whose video has a duration', () => {
+    const video = { kind: 'video', mimeType: 'video/mp4', durationMs: 31_000 };
+    const image = { kind: 'image', mimeType: 'image/jpeg', durationMs: null };
+    expect(reelLabel('video', [video])).toBe('Reel · 0:31');
+    expect(reelLabel('video', [image, video])).toBe('Reel · 0:31');
+    expect(reelLabel('carousel', [video])).toBeNull();
+    expect(reelLabel('video', [{ ...video, durationMs: null }])).toBeNull();
+    expect(reelLabel('video', [image])).toBeNull();
+  });
+});
+
+describe('detailRows', () => {
+  it('target date, then format with the slide count past one', () => {
+    const rows = detailRows(row({ mediaCount: 4 }), null, TZ);
+    expect(rows.map((r) => r.key)).toEqual(['target', 'format']);
+    expect(rows[0]).toMatchObject({ label: 'Target date', value: 'Oct 2' });
+    expect(rows[1]?.value).toMatch(/ · 4 slides$/);
+    expect(detailRows(row({ mediaCount: 1 }), null, TZ)[1]?.value).not.toContain('slides');
+  });
+
+  it('no target date: no target row', () => {
+    expect(detailRows(row({ target_date: null }), null, TZ).map((r) => r.key)).toEqual(['format']);
+  });
+
+  it('approved with an approver: name · date time', () => {
+    const rows = detailRows(
+      row({ stage: 'approved', approved_by: 'u1', approved_at: '2026-10-01T09:05:00Z' }),
+      'Asha',
+      TZ,
+    );
+    const approved = rows.find((r) => r.key === 'approved');
+    expect(approved?.label).toBe('Approved');
+    expect(approved?.value).toMatch(/^Asha · Oct 1 /);
+  });
+
+  it('approved with no approver: the date it entered approved', () => {
+    const rows = detailRows(row({ stage: 'approved' }), null, TZ);
+    expect(rows.find((r) => r.key === 'approved')?.value).toBe('Sep 20');
+  });
+
+  it('not approved and no approver: no approval row', () => {
+    expect(detailRows(row(), null, TZ).find((r) => r.key === 'approved')).toBeUndefined();
+  });
+});
+
+function fakeDeps(result: Awaited<ReturnType<StageChangeDeps['transition']>>) {
+  const target = new EventTarget();
+  const events: unknown[] = [];
+  target.addEventListener(POST_CHANGED_EVENT, (e) => events.push((e as CustomEvent).detail));
+  const deps = {
+    transition: vi.fn(async () => result),
+    target,
+    toast: vi.fn(),
+    close: vi.fn(),
+  };
+  return { deps, events };
+}
+
+describe('runStageChange', () => {
+  it('approve: one transition with the right args, then event, close and toast', async () => {
+    const { deps, events } = fakeDeps({ ok: true, data: 'p1' });
+    const error = await runStageChange(deps, {
+      kind: 'approve',
+      postId: 'p1',
+      ref: 'GBL-12',
+      traceId: 't-1',
+    });
+    expect(error).toBeNull();
+    expect(deps.transition).toHaveBeenCalledTimes(1);
+    expect(deps.transition).toHaveBeenCalledWith({
+      postId: 'p1',
+      toStage: 'approved',
+      traceId: 't-1',
+    });
+    expect(events).toEqual([{ postId: 'p1' }]);
+    expect(deps.close).toHaveBeenCalledTimes(1);
+    expect(deps.toast).toHaveBeenCalledWith('GBL-12 approved');
+  });
+
+  it('send for review moves to review and toasts its own line', async () => {
+    const { deps, events } = fakeDeps({ ok: true, data: 'p1' });
+    await runStageChange(deps, { kind: 'send_review', postId: 'p1', ref: 'GBL-12', traceId: 't' });
+    expect(deps.transition).toHaveBeenCalledWith(expect.objectContaining({ toStage: 'review' }));
+    expect(events).toEqual([{ postId: 'p1' }]);
+    expect(deps.toast).toHaveBeenCalledWith('GBL-12 sent for review');
+  });
+
+  it('a failure returns the friendly copy and announces nothing', async () => {
+    const { deps, events } = fakeDeps({
+      ok: false,
+      error: { code: 'forbidden_role', message: 'forbidden_role' },
+    });
+    const error = await runStageChange(deps, {
+      kind: 'approve',
+      postId: 'p1',
+      ref: 'GBL-12',
+      traceId: 't',
+    });
+    expect(error).toBe('You do not have permission to make this change.');
+    expect(deps.transition).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([]);
+    expect(deps.close).not.toHaveBeenCalled();
+    expect(deps.toast).not.toHaveBeenCalled();
+  });
+
+  it('a thrown transport error still resolves to copy', async () => {
+    const { deps } = fakeDeps({ ok: true, data: 'p1' });
+    deps.transition.mockRejectedValueOnce(new Error('offline'));
+    const error = await runStageChange(deps, {
+      kind: 'approve',
+      postId: 'p1',
+      ref: 'K',
+      traceId: 't',
+    });
+    expect(error).toBe('Something went wrong. Please try again.');
+    expect(deps.close).not.toHaveBeenCalled();
+  });
+
+  it('dispatchPostChanged sends the PR 2 event with the post id', () => {
+    const target = new EventTarget();
+    const seen = vi.fn();
+    target.addEventListener(POST_CHANGED_EVENT, (e) => seen((e as CustomEvent).detail));
+    dispatchPostChanged(target, 'p9');
+    expect(POST_CHANGED_EVENT).toBe('sorted:post-changed');
+    expect(seen).toHaveBeenCalledWith({ postId: 'p9' });
+  });
+});
