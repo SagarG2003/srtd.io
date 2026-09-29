@@ -37,6 +37,7 @@ describe('chat list draft preview', () => {
         timeZone: 'UTC',
         selecting: false,
         checked: false,
+        layout: 'touch',
       }),
     );
     expect(DRAFT_PREFIX).toBe('Draft: ');
@@ -53,6 +54,7 @@ describe('chat list draft preview', () => {
         timeZone: 'UTC',
         selecting: false,
         checked: false,
+        layout: 'touch',
       }),
     );
     expect(html).toContain('No messages yet');

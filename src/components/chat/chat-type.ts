@@ -122,17 +122,29 @@ export const COMPOSER_INPUT_TYPE: ChatSize = {
   laptop: '!text-[15px] !leading-[20px] font-normal',
 };
 
-/** Chat list name: 17/22/600 mobile, 17/21/400 md and up. */
-export const CHAT_LIST_NAME_TYPE =
-  'text-[17px] leading-[22px] font-semibold md:leading-[21px] md:font-normal';
+/** Chat list name: 17/22/600 touch, 17/21/400 laptop. */
+export const CHAT_LIST_NAME_TYPE: ChatSize = {
+  touch: 'text-[17px] leading-[22px] font-semibold',
+  laptop: 'text-[17px] leading-[21px] font-normal',
+};
 
-/** Chat list preview: 15/20 mobile, 14/20 md and up, 400. */
-export const CHAT_LIST_PREVIEW_TYPE =
-  'text-[15px] leading-[20px] font-normal md:text-[14px] md:leading-[20px]';
+/** Chat list preview: 15/20 touch, 14/20 laptop, 400. */
+export const CHAT_LIST_PREVIEW_TYPE: ChatSize = {
+  touch: 'text-[15px] leading-[20px] font-normal',
+  laptop: 'text-[14px] leading-[20px] font-normal',
+};
 
-/** Chat list time: 14/18 mobile, 12/16 md and up, 400; sans with tabular figures. */
-export const CHAT_LIST_TIME_TYPE =
-  'font-sans text-[14px] leading-[18px] font-normal tabular-nums md:text-xs';
+/** Chat list time: 14/18 touch, 12/16 laptop, 400; sans with tabular figures. */
+export const CHAT_LIST_TIME_TYPE: ChatSize = {
+  touch: 'font-sans text-[14px] leading-[18px] font-normal tabular-nums',
+  laptop: 'font-sans text-xs font-normal tabular-nums',
+};
+
+/** Thread header row padding: 8px touch, 16px laptop. */
+export const HEADER_PAD: ChatSize = {
+  touch: 'px-2',
+  laptop: 'px-4',
+};
 
 /** Date separator pill: 12.5/16/500 touch, 12.5/16/400 uppercase laptop; sans, tabular. */
 export const DATE_PILL_TYPE: ChatSize = {

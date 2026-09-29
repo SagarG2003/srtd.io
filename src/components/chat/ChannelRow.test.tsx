@@ -7,6 +7,13 @@ vi.mock('agora-chat', () => ({
 }));
 
 import { channelRowBody, channelRowClass } from '@/components/chat/ChannelList';
+import {
+  CHAT_LIST_NAME_TYPE,
+  CHAT_LIST_PREVIEW_TYPE,
+  CHAT_LIST_TIME_TYPE,
+  chatLayout,
+  type ChatLayout,
+} from '@/components/chat/chat-type';
 import type { ChannelSummary } from '@/lib/chat-reads';
 import type { ConversationSummary } from '@/lib/chat/chat-store';
 
@@ -41,7 +48,17 @@ function row(
   const selecting = state.selecting === true;
   const checked = state.checked === true;
   const html = renderToStaticMarkup(
-    <>{channelRowBody({ channel, summary, nowMs: NOW, timeZone: 'UTC', selecting, checked })}</>,
+    <>
+      {channelRowBody({
+        channel,
+        summary,
+        nowMs: NOW,
+        timeZone: 'UTC',
+        selecting,
+        checked,
+        layout: 'touch',
+      })}
+    </>,
   );
   return {
     html,
@@ -105,5 +122,39 @@ describe('ChannelList dense row', () => {
     expect(r.cls).toContain('w-full');
     expect(r.cls).toContain('border-b border-border');
     expect(r.cls).toContain('hover:bg-panel-2');
+  });
+});
+
+describe('R2: chat list sizes follow the input, as the thread', () => {
+  function listHtml(layout: ChatLayout): string {
+    return renderToStaticMarkup(
+      <>
+        {channelRowBody({
+          channel: dm,
+          summary: { ...read, unread: 2 },
+          nowMs: NOW,
+          timeZone: 'UTC',
+          selecting: false,
+          checked: false,
+          layout,
+        })}
+      </>,
+    );
+  }
+
+  it('coarse pointer at 1024 (iPad) takes the touch list sizes', () => {
+    const html = listHtml(chatLayout({ finePointer: false, widthPx: 1024 }));
+    expect(html).toContain(CHAT_LIST_NAME_TYPE.touch);
+    expect(html).toContain(CHAT_LIST_PREVIEW_TYPE.touch);
+    expect(html).toContain(CHAT_LIST_TIME_TYPE.touch);
+    expect(html).not.toContain('md:');
+  });
+
+  it('fine pointer at 1280 takes the laptop list sizes', () => {
+    const html = listHtml(chatLayout({ finePointer: true, widthPx: 1280 }));
+    expect(html).toContain(CHAT_LIST_NAME_TYPE.laptop);
+    expect(html).toContain(CHAT_LIST_PREVIEW_TYPE.laptop);
+    expect(html).toContain(CHAT_LIST_TIME_TYPE.laptop);
+    expect(html).not.toContain('md:');
   });
 });

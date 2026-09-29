@@ -16,10 +16,14 @@ import { Link } from 'react-router-dom';
 import { isNearBottom } from '@/lib/chat/scroll';
 import {
   distanceFromBottom,
+  anchorAfterOlderLoad,
+  flickInProgress,
   intentAfterNewest,
   intentAfterScroll,
   isScrollKey,
   openingIntent,
+  SCROLL_SETTLE_MS,
+  settleDecision,
   sizeChangeAction,
   type ScrollSource,
 } from '@/lib/chat/stick-to-bottom';
@@ -66,6 +70,7 @@ import {
   GROUP_SENDER_TYPE,
   HEADER_LINE_TYPE,
   HEADER_NAME_TYPE,
+  HEADER_PAD,
   HOVER_POINTER_QUERY,
   REACTION_EMOJI_TYPE,
   sized,
@@ -1927,6 +1932,40 @@ function ThreadBody(
   const userGesture = (): void => {
     sourceRef.current = 'user';
   };
+  // A touch flick: the finger is down, or momentum is still scrolling (a scroll
+  // event from the touch gesture in the last 150ms). A size change meanwhile
+  // defers its pin until the list settles, then decides on the settled spot.
+  const touchingRef = useRef(false);
+  const touchScrollAtRef = useRef<number | null>(null);
+  const deferredPinRef = useRef(false);
+  const settleTimerRef = useRef<number | null>(null);
+  const scheduleSettle = useCallback((): void => {
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = window.setTimeout(() => {
+      settleTimerRef.current = null;
+      if (touchingRef.current) return;
+      touchScrollAtRef.current = null;
+      const el = listRef.current;
+      if (!deferredPinRef.current || el === null) return;
+      deferredPinRef.current = false;
+      const settled = settleDecision({
+        intent: stickRef.current,
+        distanceFromBottom: distanceFromBottom(el),
+        restoring: pendingJumpRef.current !== null || anchorHeightRef.current !== null,
+      });
+      stickRef.current = settled.intent;
+      if (settled.action === 'pin') pin();
+    }, SCROLL_SETTLE_MS);
+  }, [pin]);
+  const touchStart = (): void => {
+    userGesture();
+    touchingRef.current = true;
+  };
+  const touchEnd = (): void => {
+    touchingRef.current = false;
+    touchScrollAtRef.current = Date.now();
+    scheduleSettle();
+  };
   const ensureLoadedRef = useRef(props.onEnsureLoaded);
   ensureLoadedRef.current = props.onEnsureLoaded;
   const toastRef = useRef(toast);
@@ -2014,12 +2053,21 @@ function ThreadBody(
     const observer =
       observerRef.current ??
       new ResizeObserver(() => {
+        const touchScrollAt = touchScrollAtRef.current;
         const action = sizeChangeAction({
           intent: stickRef.current,
           pendingJump: pendingJumpRef.current !== null,
           olderPageRestore: anchorHeightRef.current !== null,
+          flicking: flickInProgress({
+            touching: touchingRef.current,
+            msSinceTouchScroll: touchScrollAt !== null ? Date.now() - touchScrollAt : null,
+          }),
         });
         if (action === 'pin') pin();
+        if (action === 'defer') {
+          deferredPinRef.current = true;
+          if (!touchingRef.current && settleTimerRef.current === null) scheduleSettle();
+        }
       });
     observerRef.current = observer;
     const observed = observedRef.current;
@@ -2034,9 +2082,26 @@ function ThreadBody(
       observed.add(node);
     }
   });
+  // An older-page load that ended with no new rows (empty or failed) lets go of
+  // the anchor, else size-change pinning would stay off for good.
+  const loadingOlder = props.loadingOlder === true;
+  const wasLoadingOlderRef = useRef(loadingOlder);
+  const messagesAtLoadRef = useRef(props.messages);
+  useLayoutEffect(() => {
+    const wasLoading = wasLoadingOlderRef.current;
+    wasLoadingOlderRef.current = loadingOlder;
+    if (loadingOlder && !wasLoading) messagesAtLoadRef.current = props.messages;
+    const anchored = anchorAfterOlderLoad({
+      anchored: anchorHeightRef.current !== null,
+      loadEnded: wasLoading && !loadingOlder,
+      messagesChanged: props.messages !== messagesAtLoadRef.current,
+    });
+    if (!anchored) anchorHeightRef.current = null;
+  }, [loadingOlder, props.messages]);
   useEffect(() => {
     const observed = observedRef.current;
     return () => {
+      if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
       observerRef.current?.disconnect();
       observerRef.current = null;
       observed.clear();
@@ -2083,8 +2148,10 @@ function ThreadBody(
     <>
       <ul
         ref={listRef}
-        onTouchStart={userGesture}
+        onTouchStart={touchStart}
         onTouchMove={userGesture}
+        onTouchEnd={touchEnd}
+        onTouchCancel={touchEnd}
         onWheel={userGesture}
         onKeyDown={(e) => {
           if (isScrollKey(e.key)) userGesture();
@@ -2095,6 +2162,10 @@ function ThreadBody(
         }}
         onScroll={(e) => {
           const el = e.currentTarget;
+          if (touchingRef.current || touchScrollAtRef.current !== null) {
+            touchScrollAtRef.current = Date.now();
+            if (!touchingRef.current) scheduleSettle();
+          }
           stickRef.current = intentAfterScroll({
             intent: stickRef.current,
             source: sourceRef.current,
@@ -2625,7 +2696,12 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   });
   return (
     <div className="flex h-full flex-col bg-bg">
-      <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-2 md:px-4">
+      <div
+        className={cn(
+          'flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel',
+          sized(HEADER_PAD, layout),
+        )}
+      >
         {props.onBack !== undefined ? (
           <IconButton label="Back to conversations" onClick={props.onBack}>
             <IconChevronLeft size={20} />

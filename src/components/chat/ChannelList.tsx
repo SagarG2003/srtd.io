@@ -44,6 +44,9 @@ import {
   CHAT_LIST_PREVIEW_TYPE,
   CHAT_LIST_TIME_TYPE,
   DRAFT_PREFIX_TYPE,
+  sized,
+  useChatLayout,
+  type ChatLayout,
 } from '@/components/chat/chat-type';
 
 /** Per-channel draft text lookup ('' when the chat has no draft). */
@@ -307,8 +310,10 @@ export function channelRowBody(props: {
   timeZone: string;
   selecting: boolean;
   checked: boolean;
+  /** The size table (input-based, as the thread). */
+  layout: ChatLayout;
 }): ReactElement {
-  const { channel, summary } = props;
+  const { channel, summary, layout } = props;
   const hasMessage = summary !== undefined && summary.lastMessageTs > 0;
   const unread = summary?.unread ?? 0;
   const isUnread = unread > 0;
@@ -323,14 +328,16 @@ export function channelRowBody(props: {
       {channelAvatar(channel)}
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="flex items-baseline gap-2">
-          <span className={cn('min-w-0 flex-1 truncate text-fg', CHAT_LIST_NAME_TYPE)}>
+          <span
+            className={cn('min-w-0 flex-1 truncate text-fg', sized(CHAT_LIST_NAME_TYPE, layout))}
+          >
             {channel.title}
           </span>
           {time !== '' ? (
             <span
               className={cn(
                 'shrink-0',
-                CHAT_LIST_TIME_TYPE,
+                sized(CHAT_LIST_TIME_TYPE, layout),
                 isUnread ? 'text-accent' : 'text-fg-3',
               )}
             >
@@ -342,7 +349,10 @@ export function channelRowBody(props: {
           {draft !== null ? (
             <span
               data-draft-preview=""
-              className={cn('min-w-0 flex-1 truncate text-fg-2', CHAT_LIST_PREVIEW_TYPE)}
+              className={cn(
+                'min-w-0 flex-1 truncate text-fg-2',
+                sized(CHAT_LIST_PREVIEW_TYPE, layout),
+              )}
             >
               <span className={cn('text-accent', DRAFT_PREFIX_TYPE)}>{DRAFT_PREFIX}</span>
               {draft}
@@ -351,7 +361,7 @@ export function channelRowBody(props: {
             <span
               className={cn(
                 'min-w-0 flex-1 truncate',
-                CHAT_LIST_PREVIEW_TYPE,
+                sized(CHAT_LIST_PREVIEW_TYPE, layout),
                 hasMessage ? 'text-fg-2' : 'text-fg-3',
               )}
             >
@@ -390,6 +400,7 @@ export function ChannelCard(props: {
   const rowRef = useRef<HTMLButtonElement>(null);
   const selecting = props.onToggle !== undefined;
   const hoverMenu = useMediaQuery(HOVER_POINTER_QUERY);
+  const layout = useChatLayout();
   const menuEnabled = !selecting && props.onLongPress !== undefined;
   const openMenu = (anchor?: DOMRect): void => {
     if (selecting || props.onLongPress === undefined) return;
@@ -447,6 +458,7 @@ export function ChannelCard(props: {
           timeZone: props.timeZone,
           selecting,
           checked,
+          layout,
         })}
       </button>
       {menuEnabled && hoverMenu ? (

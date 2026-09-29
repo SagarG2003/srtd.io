@@ -41,7 +41,31 @@ export const GROUP_ACTION_MESSAGES: Readonly<Record<string, string>> = {
   group_not_found: 'This group no longer exists',
   member_not_in_workspace: "This person isn't in the workspace",
   group_manage_denied: GROUP_INFO_ADMIN_ONLY,
+  workspace_member_only: 'Only workspace members can do this',
 };
+
+/** A group action that threw (network, a bug): no code, so it reads the fallback. */
+const THROWN_FAILURE = { code: '', message: '' };
+
+/**
+ * Run a group action with the sheet busy: busy always resets (try / finally),
+ * and a thrown error resolves to `onThrow` instead of escaping, so the sheet
+ * never sticks busy and never shows raw error text.
+ */
+export async function withGroupBusy<T>(input: {
+  setBusy: (busy: boolean) => void;
+  run: () => Promise<T>;
+  onThrow: T;
+}): Promise<T> {
+  input.setBusy(true);
+  try {
+    return await input.run();
+  } catch {
+    return input.onThrow;
+  } finally {
+    input.setBusy(false);
+  }
+}
 
 /**
  * Whether the viewer may edit the group's info, mirroring group_rename: the
@@ -225,18 +249,21 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
 
   async function submitRename(): Promise<void> {
     if (!infoLocked && (!nameChanged || busy)) return;
-    setBusy(true);
     setError(null);
-    const outcome = await requestRename({
-      canEditInfo,
-      rename: () =>
-        renameGroupChannel(
-          supabase,
-          { groupId: props.groupId, name: name.trim(), traceId: newTrace() },
-          props.onChanged,
-        ),
+    const outcome = await withGroupBusy<RenameOutcome>({
+      setBusy,
+      run: () =>
+        requestRename({
+          canEditInfo,
+          rename: () =>
+            renameGroupChannel(
+              supabase,
+              { groupId: props.groupId, name: name.trim(), traceId: newTrace() },
+              props.onChanged,
+            ),
+        }),
+      onThrow: { kind: 'failed', message: groupActionMessage(THROWN_FAILURE) },
     });
-    setBusy(false);
     if (outcome.kind === 'blocked') showAdminOnly();
     else if (outcome.kind === 'failed') {
       if (outcome.message === GROUP_INFO_ADMIN_ONLY) setInfoNotice(true);
@@ -246,14 +273,18 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
 
   async function submitAdd(): Promise<void> {
     if (addId === null || busy) return;
-    setBusy(true);
+    const userId = addId;
     setError(null);
-    const failure = await addGroupMember(
-      supabase,
-      { groupId: props.groupId, userId: addId, traceId: newTrace() },
-      props.onChanged,
-    );
-    setBusy(false);
+    const failure = await withGroupBusy({
+      setBusy,
+      run: () =>
+        addGroupMember(
+          supabase,
+          { groupId: props.groupId, userId, traceId: newTrace() },
+          props.onChanged,
+        ),
+      onThrow: THROWN_FAILURE,
+    });
     if (failure !== null) {
       setError(groupActionMessage(failure));
       return;
@@ -264,14 +295,18 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
 
   async function confirmRemove(): Promise<void> {
     if (removeTarget === null) return;
-    setBusy(true);
+    const userId = removeTarget.userId;
     setError(null);
-    const failure = await removeGroupMember(
-      supabase,
-      { groupId: props.groupId, userId: removeTarget.userId, traceId: newTrace() },
-      props.onChanged,
-    );
-    setBusy(false);
+    const failure = await withGroupBusy({
+      setBusy,
+      run: () =>
+        removeGroupMember(
+          supabase,
+          { groupId: props.groupId, userId, traceId: newTrace() },
+          props.onChanged,
+        ),
+      onThrow: THROWN_FAILURE,
+    });
     setRemoveTarget(null);
     if (failure !== null) {
       setError(groupActionMessage(failure));
@@ -281,14 +316,13 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
   }
 
   async function confirmLeave(): Promise<void> {
-    setBusy(true);
     setError(null);
-    const failure = await leaveGroupChannel(
-      supabase,
-      { groupId: props.groupId, traceId: newTrace() },
-      props.onLeft,
-    );
-    setBusy(false);
+    const failure = await withGroupBusy({
+      setBusy,
+      run: () =>
+        leaveGroupChannel(supabase, { groupId: props.groupId, traceId: newTrace() }, props.onLeft),
+      onThrow: THROWN_FAILURE,
+    });
     setLeaving(false);
     if (failure !== null) setError(groupActionMessage(failure));
   }

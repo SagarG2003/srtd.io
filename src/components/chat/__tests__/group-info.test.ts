@@ -11,6 +11,7 @@ import {
   GroupInfoNotice,
   groupActionMessage,
   requestRename,
+  withGroupBusy,
 } from '@/components/chat/GroupInfoSheet';
 
 describe('group info permission (mirrors group_rename)', () => {
@@ -114,5 +115,40 @@ describe('F10: the admin-only notice', () => {
     const props = notice.props as { className: string; children: string };
     expect({ className: props.className, text: props.children }).toMatchSnapshot();
     expect(renderToStaticMarkup(notice)).not.toContain('text-sm');
+  });
+});
+
+describe('R6: the group sheet never sticks busy and never shows raw text', () => {
+  it('a thrown error resets busy and reads the fallback', async () => {
+    const busy: boolean[] = [];
+    const failure = await withGroupBusy({
+      setBusy: (value) => busy.push(value),
+      run: () => Promise.reject(new Error('fetch failed: raw detail')),
+      onThrow: { code: '', message: '' },
+    });
+    expect(busy).toEqual([true, false]);
+    const shown = groupActionMessage(failure);
+    expect(shown).toBe(GROUP_ACTION_FALLBACK);
+    expect(shown).not.toContain('raw detail');
+  });
+
+  it('a resolved action resets busy and passes its result through', async () => {
+    const busy: boolean[] = [];
+    const result = await withGroupBusy({
+      setBusy: (value) => busy.push(value),
+      run: () => Promise.resolve(null),
+      onThrow: { code: '', message: '' },
+    });
+    expect(result).toBeNull();
+    expect(busy).toEqual([true, false]);
+  });
+
+  it("maps 'workspace_member_only' to its sentence", () => {
+    expect(groupActionMessage({ code: 'workspace_member_only', message: 'x' })).toBe(
+      'Only workspace members can do this',
+    );
+    expect(groupActionMessage({ code: 'unknown', message: 'workspace_member_only' })).toBe(
+      'Only workspace members can do this',
+    );
   });
 });

@@ -7,6 +7,7 @@
  * who scrolled up to read history.
  */
 import { NEAR_BOTTOM_THRESHOLD_PX } from '@/lib/chat/scroll';
+import type { MessageState } from '@/lib/chat/thread';
 
 /** The scroll geometry of the thread list. */
 export interface ScrollMetrics {
@@ -42,31 +43,104 @@ export function intentAfterScroll(input: {
 }
 
 /**
+ * How long the list must go without a scroll event, after the finger lifts,
+ * before a flick counts as settled (momentum scrolling has stopped).
+ */
+export const SCROLL_SETTLE_MS = 150;
+
+/**
+ * Whether a touch flick is still moving the list: a finger is down, or a scroll
+ * event from the touch gesture landed within the last {@link SCROLL_SETTLE_MS}
+ * (momentum after touchend). `msSinceTouchScroll` is null once settled.
+ */
+export function flickInProgress(input: {
+  touching: boolean;
+  msSinceTouchScroll: number | null;
+}): boolean {
+  if (input.touching) return true;
+  return input.msSinceTouchScroll !== null && input.msSinceTouchScroll < SCROLL_SETTLE_MS;
+}
+
+/**
  * What a change in content height or list height does: pin to the bottom while
  * the intent holds, unless a pending jump owns the position or an older page is
- * being restored under the reader.
+ * being restored under the reader. During a flick a pin would fight the finger
+ * or the momentum, so it defers until the scroll settles.
  */
 export function sizeChangeAction(input: {
   intent: boolean;
   pendingJump: boolean;
   olderPageRestore: boolean;
-}): 'pin' | 'leave' {
+  flicking: boolean;
+}): 'pin' | 'leave' | 'defer' {
   if (input.pendingJump || input.olderPageRestore) return 'leave';
-  return input.intent ? 'pin' : 'leave';
+  if (!input.intent) return 'leave';
+  return input.flicking ? 'defer' : 'pin';
 }
 
 /**
- * The intent when the newest message changes: an own send always takes hold
- * again (the reader wants to see it land); anything else keeps the intent.
+ * The decision once a deferred flick settles: the settled position is the
+ * reader's (a user scroll), so within 120px of the bottom the intent holds and
+ * the list pins; further up it lets go. `restoring` is a pending jump or an
+ * older-page restore, which still own the position.
+ */
+export function settleDecision(input: {
+  intent: boolean;
+  distanceFromBottom: number;
+  restoring: boolean;
+}): { intent: boolean; action: 'pin' | 'leave' } {
+  const intent = intentAfterScroll({
+    intent: input.intent,
+    source: 'user',
+    distanceFromBottom: input.distanceFromBottom,
+  });
+  const action = sizeChangeAction({
+    intent,
+    pendingJump: input.restoring,
+    olderPageRestore: false,
+    flicking: false,
+  });
+  return { intent, action: action === 'pin' ? 'pin' : 'leave' };
+}
+
+/**
+ * Whether the older-page anchor still holds once a load ends: a load that
+ * brought no rows or failed (the flag went false with the messages unchanged)
+ * lets go, so size-change pinning works again. A load that changed the
+ * messages is restored by the new-rows pass, which clears the anchor itself.
+ */
+export function anchorAfterOlderLoad(input: {
+  anchored: boolean;
+  loadEnded: boolean;
+  messagesChanged: boolean;
+}): boolean {
+  if (!input.anchored) return false;
+  return !(input.loadEnded && !input.messagesChanged);
+}
+
+/**
+ * The intent when the newest message changes: an own send from THIS device
+ * (still in this device's outbox: 'sending' or 'failed') always takes hold
+ * again (the reader wants to see it land); anything else, own messages from
+ * another device included, keeps the intent.
  */
 export function intentAfterNewest(input: {
   intent: boolean;
-  newest: { id: string; mine: boolean } | undefined;
+  newest: { id: string; mine: boolean; state: MessageState } | undefined;
   previousNewestId: string | null;
 }): boolean {
   const newest = input.newest;
   if (newest === undefined || newest.id === input.previousNewestId) return input.intent;
-  return newest.mine ? true : input.intent;
+  return sentFromThisDevice(newest) ? true : input.intent;
+}
+
+/**
+ * An own message this device is sending: the outbox renders it 'sending' (or
+ * 'failed' with Retry) before the server records it; a message by the same
+ * user from another device arrives already 'sent'.
+ */
+export function sentFromThisDevice(message: { mine: boolean; state: MessageState }): boolean {
+  return message.mine && message.state !== 'sent';
 }
 
 /** A thread opens holding the bottom, before any gesture. */

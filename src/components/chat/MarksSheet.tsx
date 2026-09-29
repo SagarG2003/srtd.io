@@ -36,7 +36,7 @@ import { useWorkspace } from '@/lib/workspace-context';
 import { readPostsByIds } from '@srtdio/posts';
 import type { ChatProfile } from '@/lib/chat-reads';
 import { readBriefsByIds } from '@/lib/chat/briefs';
-import { formatMessageTime, formatShortDateOnly } from '@/lib/chat/time-format';
+import { formatClockTime, formatShortDateOnly } from '@/lib/chat/time-format';
 import type { OpenPostRow } from '@/lib/chat/use-open-posts';
 import type { WriteResult } from '@/lib/chat/record';
 import type { ThreadMessage } from '@/lib/chat/thread';
@@ -557,8 +557,8 @@ export function MarksList(props: MarksListProps): ReactElement {
                       : undefined) ?? 'Member');
             const when =
               message !== undefined && message.createdAt !== ''
-                ? formatMessageTime(message.createdAt, props.timeZone)
-                : formatMessageTime(mark.markedAt, props.timeZone);
+                ? formatClockTime(message.createdAt, props.timeZone)
+                : formatClockTime(mark.markedAt, props.timeZone);
             return (
               <MarkSheetRow
                 key={mark.messageId}
@@ -572,7 +572,7 @@ export function MarksList(props: MarksListProps): ReactElement {
                         name: resolverName(mark, props.currentUserId, displayNameOf),
                         when:
                           mark.resolvedAt !== null
-                            ? formatMessageTime(mark.resolvedAt, props.timeZone)
+                            ? formatClockTime(mark.resolvedAt, props.timeZone)
                             : '',
                       },
                     }

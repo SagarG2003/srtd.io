@@ -26,7 +26,7 @@ import type { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
 import type { Result } from '@srtdio/rpc';
 import type { MessageCursor } from '@/lib/chat/thread';
-import { formatMessageTime, formatShortDate } from '@/lib/chat/time-format';
+import { formatClockTime, formatShortDate } from '@/lib/chat/time-format';
 import { APP_ENTITY_ROUTES, currentOrigin, displayUrl } from '@/lib/chat/message-links';
 import {
   listChannelAttachments,
@@ -561,7 +561,7 @@ export function ContactSheet(props: ContactSheetProps): ReactElement {
           presignEnabled={props.presignEnabled}
           details={{
             sender: senderName(current.senderUserId),
-            time: formatMessageTime(current.createdAt, props.timeZone),
+            time: formatClockTime(current.createdAt, props.timeZone),
           }}
           onIndexChange={setViewer}
           onClose={() => setViewer(null)}
