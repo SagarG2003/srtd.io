@@ -536,6 +536,18 @@ const JUMP_HIGHLIGHT_MS = 2000;
 /** Toast when jump-to cannot bring the message into the loaded history. */
 export const JUMP_NOT_LOADED_TOAST = 'Message is older than loaded history';
 
+/**
+ * A jump that did not land (not loaded within its budget, failed, or not in
+ * history): the pending target clears, the stick-to-bottom intent goes back to
+ * what it was before the jump, and the not-loaded toast shows. Null on found. Pure.
+ */
+export function jumpMiss(
+  outcome: FindOlderOutcome,
+  stickBefore: boolean,
+): { stick: boolean; toast: string } | null {
+  return outcome === 'found' ? null : { stick: stickBefore, toast: JUMP_NOT_LOADED_TOAST };
+}
+
 const NO_MARKS: Map<string, ChatMark> = new Map();
 
 /**
@@ -2497,19 +2509,22 @@ function ThreadBody(
       return;
     }
     pendingJumpRef.current = id;
+    // A jump that does not land gives the bottom back as it was.
+    const stickBefore = stickRef.current;
     stickRef.current = false;
     void ensure(id).then((outcome) => {
       if (pendingJumpRef.current !== id) return;
-      if (outcome !== 'found') {
+      const miss = jumpMiss(outcome, stickBefore);
+      if (miss !== null) {
         pendingJumpRef.current = null;
-        toastRef.current.show({
-          title: outcome === 'error' ? 'Could not load older messages' : JUMP_NOT_LOADED_TOAST,
-        });
+        stickRef.current = miss.stick;
+        if (miss.stick) pin();
+        toastRef.current.show({ title: miss.toast });
         return;
       }
       if (reveal(id, JUMP_HIGHLIGHT_MS)) pendingJumpRef.current = null;
     });
-  }, [jumpRequest, reveal]);
+  }, [jumpRequest, reveal, pin]);
   // New rows: a pending jump owns the position while its pages land; an older
   // page keeps the reader where they were; else an own send takes hold of the
   // bottom again and, while the intent holds, the list pins instantly before

@@ -82,13 +82,17 @@ export async function loadLatestMessages(
   return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
 }
 
-/** The page before `cursor` (the oldest loaded row), returned oldest-first. */
+/**
+ * The page before `cursor` (the oldest loaded row), returned oldest-first. A
+ * `signal` cancels the request (.abortSignal); an aborted read is a failure.
+ */
 export async function loadOlderMessages(
   client: Client,
   channelId: string,
   cursor: MessageCursor,
+  signal?: AbortSignal,
 ): Promise<Result<HistoryPage>> {
-  const res = await client
+  const query = client
     .from('chat_messages')
     .select(MESSAGE_COLUMNS)
     .eq('channel_id', channelId)
@@ -96,6 +100,7 @@ export async function loadOlderMessages(
     .order('created_at', { ascending: false })
     .order('id', { ascending: false })
     .limit(HISTORY_PAGE_SIZE);
+  const res = await (signal !== undefined ? query.abortSignal(signal) : query);
   if (res.error) return fail(`loadOlderMessages: ${res.error.message}`);
   return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
 }

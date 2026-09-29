@@ -28,6 +28,7 @@ import {
   loadOlderMessages,
   loadPeerReadCursor,
   loadReactions,
+  type HistoryPage,
 } from '@/lib/chat/history';
 import { browserCatchUpTriggers, catchUpRows, type CatchUpReason } from '@/lib/chat/catch-up';
 import { liveVerifierFor, type LiveVerifier } from '@/lib/chat/live-verify';
@@ -76,6 +77,7 @@ import {
   withOutboxBubbles,
   type ChannelTarget,
   type ChatMessageRow,
+  type MessageCursor,
   type ThreadConnection,
   type ThreadMessage,
 } from '@/lib/chat/thread';
@@ -86,6 +88,46 @@ import {
   type ReplyQuote,
 } from '@/lib/chat/attachments';
 import type { ChatConnection, ChatStatus } from '@/lib/chat/types';
+
+/** The whole jump-to (every older page it reads) ends within this. */
+export const JUMP_BUDGET_MS = 5_000;
+
+/**
+ * Page older history for a jump under one budget: when it runs out, the page
+ * read in flight is aborted (its signal), no later page is handed to `onPage`,
+ * and the jump ends as 'error'. `onDone` runs once it ends, however it ends.
+ */
+export async function findWithinBudget(params: {
+  start: MessageCursor | undefined;
+  targetId: string;
+  loadPage: (cursor: MessageCursor, signal: AbortSignal) => Promise<Result<HistoryPage>>;
+  onPage: (rows: ChatMessageRow[], hasMore: boolean) => void;
+  onDone: (timedOut: boolean) => void;
+  budgetMs?: number;
+}): Promise<FindOlderOutcome> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<FindOlderOutcome>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve('error');
+    }, params.budgetMs ?? JUMP_BUDGET_MS);
+  });
+  try {
+    const found = findInOlderPages({
+      start: params.start,
+      targetId: params.targetId,
+      loadPage: (cursor) => params.loadPage(cursor, controller.signal),
+      onPage: (rows, more) => {
+        if (!controller.signal.aborted) params.onPage(rows, more);
+      },
+    }).catch((): FindOlderOutcome => 'error');
+    return await Promise.race([found, expired]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    params.onDone(controller.signal.aborted);
+  }
+}
 
 export interface UseChatThread {
   messages: ThreadMessage[];
@@ -605,31 +647,33 @@ export function useChatThread(params: {
       if (forChannel === null || loadingOlderRef.current) return 'error';
       loadingOlderRef.current = true;
       setLoadingOlder(true);
-      try {
-        const outcome = await findInOlderPages({
-          start: oldestCursor(messagesRef.current),
-          targetId: messageId,
-          loadPage: (cursor) => loadOlderMessages(db, forChannel, cursor),
-          onPage: (rows, more) => {
-            if (channelRef.current !== forChannel) return;
-            const fetched = rows.map((row) => rowToThreadMessage(row, currentUserId));
-            // Keep the next page's cursor current before React re-renders.
-            messagesRef.current = [...fetched, ...messagesRef.current];
-            foldRows(fetched, forChannel);
-            setHasMore(more);
-          },
+      let timedOut = false;
+      const outcome = await findWithinBudget({
+        start: oldestCursor(messagesRef.current),
+        targetId: messageId,
+        loadPage: (cursor, signal) => loadOlderMessages(db, forChannel, cursor, signal),
+        onPage: (rows, more) => {
+          if (channelRef.current !== forChannel) return;
+          const fetched = rows.map((row) => rowToThreadMessage(row, currentUserId));
+          // Keep the next page's cursor current before React re-renders.
+          messagesRef.current = [...fetched, ...messagesRef.current];
+          foldRows(fetched, forChannel);
+          setHasMore(more);
+        },
+        onDone: (expired) => {
+          timedOut = expired;
+          loadingOlderRef.current = false;
+          if (channelRef.current === forChannel) setLoadingOlder(false);
+        },
+      });
+      if (outcome === 'error') {
+        logger.warn('chat: jump-to page load failed', {
+          channel_id: forChannel,
+          message_id: messageId,
+          timed_out: timedOut,
         });
-        if (outcome === 'error') {
-          logger.warn('chat: jump-to page load failed', {
-            channel_id: forChannel,
-            message_id: messageId,
-          });
-        }
-        return outcome;
-      } finally {
-        loadingOlderRef.current = false;
-        if (channelRef.current === forChannel) setLoadingOlder(false);
       }
+      return outcome;
     },
     [db, currentUserId, foldRows],
   );

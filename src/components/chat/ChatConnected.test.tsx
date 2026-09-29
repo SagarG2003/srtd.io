@@ -28,6 +28,8 @@ import {
 } from '@/components/chat/ChatConnected';
 import {
   initialJumpDue,
+  JUMP_NOT_LOADED_TOAST,
+  jumpMiss,
   olderPageAnchorStep,
   profileNameOf,
   renderBodyWithMentions,
@@ -55,6 +57,8 @@ import { mentionGone } from '@/components/chat/use-channel-members';
 import { runEdit } from '@/lib/chat/delete-flow';
 import type { ChatMessageRow, ThreadMessage } from '@/lib/chat/thread';
 import type { Client, Result } from '@srtdio/rpc';
+import { loadOlderMessages } from '@/lib/chat/history';
+import { findWithinBudget, JUMP_BUDGET_MS } from '@/lib/chat/use-chat-thread';
 
 const ANA = '11111111-1111-4111-8111-111111111111';
 const BEN = '22222222-2222-4222-8222-222222222222';
@@ -622,6 +626,124 @@ describe('J5 a deep-link refresh applies only on the same page', () => {
 });
 
 // --- fix round 4 -------------------------------------------------------------
+
+describe('B2 the jump runs under one 5s budget', () => {
+  const start = { createdAt: '2026-09-03T00:00:00Z', id: 'm1' };
+
+  /** A chat_messages query whose read hangs until its abort signal fires. */
+  function hangingClient(): { client: Client; signals: AbortSignal[] } {
+    const signals: AbortSignal[] = [];
+    const query = {
+      select: () => query,
+      eq: () => query,
+      or: () => query,
+      order: () => query,
+      limit: () => query,
+      abortSignal: (signal: AbortSignal) => {
+        signals.push(signal);
+        return new Promise((resolve) => {
+          signal.addEventListener('abort', () =>
+            resolve({ data: null, error: { message: 'AbortError: aborted' } }),
+          );
+        });
+      },
+    };
+    return { client: { from: () => query } as unknown as Client, signals };
+  }
+
+  it('B2 hanging older-page read during a jump ends within 5s with spinner off, pending cleared, toast shown', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, signals } = hangingClient();
+      let loadingOlder = true;
+      const onPage = vi.fn();
+      const pending = findWithinBudget({
+        start,
+        targetId: 'target',
+        loadPage: (cursor, signal) => loadOlderMessages(client, 'c1', cursor, signal),
+        onPage,
+        onDone: () => {
+          loadingOlder = false;
+        },
+      });
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(JUMP_BUDGET_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const outcome = await pending;
+      expect(JUMP_BUDGET_MS).toBe(5_000);
+      expect(outcome).toBe('error');
+      // The hung request was cancelled through .abortSignal and the spinner is off.
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.aborted).toBe(true);
+      expect(loadingOlder).toBe(false);
+      expect(onPage).not.toHaveBeenCalled();
+      // The thread clears the pending target, gives the bottom back and toasts.
+      expect(jumpMiss(outcome, true)).toEqual({ stick: true, toast: JUMP_NOT_LOADED_TOAST });
+      expect(jumpMiss(outcome, false)).toEqual({ stick: false, toast: JUMP_NOT_LOADED_TOAST });
+      // The deep link's pending jump was already dropped when the thread took it.
+      expect(initialJumpFor(null, 'c1')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('B2 slow pages share the one budget: the whole jump still ends at 5s', async () => {
+    vi.useFakeTimers();
+    try {
+      const row = (id: string, at: string): ChatMessageRow =>
+        ({ id, created_at: at }) as ChatMessageRow;
+      let n = 0;
+      let done = false;
+      const pending = findWithinBudget({
+        start,
+        targetId: 'target',
+        loadPage: () =>
+          new Promise((resolve) => {
+            n += 1;
+            const page = row(`p${n}`, `2026-09-02T00:00:0${n}Z`);
+            setTimeout(() => resolve({ ok: true, data: { rows: [page], hasMore: true } }), 3_000);
+          }),
+        onPage: vi.fn(),
+        onDone: () => {
+          done = true;
+        },
+      });
+      await vi.advanceTimersByTimeAsync(JUMP_BUDGET_MS);
+      expect(await pending).toBe('error');
+      expect(done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('B2 normal jump unchanged: pages in, found, no toast', async () => {
+    const row = (id: string, at: string): ChatMessageRow =>
+      ({ id, created_at: at }) as ChatMessageRow;
+    const pages = [[row('p2', '2026-09-02T00:00:00Z')], [row('target', '2026-09-01T00:00:00Z')]];
+    const onDone = vi.fn();
+    const seen: string[] = [];
+    const signals: AbortSignal[] = [];
+    const outcome = await findWithinBudget({
+      start,
+      targetId: 'target',
+      loadPage: async (_cursor, signal) => {
+        signals.push(signal);
+        return { ok: true, data: { rows: pages.shift() ?? [], hasMore: pages.length > 0 } };
+      },
+      onPage: (rows) => seen.push(...rows.map((r) => r.id)),
+      onDone,
+    });
+    expect(outcome).toBe('found');
+    expect(seen).toEqual(['p2', 'target']);
+    expect(onDone).toHaveBeenCalledWith(false);
+    expect(signals.every((s) => !s.aborted)).toBe(true);
+    expect(jumpMiss(outcome, true)).toBeNull();
+  });
+});
 
 describe('B1 a readable profile is not membership', () => {
   beforeEach(() => resetMentionNames());
