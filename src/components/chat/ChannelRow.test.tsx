@@ -11,17 +11,23 @@ import { fileURLToPath } from 'node:url';
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import {
   CHANNEL_ROW_BUTTON,
-  CHANNEL_TILE_GRID,
+  CHAT_HOME_STACK,
   ChannelCard,
   DEFAULT_LIST_INPUT,
+  GROUP_NAME_TYPE,
+  GROUP_PREVIEW_TYPE,
+  GROUP_TILE_LIST,
   GROUP_TILE_PHOTO,
-  TILE_NAME_TYPE,
-  TILE_PREVIEW_TYPE,
-  TILE_TIME_TYPE,
+  PEOPLE_TILE_GRID,
+  PERSON_NAME_TYPE,
+  PERSON_PREVIEW_TYPE,
+  PERSON_TILE_PHOTO,
+  SECTION_LABEL_TYPE,
   channelListView,
   channelRowBody,
   channelRowClass,
   chatRowContextMenu,
+  splitSections,
   tileKind,
   unreadPillText,
   type ChannelListInput,
@@ -80,10 +86,87 @@ function tokenOnly(text: string): void {
   for (const literal of banned) expect(text).not.toContain(literal);
 }
 
-describe('chat home tile kind selection', () => {
-  it('group channel -> wide, DM channel -> square', () => {
+function html(el: ReactNode): string {
+  return renderToStaticMarkup(<>{el}</>);
+}
+
+function view(channels: ChannelSummary[]): ReactElement {
+  return channelListView({
+    channels,
+    hasChannels: true,
+    selectedChannelId: null,
+    onSelect: () => {},
+    onNewChat: () => {},
+  });
+}
+
+/** The ids of the tiles inside one section's list, in order. */
+function sectionIds(markup: string, section: 'groups' | 'people'): string[] {
+  const m = markup.match(new RegExp(`data-section="${section}"[^>]*>(.*?)</ul>`));
+  if (m === null) return [];
+  return [...(m[1] ?? '').matchAll(/aria-label="Open ([^"]*)"/g)].map((x) => x[1] ?? '');
+}
+
+const dm2: ChannelSummary = { ...dm, channelId: 'c2', title: 'Ravi Menon' };
+const group2: ChannelSummary = { ...group, channelId: 'g2', title: 'Brand' };
+
+const esc = (cls: string): string => cls.replaceAll('&', '&amp;').replaceAll('>', '&gt;');
+
+describe('chat home sections', () => {
+  it('group channel -> Groups section wide tile; DM channel -> People section square tile', () => {
     expect(tileKind(group)).toBe('wide');
     expect(tileKind(dm)).toBe('square');
+    const markup = html(view([dm, group, dm2, group2]));
+    expect(sectionIds(markup, 'groups')).toEqual(['Launch', 'Brand']);
+    expect(sectionIds(markup, 'people')).toEqual(['Asha Rao', 'Ravi Menon']);
+    // Groups first, then People; labels in that order.
+    expect(markup.indexOf('>Groups<')).toBeLessThan(markup.indexOf('>People<'));
+    expect(markup).toContain(`data-section="groups" class="${GROUP_TILE_LIST}"`);
+    expect(markup).toContain(`data-section="people" class="${PEOPLE_TILE_GRID}"`);
+    expect((view([group, dm]).props as { className: string }).className).toBe(CHAT_HOME_STACK);
+  });
+
+  it('keeps the recency order within each section', () => {
+    expect(splitSections([dm2, group2, dm, group])).toEqual({
+      groups: [group2, group],
+      people: [dm2, dm],
+    });
+  });
+
+  it('zero groups -> no Groups label; People label takes the first padding', () => {
+    const markup = html(view([dm, dm2]));
+    expect(markup).not.toContain('data-section-label="groups"');
+    expect(markup).not.toContain('>Groups<');
+    expect(markup).not.toContain('data-section="groups"');
+    expect(markup).toContain(`data-section-label="people" class="${SECTION_LABEL_TYPE} px-1 pt-1"`);
+  });
+
+  it('zero DMs -> no People label', () => {
+    const markup = html(view([group, group2]));
+    expect(markup).not.toContain('data-section-label="people"');
+    expect(markup).not.toContain('>People<');
+    expect(markup).not.toContain('data-section="people"');
+    expect(markup).toContain(`data-section-label="groups" class="${SECTION_LABEL_TYPE} px-1 pt-1"`);
+  });
+
+  it('second label gets 12px top padding; labels are 12/600 uppercase secondary', () => {
+    const markup = html(view([group, dm]));
+    expect(markup).toContain(`data-section-label="people" class="${SECTION_LABEL_TYPE} px-1 pt-3"`);
+    for (const t of ['text-xs', 'font-semibold', 'uppercase', 'tracking-[0.06em]', 'text-fg-2']) {
+      expect(SECTION_LABEL_TYPE.split(' ')).toContain(t);
+    }
+    tokenOnly(markup);
+  });
+
+  it('People grid: 2 fluid columns, 168px rows, 10px gap, no dense packing or spans', () => {
+    expect(PEOPLE_TILE_GRID).toBe(
+      'grid grid-cols-[repeat(2,minmax(0,1fr))] auto-rows-[168px] gap-[10px]',
+    );
+    // An odd count leaves the last cell empty: nothing spans or stretches.
+    const markup = html(view([dm, dm2, { ...dm, channelId: 'c3', title: 'Neha' }]));
+    expect(markup).not.toContain('col-span');
+    expect(markup).not.toContain('grid-flow');
+    expect(CHAT_HOME_STACK).toBe('flex flex-col gap-2 px-[14px]');
   });
 
   it('unread 0 -> no pill, unread 3 -> pill "3"', () => {
@@ -94,48 +177,42 @@ describe('chat home tile kind selection', () => {
     expect(tile(group, read).html).not.toContain('data-unread-pill');
     expect(tile(group, { ...read, unread: 3 }).html).toMatch(/data-unread-pill="[^"]*"[^>]*>3</);
   });
-
-  it('wide tiles span both columns; square tiles take one', () => {
-    const tree = channelListView({
-      channels: [group, dm],
-      hasChannels: true,
-      selectedChannelId: null,
-      onSelect: () => {},
-      onNewChat: () => {},
-    });
-    const items = (tree.props as { children: ReactElement<{ className: string }>[] }).children;
-    expect(items[0]!.props.className).toContain('col-span-2');
-    expect(items[1]!.props.className).not.toContain('col-span-2');
-    expect((tree.props as { className: string }).className).toBe(CHANNEL_TILE_GRID);
-  });
 });
 
 describe('chat home tile', () => {
-  it('square DM: 170 tall column, 48px disc, 2-line preview, pill capped at 99+', () => {
+  it('People square: 168 tall centred column, 72px disc, 1-line preview, corner pill capped at 99+', () => {
     const t = tile(dm, { ...read, unread: 120 });
-    expect(t.cls).toContain('h-[170px]');
-    expect(t.cls).toContain('flex-col');
+    expect(t.cls).toContain('h-[168px]');
+    expect(t.cls.split(' ')).toEqual(
+      expect.arrayContaining(['flex-col', 'items-center', 'relative', 'px-3', 'pt-4', 'pb-[14px]']),
+    );
     expect(t.cls).toContain('bg-panel');
     expect(t.cls.split(' ')).toEqual(expect.arrayContaining(['border', 'border-border']));
-    expect(t.cls).toContain('rounded-[14px]');
-    expect(t.html).toContain('width:48px;height:48px');
-    expect(t.html).toContain('line-clamp-2');
+    expect(t.cls).toContain('rounded-[18px]');
+    expect(t.html).toContain(`data-person-photo="" class="${esc(PERSON_TILE_PHOTO)}"`);
+    expect(PERSON_TILE_PHOTO).toContain('[&>*]:!h-[72px] [&>*]:!w-[72px]');
+    expect(PERSON_TILE_PHOTO).not.toContain('rounded');
+    expect(t.html).toContain(`min-w-0 max-w-full truncate ${PERSON_PREVIEW_TYPE}`);
+    expect(t.html).not.toContain('line-clamp');
     expect(t.html).toContain('mt-auto');
+    expect(t.html).toMatch(/absolute right-3 top-3 flex"><span data-unread-pill/);
     expect(t.html).toContain('>99+<');
     tokenOnly(t.cls + t.html);
     expect({ tile: t.cls, classes: t.classes }).toMatchSnapshot();
   });
 
-  it('wide group: 120 tall row, 72px rounded-square photo, 3-line preview, pill after time', () => {
+  it('Groups wide: 100 tall row, 76px rounded-square photo, 2-line preview, pill far right', () => {
     const t = tile(group, { ...read, unread: 3 });
-    expect(t.cls).toContain('h-[120px]');
+    expect(t.cls).toContain('h-[100px]');
     expect(t.cls).not.toContain('flex-col');
-    expect(t.html).toContain(
-      `data-group-photo="" class="${GROUP_TILE_PHOTO.replaceAll('&', '&amp;').replaceAll('>', '&gt;')}"`,
+    expect(t.cls.split(' ')).toEqual(
+      expect.arrayContaining(['w-full', 'rounded-[18px]', 'py-3', 'pl-3', 'pr-4', 'items-center']),
     );
-    expect(GROUP_TILE_PHOTO).toContain('[&>*]:!h-[72px] [&>*]:!w-[72px] [&>*]:!rounded-[14px]');
-    expect(t.html).toContain('line-clamp-3');
-    expect(t.html.indexOf('data-unread-pill')).toBeGreaterThan(t.html.indexOf(TILE_TIME_TYPE));
+    expect(t.html).toContain(`data-group-photo="" class="${esc(GROUP_TILE_PHOTO)}"`);
+    expect(GROUP_TILE_PHOTO).toContain('[&>*]:!h-[76px] [&>*]:!w-[76px] [&>*]:!rounded-[18px]');
+    expect(t.html).toContain(`break-words line-clamp-2 ${GROUP_PREVIEW_TYPE}`);
+    // The pill is the last thing in the row, after the text column.
+    expect(t.html.indexOf('data-unread-pill')).toBeGreaterThan(t.html.indexOf('See you then'));
     tokenOnly(t.cls + t.html);
     expect({ tile: t.cls, classes: t.classes }).toMatchSnapshot();
   });
@@ -148,10 +225,12 @@ describe('chat home tile', () => {
   });
 
   it('checked in select mode: accent tint and the on select circle', () => {
-    const t = tile(dm, read, { selecting: true, checked: true });
-    expect(t.cls).toContain('bg-accent-soft');
-    expect(t.html).toContain('data-select-check="on"');
-    tokenOnly(t.cls + t.html);
+    for (const c of [dm, group]) {
+      const t = tile(c, read, { selecting: true, checked: true });
+      expect(t.cls).toContain('bg-accent-soft');
+      expect(t.html).toContain('data-select-check="on"');
+      tokenOnly(t.cls + t.html);
+    }
   });
 
   it('empty preview: "No messages yet" in tertiary ink; group initials fallback', () => {
@@ -162,17 +241,24 @@ describe('chat home tile', () => {
     tokenOnly(t.cls + t.html);
   });
 
-  it('name truncates and previews clamp, so text never overflows the tile', () => {
+  it('name truncates and previews clamp or truncate, so text never overflows the tile', () => {
+    expect(tile(dm, read).html).toContain(`min-w-0 truncate text-fg ${PERSON_NAME_TYPE}`);
+    expect(tile(group, read).html).toContain(`min-w-0 truncate text-fg ${GROUP_NAME_TYPE}`);
+    expect(tile(dm, read).html).toContain('flex w-full min-w-0 justify-center');
+  });
+
+  it('no presence, last seen or typing on tiles', () => {
     for (const c of [dm, group]) {
-      const html = tile(c, read).html;
-      expect(html).toContain(`min-w-0 truncate text-fg ${TILE_NAME_TYPE}`);
-      expect(html).toContain(TILE_PREVIEW_TYPE);
-      expect(html).toContain('break-words');
+      const h = tile(c, read).html;
+      expect(h).not.toContain('data-presence');
+      expect(h.toLowerCase()).not.toContain('last seen');
+      expect(h.toLowerCase()).not.toContain('typing');
     }
   });
 
   it('"You: " prefix is unchanged', () => {
     expect(tile(dm, { ...read, lastMessagePrefix: 'You' }).html).toContain('You: See you then');
+    expect(tile(group, { ...read, lastMessagePrefix: 'You' }).html).toContain('You: See you then');
   });
 });
 

@@ -205,86 +205,115 @@ export function channelListView(props: ChannelListBodyProps): ReactElement {
   const summaryFor: SummaryLookup = props.summaryFor ?? (() => undefined);
   const nowMs = props.nowMs ?? 0;
   const timeZone = workspaceTimeZone(props.timeZone);
+  const card = (channel: ChannelSummary): ReactElement => (
+    <li key={channel.channelId} className="min-w-0">
+      <ChannelCard
+        channel={channel}
+        selected={channel.channelId === props.selectedChannelId}
+        summary={summaryFor(channel.channelId)}
+        draft={rowDraft(
+          props.draftFor?.(channel.channelId) ?? '',
+          channel.channelId === props.selectedChannelId,
+        )}
+        nowMs={nowMs}
+        timeZone={timeZone}
+        onSelect={props.onSelect}
+        input={props.input ?? DEFAULT_LIST_INPUT}
+        {...(props.selecting !== undefined
+          ? {
+              checked: props.selecting.selectedIds.has(channel.channelId),
+              onToggle: props.selecting.onToggle,
+            }
+          : {})}
+        {...(props.onLongPress !== undefined ? { onLongPress: props.onLongPress } : {})}
+      />
+    </li>
+  );
+  const { groups, people } = splitSections(props.channels);
   return (
-    <ul className={CHANNEL_TILE_GRID}>
-      {props.channels.map((channel) => (
-        <li
-          key={channel.channelId}
-          className={tileKind(channel) === 'wide' ? 'col-span-2 min-w-0' : 'min-w-0'}
-        >
-          <ChannelCard
-            channel={channel}
-            selected={channel.channelId === props.selectedChannelId}
-            summary={summaryFor(channel.channelId)}
-            draft={rowDraft(
-              props.draftFor?.(channel.channelId) ?? '',
-              channel.channelId === props.selectedChannelId,
-            )}
-            nowMs={nowMs}
-            timeZone={timeZone}
-            onSelect={props.onSelect}
-            input={props.input ?? DEFAULT_LIST_INPUT}
-            {...(props.selecting !== undefined
-              ? {
-                  checked: props.selecting.selectedIds.has(channel.channelId),
-                  onToggle: props.selecting.onToggle,
-                }
-              : {})}
-            {...(props.onLongPress !== undefined ? { onLongPress: props.onLongPress } : {})}
-          />
-        </li>
-      ))}
-    </ul>
+    <div data-chat-home="" className={CHAT_HOME_STACK}>
+      {groups.length > 0 ? (
+        <>
+          <h3 data-section-label="groups" className={sectionLabelClass(true)}>
+            Groups
+          </h3>
+          <ul data-section="groups" className={GROUP_TILE_LIST}>
+            {groups.map(card)}
+          </ul>
+        </>
+      ) : null}
+      {people.length > 0 ? (
+        <>
+          <h3 data-section-label="people" className={sectionLabelClass(groups.length === 0)}>
+            People
+          </h3>
+          <ul data-section="people" className={PEOPLE_TILE_GRID}>
+            {people.map(card)}
+          </ul>
+        </>
+      ) : null}
+    </div>
   );
 }
 
 /** Skeleton tiles shown while the list loads; enough to fill a phone screen. */
 export const SKELETON_ROWS = 6;
 
-/** The skeleton's tile kinds: two wide group tiles and four square DM tiles. */
-const SKELETON_KINDS: readonly TileKind[] = [
-  'wide',
-  'square',
-  'square',
-  'wide',
-  'square',
-  'square',
-];
+/** The skeleton's sections: two wide group tiles, then four square people tiles. */
+const SKELETON_GROUPS = 2;
+const SKELETON_PEOPLE = SKELETON_ROWS - SKELETON_GROUPS;
+
+/** A label-sized placeholder bar (16px line, same padding as the real label). */
+function skeletonLabel(first: boolean): ReactElement {
+  return (
+    <div className={cn(first ? 'px-1 pt-1' : 'px-1 pt-3')}>
+      <div className="h-4 w-16 rounded bg-panel-2" />
+    </div>
+  );
+}
 
 /**
- * The loading body: placeholder tiles with the real tiles' boxes (wide 120px
- * with a 72px rounded-square photo, square 170px with a 48px disc), so swapping
- * in the list shifts nothing. Reuses the repo's animate-pulse + bg-panel-2
- * skeleton pattern.
+ * The loading body: the real sections' shapes (label, wide 100px tiles with a
+ * 76px rounded-square photo, label, a 2-column grid of 168px square tiles with
+ * a 72px disc), so swapping in the list shifts nothing. Reuses the repo's
+ * animate-pulse + bg-panel-2 skeleton pattern; no spinner.
  */
 export function channelListSkeleton(): ReactElement {
   return (
-    <ul className={CHANNEL_TILE_GRID} aria-busy="true" aria-label="Loading conversations">
-      {SKELETON_KINDS.slice(0, SKELETON_ROWS).map((kind, i) => (
-        <li key={i} className={kind === 'wide' ? 'col-span-2 min-w-0' : 'min-w-0'}>
-          <div
-            data-skeleton-row={kind}
-            className={cn(tileBoxClass(kind), 'border-border bg-panel animate-pulse')}
-          >
-            {kind === 'wide' ? (
-              <>
-                <div className="h-[72px] w-[72px] shrink-0 rounded-[14px] bg-panel-2" />
-                <div className="flex min-w-0 flex-1 flex-col gap-2">
-                  <div className="h-3.5 w-1/2 rounded bg-panel-2" />
-                  <div className="h-3 w-3/4 rounded bg-panel-2" />
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="h-12 w-12 shrink-0 rounded-full bg-panel-2" />
-                <div className="mt-2 h-3.5 w-2/3 rounded bg-panel-2" />
-                <div className="mt-2 h-3 w-full rounded bg-panel-2" />
-              </>
-            )}
-          </div>
-        </li>
-      ))}
-    </ul>
+    <div className={CHAT_HOME_STACK} aria-busy="true" aria-label="Loading conversations">
+      {skeletonLabel(true)}
+      <ul className={GROUP_TILE_LIST}>
+        {Array.from({ length: SKELETON_GROUPS }, (_, i) => (
+          <li key={i} className="min-w-0">
+            <div
+              data-skeleton-row="wide"
+              className={cn(tileBoxClass('wide'), 'border-border bg-panel animate-pulse')}
+            >
+              <div className="h-[76px] w-[76px] shrink-0 rounded-[18px] bg-panel-2" />
+              <div className="flex min-w-0 flex-1 flex-col gap-2">
+                <div className="h-4 w-1/2 rounded bg-panel-2" />
+                <div className="h-3 w-3/4 rounded bg-panel-2" />
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {skeletonLabel(false)}
+      <ul className={PEOPLE_TILE_GRID}>
+        {Array.from({ length: SKELETON_PEOPLE }, (_, i) => (
+          <li key={i} className="min-w-0">
+            <div
+              data-skeleton-row="square"
+              className={cn(tileBoxClass('square'), 'border-border bg-panel animate-pulse')}
+            >
+              <div className="h-[72px] w-[72px] shrink-0 rounded-full bg-panel-2" />
+              <div className="mt-2 h-3.5 w-2/3 rounded bg-panel-2" />
+              <div className="mt-2 h-3 w-full rounded bg-panel-2" />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -323,7 +352,7 @@ export function rowMenuKey(event: { key: string; shiftKey: boolean }): boolean {
   return event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10');
 }
 
-/** A home tile's shape: a group channel is wide (both columns), a DM is square. */
+/** A home tile's shape: a group channel is wide (Groups), a DM is square (People). */
 export type TileKind = 'wide' | 'square';
 
 /** The tile a channel renders as: group -> wide, DM -> square. Pure. */
@@ -331,41 +360,77 @@ export function tileKind(channel: Pick<ChannelSummary, 'channelType'>): TileKind
   return channel.channelType === 'group' ? 'wide' : 'square';
 }
 
+/**
+ * Split the (already recency-sorted, filtered) channels into the Groups and
+ * People sections, keeping each section's order. Pure.
+ */
+export function splitSections<T extends Pick<ChannelSummary, 'channelType'>>(
+  channels: readonly T[],
+): { groups: T[]; people: T[] } {
+  const groups: T[] = [];
+  const people: T[] = [];
+  for (const c of channels) (tileKind(c) === 'wide' ? groups : people).push(c);
+  return { groups, people };
+}
+
 /** The unread pill's text, or null when there is nothing unread (no pill). Pure. */
 export function unreadPillText(unread: number): string | null {
   return unread > 0 ? countBadgeText(unread) : null;
 }
 
-/** The home grid: two fluid columns, 8px gaps, 12px side padding. */
-export const CHANNEL_TILE_GRID =
-  'grid grid-flow-row-dense grid-cols-[repeat(2,minmax(0,1fr))] gap-2 px-3';
+/** The home stack inside the one scroll container: 14px sides, 8px between blocks. */
+export const CHAT_HOME_STACK = 'flex flex-col gap-2 px-[14px]';
 
-/** Tile type: name 16/600, preview 14/19, time 12 (same on touch and laptop). */
-export const TILE_NAME_TYPE = 'text-[16px] leading-[20px] font-semibold';
-export const TILE_PREVIEW_TYPE = 'text-[14px] leading-[19px] font-normal';
+/** Groups: one full-width wide tile per row, 8px apart. */
+export const GROUP_TILE_LIST = 'flex flex-col gap-2';
+
+/** People: two fluid columns of 168px rows, 10px gaps; an odd last cell stays empty. */
+export const PEOPLE_TILE_GRID =
+  'grid grid-cols-[repeat(2,minmax(0,1fr))] auto-rows-[168px] gap-[10px]';
+
+/** Section label: 12/600 uppercase, 0.06em tracking, secondary ink. */
+export const SECTION_LABEL_TYPE = 'text-xs font-semibold uppercase tracking-[0.06em] text-fg-2';
+
+/** The label's padding: 4px 4px 0 for the first section, 12px 4px 0 after. */
+export function sectionLabelClass(first: boolean): string {
+  return cn(SECTION_LABEL_TYPE, first ? 'px-1 pt-1' : 'px-1 pt-3');
+}
+
+/** Tile type. Group: name 17/600, preview 14/19. Person: name 15/600, preview 13/18. Time 12. */
+export const GROUP_NAME_TYPE = 'text-[17px] leading-[22px] font-semibold';
+export const GROUP_PREVIEW_TYPE = 'text-[14px] leading-[19px] font-normal';
+export const PERSON_NAME_TYPE = 'text-[15px] leading-[20px] font-semibold';
+export const PERSON_PREVIEW_TYPE = 'text-[13px] leading-[18px] font-normal';
 export const TILE_TIME_TYPE = 'font-sans text-xs font-normal tabular-nums';
 
 /**
- * The wide tile's 72px rounded-square (radius 14) group photo: the shared
+ * The wide tile's 76px rounded-square (radius 18) group photo: the shared
  * Avatar (photo or initials fallback, unchanged) resized in place, so the box
  * is final on first paint.
  */
 export const GROUP_TILE_PHOTO =
-  'flex h-[72px] w-[72px] shrink-0 [&>*]:!h-[72px] [&>*]:!w-[72px] [&>*]:!rounded-[14px] [&>*]:!text-xl';
+  'flex h-[76px] w-[76px] shrink-0 [&>*]:!h-[76px] [&>*]:!w-[76px] [&>*]:!rounded-[18px] [&>*]:!text-xl';
+
+/** The square tile's 72px circular photo: the shared Avatar resized in place. */
+export const PERSON_TILE_PHOTO =
+  'flex h-[72px] w-[72px] shrink-0 [&>*]:!h-[72px] [&>*]:!w-[72px] [&>*]:!text-xl';
 
 /** The unread pill: 22px min, radius 11, accent fill, 12/700. */
 export const TILE_PILL =
   'inline-flex h-[22px] min-w-[22px] shrink-0 items-center justify-center rounded-[11px] bg-accent px-1.5 text-xs font-bold leading-none tabular-nums text-accent-fg';
 
 /**
- * A tile's box: hairline border, radius 14, padding 12 and its fixed height
- * (wide 120 as a row, square 170 as a column). Shared by the skeleton so
- * swapping in the list shifts nothing.
+ * A tile's box: hairline border, radius 18 and its fixed height. Wide: 100 tall
+ * row, padding 12 16 12 12. Square: 168 tall centred column, padding 16 12 14,
+ * positioned for its corner pill. Shared by the skeleton so swapping in the list
+ * shifts nothing.
  */
 export function tileBoxClass(kind: TileKind): string {
   return cn(
-    'flex w-full rounded-[14px] border p-3',
-    kind === 'wide' ? 'h-[120px] items-center gap-3' : 'h-[170px] flex-col items-stretch',
+    'flex w-full rounded-[18px] border',
+    kind === 'wide'
+      ? 'h-[100px] items-center gap-3 py-3 pl-3 pr-4'
+      : 'relative h-[168px] flex-col items-center px-3 pt-4 pb-[14px] text-center',
   );
 }
 
@@ -424,12 +489,12 @@ function unreadPill(unread: number): ReactElement | null {
 }
 
 /**
- * The inside of one tile. Wide (group): 72px rounded-square photo, then name +
- * time + pill over a 3-line preview. Square (DM): 48px disc + pill, name, a
- * 2-line preview, time pinned to the bottom. The avatar URL is on the summary
- * before the tile mounts (one batched list read), so a tile with a photo paints
- * the photo first, never the initials. Hook-free so the tile's states are
- * snapshot tested.
+ * The inside of one tile. Wide (group): 76px rounded-square photo, then name +
+ * time over a 2-line preview, the pill at the far right. Square (person): 72px
+ * disc, name, a 1-line preview, time pinned to the bottom, the pill in the top
+ * right corner. The avatar URL is on the summary before the tile mounts (one
+ * batched list read), so a tile with a photo paints the photo first, never the
+ * initials. Hook-free so the tile's states are snapshot tested.
  */
 export function channelRowBody(props: {
   channel: ChannelSummary;
@@ -442,7 +507,7 @@ export function channelRowBody(props: {
   checked: boolean;
 }): ReactElement {
   const { channel, summary } = props;
-  const kind = tileKind(channel);
+  const wide = tileKind(channel) === 'wide';
   const hasMessage = summary !== undefined && summary.lastMessageTs > 0;
   const unread = summary?.unread ?? 0;
   const preview = hasMessage ? previewLine(summary) : 'No messages yet';
@@ -450,74 +515,65 @@ export function channelRowBody(props: {
   const time = hasMessage
     ? formatRelativeTime(summary.lastMessageTs, props.nowMs, props.timeZone)
     : '';
-  const clamp = kind === 'wide' ? 'line-clamp-3' : 'line-clamp-2';
+  // Wide clamps to two lines; square is one line with an ellipsis.
+  const fit = wide ? 'break-words line-clamp-2' : 'max-w-full truncate';
+  const previewType = wide ? GROUP_PREVIEW_TYPE : PERSON_PREVIEW_TYPE;
   const name = (
-    <span className={cn('min-w-0 truncate text-fg', TILE_NAME_TYPE)}>{channel.title}</span>
+    <span className={cn('min-w-0 truncate text-fg', wide ? GROUP_NAME_TYPE : PERSON_NAME_TYPE)}>
+      {channel.title}
+    </span>
   );
   const timeNode =
     time !== '' ? <span className={cn('shrink-0 text-fg-2', TILE_TIME_TYPE)}>{time}</span> : null;
   const check = props.selecting ? <SelectCheck checked={props.checked} /> : null;
+  const pill = unreadPill(unread);
   const previewNode =
     draft !== null ? (
-      <span
-        data-draft-preview=""
-        className={cn('min-w-0 break-words text-fg-2', clamp, TILE_PREVIEW_TYPE)}
-      >
+      <span data-draft-preview="" className={cn('min-w-0 text-fg-2', fit, previewType)}>
         <span className={cn('text-accent', DRAFT_PREFIX_TYPE)}>{DRAFT_PREFIX}</span>
         {boldAllMentions(draft)}
       </span>
     ) : (
-      <span
-        className={cn(
-          'min-w-0 break-words',
-          clamp,
-          TILE_PREVIEW_TYPE,
-          hasMessage ? 'text-fg-2' : 'text-fg-3',
-        )}
-      >
+      <span className={cn('min-w-0', fit, previewType, hasMessage ? 'text-fg-2' : 'text-fg-3')}>
         {boldAllMentions(preview)}
       </span>
     );
-  if (kind === 'wide') {
+  const photo = (
+    <span
+      {...(wide ? { 'data-group-photo': '' } : { 'data-person-photo': '' })}
+      className={wide ? GROUP_TILE_PHOTO : PERSON_TILE_PHOTO}
+    >
+      <Avatar
+        name={channel.title}
+        {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
+        size="row"
+      />
+    </span>
+  );
+  if (wide) {
     return (
       <>
-        <span data-group-photo="" className={GROUP_TILE_PHOTO}>
-          <Avatar
-            name={channel.title}
-            {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
-            size="row"
-          />
-        </span>
+        {photo}
         <span className="flex min-w-0 flex-1 flex-col gap-1">
-          <span className="flex min-w-0 items-center gap-2">
+          <span className="flex min-w-0 items-baseline gap-2">
             <span className="flex min-w-0 flex-1">{name}</span>
             {timeNode}
-            {unreadPill(unread)}
-            {check}
           </span>
           {previewNode}
         </span>
+        {pill}
+        {check}
       </>
     );
   }
   return (
     <>
-      <span className="flex items-start justify-between gap-2">
-        <span className="shrink-0">
-          <Avatar
-            name={channel.title}
-            {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
-            size="row"
-          />
-        </span>
-        <span className="flex items-center gap-2">
-          {unreadPill(unread)}
-          {check}
-        </span>
-      </span>
-      <span className="mt-2 flex min-w-0">{name}</span>
-      <span className="mt-0.5 flex min-w-0">{previewNode}</span>
+      {photo}
+      <span className="mt-1.5 flex w-full min-w-0 justify-center">{name}</span>
+      <span className="mt-0.5 flex w-full min-w-0 justify-center">{previewNode}</span>
       {timeNode !== null ? <span className="mt-auto flex">{timeNode}</span> : null}
+      {pill !== null ? <span className="absolute right-3 top-3 flex">{pill}</span> : null}
+      {check !== null ? <span className="absolute left-3 top-3 flex">{check}</span> : null}
     </>
   );
 }
