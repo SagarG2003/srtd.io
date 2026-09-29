@@ -514,6 +514,68 @@ export async function listPosts(
   };
 }
 
+/** Row cap for {@link listOpenPosts}; the strip's number comes from {@link countOpenPosts}. */
+export const OPEN_POSTS_LIMIT = 100;
+
+/** A post waiting in review, as the chat open-loops sheet lists it. */
+export type OpenPostRow = Pick<
+  Post,
+  'id' | 'number' | 'title' | 'format' | 'target_date' | 'stage_entered_at'
+> & { thumbnailAssetVersionId: string | null };
+
+export const OPEN_POST_COLUMNS = 'id, number, title, format, target_date, stage_entered_at';
+
+/**
+ * The posts waiting in review in a workspace, longest waiting first
+ * (stage_entered_at asc), capped at {@link OPEN_POSTS_LIMIT}. One posts read
+ * pinned to (workspace_id, stage) of posts_workspace_stage_idx, then one batched
+ * first-image read over the rows that came back (skipped when none did), never
+ * one read per post. RLS decides what the viewer sees.
+ */
+export async function listOpenPosts(
+  client: Client,
+  input: { workspaceId: string },
+): Promise<Result<OpenPostRow[]>> {
+  const { data, error } = await client
+    .from('posts')
+    .select(OPEN_POST_COLUMNS)
+    .eq('workspace_id', input.workspaceId)
+    .eq('stage', 'review')
+    .is('deleted_at', null)
+    .order('stage_entered_at', { ascending: true })
+    .limit(OPEN_POSTS_LIMIT);
+  if (error) return { ok: false, error: transportError(error.message) };
+
+  const posts = (data ?? []) as Array<Omit<OpenPostRow, 'thumbnailAssetVersionId'>>;
+  const thumbnails = await firstImageByPost(
+    client,
+    posts.map((post) => post.id),
+  );
+  if (!thumbnails.ok) return thumbnails;
+  return {
+    ok: true,
+    data: posts.map((post) => ({
+      ...post,
+      thumbnailAssetVersionId: thumbnails.data.get(post.id) ?? null,
+    })),
+  };
+}
+
+/** Count-only read (head:true, count:'exact') on the {@link listOpenPosts} filter. */
+export async function countOpenPosts(
+  client: Client,
+  input: { workspaceId: string },
+): Promise<Result<number>> {
+  const { error, count } = await client
+    .from('posts')
+    .select('id', { count: 'exact', head: true })
+    .eq('workspace_id', input.workspaceId)
+    .eq('stage', 'review')
+    .is('deleted_at', null);
+  if (error) return { ok: false, error: transportError(error.message) };
+  return { ok: true, data: count ?? 0 };
+}
+
 /**
  * Fetch one post by id together with its versions and annotations in a single
  * RLS-scoped query via PostgREST resource embedding (no per-row loops, no N+1).

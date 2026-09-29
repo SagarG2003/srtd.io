@@ -42,9 +42,12 @@ import {
   threadLightbox,
   threadRows,
   ThreadHeaderIdentity,
+  threadStripSlot,
   TimeLabel,
   type ThreadRow,
 } from '@/components/chat/MessageThread';
+import { renderToStaticMarkup as renderStrip } from 'react-dom/server';
+import { MarkStrip } from '@/components/chat/MarksSheet';
 import { roleLabel } from '@/components/pages/settings/members-data';
 import { IconClock, IconTickDouble, IconTickSingle } from '@/components/ui/icons';
 import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
@@ -1788,5 +1791,62 @@ describe('post references after audit', () => {
       filterEmptyLabel('GBL-14'),
     );
     expect(withRows.map((i) => i.key)).not.toContain('filter-empty');
+  });
+});
+
+describe('open loops strip slot', () => {
+  it('FilterStrip still wins while filtering; else the loops strip for threads with marks', () => {
+    expect(threadStripSlot({ filtering: true, hasMarks: true, selecting: false })).toBe('filter');
+    expect(threadStripSlot({ filtering: true, hasMarks: false, selecting: true })).toBe('filter');
+    expect(threadStripSlot({ filtering: false, hasMarks: true, selecting: false })).toBe('loops');
+    expect(threadStripSlot({ filtering: false, hasMarks: true, selecting: true })).toBeNull();
+    expect(threadStripSlot({ filtering: false, hasMarks: false, selecting: false })).toBeNull();
+  });
+
+  it('the strip label carries the posts waiting ahead of the marks', () => {
+    const marks = new Map([
+      [
+        'm1',
+        {
+          messageId: 'm1',
+          channelId: 'c1',
+          type: 'pending' as const,
+          priority: 1 as const,
+          markedAt: '2026-09-27T10:00:00Z',
+          resolved: false,
+          resolvedBy: null,
+          resolvedAt: null,
+        },
+      ],
+    ]);
+    const html = renderStrip(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: true, posts: 4, side: 'agency' }}
+        onOpen={() => {}}
+      />,
+    );
+    const text = html.replace(/<[^>]+>/g, '');
+    expect(text).toBe('54 posts waiting on client · 1 pending (1 P1)');
+  });
+
+  it('first paint is final: the label waits for posts and side together', () => {
+    const marks = new Map();
+    const pending = renderStrip(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: false, posts: 3, side: 'unknown' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(pending.replace(/<[^>]+>/g, '')).toBe('');
+    const ready = renderStrip(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: true, posts: 3, side: 'client' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(ready.replace(/<[^>]+>/g, '')).toBe('33 posts waiting on you');
   });
 });

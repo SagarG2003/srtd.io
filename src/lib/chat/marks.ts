@@ -260,6 +260,53 @@ export function markStripLabel(counts: MarkCounts): string {
   return parts.join(' · ');
 }
 
+/** Which side the open-loops wording speaks to; 'unknown' reads neutral. */
+export type LoopsSide = 'agency' | 'client' | 'unknown';
+
+/** The strip line and sheet heading for posts in review, per side. */
+export function openPostsPart(count: number, side: LoopsSide): string {
+  const posts = plural(count, 'post', 'posts');
+  if (side === 'client') return `${posts} waiting on you`;
+  if (side === 'agency') return `${posts} waiting on client`;
+  return `${posts} in review`;
+}
+
+export function openPostsHeading(side: LoopsSide): string {
+  if (side === 'client') return 'Posts waiting on you';
+  if (side === 'agency') return 'Posts waiting on client';
+  return 'Posts in review';
+}
+
+export const NOTHING_OPEN = 'Nothing open between you';
+
+export interface LoopsStripLabel {
+  /** The leading pill: posts waiting plus open marks. */
+  count: number;
+  /** The parts joined, or {@link NOTHING_OPEN} when count is 0. */
+  text: string;
+  empty: boolean;
+}
+
+/**
+ * The open-loops strip: posts waiting first, then the mark parts exactly as
+ * {@link markStripLabel} words them, zero parts omitted. Nothing open reads
+ * {@link NOTHING_OPEN}; the strip never hides.
+ */
+export function loopsStripLabel(input: {
+  posts: number;
+  side: LoopsSide;
+  marks: MarkCounts;
+}): LoopsStripLabel {
+  const posts = Math.max(0, input.posts);
+  const count = posts + input.marks.commitments + input.marks.decisions + input.marks.pending;
+  if (count === 0) return { count: 0, text: NOTHING_OPEN, empty: true };
+  const parts: string[] = [];
+  if (posts > 0) parts.push(openPostsPart(posts, input.side));
+  const marks = markStripLabel(input.marks);
+  if (marks !== '') parts.push(marks);
+  return { count, text: parts.join(' · '), empty: false };
+}
+
 /** The pin board tabs: open marks, and stamped marks. */
 export type MarkTab = 'open' | 'history';
 

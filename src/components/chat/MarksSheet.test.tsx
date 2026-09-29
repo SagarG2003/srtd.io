@@ -2,13 +2,20 @@ import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { Button } from '@/components/ui/Button';
 import { Sheet } from '@/components/ui/Sheet';
+import { renderToStaticMarkup } from 'react-dom/server';
 import {
   confirmMarkTransition,
+  LOOPS_STRIP_ARIA,
   MarkSheetRow,
+  MarkStrip,
   MarksList,
   MarksSheet,
+  OpenPostSheetRow,
+  OpenPostsList,
+  openPostLines,
 } from '@/components/chat/MarksSheet';
 import type { ChatMark } from '@/lib/chat/marks';
+import type { OpenPostRow } from '@/lib/chat/use-open-posts';
 
 // MarkSheetRow is hook-free, so its returned tree is walked directly with no
 // DOM, as MessageThread.test.tsx does for MessageBubble.
@@ -188,5 +195,164 @@ describe('MarksSheet', () => {
     expect(tree.props.onClose).toBe(onClose);
     const list = findAll(tree, (el) => el.type === MarksList)[0];
     expect(list?.props).toEqual(listProps);
+  });
+});
+
+function openPost(over: Partial<OpenPostRow> = {}): OpenPostRow {
+  return {
+    id: 'p1',
+    number: 12,
+    title: 'Launch teaser',
+    format: 'carousel',
+    target_date: '2026-10-02',
+    stage_entered_at: '2026-09-20T00:00:00Z',
+    thumbnailAssetVersionId: null,
+    ...over,
+  };
+}
+
+describe('MarkStrip: open loops', () => {
+  const marks = new Map([['m1', mark()]]);
+
+  it('holds an empty 44px slot until posts and side are known (first paint final)', () => {
+    const html = renderToStaticMarkup(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: false, posts: null, side: 'unknown' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(html).toContain('data-loops-strip="pending"');
+    expect(html).toContain('min-h-[44px]');
+    expect(html).not.toContain('commitment');
+    expect(html).not.toContain('Nothing open');
+  });
+
+  it('leads with the count pill and the side wording once ready', () => {
+    const client = renderToStaticMarkup(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: true, posts: 2, side: 'client' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(client).toContain(`aria-label="${LOOPS_STRIP_ARIA}"`);
+    expect(client).toMatch(/data-loops-count=""[^>]*>3</);
+    expect(client).toContain('posts waiting on you');
+    expect(client).toContain('commitment');
+    const agency = renderToStaticMarkup(
+      <MarkStrip
+        marks={marks}
+        loops={{ ready: true, posts: 1, side: 'agency' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(agency).toContain('post waiting on client');
+  });
+
+  it('never disappears: nothing open reads the muted line with a check', () => {
+    const html = renderToStaticMarkup(
+      <MarkStrip
+        marks={new Map()}
+        loops={{ ready: true, posts: 0, side: 'client' }}
+        onOpen={() => {}}
+      />,
+    );
+    expect(html).toContain('data-loops-strip="empty"');
+    expect(html).toContain('Nothing open between you');
+    expect(html).toContain('text-fg-3');
+    expect(html).not.toContain('data-loops-count');
+  });
+
+  it('the aria-label is Open loops in this chat', () => {
+    expect(LOOPS_STRIP_ARIA).toBe('Open loops in this chat');
+  });
+});
+
+describe('Open tab posts section', () => {
+  it('row lines: KEY · title, then format · target date · where it is', () => {
+    expect(openPostLines(openPost(), 'gbl', true)).toEqual({
+      title: 'GBL-12 · Launch teaser',
+      meta: 'Carousel · Oct 2 · in this chat',
+    });
+    expect(openPostLines(openPost({ target_date: null }), null, false)).toEqual({
+      title: 'Launch teaser',
+      meta: 'Carousel · not shared here yet',
+    });
+  });
+
+  it('Jump when a card is in this chat, Share here otherwise', () => {
+    const onJump = vi.fn();
+    const onShare = vi.fn();
+    const shared = OpenPostSheetRow({
+      post: openPost(),
+      workspaceKey: 'gbl',
+      shared: true,
+      onJump,
+      onShare,
+    });
+    const [jump] = findAll(shared, (el) => el.type === Button);
+    expect(text(jump)).toBe('Jump');
+    (jump?.props.onClick as () => void)();
+    expect(onJump).toHaveBeenCalledTimes(1);
+    expect(onShare).not.toHaveBeenCalled();
+
+    const other = OpenPostSheetRow({
+      post: openPost(),
+      workspaceKey: 'gbl',
+      shared: false,
+      onJump,
+      onShare,
+    });
+    const [share] = findAll(other, (el) => el.type === Button);
+    expect(text(share)).toBe('Share here');
+    expect(share?.props['data-open-post-action']).toBe('share');
+    (share?.props.onClick as () => void)();
+    expect(onShare).toHaveBeenCalledTimes(1);
+  });
+
+  it('rows are 64px with a 44px thumb; no cover shows the KEY monogram', () => {
+    const html = renderToStaticMarkup(
+      <OpenPostSheetRow
+        post={openPost()}
+        workspaceKey="gbl"
+        shared={false}
+        onJump={() => {}}
+        onShare={() => {}}
+      />,
+    );
+    expect(html).toContain('h-16');
+    expect(html).toMatch(/data-open-post-thumb=""[^>]*h-11 w-11[^>]*>GBL</);
+  });
+
+  it('lists under the side heading, marking which posts are shared here', () => {
+    const onJump = vi.fn();
+    const onShare = vi.fn();
+    const html = renderToStaticMarkup(
+      <OpenPostsList
+        heading="Posts waiting on you"
+        posts={[openPost(), openPost({ id: 'p2', number: 13, title: 'Reel cut' })]}
+        workspaceKey="gbl"
+        sharedIds={new Set(['p2'])}
+        onJump={onJump}
+        onShare={onShare}
+      />,
+    );
+    expect(html).toContain('Posts waiting on you');
+    expect(html).toContain('data-open-post="p1"');
+    expect(html).toContain('data-open-post-action="share"');
+    expect(html).toContain('data-open-post-action="jump"');
+  });
+
+  it('renders nothing with no posts waiting or before the read lands', () => {
+    const base = {
+      heading: 'x',
+      workspaceKey: 'gbl',
+      sharedIds: new Set<string>(),
+      onJump: vi.fn(),
+      onShare: vi.fn(),
+    };
+    expect(OpenPostsList({ ...base, posts: [] })).toBeNull();
+    expect(OpenPostsList({ ...base, posts: null })).toBeNull();
   });
 });

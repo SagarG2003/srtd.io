@@ -73,6 +73,8 @@ import { MessageActionMenu } from '@/components/chat/MessageActionMenu';
 import { SharedBriefCards } from '@/components/chat/BriefCard';
 import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
 import { MarkStrip, MarksSheet, PrioritySheet } from '@/components/chat/MarksSheet';
+import { useOpenPosts } from '@/lib/chat/use-open-posts';
+import { useViewerSide } from '@/lib/chat/viewer-role';
 import { ContactSheet } from '@/components/chat/ContactSheet';
 import { SelectionBar } from '@/components/chat/SelectionBar';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
@@ -88,6 +90,7 @@ import {
 } from '@/lib/chat/forward';
 import {
   markMenuOptions,
+  openPostsHeading,
   toggleSelected,
   type ChatMark,
   type FindOlderOutcome,
@@ -248,6 +251,20 @@ export function keyOpensMenu(event: {
   if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) return true;
   if (event.target !== event.currentTarget) return false;
   return event.key === 'Enter' || event.key === ' ';
+}
+
+/**
+ * What sits under the thread header: the filter strip while one post's
+ * conversation is shown, else the open-loops strip (threads with marks, not
+ * while selecting), else nothing.
+ */
+export function threadStripSlot(input: {
+  filtering: boolean;
+  hasMarks: boolean;
+  selecting: boolean;
+}): 'filter' | 'loops' | null {
+  if (input.filtering) return 'filter';
+  return input.hasMarks && !input.selecting ? 'loops' : null;
 }
 
 /** A voice note alone (no text, cards or other files): it takes the text-bubble layout. */
@@ -1727,9 +1744,12 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const gateRef = useRef<PageGate | null>(null);
   // Bumped when a page row's hydration wait runs out, so it goes on without it.
   const [hydrationTick, setHydrationTick] = useState(0);
-  const { workspaceKey } = useWorkspace();
+  const { workspaceKey, workspaceId } = useWorkspace();
   const toast = useToast();
   const marks = props.marks ?? NO_MARKS;
+  // Open loops: posts in review (two reads per thread open) and the viewer's side.
+  const viewerSide = useViewerSide(workspaceId);
+  const openPosts = useOpenPosts(workspaceId, props.channelId ?? props.title);
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [marksOpen, setMarksOpen] = useState(false);
@@ -1975,6 +1995,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     );
   };
   const filterPost = filterPostId !== null ? postRef(filterPostId) : undefined;
+  const stripSlot = threadStripSlot({
+    filtering: filterPostId !== null,
+    hasMarks: props.marks !== undefined,
+    selecting,
+  });
   return (
     <div className="flex h-full flex-col bg-bg">
       <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-2 md:px-4">
@@ -1997,14 +2022,22 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           </IconButton>
         ) : null}
       </div>
-      {filterPostId !== null ? (
+      {stripSlot === 'filter' ? (
         <FilterStrip
           post={filterPost ?? null}
           workspaceKey={workspaceKey}
           onShowAll={() => setFilterPostId(null)}
         />
-      ) : props.marks !== undefined && !selecting ? (
-        <MarkStrip marks={marks} onOpen={() => setMarksOpen(true)} />
+      ) : stripSlot === 'loops' ? (
+        <MarkStrip
+          marks={marks}
+          loops={{
+            ready: openPosts.ready && viewerSide.ready,
+            posts: openPosts.count,
+            side: viewerSide.side,
+          }}
+          onOpen={() => setMarksOpen(true)}
+        />
       ) : null}
       <ThreadBody
         title={props.title}
@@ -2115,6 +2148,21 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           }}
           onResolve={props.onResolveMark}
           onReopen={props.onReopenMark}
+          openPosts={{
+            heading: openPostsHeading(viewerSide.side),
+            posts: openPosts.posts,
+            workspaceKey,
+            sharedIds: sharedInChat,
+            onJump: (postId) => {
+              setMarksOpen(false);
+              const card = newestCardFor(props.messages, postId);
+              if (card !== null) jumpToAll(card.id);
+            },
+            onShare: (postId) => {
+              setMarksOpen(false);
+              bringPost(postId);
+            },
+          }}
         />
       ) : null}
       {canOpenContact && props.channelId !== undefined ? (
