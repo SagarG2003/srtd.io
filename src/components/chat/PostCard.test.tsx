@@ -10,10 +10,15 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import type { Client } from '@srtdio/rpc';
 import type { PostCardRow } from '../../../packages/posts/src/reads';
+import { createLongPressController } from '@/components/ui/useLongPress';
+import { ACTION_SOFT, PostSheetActions, talkAboutLabel } from '@/components/chat/PostSheet';
+import { sheetActions } from '@/components/chat/post-sheet';
 import {
+  CARD_HOLD,
   CARD_SKELETON,
   NotVisibleCard,
   cardTapHandlers,
+  keyTapHandler,
   POST_CARD,
   SHARED_CARD,
   SharedPostCardList,
@@ -266,5 +271,142 @@ describe('cardTapHandlers', () => {
     expect(space.preventDefault).not.toHaveBeenCalled();
     expect(openSheet).toHaveBeenCalledTimes(1);
     expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('card long-press: talk about the post', () => {
+  /** The card's wiring: the hold controller plus the tap handlers reading its flag. */
+  function card(): {
+    onTalkAbout: ReturnType<typeof vi.fn>;
+    openSheet: ReturnType<typeof vi.fn>;
+    press: (holdMs: number, moveX?: number) => void;
+  } {
+    const onTalkAbout = vi.fn();
+    const openSheet = vi.fn();
+    const hold = createLongPressController({ onLongPress: onTalkAbout, ...CARD_HOLD });
+    const tap = cardTapHandlers(openSheet, hold.consumeClickSuppression);
+    const press = (holdMs: number, moveX = 0): void => {
+      hold.handlers.onPointerDown({ clientX: 0, clientY: 0, pointerType: 'touch' });
+      if (moveX !== 0) hold.handlers.onPointerMove({ clientX: moveX, clientY: 0 });
+      vi.advanceTimersByTime(holdMs);
+      hold.handlers.onPointerUp();
+      tap.onClick();
+    };
+    return { onTalkAbout, openSheet, press };
+  }
+
+  it('holds 450 ms within 10 px', () => {
+    expect(CARD_HOLD).toEqual({ thresholdMs: 450, moveTolerancePx: 10 });
+  });
+
+  it('a hold calls onTalkAbout and the click that ends it does not open the sheet', () => {
+    vi.useFakeTimers();
+    const { onTalkAbout, openSheet, press } = card();
+    press(450);
+    expect(onTalkAbout).toHaveBeenCalledTimes(1);
+    expect(openSheet).not.toHaveBeenCalled();
+    // The next plain tap opens the sheet again.
+    press(100);
+    expect(openSheet).toHaveBeenCalledTimes(1);
+    expect(onTalkAbout).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('a tap opens the sheet; a drag past 10 px never talks about the post', () => {
+    vi.useFakeTimers();
+    const { onTalkAbout, openSheet, press } = card();
+    press(200);
+    expect(openSheet).toHaveBeenCalledTimes(1);
+    expect(onTalkAbout).not.toHaveBeenCalled();
+    press(600, 11);
+    expect(onTalkAbout).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('with onShowPost the KEY is a button that shows the post', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <SharedPostCardList
+          views={sharedPostViews(['p1'], indexPostsById([cardRow('p1')]))}
+          {...CONTEXT}
+          onShowPost={() => {}}
+          onTalkAbout={() => {}}
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toMatch(/<button[^>]*data-card-ref=""[^>]*>GBL-12<\/button>/);
+    expect(html).toContain('aria-label="Show the conversation about GBL-12"');
+    // Without it the KEY stays plain text.
+    expect(render(['p1'], [cardRow('p1')])).not.toContain('Show the conversation');
+  });
+});
+
+describe('post sheet: Talk about', () => {
+  function actions(onTalkAbout?: () => void): string {
+    const post = cardRow('p1');
+    return renderToStaticMarkup(
+      <PostSheetActions
+        set={sheetActions('agency', post, 'UTC')}
+        mode={{ kind: 'actions' }}
+        refLabel="GBL-12"
+        approverName={null}
+        mediaCount={0}
+        targetDate=""
+        busy={false}
+        error={null}
+        onAction={vi.fn()}
+        onConfirm={vi.fn()}
+        onBack={vi.fn()}
+        onTalkAbout={onTalkAbout}
+      />,
+    );
+  }
+
+  it('shows a soft "Talk about <KEY>" button when the thread offers it', () => {
+    expect(talkAboutLabel('GBL-12')).toBe('Talk about GBL-12');
+    expect(ACTION_SOFT).toContain('bg-accent-soft');
+    const html = actions(() => {});
+    expect(html).toMatch(/data-sheet-talk-about=""[^>]*>Talk about GBL-12</);
+    expect(html).toContain('bg-accent-soft text-accent');
+  });
+
+  it('is absent without the hook', () => {
+    expect(actions()).not.toContain('Talk about');
+  });
+});
+
+describe('F9: a hold that starts on the KEY', () => {
+  it('talks about the post once, swallows the release, and the next card tap opens the sheet', () => {
+    vi.useFakeTimers();
+    const onTalkAbout = vi.fn();
+    const openSheet = vi.fn();
+    const onShowPost = vi.fn();
+    // The KEY sits inside the card: its pointer events reach the card's hold.
+    const hold = createLongPressController({ onLongPress: onTalkAbout, ...CARD_HOLD });
+    const card = cardTapHandlers(openSheet, hold.consumeClickSuppression);
+    const key = keyTapHandler(onShowPost, hold.consumeClickSuppression);
+    const stop = { stopPropagation: vi.fn() };
+
+    hold.handlers.onPointerDown({ clientX: 0, clientY: 0, pointerType: 'touch' });
+    vi.advanceTimersByTime(450);
+    hold.handlers.onPointerUp();
+    key(stop); // the release click lands on the KEY
+    expect(onTalkAbout).toHaveBeenCalledTimes(1);
+    expect(onShowPost).not.toHaveBeenCalled();
+    expect(openSheet).not.toHaveBeenCalled();
+    expect(stop.stopPropagation).toHaveBeenCalled();
+
+    // No flag left behind: a plain tap on the card opens the sheet.
+    hold.handlers.onPointerDown({ clientX: 0, clientY: 0, pointerType: 'touch' });
+    vi.advanceTimersByTime(100);
+    hold.handlers.onPointerUp();
+    card.onClick();
+    expect(openSheet).toHaveBeenCalledTimes(1);
+
+    // And a plain tap on the KEY shows the post.
+    key(stop);
+    expect(onShowPost).toHaveBeenCalledTimes(1);
+    expect(onTalkAbout).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 });

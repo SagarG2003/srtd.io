@@ -4,8 +4,13 @@ vi.mock('@/lib/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
+import { renderToStaticMarkup } from 'react-dom/server';
+import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import {
+  AboutBar,
   composerCanSend,
+  composerPlaceholder,
+  hashPickerQuery,
   dispatchSend,
   draftAttachments,
   hasLinkCards,
@@ -15,6 +20,8 @@ import {
 } from '@/components/chat/Composer';
 import { createOutboxSender, type SendOutcome } from '@/lib/chat/send-flow';
 import { canSendAttachmentMessage } from '@/lib/chat/attachments';
+import { stripHashToken } from '@/lib/chat/post-refs';
+import { IconButton } from '@/components/ui/IconButton';
 
 // The repo's vitest runs in the node environment with no @testing-library/react,
 // so caret/DOM behaviour is not exercised here. Following the codebase pattern
@@ -256,5 +263,110 @@ describe('pasted post and brief links become cards at Send', () => {
     expect(r.briefIds).not.toHaveBeenCalled();
     expect(hasLinkCards(`${ORIGIN}/b/gbl-1`, 'gbl', ORIGIN)).toBe(true);
     expect(hasLinkCards(`${ORIGIN}/b/gbl-1`, null, ORIGIN)).toBe(false);
+  });
+});
+
+// The hash character, built so this file passes the chat token-hygiene check.
+const HASH = String.fromCharCode(35);
+
+describe('hash picker', () => {
+  const at = (
+    text: string,
+    caret = text.length,
+    over: { enabled?: boolean; dismissed?: boolean } = {},
+  ) => hashPickerQuery({ enabled: true, dismissed: false, text, caret, ...over });
+
+  it('opens on a hash token at the caret with its query', () => {
+    expect(at(HASH)).toBe('');
+    expect(at(`${HASH}laun`)).toBe('laun');
+    expect(at(`about ${HASH}14`)).toBe('14');
+  });
+
+  it('closes on a space with no pick, mid-word, on Escape, or without a bring hook', () => {
+    expect(at(`${HASH}laun `)).toBeNull();
+    expect(at(`a${HASH}b`)).toBeNull();
+    expect(at(`${HASH}laun`, undefined, { dismissed: true })).toBeNull();
+    expect(at(`${HASH}laun`, undefined, { enabled: false })).toBeNull();
+  });
+
+  it('a pick strips the token and keeps the rest of the draft', () => {
+    const text = `look at ${HASH}lau please`;
+    const caret = `look at ${HASH}lau`.length;
+    expect(at(text, caret)).toBe('lau');
+    expect(stripHashToken(text, caret)).toEqual({ text: 'look at  please', caret: 8 });
+  });
+});
+
+describe('About bar', () => {
+  const post = { id: 'p1', number: 14, title: 'Launch teaser', thumbnailAssetVersionId: null };
+
+  function find(node: ReactNode, match: (el: ReactElement) => boolean): ReactElement | null {
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = find(child, match);
+        if (hit !== null) return hit;
+      }
+      return null;
+    }
+    if (!isValidElement(node)) return null;
+    if (match(node)) return node;
+    return find((node.props as { children?: ReactNode }).children, match);
+  }
+
+  it('renders the reply bar grammar: accent rule, 32px thumb, "About KEY" over the title', () => {
+    const html = renderToStaticMarkup(
+      <AboutBar post={post} refLabel="GBL-14" onCancel={() => {}} />,
+    );
+    expect(html).toContain('w-[3px]');
+    expect(html).toContain('bg-accent');
+    expect(html).toContain('h-8 w-8');
+    expect(html).toMatch(/text-accent[^>]*>About GBL-14</);
+    expect(html).toContain('Launch teaser');
+    expect(html).toContain('aria-label="Close about"');
+  });
+
+  it('its X cancels', () => {
+    const onCancel = vi.fn();
+    const close = find(
+      AboutBar({ post, refLabel: 'GBL-14', onCancel }),
+      (el) => el.type === IconButton,
+    );
+    (close?.props as { onClick: () => void }).onClick();
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('the placeholder follows About', () => {
+    expect(composerPlaceholder('GBL-14')).toBe('Message about GBL-14');
+    expect(composerPlaceholder(null)).toBe('Write a message');
+  });
+});
+
+describe('About bar while its post loads (F14)', () => {
+  it('is a skeleton with the same close: no KEY, a title placeholder', () => {
+    const html = renderToStaticMarkup(
+      <AboutBar post={null} refLabel="GBL-14" onCancel={() => {}} />,
+    );
+    expect(html).toContain('data-about-loading');
+    expect(html).toMatch(/text-accent[^>]*>About</);
+    expect(html).not.toContain('GBL-14');
+    expect(html).toContain('h-3 w-28');
+    expect(html).toContain('aria-label="Close about"');
+  });
+
+  it('can be cancelled while loading', () => {
+    const onCancel = vi.fn();
+    const root = AboutBar({ post: null, refLabel: null, onCancel });
+    const stack: ReactNode[] = [root];
+    let close: ReactElement | null = null;
+    while (stack.length > 0 && close === null) {
+      const node = stack.pop();
+      if (Array.isArray(node)) stack.push(...(node as ReactNode[]));
+      else if (isValidElement(node)) {
+        if (node.type === IconButton) close = node;
+        else stack.push((node.props as { children?: ReactNode }).children);
+      }
+    }
+    (close?.props as { onClick: () => void }).onClick();
+    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 });

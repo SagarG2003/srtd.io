@@ -9,13 +9,24 @@
 // the tab returns after a minute away, or when a sorted:post-changed event names
 // one of its posts. The cover presigns lazily through the shared thumbnail hook.
 // Tapping a card opens its PostSheet (media, facts, the viewer's action) instead
-// of navigating; the sheet portals above the thread.
+// of navigating; the sheet portals above the thread. Holding a card (450 ms,
+// 10 px) brings its post into the conversation (onTalkAbout) and the click that
+// ends the hold is swallowed, so the sheet does not open; the KEY on a card
+// shows only that post's conversation (onShowPost).
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { KeyboardEvent, ReactElement, ReactNode, SyntheticEvent } from 'react';
+import type {
+  KeyboardEvent,
+  MouseEvent,
+  PointerEvent,
+  ReactElement,
+  ReactNode,
+  SyntheticEvent,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { Tag, isTagDot } from '@/components/ui/Tag';
 import { IconCheck, IconPlay } from '@/components/ui/icons';
+import { useLongPress } from '@/components/ui';
 import { useThumbnail } from '@/components/media/use-thumbnail';
 import { PresignCache, type PresignDeps } from '@/lib/asset-presign';
 import { readProfiles } from '@/lib/chat-reads';
@@ -147,13 +158,33 @@ const cardPresignDeps: PresignDeps = {
   fetcher: (input, init) => fetchWithTrace(input, init),
 };
 let cardPresignCache: PresignCache | null = null;
-function sharedCardPresignCache(): PresignCache {
+export function sharedCardPresignCache(): PresignCache {
   if (cardPresignCache === null) cardPresignCache = new PresignCache(cardPresignDeps);
   return cardPresignCache;
 }
-const PRESIGN_ENABLED = env.VITE_ASSET_READ_URL !== undefined && env.VITE_ASSET_READ_URL !== '';
+export const PRESIGN_ENABLED =
+  env.VITE_ASSET_READ_URL !== undefined && env.VITE_ASSET_READ_URL !== '';
 
-export function SharedPostCards({ postIds }: { postIds: string[] }): ReactElement | null {
+/** Talk-about and filter hooks a thread hands its cards; absent disables both. */
+export interface CardRefActions {
+  /** Hold on a card, or the sheet's "Talk about": bring the post into the conversation. */
+  onTalkAbout?: ((postId: string) => void) | undefined;
+  /** Tap on a card's KEY: show only that post's conversation. */
+  onShowPost?: ((postId: string) => void) | undefined;
+}
+
+export function SharedPostCards({
+  postIds,
+  messageId,
+  onTalkAbout,
+  onShowPost,
+}: {
+  postIds: string[];
+  /** The card message's id, handed to onTalkAbout. */
+  messageId?: string;
+  onTalkAbout?: ((postId: string, messageId: string) => void) | undefined;
+  onShowPost?: ((postId: string) => void) | undefined;
+}): ReactElement | null {
   const { workspaceId, workspaceKey, workspaces } = useWorkspace();
   const { side, ready } = useViewerSide(workspaceId);
   const { views, loading } = useSharedPosts(postIds);
@@ -169,7 +200,18 @@ export function SharedPostCards({ postIds }: { postIds: string[] }): ReactElemen
     );
   }
   return (
-    <SharedPostCardList views={views} side={side} workspaceKey={workspaceKey} timeZone={timeZone} />
+    <SharedPostCardList
+      views={views}
+      side={side}
+      workspaceKey={workspaceKey}
+      timeZone={timeZone}
+      onTalkAbout={
+        onTalkAbout !== undefined && messageId !== undefined
+          ? (postId) => onTalkAbout(postId, messageId)
+          : undefined
+      }
+      onShowPost={onShowPost}
+    />
   );
 }
 
@@ -181,15 +223,23 @@ export interface CardContext {
 }
 
 /** The resolved cards in postIds order (presentational; no reads). */
-export function SharedPostCardList(props: { views: SharedPostView[] } & CardContext): ReactElement {
-  const { views, ...context } = props;
+export function SharedPostCardList(
+  props: { views: SharedPostView[] } & CardContext & CardRefActions,
+): ReactElement {
+  const { views, onTalkAbout, onShowPost, ...context } = props;
   return (
     <div className="mt-1.5 flex flex-col items-start gap-1.5">
       {views.map((view) =>
         view.kind === 'not_visible' ? (
           <NotVisibleCard key={view.postId} />
         ) : (
-          <PostCardItem key={view.postId} view={view} {...context} />
+          <PostCardItem
+            key={view.postId}
+            view={view}
+            {...context}
+            {...(onTalkAbout !== undefined ? { onTalkAbout: () => onTalkAbout(view.postId) } : {})}
+            {...(onShowPost !== undefined ? { onShowPost: () => onShowPost(view.postId) } : {})}
+          />
         ),
       )}
     </div>
@@ -221,14 +271,22 @@ function entityRef(workspaceKey: string | null, number: number): string | null {
 
 /**
  * The card's tap and Enter key: both open its sheet, neither navigates (the sheet
- * carries "Open full post"). Pure so the wiring is tested without a DOM.
+ * carries "Open full post"). A click that ends a long-press (consumeHold reads
+ * and clears the hold's suppression flag) is swallowed, as the bubble does. Pure
+ * so the wiring is tested without a DOM.
  */
-export function cardTapHandlers(openSheet: () => void): {
+export function cardTapHandlers(
+  openSheet: () => void,
+  consumeHold: () => boolean = () => false,
+): {
   onClick: () => void;
   onKeyDown: (e: Pick<KeyboardEvent<HTMLDivElement>, 'key' | 'preventDefault'>) => void;
 } {
   return {
-    onClick: openSheet,
+    onClick: () => {
+      if (consumeHold()) return;
+      openSheet();
+    },
     onKeyDown: (e) => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
@@ -237,8 +295,65 @@ export function cardTapHandlers(openSheet: () => void): {
   };
 }
 
+/** A card's hold: 450 ms still within 10 px, the bubble's long-press defaults. */
+export const CARD_HOLD = { thresholdMs: 450, moveTolerancePx: 10 } as const;
+
+/**
+ * A tap on a card's KEY. The KEY sits inside the card, so a hold that starts on
+ * it is the card's hold: the release click reads (and so clears) the card's
+ * suppression flag and does nothing else. A plain tap shows the post. Never
+ * reaches the card's own click (which would open the sheet). Pure.
+ */
+export function keyTapHandler(
+  onShowPost: () => void,
+  consumeHold: () => boolean,
+): (e: { stopPropagation: () => void }) => void {
+  return (e) => {
+    e.stopPropagation();
+    if (consumeHold()) return;
+    onShowPost();
+  };
+}
+
+/** The small KEY pill on a card; a button (44px hit area) when it filters. */
+function CardRef(props: {
+  label: string;
+  className: string;
+  /** The inline KEY (no cover) carries data-card-ref; the cover pill data-card-pill-ref. */
+  inline: boolean;
+  onTap?: ((e: { stopPropagation: () => void }) => void) | undefined;
+}): ReactElement {
+  const onTap = props.onTap;
+  const marker = props.inline ? { 'data-card-ref': '' } : { 'data-card-pill-ref': '' };
+  if (onTap === undefined) {
+    return (
+      <span {...marker} className={props.className}>
+        {props.label}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      {...marker}
+      aria-label={`Show the conversation about ${props.label}`}
+      onClick={onTap}
+      onKeyDown={(e) => e.stopPropagation()}
+      className={cn(
+        props.className,
+        "before:absolute before:-inset-x-1 before:-inset-y-3 before:content-['']",
+      )}
+    >
+      {props.label}
+    </button>
+  );
+}
+
 export function PostCardItem(
-  props: { view: Extract<SharedPostView, { kind: 'post' }> } & CardContext,
+  props: { view: Extract<SharedPostView, { kind: 'post' }> } & CardContext & {
+      onTalkAbout?: () => void;
+      onShowPost?: () => void;
+    },
 ): ReactElement {
   const { view, side, workspaceKey, timeZone } = props;
   const { post } = view;
@@ -248,10 +363,18 @@ export function PostCardItem(
   // The sheet mounts on first open and stays mounted so its exit can animate.
   const [sheetOpen, setSheetOpen] = useState(false);
   const [sheetMounted, setSheetMounted] = useState(false);
+  const onTalkAbout = props.onTalkAbout;
+  const hold = useLongPress(() => onTalkAbout?.(), CARD_HOLD);
+  // A touch hold also fires contextmenu (Android): the hold is the card's, so
+  // the bubble's action menu stays shut. A mouse right-click still reaches it.
+  const touchPress = useRef(false);
   const tap = cardTapHandlers(() => {
     setSheetMounted(true);
     setSheetOpen(true);
-  });
+  }, hold.consumeClickSuppression);
+  const onShowPost = props.onShowPost;
+  const keyTap =
+    onShowPost !== undefined ? keyTapHandler(onShowPost, hold.consumeClickSuppression) : undefined;
   return (
     <>
       <div
@@ -260,12 +383,31 @@ export function PostCardItem(
         data-msg-link=""
         aria-haspopup="dialog"
         aria-label={`Open post ${post.title}`}
+        {...(onTalkAbout !== undefined
+          ? {
+              ...hold.handlers,
+              onPointerDown: (e: PointerEvent<HTMLDivElement>) => {
+                touchPress.current = e.pointerType !== 'mouse';
+                hold.handlers.onPointerDown(e);
+              },
+              onContextMenu: (e: MouseEvent<HTMLDivElement>) => {
+                if (!touchPress.current) return;
+                e.preventDefault();
+                e.stopPropagation();
+              },
+            }
+          : {})}
         onClick={tap.onClick}
         onKeyDown={tap.onKeyDown}
         className={cn(POST_CARD, 'cursor-pointer transition-colors hover:bg-panel-2')}
       >
         {post.thumbnailAssetVersionId !== null ? (
-          <CardMedia post={post} assetVersionId={post.thumbnailAssetVersionId} entityRef={ref} />
+          <CardMedia
+            post={post}
+            assetVersionId={post.thumbnailAssetVersionId}
+            entityRef={ref}
+            onKeyTap={keyTap}
+          />
         ) : null}
         <div className="flex flex-col gap-1.5 px-3 py-2.5">
           <span
@@ -274,9 +416,12 @@ export function PostCardItem(
             title={post.title}
           >
             {post.thumbnailAssetVersionId === null && ref !== null ? (
-              <span data-card-ref="" className="mr-1.5 font-mono text-fg-3">
-                {ref}
-              </span>
+              <CardRef
+                label={ref}
+                className="relative mr-1.5 font-mono text-fg-3"
+                inline
+                onTap={keyTap}
+              />
             ) : null}
             {post.title}
           </span>
@@ -316,6 +461,7 @@ export function PostCardItem(
             cache={sharedCardPresignCache()}
             deps={cardPresignDeps}
             presignEnabled={PRESIGN_ENABLED}
+            {...(onTalkAbout !== undefined ? { onTalkAbout } : {})}
           />
         </SheetBoundary>
       ) : null}
@@ -352,6 +498,7 @@ function CardMedia(props: {
   post: PostCardRow;
   assetVersionId: string;
   entityRef: string | null;
+  onKeyTap?: ((e: { stopPropagation: () => void }) => void) | undefined;
 }): ReactElement {
   const { post, assetVersionId, entityRef: ref } = props;
   const thumb = useThumbnail<HTMLDivElement>({
@@ -372,7 +519,12 @@ function CardMedia(props: {
         />
       ) : null}
       {ref !== null ? (
-        <span className={cn(MEDIA_PILL, 'absolute left-2 top-2 font-mono')}>{ref}</span>
+        <CardRef
+          label={ref}
+          className={cn(MEDIA_PILL, 'absolute left-2 top-2 font-mono')}
+          inline={false}
+          onTap={props.onKeyTap}
+        />
       ) : null}
       <span className={cn(MEDIA_PILL, 'absolute right-2 top-2')}>{formatLabel(post.format)}</span>
       {pills.slides !== null || pills.video !== null ? (
