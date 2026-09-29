@@ -541,7 +541,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       {
         deliver: (channelId, entry, traceId, onRecorded) => {
           const connection = clientRef.current;
-          const target = liveTarget(summariesRef.current.get(channelId));
+          const summary = summariesRef.current.get(channelId);
+          const target = liveTarget(summary);
           return runSend(
             {
               // The ack's server created_at against the device time of the
@@ -590,6 +591,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
               traceId,
               text: entry.text,
               local: entry.local,
+              ...(summary !== undefined ? { channelType: summary.channelType } : {}),
             },
           );
         },

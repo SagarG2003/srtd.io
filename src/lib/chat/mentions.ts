@@ -26,9 +26,14 @@ export interface MentionPick {
   name: string;
 }
 
-/** Whether a send or edit failed because a mentioned person is not in the chat. */
+/**
+ * Whether a send or edit failed because the server refused its mentions: a
+ * mentioned person is not in the chat, or "all" outside a group.
+ */
 export function isMentionRefusal(message: string): boolean {
-  return /mentioned people must be in this chat/i.test(message);
+  return /mentioned people must be in this chat|everyone mention works only in groups/i.test(
+    message,
+  );
 }
 
 /**
@@ -79,11 +84,12 @@ export function mentionsAll(body: string): boolean {
 
 /**
  * The p_mentions list for a body: its user ids, plus the string "all" while
- * the `@[all]` token is present. Send and edit both derive it here.
+ * the `@[all]` token is present and the chat is not a DM (a stray `@[all]` in
+ * a DM never goes out). Send and edit both derive it here.
  */
-export function mentionTargets(body: string): string[] {
+export function mentionTargets(body: string, channelType?: 'dm' | 'group'): string[] {
   const ids = mentionIds(body);
-  return mentionsAll(body) ? [...ids, ALL_MENTION] : ids;
+  return mentionsAll(body) && channelType !== 'dm' ? [...ids, ALL_MENTION] : ids;
 }
 
 /** Split a body into text runs and mention tokens. Adjacent text stays one run. */

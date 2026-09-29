@@ -472,6 +472,37 @@ describe('H2 / A4 edit mentions', () => {
     expect(argsOf(rpc, 1).p_mentions).toEqual([]);
   });
 
+  it('J2 edit: second refusal steps down to no mentions and succeeds; "@[all]" in a DM edits without "all"', async () => {
+    const body = `@[all] @[${ANA}]`;
+    const rpc = rpcSequence([
+      { data: null, error: { message: 'mentioned people must be in this chat' } },
+      { data: null, error: { message: 'everyone mention works only in groups' } },
+      { data: { id: 'm1', body, edited_at: 'now' }, error: null },
+    ]);
+    const recheck = vi.fn(async () => ({ ok: true as const, data: [ANA] }));
+    const result = await runEdit(editDeps(rpc, recheck), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body,
+      traceId: 't',
+    });
+    expect(result.ok).toBe(true);
+    expect(recheck).toHaveBeenCalledTimes(1);
+    expect(argsOf(rpc, 1).p_mentions).toEqual([ANA, 'all']);
+    expect(argsOf(rpc, 2).p_mentions).toEqual([]);
+
+    const dm = rpcSequence([{ data: { id: 'm1', body, edited_at: 'now' }, error: null }]);
+    await runEdit(editDeps(dm), {
+      channelId: 'c1',
+      messageId: 'm1',
+      body,
+      traceId: 't',
+      channelType: 'dm',
+    });
+    expect(argsOf(dm, 0).p_body).toBe(body);
+    expect(argsOf(dm, 0).p_mentions).toEqual([ANA]);
+  });
+
   it('A4 edit passes "all" while the token is present and omits it once removed', async () => {
     const withAll = rpcSequence([{ data: { id: 'm1', body: 'x', edited_at: 'now' }, error: null }]);
     await runEdit(editDeps(withAll), {

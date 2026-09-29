@@ -753,6 +753,34 @@ describe('H2 a refused mention never fails the send', () => {
     expect(again.mock.calls[1]?.[0].mentions).toEqual([]);
   });
 
+  it('J2 second refusal steps down to no mentions and succeeds; "@[all]" typed in a DM sends without "all"', async () => {
+    const recordMessage = vi
+      .fn<SendFlowDeps['recordMessage']>()
+      .mockResolvedValueOnce(refused)
+      .mockResolvedValueOnce({
+        ok: false,
+        reason: 'error',
+        message: 'everyone mention works only in groups',
+      })
+      .mockResolvedValueOnce({ ok: true, row: row() });
+    const recheckMentions = vi.fn(async () => ({ ok: true as const, data: [ANA, EX] }));
+    const outcome = await runSend(
+      deps({ recordMessage, recheckMentions }),
+      input({ text: `@[all] ${body}` }),
+    );
+    expect(outcome.ok).toBe(true);
+    expect(recheckMentions).toHaveBeenCalledTimes(1);
+    expect(recordMessage).toHaveBeenCalledTimes(3);
+    expect(recordMessage.mock.calls[1]?.[0].mentions).toEqual([ANA, EX, 'all']);
+    expect(recordMessage.mock.calls[2]?.[0].mentions).toEqual([]);
+
+    const dm = deps();
+    await runSend(dm, input({ text: `@[all] and @[${ANA}]`, channelType: 'dm' }));
+    expect(dm.recordMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ body: `@[all] and @[${ANA}]`, mentions: [ANA] }),
+    );
+  });
+
   it('A2 p_mentions carries "all" alongside uuids', async () => {
     const d = deps();
     await runSend(d, input({ text: `@[all] and @[${ANA}]` }));

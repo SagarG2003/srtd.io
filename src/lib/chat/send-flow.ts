@@ -67,6 +67,8 @@ export interface SendInput {
   traceId: string;
   text: string;
   local: LocalMessageContent;
+  /** The chat's type; a DM never sends "all" in p_mentions. */
+  channelType?: 'dm' | 'group';
 }
 
 export interface SendFlowDeps {
@@ -167,11 +169,16 @@ export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<Sen
       replyToMessageId: input.local.reply?.id ?? null,
       attachmentMeta: buildAttachmentMeta(input.local.attachments),
     });
-  const mentions = mentionTargets(input.text);
+  const mentions = mentionTargets(input.text, input.channelType);
   let recorded = await record(mentions);
   if (!recorded.ok && mentions.length > 0 && isMentionRefusal(recorded.message)) {
     const fresh = await recheck(deps.recheckMentions, input.channelId);
-    recorded = await record(mentionsAfterRefusal(mentions, fresh));
+    const retry = mentionsAfterRefusal(mentions, fresh);
+    recorded = await record(retry);
+    // Refused again: the last step sends without mentions, never a failed send.
+    if (!recorded.ok && retry.length > 0 && isMentionRefusal(recorded.message)) {
+      recorded = await record([]);
+    }
   }
   if (!recorded.ok) {
     return { ok: false, reason: recorded.reason, error: recorded.message };

@@ -72,7 +72,14 @@ export interface EditFlowDeps {
 
 export async function runEdit(
   deps: EditFlowDeps,
-  input: { channelId: string; messageId: string; body: string; traceId: string },
+  input: {
+    channelId: string;
+    messageId: string;
+    body: string;
+    traceId: string;
+    /** The chat's type; a DM never sends "all" in p_mentions. */
+    channelType?: 'dm' | 'group';
+  },
 ): Promise<{ ok: true } | { ok: false; message: string; error: string }> {
   const edit = (mentions: string[]): ReturnType<typeof editMessageRecord> =>
     editMessageRecord({
@@ -84,13 +91,18 @@ export async function runEdit(
       traceId: input.traceId,
       ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     });
-  const mentions = mentionTargets(input.body);
+  const mentions = mentionTargets(input.body, input.channelType);
   let result = await edit(mentions);
   if (!result.ok && mentions.length > 0 && isMentionRefusal(result.message)) {
     const read =
       deps.recheckMentions ??
       ((channelId: string) => readChannelMemberIds(deps.client, { channelId }));
-    result = await edit(mentionsAfterRefusal(mentions, await recheck(read, input.channelId)));
+    const retry = mentionsAfterRefusal(mentions, await recheck(read, input.channelId));
+    result = await edit(retry);
+    // Refused again: the last step edits without mentions, never a failed edit.
+    if (!result.ok && retry.length > 0 && isMentionRefusal(result.message)) {
+      result = await edit([]);
+    }
   }
   if (!result.ok) {
     return { ok: false, message: editFailureCopy(result.message), error: result.message };
