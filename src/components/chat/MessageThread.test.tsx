@@ -31,7 +31,6 @@ import {
   renderMessageBody,
   isVoiceOnly,
   keyOpensMenu,
-  lastSeenLabel,
   ABOUT_UNAVAILABLE_TOAST,
   aboutQuote,
   aboutReplyFor,
@@ -645,20 +644,6 @@ describe('threadRows', () => {
   });
 });
 
-describe('lastSeenLabel', () => {
-  it('buckets recent presence and renders an older last-seen on the workspace clock', () => {
-    const now = Date.parse('2026-09-23T12:00:00Z');
-    expect(lastSeenLabel(null, now, 'UTC')).toBe('Offline');
-    expect(lastSeenLabel(now - 30_000, now, 'UTC')).toBe('last seen just now');
-    expect(lastSeenLabel(now - 5 * 60_000, now, 'UTC')).toBe('last seen 5m ago');
-    expect(lastSeenLabel(now - 3 * 3_600_000, now, 'UTC')).toBe('last seen 3h ago');
-    const twoDaysAgo = Date.parse('2026-09-21T18:45:00Z');
-    expect(lastSeenLabel(twoDaysAgo, now, 'Asia/Kolkata')).toBe(
-      `last seen 1d ago at ${formatClockTime(twoDaysAgo, 'Asia/Kolkata')}`,
-    );
-  });
-});
-
 function findByChildren(root: ReactElement, text: string): ReactElement | null {
   let found: ReactElement | null = null;
   walk(root, (el) => {
@@ -994,32 +979,33 @@ describe('dmHeaderLine', () => {
   const base = {
     isGroup: false,
     peerTyping: false,
-    presence: { online: false, lastTimeMs: null, available: true },
     role: 'client',
     workspaceName: 'Northwind',
-    timeZone: 'UTC',
   };
+  const roleLine = `${roleLabel(base.role)} · ${base.workspaceName}`;
 
-  it('online keeps the role line; typing replaces it, then the role line returns', () => {
-    const online = { online: true, lastTimeMs: null, available: true };
-    const roleLine = `${roleLabel(base.role)} · ${base.workspaceName}`;
-    expect(dmHeaderLine({ ...base, presence: online })).toBe(roleLine);
-    expect(dmHeaderLine({ ...base, peerTyping: true, presence: online })).toBe(HEADER_TYPING);
-    expect(dmHeaderLine({ ...base, presence: online })).toBe(roleLine);
+  it('rests on "<role label> · <workspace>" whatever the peer presence (offline included)', () => {
+    expect(dmHeaderLine(base)).toBe(roleLine);
   });
 
-  it('never shows an "Online" or last-seen text while the peer is online', () => {
-    const online = { online: true, lastTimeMs: null, available: true };
-    expect(
-      dmHeaderLine({ ...base, role: null, workspaceName: undefined, presence: online }),
-    ).toBeNull();
+  it('typing replaces the role line, then the role line returns', () => {
+    expect(dmHeaderLine({ ...base, peerTyping: true })).toBe(HEADER_TYPING);
+    expect(dmHeaderLine(base)).toBe(roleLine);
   });
 
-  it('rests on "<role label> · <workspace>", labelled through roleLabel', () => {
-    expect(dmHeaderLine(base)).toBe(`${roleLabel(base.role)} · ${base.workspaceName}`);
-    expect(dmHeaderLine({ ...base, presence: undefined })).toBe(
-      `${roleLabel(base.role)} · ${base.workspaceName}`,
-    );
+  it('never carries presence or last-seen text in any state', () => {
+    const presenceCopy = /last seen|offline|online/i;
+    for (const isGroup of [false, true]) {
+      for (const peerTyping of [false, true]) {
+        for (const role of ['client', null]) {
+          for (const workspaceName of ['Northwind', undefined]) {
+            const line = dmHeaderLine({ isGroup, peerTyping, role, workspaceName });
+            expect(line ?? '').not.toMatch(presenceCopy);
+          }
+        }
+      }
+    }
+    expect(dmHeaderLine({ ...base, role: null, workspaceName: undefined })).toBeNull();
   });
 
   it('shows the workspace name alone when the role is null', () => {

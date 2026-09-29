@@ -235,7 +235,7 @@ interface MessageThreadProps {
   typingUserIds: string[];
   /** Forwarded to the composer so each keystroke broadcasts a typing signal. */
   onTyping?: () => void;
-  /** DM peer presence; absent for groups. Renders a header status line when available. */
+  /** DM peer presence; absent for groups. Drives only the online dot on the header photo. */
   presence?: { online: boolean; lastTimeMs: number | null; available: boolean };
   /** True only for DM threads; gates seen ticks on own bubbles. */
   showTicks?: boolean;
@@ -511,53 +511,29 @@ export interface RowSelection {
   onToggle: () => void;
 }
 
-/**
- * Coarse "last seen" label from a timestamp, bucketed minutes/hours/days. Null
- * (no known last-seen) reads as a plain 'Offline'. Computed at render against a
- * supplied now so there is no timer or interval driving the header. Beyond a
- * day it shows the clock time of the last visit (device hour cycle, workspace zone).
- */
-export function lastSeenLabel(lastTimeMs: number | null, nowMs: number, timeZone: string): string {
-  if (lastTimeMs === null) return 'Offline';
-  const mins = Math.floor((nowMs - lastTimeMs) / 60000);
-  if (mins < 1) return 'last seen just now';
-  if (mins < 60) return `last seen ${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `last seen ${hours}h ago`;
-  return `last seen ${Math.floor(hours / 24)}d ago at ${formatClockTime(lastTimeMs, timeZone)}`;
-}
-
 /** A DM header's second line while the peer is typing. */
 export const HEADER_TYPING = 'typing…';
 
 /**
- * The DM header's second line, in priority order: 'typing…' while the peer
- * types, else "<role label> · <workspace>" (the workspace alone when the role is
- * unknown). Online shows as the dot on the header photo, not as text. Without a
- * workspace name it falls back to the role alone, then (offline only) the
- * last-seen line. Groups keep no second line.
+ * The DM header's second line: 'typing…' while the peer types, else
+ * "<role label> · <workspace>" (the workspace alone when the role is unknown,
+ * the role alone without a workspace name). Online shows only as the dot on the
+ * header photo; there is never presence or last-seen text. Groups keep no
+ * second line.
  */
 export function dmHeaderLine(input: {
   isGroup: boolean;
   peerTyping: boolean;
-  presence: { online: boolean; lastTimeMs: number | null; available: boolean } | undefined;
   role: string | null;
   workspaceName: string | undefined;
-  timeZone: string;
-  nowMs?: number;
 }): string | null {
   if (input.isGroup) return null;
   if (input.peerTyping) return HEADER_TYPING;
-  const presence = input.presence?.available === true ? input.presence : undefined;
   const role = input.role !== null ? roleLabel(input.role) : null;
   if (input.workspaceName !== undefined) {
     return role !== null ? `${role} · ${input.workspaceName}` : input.workspaceName;
   }
-  if (role !== null) return role;
-  if (presence !== undefined && !presence.online) {
-    return lastSeenLabel(presence.lastTimeMs, input.nowMs ?? Date.now(), input.timeZone);
-  }
-  return null;
+  return role;
 }
 
 /**
@@ -2733,21 +2709,17 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const headerLine = dmHeaderLine({
     isGroup: props.isGroup === true,
     peerTyping: props.typingUserIds.length > 0,
-    presence: props.presence,
     role: props.role ?? null,
     workspaceName: props.subtitle,
-    timeZone: props.timeZone,
   });
   const canOpenContact = props.isGroup !== true && props.channelId !== undefined;
   // The Contact sheet's role line is the header's resting line: never typing,
-  // never presence, so it reads "role · workspace" from the same source.
+  // so it reads "role · workspace" from the same source.
   const contactRoleLine = dmHeaderLine({
     isGroup: false,
     peerTyping: false,
-    presence: undefined,
     role: props.role ?? null,
     workspaceName: props.subtitle,
-    timeZone: props.timeZone,
   });
   const jumpTo = (id: string): void =>
     setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
