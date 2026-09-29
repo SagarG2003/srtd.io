@@ -310,15 +310,17 @@ describe('R2: catch-up rechecks loaded rows a missed delete or edit can touch', 
       msg('live-only', 1000, { provisionalTime: true }),
     ];
     const load = vi.fn(ok([]));
-    await recheckLoaded(load, list, NOW);
+    await recheckLoaded(load, list, NOW, 'visible');
     expect(load).toHaveBeenCalledOnce();
     expect(load.mock.calls[0]?.[0]).toEqual(['recent', 'edge']);
   });
 
   it('no read when no loaded row qualifies', () => {
     const load = vi.fn(ok([]));
-    expect(recheckLoaded(load, [msg('old', REVALIDATE_WINDOW_MS + 60_000)], NOW)).toBeNull();
-    expect(recheckLoaded(load, [], NOW)).toBeNull();
+    expect(
+      recheckLoaded(load, [msg('old', REVALIDATE_WINDOW_MS + 60_000)], NOW, 'connected'),
+    ).toBeNull();
+    expect(recheckLoaded(load, [], NOW, 'connected')).toBeNull();
     expect(load).not.toHaveBeenCalled();
   });
 
@@ -340,6 +342,29 @@ describe('R2: catch-up rechecks loaded rows a missed delete or edit can touch', 
     const reportDeleted = vi.fn();
     if (applied.deleted.length > 0) reportDeleted('c', applied.deleted);
     expect(reportDeleted).toHaveBeenCalledExactlyOnceWith('c', ['a']);
+  });
+
+  it('S2: no recheck on the interval; recheck on connected and on foreground', () => {
+    const list = [msg('recent', 5 * 60_000)];
+    const load = vi.fn(ok([]));
+    expect(recheckLoaded(load, list, NOW, 'interval')).toBeNull();
+    expect(load).not.toHaveBeenCalled();
+    for (const reason of ['connected', 'visible', 'online'] as const) {
+      expect(recheckLoaded(load, list, NOW, reason)).not.toBeNull();
+    }
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('S1: an older or equal edited_at is ignored; a newer one applies', () => {
+    const list = [msg('b', 60_000, { body: 'second', editedAt: '2026-09-29T11:58:30.500+00:00' })];
+    const older = dbRow('b', { body: 'first', edited_at: '2026-09-29T11:58:10+00:00' });
+    expect(applyRevalidatedRows(list, [older], 'c').messages).toBe(list);
+    const equal = dbRow('b', { body: 'stale', edited_at: '2026-09-29T11:58:30.500+00:00' });
+    expect(applyRevalidatedRows(list, [equal], 'c').messages).toBe(list);
+    const newer = dbRow('b', { body: 'third', edited_at: '2026-09-29T11:59:00+00:00' });
+    const b = applyRevalidatedRows(list, [newer], 'c').messages.find((m) => m.id === 'b');
+    expect(b?.body).toBe('third');
+    expect(b?.editedAt).toBe('2026-09-29T11:59:00+00:00');
   });
 
   it('nothing changed on record: the same list, nothing reported', () => {

@@ -7,7 +7,7 @@
 // (see PostActionSheet), exactly as the Chat page scopes its own connection.
 // The list renders from Postgres whatever the connection state (no
 // connection-gated UI); while the read is in flight, skeleton rows hold the
-// final row height.
+// final row height, and the body keeps one fixed height in every state.
 
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
@@ -101,8 +101,26 @@ export function ConversationPicker({
   return conversationPickerBody(load, sendingId, (channel) => void send(channel));
 }
 
-/** Skeleton rows while the list loads. */
-export const CONVERSATION_SKELETON_ROWS = 4;
+/**
+ * The sheet body's fixed height in every state (loading, list, empty, error),
+ * so nothing shifts when the read settles; a longer list scrolls inside it.
+ * Keep in step with BODY_BOX.
+ */
+export const CONVERSATION_BODY_PX = 288;
+
+/** One ActionRow's box: py-2 plus the text-sm and text-xs snug line boxes. */
+const CONVERSATION_ROW_PX = 16 + 14 * 1.375 + 12 * 1.375;
+/** The gap-1 between rows. */
+const CONVERSATION_ROW_GAP_PX = 4;
+
+/** Skeleton rows while the list loads: enough to fill the fixed body. */
+export const CONVERSATION_SKELETON_ROWS = Math.ceil(
+  (CONVERSATION_BODY_PX + CONVERSATION_ROW_GAP_PX) /
+    (CONVERSATION_ROW_PX + CONVERSATION_ROW_GAP_PX),
+);
+
+/** The fixed body box shared by all four states. */
+const BODY_BOX = 'h-[288px] overflow-y-auto';
 
 /**
  * One placeholder with an ActionRow's box (padding, min height, the label and
@@ -139,37 +157,46 @@ export function conversationPickerBody(
 ): ReactElement {
   if (load.status === 'loading') {
     return (
-      <div className="flex flex-col gap-1" aria-busy="true" aria-label="Loading conversations">
-        {Array.from({ length: CONVERSATION_SKELETON_ROWS }).map((_, i) => (
-          <ConversationSkeletonRow key={i} />
-        ))}
+      <div className={BODY_BOX}>
+        <div
+          role="status"
+          aria-busy="true"
+          aria-label="Loading conversations"
+          className="flex h-full flex-col gap-1 overflow-hidden"
+        >
+          {Array.from({ length: CONVERSATION_SKELETON_ROWS }).map((_, i) => (
+            <ConversationSkeletonRow key={i} />
+          ))}
+        </div>
       </div>
     );
   }
 
-  if (load.status === 'error') {
+  if (load.status === 'error' || load.channels.length === 0) {
     return (
-      <p className="px-3 py-6 text-center text-sm text-fg-3">
-        Could not load conversations. Please try again.
-      </p>
+      <div className={BODY_BOX}>
+        <p className="flex h-full items-center justify-center px-3 text-center text-sm text-fg-3">
+          {load.status === 'error'
+            ? 'Could not load conversations. Please try again.'
+            : 'No conversations yet'}
+        </p>
+      </div>
     );
   }
 
-  if (load.channels.length === 0) {
-    return <p className="px-3 py-6 text-center text-sm text-fg-3">No conversations yet</p>;
-  }
-
   return (
-    <div className="flex flex-col gap-1">
-      {load.channels.map((channel) => (
-        <ActionRow
-          key={channel.channelId}
-          icon={<IconChat size={18} />}
-          label={channel.title}
-          sub={sendingId === channel.channelId ? 'Sending' : channelTypeLabel(channel)}
-          onClick={() => onSend(channel)}
-        />
-      ))}
+    <div className={BODY_BOX}>
+      <div className="flex flex-col gap-1">
+        {load.channels.map((channel) => (
+          <ActionRow
+            key={channel.channelId}
+            icon={<IconChat size={18} />}
+            label={channel.title}
+            sub={sendingId === channel.channelId ? 'Sending' : channelTypeLabel(channel)}
+            onClick={() => onSend(channel)}
+          />
+        ))}
+      </div>
     </div>
   );
 }

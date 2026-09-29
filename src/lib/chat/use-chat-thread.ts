@@ -29,7 +29,7 @@ import {
   loadPeerReadCursor,
   loadReactions,
 } from '@/lib/chat/history';
-import { browserCatchUpTriggers, catchUpRows } from '@/lib/chat/catch-up';
+import { browserCatchUpTriggers, catchUpRows, type CatchUpReason } from '@/lib/chat/catch-up';
 import { liveVerifierFor, type LiveVerifier } from '@/lib/chat/live-verify';
 import type { ChannelOutbox, OutboxEntry } from '@/lib/chat/chat-store';
 import {
@@ -200,13 +200,17 @@ export function revalidationIds(messages: readonly ThreadMessage[], nowMs: numbe
 
 /**
  * The catch-up recheck: one batched read of the revalidation ids, or null (no
- * read) when none qualify.
+ * read) when none qualify. Only on a 'connected' transition or a foreground
+ * (visible, online) trigger, never on the periodic interval, so an open chat
+ * stays at one read per interval.
  */
 export function recheckLoaded(
   load: (ids: readonly string[]) => Promise<Result<ChatMessageRow[]>>,
   messages: readonly ThreadMessage[],
   nowMs: number,
+  reason: CatchUpReason,
 ): Promise<Result<ChatMessageRow[]>> | null {
+  if (reason === 'interval') return null;
   const ids = revalidationIds(messages, nowMs);
   return ids.length > 0 ? load(ids) : null;
 }
@@ -490,70 +494,76 @@ export function useChatThread(params: {
   // Catch-up from Postgres, never gated on the Agora state: rows newer than the
   // newest recorded message (paging past the 200 cap), or the latest page when
   // nothing is recorded yet, plus one batched re-read of loaded rows from the
-  // last 30 min (a delete or edit signal missed on them), then the unread
+  // last 30 min (a delete or edit signal missed on them; on 'connected' and
+  // the foreground triggers only, never the interval), then the unread
   // refresh. One run at a time.
-  const catchUp = useCallback((): void => {
-    if (catchingUpRef.current) return;
-    const forChannel = channelRef.current;
-    if (forChannel === null) {
-      onCaughtUpRef.current?.();
-      return;
-    }
-    catchingUpRef.current = true;
-    const cursor = newestCursor(messagesRef.current);
-    // Loaded rows a missed delete or edit can still touch: one batched re-read.
-    const recheck = recheckLoaded(
-      (ids) => loadMessagesByIds(db, ids),
-      messagesRef.current,
-      Date.now(),
-    );
-    void (async (): Promise<void> => {
-      try {
-        const [outcome, rechecked] = await Promise.all([
-          catchUpRows(
-            {
-              loadLatest: () => loadLatestMessages(db, forChannel),
-              loadNewer: (from) => loadNewerMessages(db, forChannel, from),
-            },
-            cursor,
-          ),
-          recheck,
-        ]);
-        if (channelRef.current !== forChannel) return;
-        if (rechecked !== null && !rechecked.ok) {
-          logger.warn('chat: catch-up recheck failed', {
-            channel_id: forChannel,
-            error: rechecked.error.message,
-          });
-        }
-        if (rechecked !== null && rechecked.ok) {
-          const rows = rechecked.data;
-          const { deleted } = applyRevalidatedRows(messagesRef.current, rows, forChannel);
-          setMessages((prev) => applyRevalidatedRows(prev, rows, forChannel).messages);
-          if (deleted.length > 0) reportDeleted(forChannel, deleted);
-        }
-        if (!outcome.ok) {
-          logger.warn('chat: catch-up load failed', {
-            channel_id: forChannel,
-            error: outcome.error,
-          });
-        }
-        const fetched = outcome.rows.map((row) => rowToThreadMessage(row, currentUserId));
-        if (fetched.length > 0) foldRows(fetched, forChannel);
-        if (outcome.ok && outcome.latestPage !== undefined) setHasMore(outcome.latestPage.hasMore);
-      } finally {
-        catchingUpRef.current = false;
+  const catchUp = useCallback(
+    (reason: CatchUpReason): void => {
+      if (catchingUpRef.current) return;
+      const forChannel = channelRef.current;
+      if (forChannel === null) {
         onCaughtUpRef.current?.();
+        return;
       }
-    })();
-  }, [db, currentUserId, foldRows, reportDeleted]);
+      catchingUpRef.current = true;
+      const cursor = newestCursor(messagesRef.current);
+      // Loaded rows a missed delete or edit can still touch: one batched re-read.
+      const recheck = recheckLoaded(
+        (ids) => loadMessagesByIds(db, ids),
+        messagesRef.current,
+        Date.now(),
+        reason,
+      );
+      void (async (): Promise<void> => {
+        try {
+          const [outcome, rechecked] = await Promise.all([
+            catchUpRows(
+              {
+                loadLatest: () => loadLatestMessages(db, forChannel),
+                loadNewer: (from) => loadNewerMessages(db, forChannel, from),
+              },
+              cursor,
+            ),
+            recheck,
+          ]);
+          if (channelRef.current !== forChannel) return;
+          if (rechecked !== null && !rechecked.ok) {
+            logger.warn('chat: catch-up recheck failed', {
+              channel_id: forChannel,
+              error: rechecked.error.message,
+            });
+          }
+          if (rechecked !== null && rechecked.ok) {
+            const rows = rechecked.data;
+            const { deleted } = applyRevalidatedRows(messagesRef.current, rows, forChannel);
+            setMessages((prev) => applyRevalidatedRows(prev, rows, forChannel).messages);
+            if (deleted.length > 0) reportDeleted(forChannel, deleted);
+          }
+          if (!outcome.ok) {
+            logger.warn('chat: catch-up load failed', {
+              channel_id: forChannel,
+              error: outcome.error,
+            });
+          }
+          const fetched = outcome.rows.map((row) => rowToThreadMessage(row, currentUserId));
+          if (fetched.length > 0) foldRows(fetched, forChannel);
+          if (outcome.ok && outcome.latestPage !== undefined)
+            setHasMore(outcome.latestPage.hasMore);
+        } finally {
+          catchingUpRef.current = false;
+          onCaughtUpRef.current?.();
+        }
+      })();
+    },
+    [db, currentUserId, foldRows, reportDeleted],
+  );
 
   const catchUpRef = useRef(catchUp);
   catchUpRef.current = catchUp;
 
   // Tab visible, browser online, and every 60s while visible (cleared while
   // hidden and on unmount).
-  useEffect(() => browserCatchUpTriggers(() => catchUpRef.current()), []);
+  useEffect(() => browserCatchUpTriggers((reason) => catchUpRef.current(reason)), []);
 
   // Every transition to 'connected'.
   const previousStatusRef = useRef<ChatStatus>(status);
@@ -561,7 +571,7 @@ export function useChatThread(params: {
     const previous = previousStatusRef.current;
     previousStatusRef.current = status;
     if (status !== 'connected' || previous === 'connected') return;
-    catchUpRef.current();
+    catchUpRef.current('connected');
   }, [status]);
 
   const loadOlder = useCallback((): void => {

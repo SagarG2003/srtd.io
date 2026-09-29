@@ -8,6 +8,7 @@ import {
   EmojiSearchField,
   EmojiTabs,
   EmojiVirtualGrid,
+  activeGroupAfterQuery,
   activeGroupAfterScroll,
   createEmojiSearch,
   emojiRows,
@@ -328,6 +329,24 @@ describe('R4: a tab tap while searching', () => {
         current: 'Flags',
       }),
     ).toBe('Smileys & Emotion');
+  });
+});
+
+describe('R4b: clearing the query by typing', () => {
+  it('resets the highlighted tab to the first group', () => {
+    const first = emojiSections()[0]?.group ?? null;
+    // Scrolled to Flags, then typed a query: the highlight stays while searching.
+    expect(activeGroupAfterQuery({ query: 'cat', pendingTab: null, current: 'Flags', first })).toBe(
+      'Flags',
+    );
+    // Backspaced to empty: the grid is at the top, so the first group reads selected.
+    expect(activeGroupAfterQuery({ query: '', pendingTab: null, current: 'Flags', first })).toBe(
+      first,
+    );
+    // A tab tap that cleared the query keeps the tapped group.
+    expect(
+      activeGroupAfterQuery({ query: '', pendingTab: 'Travel & Places', current: 'Flags', first }),
+    ).toBe('Travel & Places');
   });
 });
 

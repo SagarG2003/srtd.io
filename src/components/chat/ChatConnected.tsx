@@ -29,6 +29,7 @@ import { ChannelList } from '@/components/chat/ChannelList';
 import { MessageThread } from '@/components/chat/MessageThread';
 import { NewChatSheet } from '@/components/chat/NewChatSheet';
 import { GroupInfoSheet } from '@/components/chat/GroupInfoSheet';
+import { leaveSelectionThen } from '@/lib/chat/forward';
 
 interface ChatConnectedProps {
   client: ChatConnection | null;
@@ -163,7 +164,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const onDmReady = useCallback(
     (channelId: string) => {
       setNewChatOpen(false);
-      void refreshChannels(channelId);
+      // A thread selecting messages exits that first (history.back()).
+      leaveSelectionThen(() => void refreshChannels(channelId));
     },
     [refreshChannels],
   );

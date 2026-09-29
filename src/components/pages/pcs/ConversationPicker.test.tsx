@@ -13,6 +13,7 @@ vi.mock('@/lib/chat', () => ({
 }));
 
 import {
+  CONVERSATION_BODY_PX,
   CONVERSATION_SKELETON_ROWS,
   ConversationPicker,
   conversationPickerBody,
@@ -85,8 +86,28 @@ describe('R12: the conversation picker is never connection-gated', () => {
   it('a tap sends to that conversation', () => {
     const onSend = vi.fn();
     const body = conversationPickerBody(READY, null, onSend);
-    const children = (body.props as { children: { props: { onClick: () => void } }[] }).children;
+    const list = (body.props as { children: { props: unknown } }).children;
+    const children = (list.props as { children: { props: { onClick: () => void } }[] }).children;
     children[1]?.props.onClick();
     expect(onSend).toHaveBeenCalledWith(READY.channels[1]);
+  });
+
+  it('the body keeps one fixed height in all four states; skeleton rows fill it', () => {
+    const states = [
+      conversationPickerBody({ status: 'loading' }, null, vi.fn()),
+      conversationPickerBody(READY, null, vi.fn()),
+      conversationPickerBody({ status: 'ready', channels: [] }, null, vi.fn()),
+      conversationPickerBody({ status: 'error' }, null, vi.fn()),
+    ];
+    const boxes = states.map((el) => (el.props as { className: string }).className);
+    for (const box of boxes) expect(box).toBe(`h-[${CONVERSATION_BODY_PX}px] overflow-y-auto`);
+    // 51.75px rows with a 4px gap cover the whole body.
+    expect(
+      CONVERSATION_SKELETON_ROWS * 51.75 + (CONVERSATION_SKELETON_ROWS - 1) * 4,
+    ).toBeGreaterThanOrEqual(CONVERSATION_BODY_PX);
+    const loading = renderToStaticMarkup(
+      conversationPickerBody({ status: 'loading' }, null, vi.fn()),
+    );
+    expect(loading).toMatch(/role="status"[^>]*aria-label="Loading conversations"/);
   });
 });

@@ -186,6 +186,21 @@ export function activeGroupAfterScroll(params: {
   return groupAtRow(params.rows, Math.floor(params.scrollTop / EMOJI_ROW_PX)) ?? params.current;
 }
 
+/**
+ * The highlighted tab after the query changes: the tapped group when a tab tap
+ * cleared the query, the first group when the query was cleared by typing
+ * (the grid is back at the top), else unchanged. Pure.
+ */
+export function activeGroupAfterQuery(params: {
+  query: string;
+  pendingTab: string | null;
+  current: string | null;
+  first: string | null;
+}): string | null {
+  if (params.pendingTab !== null) return params.pendingTab;
+  return params.query.trim() === '' ? params.first : params.current;
+}
+
 /** Glyph columns that fit a grid this wide (44px each, 4px side padding). Pure. */
 export function gridColumns(width: number): number {
   return Math.max(1, Math.floor((width - 8) / EMOJI_ROW_PX));
@@ -430,11 +445,20 @@ export function EmojiPickerPanel(props: {
   };
 
   // A new query starts the list from the top, unless a tab tap cleared it:
-  // then it lands on that group (after the grouped rows are in the DOM).
+  // then it lands on that group (after the grouped rows are in the DOM). A
+  // query cleared by typing highlights the first group again.
   useLayoutEffect(() => {
     const pending = pendingTabRef.current;
     pendingTabRef.current = null;
     setFocusRow(null);
+    setActiveGroup((current) =>
+      activeGroupAfterQuery({
+        query,
+        pendingTab: pending,
+        current,
+        first: SECTIONS[0]?.group ?? null,
+      }),
+    );
     scrollTo(pending !== null ? tabJumpTop(pending, headingRow) : 0);
     // headingRow is read for the pending tab only; the reset runs per query.
     // eslint-disable-next-line react-hooks/exhaustive-deps

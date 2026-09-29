@@ -3030,6 +3030,27 @@ describe('R6: selection history, switch, bound and double back', () => {
     expect(run).toHaveBeenCalledOnce();
   });
 
+  it('S3: New chat while selecting exits first; the pending switch survives dispose()', () => {
+    resetSelectionHistory();
+    const win = queuedWindow([HOME, CHAT]);
+    const order: string[] = [];
+    const entry = enterSelectionHistory(win, () => order.push('exit'));
+    const back = vi.spyOn(win.history, 'back');
+    // ChannelList's New chat and ChatConnected's onDmReady both go through this.
+    leaveSelectionThen(() => {
+      order.push('open');
+      win.replace(OTHER);
+    });
+    expect(back).toHaveBeenCalledOnce();
+    expect(order).toEqual([]);
+    // The thread unmounts while history.back() is still pending.
+    entry.dispose();
+    expect(order).toEqual([]);
+    win.flush();
+    expect(order).toEqual(['open']);
+    expect(win.url()).toBe(OTHER);
+  });
+
   it('buried markers are bounded to the most recent 20; one guard listener', () => {
     resetSelectionHistory();
     const win = queuedWindow([HOME, CHAT]);

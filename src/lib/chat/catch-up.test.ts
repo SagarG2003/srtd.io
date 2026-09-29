@@ -110,6 +110,7 @@ describe('startCatchUpTriggers', () => {
 
     t.online();
     expect(t.run).toHaveBeenCalledTimes(3);
+    expect(t.run.mock.calls.map((c) => c[0])).toEqual(['interval', 'visible', 'online']);
   });
 
   it('clears the interval on teardown and starts none while hidden', () => {

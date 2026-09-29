@@ -1813,7 +1813,8 @@ function MessageRow(props: {
       rowHold.pointerDown();
       // A press on a body link never arms the long-press menu; the swipe still
       // only starts past 8px, so a tap under that is the link's. In selection
-      // mode a hold anywhere on the row toggles it, links included.
+      // mode the row's own gesture toggles it (links included); the hold here
+      // never opens the menu.
       if (selecting || !isLinkTarget(e.target)) handlers.onPointerDown(e);
       swipe.handlers.onPointerDown(e);
     },
@@ -2923,7 +2924,8 @@ export function buriedMarkerCount(): number {
  * the marker never lingers, and only once however often it is pressed;
  * dispose() pops it too when selection ended some other way, and a marker
  * buried under a navigation is skipped if ever landed on. While open, a
- * channel switch (leaveSelectionThen) goes through cancel() first.
+ * channel switch (leaveSelectionThen) goes through cancel() first; a dispose()
+ * while that back() is pending still runs the switch once the pop lands.
  */
 export function enterSelectionHistory(
   win: SelectionHistoryWindow,
@@ -2985,9 +2987,20 @@ export function enterSelectionHistory(
       win.removeEventListener('popstate', onPop);
       if (!active) return;
       active = false;
+      const pending = afterExit;
       afterExit = null;
       clearSelectionLeave(leave);
-      if (leaving) return;
+      if (leaving) {
+        // A switch waiting on history.back() still runs once that pop lands.
+        if (pending !== null) {
+          const onLanded = (): void => {
+            win.removeEventListener('popstate', onLanded);
+            pending();
+          };
+          win.addEventListener('popstate', onLanded);
+        }
+        return;
+      }
       if (onTop()) win.history.back();
       else buryMarker(win, marker);
     },

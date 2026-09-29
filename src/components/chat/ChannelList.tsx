@@ -627,6 +627,8 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
   const hasChannels = ready && props.channels.some((c) => !isHidden(c.channelId));
   const select = ready ? props.select : undefined;
   const selecting = select?.active === true ? select : undefined;
+  // New chat from a thread selecting messages exits that first (history.back()).
+  const newChat = (): void => leaveSelectionThen(props.onNewChat);
   return (
     <div className="flex h-full flex-col">
       {selecting !== undefined ? (
@@ -652,7 +654,7 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
                     size="lg"
                     aria-label="New chat"
                     className="w-11 px-0"
-                    onClick={props.onNewChat}
+                    onClick={newChat}
                   >
                     <IconPlus size={18} />
                   </Button>
@@ -672,7 +674,7 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
                 hasChannels: hasChannels || props.search.trim() !== '',
                 selectedChannelId: props.selectedChannelId,
                 onSelect: props.onSelect,
-                onNewChat: props.onNewChat,
+                onNewChat: newChat,
                 summaryFor,
                 ...(props.draftFor !== undefined ? { draftFor: props.draftFor } : {}),
                 ...(selecting !== undefined
