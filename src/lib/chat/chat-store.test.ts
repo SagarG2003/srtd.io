@@ -15,8 +15,8 @@ import {
   applyChannelPreviews,
   applyPreviews,
   applyServerClock,
+  CLOCK_SAMPLER_LIMIT,
   createClockSampler,
-  outboxIds,
   channelsShowingDeleted,
   stripDeletedQuotes,
   stripPersistedQuotes,
@@ -717,22 +717,37 @@ describe('D3: server clock offset', () => {
   it('a fresh first attempt samples the clock; a retry and an outbox replay never do', () => {
     let device = Date.parse('2026-09-22T10:00:00.000Z');
     const sampler = createClockSampler(() => device);
-    sampler.replayed(
-      outboxIds({ c1: [{ id: 'queued' } as never], c2: [{ id: 'queued-2' } as never] }),
-    );
     let state = initialState();
-    // Replayed: the ack carries the original created_at, so it is never applied.
+    // Replayed from storage: never marked fresh, so its ack is never applied.
     expect(sampler.begin('queued')).toBeNull();
     expect(state.serverClockOffsetMs).toBe(0);
     // Fresh: applied.
+    sampler.fresh('fresh');
     const fresh = sampler.begin('fresh');
     expect(fresh).toBe(device);
+    sampler.settled('fresh');
     state = applyServerClock(state, '2026-09-22T10:00:03.000Z', fresh as number);
     expect(state.serverClockOffsetMs).toBe(3000);
     // A retry of the fresh id hours later: the old created_at must not move it.
     device += 3 * 60 * 60 * 1000;
     expect(sampler.begin('fresh')).toBeNull();
-    expect(sampler.begin('queued-2')).toBeNull();
+  });
+
+  it('R11: an id leaves the set on its first ack and on its first failure; the set is bounded', () => {
+    const sampler = createClockSampler(() => 1);
+    sampler.fresh('acked');
+    sampler.fresh('failed');
+    expect(sampler.size()).toBe(2);
+    expect(sampler.begin('acked')).toBe(1);
+    sampler.settled('acked');
+    expect(sampler.size()).toBe(1);
+    expect(sampler.begin('failed')).toBe(1);
+    sampler.settled('failed');
+    expect(sampler.size()).toBe(0);
+    // The retry after the failure does not sample.
+    expect(sampler.begin('failed')).toBeNull();
+    for (let i = 0; i < CLOCK_SAMPLER_LIMIT + 50; i += 1) sampler.fresh(`never-attempted-${i}`);
+    expect(sampler.size()).toBe(CLOCK_SAMPLER_LIMIT);
   });
 
   it('survives a reload of the list', () => {

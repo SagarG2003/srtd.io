@@ -1,5 +1,5 @@
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   EMOJI_NO_RESULTS,
   EMOJI_ROW_BUFFER,
@@ -8,16 +8,30 @@ import {
   EmojiSearchField,
   EmojiTabs,
   EmojiVirtualGrid,
+  activeGroupAfterScroll,
+  createEmojiSearch,
   emojiRows,
   emojiSections,
   groupAtRow,
   groupRowIndex,
   gridColumns,
+  gridRows,
+  renderedRowIndices,
   searchEmoji,
+  tabJumpTop,
   visibleRowRange,
 } from '@/components/chat/EmojiPicker';
 import { EMOJI, EMOJI_GROUPS } from '@/components/chat/emoji-data';
-import { popoverPosition } from '@/components/chat/MessageActionMenu';
+import {
+  EMOJI_LOAD_FAILED,
+  EmojiPickerLoadFailed,
+  loadEmojiPicker,
+  pickerBodyState,
+  popoverPosition,
+  resetEmojiPickerLoad,
+  type EmojiPickerModule,
+} from '@/components/chat/MessageActionMenu';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -102,9 +116,8 @@ describe('EmojiPicker parts', () => {
   it('search by name shows only the matches; a pick hands the glyph back once', () => {
     const onPick = vi.fn();
     const grid = EmojiGrid({
-      query: 'unicorn',
+      rows: gridRows('unicorn', 8, searchEmoji, emojiRows(emojiSections(), 8)),
       onPick,
-      columns: 8,
       scrollTop: 0,
       viewportHeight: 400,
     });
@@ -118,9 +131,8 @@ describe('EmojiPicker parts', () => {
 
   it('no match: the empty line', () => {
     const grid = EmojiGrid({
-      query: 'zzqx',
+      rows: gridRows('zzqx', 8, searchEmoji, emojiRows(emojiSections(), 8)),
       onPick: vi.fn(),
-      columns: 8,
       scrollTop: 0,
       viewportHeight: 400,
     });
@@ -248,5 +260,109 @@ describe('F15: the emoji data generator is typechecked and linted', () => {
     const eslint = readFileSync(join(repo, 'eslint.config.js'), 'utf8');
     expect(eslint).toContain("files: ['**/*.{ts,tsx}']");
     expect(eslint).not.toMatch(/ignores:[^\]]*scripts/);
+  });
+});
+
+describe('R3: the picker chunk fails to load', () => {
+  afterEach(() => resetEmojiPickerLoad());
+
+  it('shows the copy and a 44x44 Try again, never the raw error, and is not busy', () => {
+    const onRetry = vi.fn();
+    const html = renderToStaticMarkup(<EmojiPickerLoadFailed onRetry={onRetry} />);
+    // The markup escapes the apostrophe; the line itself is the fixed copy.
+    const line = all(EmojiPickerLoadFailed({ onRetry })).find((e) => e.type === 'p');
+    expect(line?.props.children).toBe(EMOJI_LOAD_FAILED);
+    expect(EMOJI_LOAD_FAILED).toBe("Couldn't load emoji");
+    expect(html).toContain('Try again');
+    expect(html).toMatch(/h-11[^"]*min-w-\[44px\]|min-w-\[44px\][^"]*h-11/);
+    expect(html).not.toContain('chunk');
+    const el = EmojiPickerLoadFailed({ onRetry });
+    const retry = all(el).find((e) => e.props['data-emoji-retry'] !== undefined);
+    (retry?.props.onClick as () => void)();
+    expect(onRetry).toHaveBeenCalledOnce();
+    expect(pickerBodyState(null, true)).toBe('failed');
+    expect(pickerBodyState(null, false)).toBe('loading');
+  });
+
+  it('Try again re-runs the import; its success fills the grid', async () => {
+    const failing = vi.fn(() => Promise.reject(new Error('chunk 404')));
+    await expect(loadEmojiPicker(failing)).rejects.toThrow();
+    const module = { EmojiPickerPanel: () => null } as unknown as EmojiPickerModule;
+    const working = vi.fn(() => Promise.resolve(module));
+    const loaded = await loadEmojiPicker(working);
+    expect(working).toHaveBeenCalledOnce();
+    expect(pickerBodyState(loaded, false)).toBe('ready');
+  });
+});
+
+describe('R4: a tab tap while searching', () => {
+  const rows = emojiRows(emojiSections(), 8);
+  const index = groupRowIndex(rows);
+
+  it('lands on the tapped group with its tab highlighted', () => {
+    const top = tabJumpTop('Flags', index);
+    expect(top).toBe((index.get('Flags') ?? -1) * EMOJI_ROW_PX);
+    // The jump's own scroll (even clamped at the end of the list) keeps the tapped tab.
+    expect(
+      activeGroupAfterScroll({
+        rows,
+        scrollTop: top - 3 * EMOJI_ROW_PX,
+        searching: false,
+        jumpTop: top - 3 * EMOJI_ROW_PX,
+        current: 'Flags',
+      }),
+    ).toBe('Flags');
+    // With the query cleared the tab reads selected.
+    const tabs = all(EmojiTabs({ query: '', activeGroup: 'Flags', onTab: vi.fn() })).filter(
+      (e) => e.props.role === 'tab',
+    );
+    const selected = tabs.filter((t) => t.props['aria-selected'] === true);
+    expect(selected.map((t) => t.props['aria-label'])).toEqual(['Flags']);
+    // A later user scroll follows the group at the top again.
+    expect(
+      activeGroupAfterScroll({
+        rows,
+        scrollTop: 0,
+        searching: false,
+        jumpTop: top,
+        current: 'Flags',
+      }),
+    ).toBe('Smileys & Emotion');
+  });
+});
+
+describe('R5: picker perf and focus', () => {
+  it('search is memoized per query: scroll renders never re-run it', () => {
+    const spy = vi.fn(searchEmoji);
+    const search = createEmojiSearch(spy);
+    const sections = emojiRows(emojiSections(), 8);
+    const first = gridRows('cat', 8, search, sections);
+    gridRows('cat', 8, search, sections);
+    gridRows('Cat ', 8, search, sections);
+    expect(spy).toHaveBeenCalledOnce();
+    expect(search('cat')).toBe(search('cat'));
+    gridRows('dog', 8, search, sections);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(first).not.toBeNull();
+  });
+
+  it('the focused row stays rendered after it scrolls out of the window', () => {
+    const rows = emojiRows(emojiSections(), 8);
+    expect(renderedRowIndices({ start: 50, end: 60 }, 2, rows.length)[0]).toBe(2);
+    expect(renderedRowIndices({ start: 50, end: 60 }, 99, rows.length).at(-1)).toBe(99);
+    expect(renderedRowIndices({ start: 50, end: 60 }, 55, rows.length)).toHaveLength(10);
+    expect(renderedRowIndices({ start: 50, end: 60 }, null, rows.length)).toHaveLength(10);
+    const grid = EmojiVirtualGrid({
+      rows,
+      scrollTop: 100 * EMOJI_ROW_PX,
+      viewportHeight: 400,
+      onPick: vi.fn(),
+      keepRow: 1,
+    });
+    const rendered = all(grid)
+      .filter((e) => e.props['data-emoji-row'] !== undefined)
+      .map((e) => e.props['data-emoji-row']);
+    expect(rendered).toContain(1);
+    expect(rendered).toContain(100);
   });
 });

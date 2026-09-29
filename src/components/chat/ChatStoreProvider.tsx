@@ -40,6 +40,7 @@ import { Avatar } from '@/components/ui/Avatar';
 import { listChannelClears, listChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
 import { SIGNOUT_EVENT } from '@/lib/events';
 import { stripDeletedReplies } from '@/lib/chat/drafts';
+import { leaveSelectionThen } from '@/lib/chat/forward';
 import { generateTraceId } from '@/lib/trace';
 import { useChat } from '@/lib/chat/chat-context';
 import { createTextMessage } from '@/lib/chat/message-factory';
@@ -51,12 +52,14 @@ import {
   sendText,
   targetFromSummary,
   type ChannelTarget,
+  type ChatMessageRow,
   type ThreadConnection,
 } from '@/lib/chat/thread';
 import { liveVerifierFor } from '@/lib/chat/live-verify';
 import { subscribeGlobalCmds, subscribeGlobalMessages } from '@/lib/chat/controller';
 import {
   loadConversationPreviews,
+  loadMessagesByIds,
   loadUnreadCounts,
   type ConversationPreview,
   type UnreadCount,
@@ -189,16 +192,35 @@ export function handleMessagesDeleted(
   if (channels.length > 0) deps.rereadPreviews(channels);
 }
 
+/** What routing a global command needs, injected so the trust check is unit-tested. */
+export interface GlobalCmdDeps {
+  /** One batched read of the named rows (loadMessagesByIds). */
+  loadByIds: (messageIds: readonly string[]) => Promise<Result<ChatMessageRow[]>>;
+  /** The ids whose rows are tombstones on record. */
+  onDeleted: (messageIds: readonly string[]) => void;
+}
+
 /**
- * A live command for any channel (the global fan-out): a delete signal's ids go
- * to the tombstone handler; every other command is the open thread's business.
+ * A live command for any channel (the global fan-out). The payload alone is
+ * never trusted: a delete signal's ids are re-read in one batched read and only
+ * rows whose deleted_at is set reach the tombstone handler; ids not found or
+ * not deleted are ignored. Every other command is the open thread's business.
  */
-export function routeGlobalCmd(
-  ext: unknown,
-  onDeleted: (messageIds: readonly string[]) => void,
-): void {
+export async function routeGlobalCmd(ext: unknown, deps: GlobalCmdDeps): Promise<void> {
   const event = parseLiveEvent(ext);
-  if (event.kind === 'delete') onDeleted(event.messageIds);
+  if (event.kind !== 'delete' || event.messageIds.length === 0) return;
+  const claimed = new Set(event.messageIds);
+  const result = await deps.loadByIds([...claimed]);
+  if (!result.ok) {
+    logger.warn('chat store: delete signal verification failed, ignored', {
+      error: result.error.message,
+    });
+    return;
+  }
+  const deleted = result.data
+    .filter((row) => claimed.has(row.id) && row.deleted_at !== null)
+    .map((row) => row.id);
+  if (deleted.length > 0) deps.onDeleted(deleted);
 }
 
 /** The four reads the chat list's first paint waits on. */
@@ -279,7 +301,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   const outbox = useMemo<ChannelOutbox>(
     () => ({
       entries: (channelId) => senderRef.current?.entries(channelId) ?? [],
-      enqueue: (channelId, entry) => senderRef.current?.enqueue(channelId, entry),
+      enqueue: (channelId, entry) => {
+        clockSamplerRef.current.fresh(entry.id);
+        senderRef.current?.enqueue(channelId, entry);
+      },
       retry: (channelId, id) => senderRef.current?.retry(channelId, id),
       settle: (channelId, id) => senderRef.current?.settle(channelId, id),
       subscribe: (listener) => {
@@ -440,10 +465,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     if (!workspaceId || currentUserId === null) return;
     const scopeKey = { workspaceId, userId: currentUserId };
     const storage = browserStorage();
-    // Persisted sends are replays: their acks carry the original created_at.
+    // Persisted sends are replays (never marked fresh): their acks carry the
+    // original created_at.
     const persisted = store.readPersistedOutbox(storage, scopeKey);
     const clockSampler = clockSamplerRef.current;
-    clockSampler.replayed(store.outboxIds(persisted));
     const sender = createOutboxSender(
       {
         deliver: (channelId, entry, traceId, onRecorded) => {
@@ -453,10 +478,12 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
             {
               // The ack's server created_at against the device time of the
               // send sets the server clock offset (the edit / delete windows).
-              // Only the first attempt of an id in this session samples it.
+              // Only the first attempt of an id queued in this session samples
+              // it; its ack or failure ends that.
               recordMessage: (input) => {
                 const sentAt = clockSampler.begin(input.id);
                 return sendMessageRecord({ client: supabase, ...input }).then((result) => {
+                  clockSampler.settled(input.id);
                   if (result.ok && sentAt !== null) {
                     const createdAt = result.row.created_at;
                     setState((prev) => store.applyServerClock(prev, createdAt, sentAt));
@@ -617,22 +644,28 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
               {...(summary.avatarUrl !== null ? { src: summary.avatarUrl } : {})}
             />
           ),
-          onPress: () => {
-            requestOpen(row.channel_id);
-            navigate('/chat');
-          },
+          // A thread selecting messages exits that first (history.back()).
+          onPress: () =>
+            leaveSelectionThen(() => {
+              requestOpen(row.channel_id);
+              navigate('/chat');
+            }),
         });
       });
   };
 
   useEffect(() => subscribeGlobalMessages((message) => onIncomingRef.current(message)), []);
   // A delete signal for any chat, open or not, strips its drafts, queued quotes
-  // and list line (the open thread also turns the rows into tombstones itself).
+  // and list line once its rows read back deleted (the open thread also turns
+  // the rows into tombstones itself).
   useEffect(
     () =>
-      subscribeGlobalCmds((message) =>
-        routeGlobalCmd(message.ext, (ids) => onMessagesDeletedRef.current(ids)),
-      ),
+      subscribeGlobalCmds((message) => {
+        void routeGlobalCmd(message.ext, {
+          loadByIds: (ids) => loadMessagesByIds(supabase, ids),
+          onDeleted: (ids) => onMessagesDeletedRef.current(ids),
+        });
+      }),
     [],
   );
 

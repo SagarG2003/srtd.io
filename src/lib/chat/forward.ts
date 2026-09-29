@@ -56,24 +56,23 @@ export function pruneThreadSelection(
 export const DELETE_SELECTION_WINDOW_MS = 30 * 60 * 1000;
 
 /** Why the selection's Delete is disabled; the bar shows it as one line. */
-export type DeleteBlock = 'others' | 'sending' | 'marked' | 'old';
+export type DeleteBlock = 'others' | 'marked' | 'old';
 
 /** The reason line for each disabled Delete. */
 export const DELETE_BLOCK_COPY: Record<DeleteBlock, string> = {
   others: 'Only your own messages can be deleted',
-  sending: "Messages still sending can't be deleted",
   marked: "Marked messages can't be deleted",
   old: "Messages older than 30 min can't be deleted",
 };
 
 /** Which reason wins when several apply. */
-const DELETE_BLOCK_PRIORITY: readonly DeleteBlock[] = ['others', 'sending', 'marked', 'old'];
+const DELETE_BLOCK_PRIORITY: readonly DeleteBlock[] = ['others', 'marked', 'old'];
 
 /**
  * Why Delete cannot apply to the selection, or null when it can (or nothing is
  * selected: Delete is simply disabled at 0 with no reason). Priority: someone
- * else's message, then an own message still sending or failed, then a marked
- * one, then age. `nowMs` is server time (the store's clock offset applied),
+ * else's message, then a marked one, then age (sending and failed rows are
+ * never selectable). `nowMs` is server time (the store's clock offset applied),
  * never the device clock alone.
  */
 export function deleteSelectionBlock(
@@ -89,10 +88,6 @@ export function deleteSelectionBlock(
     const message = byId.get(id);
     if (message === undefined || !message.mine || message.deleted === true) {
       hit.add('others');
-      continue;
-    }
-    if (message.state !== 'sent') {
-      hit.add('sending');
       continue;
     }
     if (marks.has(id)) hit.add('marked');
@@ -253,4 +248,31 @@ export async function runForward<T>(deps: {
     }
   }
   return { ok: true };
+}
+
+/**
+ * The open thread's way out of selection mode (through history.back()), or
+ * null when no selection is open. A channel switch goes through
+ * leaveSelectionThen so selection exits first, then the switch runs.
+ */
+let selectionLeave: ((then: () => void) => void) | null = null;
+
+/** The thread registers its selection exit while selecting. */
+export function setSelectionLeave(leave: (then: () => void) => void): void {
+  selectionLeave = leave;
+}
+
+/** Selection exited: forget its exit (only if it is still the registered one; null forgets any). */
+export function clearSelectionLeave(leave: ((then: () => void) => void) | null): void {
+  if (leave === null || selectionLeave === leave) selectionLeave = null;
+}
+
+/** Run `run` once no selection is open: at once, or after selection exits. */
+export function leaveSelectionThen(run: () => void): void {
+  const leave = selectionLeave;
+  if (leave === null) {
+    run();
+    return;
+  }
+  leave(run);
 }

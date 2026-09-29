@@ -153,12 +153,16 @@ describe('thread selection (Forward any, Delete own only)', () => {
     expect(deleteSelectionBlock(new Set(['own']), messages, marks, late)).toBe('old');
   });
 
-  it('F9: an own message still sending or failed reads the sending reason, not "Only your own"', () => {
-    const list = [...messages, msg({ id: 'failed', mine: true, state: 'failed' })];
-    expect(deleteSelectionBlock(new Set(['pending']), list, marks, NOW)).toBe('sending');
-    expect(deleteSelectionBlock(new Set(['failed', 'own']), list, marks, NOW)).toBe('sending');
-    expect(deleteSelectionBlock(new Set(['failed', 'peer']), list, marks, NOW)).toBe('others');
-    expect(DELETE_BLOCK_COPY.sending).toBe("Messages still sending can't be deleted");
+  it('R7: priority is others > marked > old; there is no sending reason (those rows are never selectable)', () => {
+    const late = Date.parse('2026-09-22T10:31:00Z');
+    expect(Object.keys(DELETE_BLOCK_COPY).sort()).toEqual(['marked', 'old', 'others']);
+    expect(deleteSelectionBlock(new Set(['marked', 'own', 'peer']), messages, marks, late)).toBe(
+      'others',
+    );
+    expect(deleteSelectionBlock(new Set(['marked', 'own']), messages, marks, late)).toBe('marked');
+    expect(deleteSelectionBlock(new Set(['own']), messages, marks, late)).toBe('old');
+    expect(threadSelectable(msg({ id: 'failed', mine: true, state: 'failed' }))).toBe(false);
+    expect(threadSelectable(msg({ id: 'pending', mine: true, state: 'sending' }))).toBe(false);
   });
 });
 

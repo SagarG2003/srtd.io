@@ -9,6 +9,7 @@ vi.mock('agora-chat', () => ({
 }));
 
 import { Avatar } from '@/components/ui/Avatar';
+import { leaveSelectionThen } from '@/lib/chat/forward';
 import {
   bodyText,
   bubbleClass,
@@ -47,9 +48,12 @@ import {
   createSelectionGesture,
   markOutcomeCopy,
   captureRowAnchor,
+  createSelectionScroll,
   restoreRowAnchor,
   type AnchorList,
   type RowAnchor,
+  BURIED_MARKERS_LIMIT,
+  buriedMarkerCount,
   enterSelectionHistory,
   resetSelectionHistory,
   SELECTION_HISTORY_KEY,
@@ -2529,7 +2533,6 @@ describe('D7: long-press never selects text or shows the iOS callout', () => {
       cancelTimer: noop,
       cancelSwipe: noop,
       swiping: () => false,
-      clearClickSuppression: noop,
     };
     const coarse = createRowHold({ ...deps, coarse: () => true });
     const preventDefault = vi.fn();
@@ -2942,6 +2945,144 @@ describe('F7: system back and iOS swipe-back exit selection first', () => {
   });
 });
 
+describe('R6: selection history, switch, bound and double back', () => {
+  // A history stack whose traversals queue (like a browser's): back() only
+  // enqueues; flush() runs them in order, firing popstate after each.
+  function queuedWindow(urls: string[]): SelectionHistoryWindow & {
+    index: () => number;
+    url: () => string;
+    flush: () => void;
+    navigate: (to: string) => void;
+    replace: (to: string) => void;
+  } {
+    const stack = urls.map((u, idx) => ({ state: { idx } as unknown, url: u }));
+    let i = stack.length - 1;
+    const queue: (() => void)[] = [];
+    const listeners = new Set<() => void>();
+    return {
+      index: () => i,
+      url: () => stack[i]?.url ?? '',
+      flush: () => {
+        while (queue.length > 0) queue.shift()?.();
+      },
+      navigate: (to) => {
+        stack.splice(i + 1);
+        stack.push({ state: { idx: i + 1 }, url: to });
+        i += 1;
+      },
+      replace: (to) => {
+        stack[i] = { state: { idx: i }, url: to };
+      },
+      history: {
+        get state() {
+          return stack[i]?.state;
+        },
+        pushState: (data, _unused, next) => {
+          stack.splice(i + 1);
+          stack.push({ state: data, url: next ?? '' });
+          i += 1;
+        },
+        back: () => {
+          queue.push(() => {
+            if (i === 0) return;
+            i -= 1;
+            for (const l of [...listeners]) l();
+          });
+        },
+      },
+      location: {
+        get href() {
+          return stack[i]?.url ?? '';
+        },
+      },
+      addEventListener: (_type, l) => listeners.add(l),
+      removeEventListener: (_type, l) => listeners.delete(l),
+    };
+  }
+  const HOME = 'https://v2.srtd.io/pipeline';
+  const LIST = 'https://v2.srtd.io/chat';
+  const CHAT = 'https://v2.srtd.io/chat?channel=c1';
+  const OTHER = 'https://v2.srtd.io/chat?channel=c2';
+
+  it('a channel switch while selecting exits selection through history.back(), then switches', () => {
+    resetSelectionHistory();
+    const win = queuedWindow([HOME, CHAT]);
+    const order: string[] = [];
+    const entry = enterSelectionHistory(win, () => order.push('exit'));
+    const back = vi.spyOn(win.history, 'back');
+    leaveSelectionThen(() => {
+      order.push('switch');
+      win.replace(OTHER);
+    });
+    expect(back).toHaveBeenCalledOnce();
+    expect(order).toEqual([]);
+    win.flush();
+    expect(order).toEqual(['exit', 'switch']);
+    entry.dispose();
+    // No marker left: back from the new chat leaves the chat, it never shows c1.
+    expect(win.url()).toBe(OTHER);
+    win.history.back();
+    win.flush();
+    expect(win.url()).toBe(HOME);
+    // Not selecting: the switch runs at once.
+    const run = vi.fn();
+    leaveSelectionThen(run);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('buried markers are bounded to the most recent 20; one guard listener', () => {
+    resetSelectionHistory();
+    const win = queuedWindow([HOME, CHAT]);
+    for (let n = 0; n < BURIED_MARKERS_LIMIT + 15; n += 1) {
+      const entry = enterSelectionHistory(win, vi.fn());
+      win.navigate(`${LIST}?n=${n}`);
+      entry.dispose();
+    }
+    expect(buriedMarkerCount()).toBe(BURIED_MARKERS_LIMIT);
+    resetSelectionHistory();
+    expect(buriedMarkerCount()).toBe(0);
+  });
+
+  it('two back presses in quick succession after a buried marker never skip past the chat list', () => {
+    resetSelectionHistory();
+    const win = queuedWindow([HOME, LIST, CHAT]);
+    const entry = enterSelectionHistory(win, vi.fn());
+    win.navigate('https://v2.srtd.io/posts');
+    entry.dispose();
+    // Both presses land before any popstate is handled.
+    win.history.back();
+    win.history.back();
+    win.flush();
+    expect(win.url()).toBe(LIST);
+    // Pressed one at a time: the same.
+    resetSelectionHistory();
+    const win2 = queuedWindow([HOME, LIST, CHAT]);
+    const entry2 = enterSelectionHistory(win2, vi.fn());
+    win2.navigate('https://v2.srtd.io/posts');
+    entry2.dispose();
+    win2.history.back();
+    win2.flush();
+    expect(win2.url()).toBe(CHAT);
+    win2.history.back();
+    win2.flush();
+    expect(win2.url()).toBe(LIST);
+  });
+
+  it('a double Cancel (chevron, Escape) pops the marker once and stays in the chat', () => {
+    resetSelectionHistory();
+    const win = queuedWindow([LIST, CHAT]);
+    const onExit = vi.fn();
+    const entry = enterSelectionHistory(win, onExit);
+    const back = vi.spyOn(win.history, 'back');
+    entry.cancel();
+    entry.cancel();
+    win.flush();
+    expect(back).toHaveBeenCalledOnce();
+    expect(onExit).toHaveBeenCalledOnce();
+    expect(win.url()).toBe(CHAT);
+  });
+});
+
 describe('F11: selection entry keeps the pressed row at its screen Y', () => {
   // A list whose rows sit at a layout offset minus the scroll; the check
   // column rewraps the bubbles above the pressed row, moving it down.
@@ -2977,6 +3118,55 @@ describe('F11: selection entry keeps the pressed row at its screen Y', () => {
     expect(captureRowAnchor(list, 'other')).toBeNull();
     expect(restoreRowAnchor(list, { id: 'other', top: 10 })).toBe(0);
     expect(list.scrollTop).toBe(400);
+  });
+
+  it('R8a: exit keeps the anchor row at its Y too (re-taken just before exit)', () => {
+    const list = fakeList();
+    const scroll = createSelectionScroll();
+    scroll.anchorEntry(list, 'pressed');
+    list.rewrap(37);
+    const entry = scroll.entered(false);
+    restoreRowAnchor(list, entry as RowAnchor);
+    expect(list.rowTop()).toBe(500);
+    // The reader scrolls a little while selecting, then exits.
+    list.scrollTop += 20;
+    scroll.beforeExit(list);
+    list.rewrap(-37);
+    const plan = scroll.exited();
+    expect(plan).toEqual({ pin: false, anchor: { id: 'pressed', top: 480 } });
+    if (!plan.pin && plan.anchor !== null) restoreRowAnchor(list, plan.anchor);
+    expect(list.rowTop()).toBe(480);
+    expect(scroll.pending()).toBeNull();
+  });
+
+  it('R8b: re-pins on exit only when the thread was pinned at entry', () => {
+    const list = fakeList();
+    const pinned = createSelectionScroll();
+    pinned.anchorEntry(list, 'pressed');
+    pinned.entered(true);
+    pinned.beforeExit(list);
+    expect(pinned.exited()).toEqual({ pin: true });
+    const reading = createSelectionScroll();
+    reading.anchorEntry(list, 'pressed');
+    reading.entered(false);
+    reading.beforeExit(list);
+    expect(reading.exited()).toMatchObject({ pin: false });
+    // The next selection starts clean: not pinned, no anchor.
+    reading.entered(false);
+    expect(reading.exited()).toEqual({ pin: false, anchor: null });
+  });
+
+  it('R8c: menu Forward that opens the picker (no selection) clears the anchor', () => {
+    const list = fakeList();
+    const scroll = createSelectionScroll();
+    scroll.anchorEntry(list, 'pressed');
+    expect(scroll.pending()).not.toBeNull();
+    scroll.cancelEntry();
+    expect(scroll.pending()).toBeNull();
+    // A later selection entered some other way restores nothing stale.
+    expect(scroll.entered(false)).toBeNull();
+    scroll.beforeExit(list);
+    expect(scroll.exited()).toEqual({ pin: false, anchor: null });
   });
 });
 

@@ -40,6 +40,7 @@ import { sortChannelsByRecency } from '@/lib/chat/sort-conversations';
 import { formatRelativeTime } from '@/lib/chat/format-relative-time';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { draftText, draftsVersion, subscribeDrafts } from '@/lib/chat/drafts';
+import { leaveSelectionThen } from '@/lib/chat/forward';
 import {
   CHAT_LIST_NAME_TYPE,
   CHAT_LIST_PREVIEW_TYPE,
@@ -510,7 +511,8 @@ export function ChannelCard(props: {
             props.onToggle?.(channel.channelId);
             return;
           }
-          props.onSelect(channel);
+          // A thread selecting messages exits that first (history.back()).
+          leaveSelectionThen(() => props.onSelect(channel));
         }}
         aria-label={channel.title}
         {...(selecting ? { 'aria-pressed': checked } : {})}

@@ -14,7 +14,7 @@ import {
   routeGlobalCmd,
   type ChatListReaders,
 } from '@/components/chat/ChatStoreProvider';
-import { deleteEventExt, readEventExt } from '@/lib/chat/thread';
+import { deleteEventExt, readEventExt, type ChatMessageRow } from '@/lib/chat/thread';
 import { ChannelCard, channelListContent } from '@/components/chat/ChannelList';
 import { EmptyState } from '@/components/ui/EmptyState';
 import type { ChannelSummary } from '@/lib/chat-reads';
@@ -33,6 +33,28 @@ import {
 } from '@/lib/chat/chat-store';
 
 const ME = 'me';
+
+function cmdRow(id: string, deleted: boolean): ChatMessageRow {
+  return {
+    id,
+    channel_id: 'other',
+    workspace_id: 'w1',
+    sender_user_id: 'p',
+    body: deleted ? null : 'words',
+    mentions: null,
+    attachment_asset_ids: null,
+    shared_post_ids: null,
+    shared_brief_ids: null,
+    reply_to_message_id: null,
+    forwarded_from_message_id: null,
+    attachment_meta: null,
+    agora_event_id: null,
+    created_at: '2026-09-22T10:00:00.000000+00:00',
+    edited_at: null,
+    deleted_at: deleted ? '2026-09-22T10:01:00.000000+00:00' : null,
+  };
+}
+
 const SCOPE = loadScope('w1', ME);
 
 function channel(channelId: string, createdAt: string): ChannelSummary {
@@ -326,7 +348,7 @@ describe('D1: the store handles a delete signal for any channel', () => {
     expect(stripOutbox).toHaveBeenCalledWith(['x9', 'x10']);
   });
 
-  it('a live delete cmd for a non-open chat strips its preview, draft and outbox', () => {
+  it('a live delete cmd for a non-open chat strips its preview, draft and outbox', async () => {
     const state: ChatStoreState = setActive(
       applyPreviews(
         {
@@ -359,15 +381,61 @@ describe('D1: the store handles a delete signal for any channel', () => {
       stripDrafts,
       stripOutbox,
     };
-    routeGlobalCmd(deleteEventExt({ messageIds: ['x9'] }), (ids) =>
-      handleMessagesDeleted(deps, ids),
+    const loadByIds = vi.fn((ids: readonly string[]) =>
+      Promise.resolve<Result<ChatMessageRow[]>>({
+        ok: true,
+        data: ids.map((id) => cmdRow(id, true)),
+      }),
     );
-    routeGlobalCmd(readEventExt({ channelId: 'other', messageId: 'x9' }), (ids) =>
-      handleMessagesDeleted(deps, ids),
-    );
+    const onDeleted = (ids: readonly string[]): void => handleMessagesDeleted(deps, ids);
+    await routeGlobalCmd(deleteEventExt({ messageIds: ['x9'] }), { loadByIds, onDeleted });
+    await routeGlobalCmd(readEventExt({ channelId: 'other', messageId: 'x9' }), {
+      loadByIds,
+      onDeleted,
+    });
+    expect(loadByIds).toHaveBeenCalledOnce();
     expect(rereadPreviews).toHaveBeenCalledExactlyOnceWith(['other']);
     expect(stripDrafts).toHaveBeenCalledExactlyOnceWith(['x9']);
     expect(stripOutbox).toHaveBeenCalledExactlyOnceWith(['x9']);
+  });
+
+  it('R1: a delete cmd is re-read in one batched read; only ids deleted on record strip', async () => {
+    const loadByIds = vi.fn((ids: readonly string[]) =>
+      Promise.resolve<Result<ChatMessageRow[]>>({
+        ok: true,
+        // 'live' is not deleted, 'gone' is, 'unknown' is not found at all.
+        data: [cmdRow('live', false), cmdRow('gone', true)].filter((r) => ids.includes(r.id)),
+      }),
+    );
+    const onDeleted = vi.fn();
+    await routeGlobalCmd(deleteEventExt({ messageIds: ['live', 'gone', 'unknown', 'gone'] }), {
+      loadByIds,
+      onDeleted,
+    });
+    expect(loadByIds).toHaveBeenCalledOnce();
+    expect(loadByIds.mock.calls[0]?.[0]).toEqual(['live', 'gone', 'unknown']);
+    expect(onDeleted).toHaveBeenCalledExactlyOnceWith(['gone']);
+  });
+
+  it('R1: a cmd naming only a non-deleted id does nothing', async () => {
+    const onDeleted = vi.fn();
+    await routeGlobalCmd(deleteEventExt({ messageIds: ['live'] }), {
+      loadByIds: () => Promise.resolve({ ok: true, data: [cmdRow('live', false)] }),
+      onDeleted,
+    });
+    expect(onDeleted).not.toHaveBeenCalled();
+  });
+
+  it('R1: a failed re-read does nothing', async () => {
+    const onDeleted = vi.fn();
+    await routeGlobalCmd(deleteEventExt({ messageIds: ['gone'] }), {
+      loadByIds: () =>
+        Promise.resolve({ ok: false, error: { code: 'unknown', message: 'nope' } } as Result<
+          ChatMessageRow[]
+        >),
+      onDeleted,
+    });
+    expect(onDeleted).not.toHaveBeenCalled();
   });
 
   it('no line shows a deleted id: no read at all', () => {

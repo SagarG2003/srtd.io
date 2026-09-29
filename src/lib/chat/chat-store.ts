@@ -369,34 +369,43 @@ export function applyServerClock(
 
 /**
  * Which record attempts may sample the server clock: only the first send
- * attempt of a message id in this session. A retry, or a replay of a persisted
- * outbox entry, gets the original created_at back from the idempotent
- * chat_message_send, so its ack says nothing about the clock now.
+ * attempt of a message id freshly queued in this session. A retry, or a replay
+ * of a persisted outbox entry, gets the original created_at back from the
+ * idempotent chat_message_send, so its ack says nothing about the clock now.
+ * An id is held only from its enqueue to its first ack or failure (bounded
+ * FIFO for sends that never reach a record attempt).
  */
 export interface ClockSampler {
-  /** Ids replayed from the persisted outbox: never sampled. */
-  replayed: (ids: readonly string[]) => void;
+  /** A new send was queued: its first record attempt may sample. */
+  fresh: (id: string) => void;
   /** A record attempt starts: the device time to sample against, or null when it must not. */
   begin: (id: string) => number | null;
+  /** The attempt was acked or failed: the id never samples again. */
+  settled: (id: string) => void;
 }
 
-export function createClockSampler(now: () => number = Date.now): ClockSampler {
-  const attempted = new Set<string>();
+/** Bound on the fresh ids a clock sampler holds. */
+export const CLOCK_SAMPLER_LIMIT = 200;
+
+export function createClockSampler(now: () => number = Date.now): ClockSampler & {
+  /** How many ids are held (tests). */
+  size: () => number;
+} {
+  const eligible = new Set<string>();
   return {
-    replayed: (ids) => {
-      for (const id of ids) attempted.add(id);
+    fresh: (id) => {
+      eligible.add(id);
+      if (eligible.size > CLOCK_SAMPLER_LIMIT) {
+        const oldest = eligible.values().next().value;
+        if (oldest !== undefined) eligible.delete(oldest);
+      }
     },
-    begin: (id) => {
-      if (attempted.has(id)) return null;
-      attempted.add(id);
-      return now();
+    begin: (id) => (eligible.has(id) ? now() : null),
+    settled: (id) => {
+      eligible.delete(id);
     },
+    size: () => eligible.size,
   };
-}
-
-/** Every message id queued in an outbox. Pure. */
-export function outboxIds(outbox: Outbox): string[] {
-  return Object.values(outbox).flatMap((list) => list.map((entry) => entry.id));
 }
 
 /**

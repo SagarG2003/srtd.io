@@ -19,6 +19,7 @@ import {
   IconTrash,
   IconX,
 } from '@/components/ui/icons';
+import { Button } from '@/components/ui/Button';
 import { IconButton } from '@/components/ui/IconButton';
 import { POPOVER_PANEL } from '@/components/ui/popover-classes';
 import { MARK_TONE } from '@/components/chat/MarkBits';
@@ -624,6 +625,39 @@ export function returnPickerFocus(plus: (Focusable & { isConnected: boolean }) |
 const PICKER_FOCUSABLE =
   'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/** The picker body's load failure line (never the raw error). */
+export const EMOJI_LOAD_FAILED = "Couldn't load emoji";
+
+/** What the picker shell shows under its frame. Pure. */
+export function pickerBodyState(
+  module: EmojiPickerModule | null,
+  failed: boolean,
+): 'ready' | 'failed' | 'loading' {
+  if (module !== null) return 'ready';
+  return failed ? 'failed' : 'loading';
+}
+
+/** The grid area when the picker chunk failed to load: the line and a 44x44 Try again. */
+export function EmojiPickerLoadFailed(props: { onRetry: () => void }): ReactElement {
+  return (
+    <div
+      data-emoji-failed=""
+      className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 text-center"
+    >
+      <p className="text-sm text-fg-3">{EMOJI_LOAD_FAILED}</p>
+      <Button
+        type="button"
+        size="lg"
+        data-emoji-retry=""
+        className="min-w-[44px]"
+        onClick={props.onRetry}
+      >
+        Try again
+      </Button>
+    </div>
+  );
+}
+
 /**
  * The emoji picker's shell. Touch: a bottom sheet over a dim, translateY
  * only, the safe-area inset kept clear. Laptop: a modal popover anchored to
@@ -645,24 +679,32 @@ export function EmojiPickerShell(props: {
 }): ReactElement | null {
   const { open, onClose, layout, returnFocus } = props;
   const [module, setModule] = useState<EmojiPickerModule | null>(loadedEmojiPicker);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [shown, setShown] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const ready = module !== null;
 
-  // The chunk normally arrived while the menu was open; if not, wait for it here.
+  // The chunk normally arrived while the menu was open; if not, wait for it
+  // here. A failure shows the retry line; Try again runs the import again.
   useEffect(() => {
     if (!open || module !== null) return;
     let cancelled = false;
+    setFailed(false);
     loadEmojiPicker().then(
       (loaded) => {
         if (!cancelled) setModule(loaded);
       },
-      (error: unknown) => logger.warn('chat: emoji picker load failed', { error: String(error) }),
+      (error: unknown) => {
+        logger.warn('chat: emoji picker load failed', { error: String(error) });
+        if (!cancelled) setFailed(true);
+      },
     );
     return () => {
       cancelled = true;
     };
-  }, [open, module]);
+  }, [open, module, attempt]);
+  const retryLoad = (): void => setAttempt((n) => n + 1);
 
   // Entrance: flip after mount so the one transition runs.
   useEffect(() => {
@@ -708,7 +750,7 @@ export function EmojiPickerShell(props: {
       return;
     }
     pickerInitialFocus(layout, dialog).focus({ preventScroll: true });
-  }, [open, ready, layout]);
+  }, [open, ready, failed, layout]);
 
   if (!open) return null;
 
@@ -746,7 +788,11 @@ export function EmojiPickerShell(props: {
           {close}
         </div>
         <div aria-hidden="true" className="h-11 shrink-0 border-b border-border" />
-        <div data-emoji-loading="" className="min-h-0 flex-1" />
+        {failed ? (
+          <EmojiPickerLoadFailed onRetry={retryLoad} />
+        ) : (
+          <div data-emoji-loading="" className="min-h-0 flex-1" />
+        )}
       </>
     );
   const dialogProps = {
@@ -754,7 +800,7 @@ export function EmojiPickerShell(props: {
     role: 'dialog',
     'aria-label': 'Emoji picker',
     'aria-modal': true,
-    'aria-busy': !ready,
+    'aria-busy': pickerBodyState(module, failed) === 'loading',
     tabIndex: -1,
     onKeyDown: trapTab,
   } as const;

@@ -5,7 +5,9 @@ import { Button } from '@/components/ui/Button';
 import { Field } from '@/components/ui/Field';
 import { Input } from '@/components/ui/Input';
 import { IconChat, IconUser } from '@/components/ui/icons';
+import type { DomainError } from '@srtdio/rpc';
 import { supabase } from '@/lib/supabase';
+import { logger } from '@/lib/logger';
 import { useNewTrace } from '@/lib/trace-context';
 import { createGroupChannel, startDmChannel } from '@/components/chat/chat-actions';
 import { MemberPicker } from '@/components/chat/MemberPicker';
@@ -24,6 +26,19 @@ interface NewChatSheetProps {
 }
 
 type Mode = 'choose' | 'dm' | 'group';
+
+/** The sheet's failure lines; the raw error goes to the logger only. */
+export const NEW_DM_FAILED = "Couldn't start the chat, try again";
+export const NEW_GROUP_FAILED = "Couldn't create the group, try again";
+
+/** Log a failed DM ensure or group create and return its fixed copy. */
+export function newChatFailureCopy(kind: 'dm' | 'group', failure: DomainError): string {
+  logger.warn(kind === 'dm' ? 'chat: dm start failed' : 'chat: group create failed', {
+    code: failure.code,
+    error: failure.message,
+  });
+  return kind === 'dm' ? NEW_DM_FAILED : NEW_GROUP_FAILED;
+}
 
 /**
  * The "New chat" entry point: choose between a new DM or a new group, then pick
@@ -73,7 +88,7 @@ export function NewChatSheet(props: NewChatSheetProps): ReactElement {
       props.onDmReady,
     );
     setBusy(false);
-    if (failure !== null) setError(failure.message);
+    if (failure !== null) setError(newChatFailureCopy('dm', failure));
   }
 
   async function submitGroup(): Promise<void> {
@@ -92,7 +107,7 @@ export function NewChatSheet(props: NewChatSheetProps): ReactElement {
       () => props.onGroupCreated(),
     );
     setBusy(false);
-    if (failure !== null) setError(failure.message);
+    if (failure !== null) setError(newChatFailureCopy('group', failure));
   }
 
   const title = mode === 'group' ? 'New group' : mode === 'dm' ? 'New direct message' : 'New chat';

@@ -134,10 +134,12 @@ import { ForwardPicker, type ForwardSendResult } from '@/components/chat/Forward
 import {
   FORWARDED_LABEL,
   canForward,
+  clearSelectionLeave,
   deleteSelectionBlock,
   pruneThreadSelection,
   scheduleSelectionBoundary,
   selectedForForward,
+  setSelectionLeave,
   threadSelectable,
   threadSelectionRole,
 } from '@/lib/chat/forward';
@@ -1377,7 +1379,7 @@ export function MessageBubble(props: {
             press.onKeyOpen();
           }}
           onClickCapture={(e) => {
-            // Selection mode's tap is handled by the row, before this.
+            // The click that trails a long-press or a swipe does nothing more.
             if (press?.consumeClick()) {
               e.preventDefault();
               e.stopPropagation();
@@ -1758,7 +1760,6 @@ function MessageRow(props: {
     cancelTimer: () => cancel(),
     cancelSwipe: () => swipeRef.current?.cancel(),
     swiping: () => swipeRef.current?.swiping() === true,
-    clearClickSuppression: () => clearClickSuppression(),
   });
   const rowHold = rowHoldRef.current;
   if (swipeRef.current === null) {
@@ -1886,18 +1887,16 @@ export interface RowHold {
   contextMenu: (event: { preventDefault: () => void }) => void;
   /** A new gesture starts: nothing has fired yet. */
   pointerDown: () => void;
-  /** True (once) when this click trails a hold that already toggled the row. */
-  consumeSelectHold: () => boolean;
 }
 
 /**
- * The hold and contextmenu of one message row, framework-free so the rules are
- * unit-tested. A hold (long-press) opens the menu, or in selection mode
- * toggles the row and opens nothing; the click that may trail it is then
- * swallowed once, so a hold never toggles twice. contextmenu always cancels
- * the native one: on a touch-first pointer the hold owns it (a contextmenu
- * that beats the hold timer acts as the hold, once per gesture); on a laptop
- * right-click opens the menu as before, and does nothing while selecting.
+ * The hold and contextmenu of one message row outside selection mode (there
+ * the row's own gesture decides, see createSelectionGesture), framework-free
+ * so the rules are unit-tested. A hold (long-press) opens the menu.
+ * contextmenu always cancels the native one: on a touch-first pointer the hold
+ * owns it (a contextmenu that beats the hold timer acts as the hold, once per
+ * gesture); on a laptop right-click opens the menu as before, and does nothing
+ * while selecting.
  */
 export function createRowHold(deps: {
   selection: () => RowSelection | undefined;
@@ -1906,21 +1905,12 @@ export function createRowHold(deps: {
   cancelTimer: () => void;
   cancelSwipe: () => void;
   swiping: () => boolean;
-  clearClickSuppression: () => void;
 }): RowHold {
   let holdFired = false;
-  let selectHold = false;
   const hold = (): void => {
     holdFired = true;
     deps.cancelSwipe();
-    const selection = deps.selection();
-    if (selection === undefined) {
-      deps.openMenu();
-      return;
-    }
-    deps.clearClickSuppression();
-    selectHold = true;
-    if (selection.role === 'selectable') selection.onToggle();
+    deps.openMenu();
   };
   return {
     hold,
@@ -1936,12 +1926,6 @@ export function createRowHold(deps: {
     },
     pointerDown: () => {
       holdFired = false;
-      selectHold = false;
-    },
-    consumeSelectHold: () => {
-      const toggled = selectHold;
-      selectHold = false;
-      return toggled;
     },
   };
 }
@@ -2133,8 +2117,11 @@ function ThreadBody(
     onMark?: (message: ThreadMessage, type: MarkType) => void;
     /** Menu "Select" picked: selection mode with the message ticked; absent hides it. */
     onStartSelect?: (message: ThreadMessage) => void;
-    /** Menu "Forward" picked: selection mode with the message ticked; absent hides it. */
-    onForwardMessage?: (message: ThreadMessage) => void;
+    /**
+     * Menu "Forward" picked: selection mode with the message ticked (true), or
+     * the picker for just this message (false); absent hides it.
+     */
+    onForwardMessage?: (message: ThreadMessage) => boolean;
     /** Menu "Edit" picked; absent hides it. */
     onEditMessage?: (message: ThreadMessage) => void;
     /** Menu "Delete" picked: selection mode with the message ticked; absent hides it. */
@@ -2219,24 +2206,44 @@ function ThreadBody(
       el.scrollTop = el.scrollHeight;
     });
   }, [programScroll]);
-  // Selection entry: the pressed row keeps its screen Y while the check column
-  // rewraps the bubbles (taken when the menu entry runs, restored before paint).
-  const selectionAnchorRef = useRef<RowAnchor | null>(null);
+  // Selection entry and exit: the pressed row keeps its screen Y while the
+  // check column comes and goes (taken when the menu entry runs and again just
+  // before exit, restored before paint); a thread pinned at entry re-pins on
+  // exit. While selecting the list never follows new messages.
+  const selectionScrollRef = useRef<SelectionScroll | null>(null);
+  selectionScrollRef.current ??= createSelectionScroll();
+  const selectionScroll = selectionScrollRef.current;
   const anchorSelection = (message: ThreadMessage): void => {
-    const el = listRef.current;
-    selectionAnchorRef.current = el !== null ? captureRowAnchor(el, message.id) : null;
+    selectionScroll.anchorEntry(listRef.current, message.id);
   };
   const selectingNow = props.selection !== undefined;
+  const selectingRef = useRef(selectingNow);
+  // Exit: read the anchor row's Y from the layout still on screen (this render
+  // has not committed yet).
+  if (selectingRef.current && !selectingNow) selectionScroll.beforeExit(listRef.current);
+  selectingRef.current = selectingNow;
+  const selectionMountedRef = useRef(false);
   useLayoutEffect(() => {
-    const anchor = selectionAnchorRef.current;
-    selectionAnchorRef.current = null;
-    if (!selectingNow || anchor === null) return;
-    // The anchored row wins over stick-to-bottom until the reader scrolls.
-    stickRef.current = false;
-    programScroll((el) => {
-      restoreRowAnchor(el, anchor);
-    });
-  }, [selectingNow, programScroll]);
+    if (!selectionMountedRef.current) {
+      selectionMountedRef.current = true;
+      return;
+    }
+    if (selectingNow) {
+      const anchor = selectionScroll.entered(stickRef.current);
+      // The anchored row wins over stick-to-bottom until selection ends.
+      stickRef.current = false;
+      if (anchor !== null) programScroll((el) => void restoreRowAnchor(el, anchor));
+      return;
+    }
+    const plan = selectionScroll.exited();
+    if (plan.pin) {
+      stickRef.current = true;
+      pin();
+      return;
+    }
+    const anchor = plan.anchor;
+    if (anchor !== null) programScroll((el) => void restoreRowAnchor(el, anchor));
+  }, [selectingNow, selectionScroll, programScroll, pin]);
   /** A user gesture on the list: the next scroll events are the reader's. */
   const userGesture = (): void => {
     sourceRef.current = 'user';
@@ -2351,6 +2358,8 @@ function ThreadBody(
       previousNewestId: lastIdRef.current,
     });
     lastIdRef.current = last?.id ?? null;
+    // While selecting, new messages arrive without moving the list.
+    if (selectingRef.current) return;
     // An own local send pins now; anything else waits out a flick (the
     // settle pins it if the reader is still near the bottom).
     const touchScrollAt = touchScrollAtRef.current;
@@ -2384,6 +2393,7 @@ function ThreadBody(
     const observer =
       observerRef.current ??
       new ResizeObserver(() => {
+        if (selectingRef.current) return;
         const touchScrollAt = touchScrollAtRef.current;
         const action = sizeChangeAction({
           intent: stickRef.current,
@@ -2621,7 +2631,8 @@ function ThreadBody(
         onForward={() => {
           if (!menu) return;
           anchorSelection(menu.message);
-          props.onForwardMessage?.(menu.message);
+          // The picker opened without selection: nothing to restore.
+          if (props.onForwardMessage?.(menu.message) !== true) selectionScroll.cancelEntry();
         }}
         canSelect={props.onStartSelect !== undefined}
         onSelect={() => {
@@ -2773,6 +2784,66 @@ export function restoreRowAnchor(list: AnchorList, anchor: RowAnchor): number {
   return delta;
 }
 
+/** Selection mode's scroll bookkeeping; see createSelectionScroll. */
+export interface SelectionScroll {
+  /** A menu entry (Select, Forward, Delete) on this row: remember where it sits. */
+  anchorEntry: (list: AnchorList | null, id: string) => void;
+  /** Menu Forward opened the picker without entering selection: forget the anchor. */
+  cancelEntry: () => void;
+  /**
+   * Selection turned on: record whether the thread was pinned to the bottom,
+   * and hand back the anchor to restore (null when none was taken).
+   */
+  entered: (pinned: boolean) => RowAnchor | null;
+  /** Selection is turning off; the old layout is still on screen: re-take the anchor row's Y. */
+  beforeExit: (list: AnchorList | null) => void;
+  /** Selection turned off: re-pin when it was pinned at entry, else restore the anchor (if any). */
+  exited: () => { pin: true } | { pin: false; anchor: RowAnchor | null };
+  /** The anchor waiting to be restored (tests). */
+  pending: () => RowAnchor | null;
+}
+
+/**
+ * Selection entry and exit keep the reader's place: entry restores the pressed
+ * row's screen Y after the check column rewraps the bubbles; exit restores the
+ * same row's Y, or re-pins to the latest message when the thread was pinned at
+ * entry. The anchor is dropped on every exit and when Forward opens the picker
+ * without entering selection. Framework-free.
+ */
+export function createSelectionScroll(): SelectionScroll {
+  let anchor: RowAnchor | null = null;
+  let anchorId: string | null = null;
+  let pinnedAtEntry = false;
+  return {
+    anchorEntry: (list, id) => {
+      anchor = list !== null ? captureRowAnchor(list, id) : null;
+      anchorId = id;
+    },
+    cancelEntry: () => {
+      anchor = null;
+      anchorId = null;
+    },
+    entered: (pinned) => {
+      pinnedAtEntry = pinned;
+      const taken = anchor;
+      anchor = null;
+      return taken;
+    },
+    beforeExit: (list) => {
+      anchor = list !== null && anchorId !== null ? captureRowAnchor(list, anchorId) : null;
+    },
+    exited: () => {
+      const taken = anchor;
+      const pin = pinnedAtEntry;
+      anchor = null;
+      anchorId = null;
+      pinnedAtEntry = false;
+      return pin ? { pin: true } : { pin: false, anchor: taken };
+    },
+    pending: () => anchor,
+  };
+}
+
 /** The toast for a mark outcome: fixed copy on failure (the raw text is logged), none on success. */
 export function markOutcomeCopy(result: WriteResult): string | null {
   if (result.ok) return null;
@@ -2797,15 +2868,22 @@ export interface SelectionHistoryWindow {
 
 /** One selection mode's history entry; see enterSelectionHistory. */
 export interface SelectionHistory {
-  /** Cancel, Escape, the header chevron: pop the marker; its popstate exits. */
-  cancel: () => void;
+  /**
+   * Cancel, Escape, the header chevron: pop the marker; its popstate exits,
+   * then runs `then` (a channel switch). Repeat calls while leaving are ignored.
+   */
+  cancel: (then?: () => void) => void;
   /** Selection ended another way (delete, forward) or the thread unmounts. */
   dispose: () => void;
 }
 
+/** How many buried markers the guard remembers (the most recent ones). */
+export const BURIED_MARKERS_LIMIT = 20;
+
 let selectionMarkerSeq = 0;
 // Markers buried under a later navigation (the chat was left while selecting):
-// landing on one skips it, so no stale entry ever shows the chat twice.
+// landing on one skips it, so no stale entry ever shows the chat twice. One
+// module-level listener; bounded to the most recent BURIED_MARKERS_LIMIT.
 const buriedMarkers = new Set<number>();
 let buriedGuard: (() => void) | null = null;
 
@@ -2817,6 +2895,10 @@ function selectionMarkerOf(state: unknown): number | null {
 
 function buryMarker(win: SelectionHistoryWindow, marker: number): void {
   buriedMarkers.add(marker);
+  if (buriedMarkers.size > BURIED_MARKERS_LIMIT) {
+    const oldest = buriedMarkers.values().next().value;
+    if (oldest !== undefined) buriedMarkers.delete(oldest);
+  }
   if (buriedGuard !== null) return;
   const guard = (): void => {
     const landed = selectionMarkerOf(win.history.state);
@@ -2828,14 +2910,20 @@ function buryMarker(win: SelectionHistoryWindow, marker: number): void {
   buriedGuard = () => win.removeEventListener('popstate', guard);
 }
 
+/** How many markers are buried (tests). */
+export function buriedMarkerCount(): number {
+  return buriedMarkers.size;
+}
+
 /**
  * Selection mode's history entry (WhatsApp: system back and the iOS swipe-back
  * leave selection first). Entering pushes one entry at the same URL (the
  * ?channel= included) whose state carries a marker; a popstate off it exits
  * selection and stays in the chat. cancel() leaves through history.back(), so
- * the marker never lingers; dispose() pops it too when selection ended some
- * other way, and a marker buried under a navigation is skipped if ever
- * landed on.
+ * the marker never lingers, and only once however often it is pressed;
+ * dispose() pops it too when selection ended some other way, and a marker
+ * buried under a navigation is skipped if ever landed on. While open, a
+ * channel switch (leaveSelectionThen) goes through cancel() first.
  */
 export function enterSelectionHistory(
   win: SelectionHistoryWindow,
@@ -2850,34 +2938,62 @@ export function enterSelectionHistory(
     win.location.href,
   );
   let active = true;
+  let leaving = false;
+  let afterExit: (() => void) | null = null;
+  const leave = (then: () => void): void => handle.cancel(then);
   const onTop = (): boolean => selectionMarkerOf(win.history.state) === marker;
-  const onPop = (): void => {
-    if (!active || onTop()) return;
+  const finish = (): void => {
     active = false;
     win.removeEventListener('popstate', onPop);
+    clearSelectionLeave(leave);
     onExit();
+    const then = afterExit;
+    afterExit = null;
+    then?.();
   };
+  function onPop(): void {
+    if (!active || onTop()) return;
+    finish();
+  }
   win.addEventListener('popstate', onPop);
-  return {
-    cancel: () => {
-      if (!active) return;
+  const handle: SelectionHistory = {
+    cancel: (then) => {
+      if (!active) {
+        then?.();
+        return;
+      }
+      if (then !== undefined) {
+        const prior = afterExit;
+        afterExit =
+          prior === null
+            ? then
+            : () => {
+                prior();
+                then();
+              };
+      }
+      if (leaving) return;
       if (onTop()) {
+        leaving = true;
         win.history.back();
         return;
       }
-      active = false;
-      win.removeEventListener('popstate', onPop);
       buryMarker(win, marker);
-      onExit();
+      finish();
     },
     dispose: () => {
       win.removeEventListener('popstate', onPop);
       if (!active) return;
       active = false;
+      afterExit = null;
+      clearSelectionLeave(leave);
+      if (leaving) return;
       if (onTop()) win.history.back();
       else buryMarker(win, marker);
     },
   };
+  setSelectionLeave(leave);
+  return handle;
 }
 
 /** Test seam: forget buried markers and the guard. */
@@ -2885,6 +3001,7 @@ export function resetSelectionHistory(): void {
   buriedMarkers.clear();
   buriedGuard?.();
   buriedGuard = null;
+  clearSelectionLeave(null);
 }
 
 /** The thread pane: header (+ optional back), message list, and composer. */
@@ -3336,13 +3453,14 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         {...(onEditMessage !== undefined && !selecting ? { onEditMessage: startEdit } : {})}
         {...(canForwardHere && !selecting
           ? {
-              onForwardMessage: (message: ThreadMessage) => {
+              onForwardMessage: (message: ThreadMessage): boolean => {
                 // Where selection exists, Forward enters it with the message ticked.
                 if (forwardEntersSelection(message, onDeleteMessages !== undefined)) {
                   enterSelection(message);
-                  return;
+                  return true;
                 }
                 setForwardFor([message]);
+                return false;
               },
             }
           : {})}
