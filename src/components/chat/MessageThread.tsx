@@ -78,7 +78,6 @@ import {
   PrioritySheet,
   type StripLoops,
 } from '@/components/chat/MarksSheet';
-import { marksLoadedFor } from '@/lib/chat/use-chat-marks';
 import { useOpenPosts, type UseOpenPosts } from '@/lib/chat/use-open-posts';
 import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { ContactSheet } from '@/components/chat/ContactSheet';
@@ -150,6 +149,8 @@ interface MessageThreadProps {
   onSend: ComposerSend;
   /** Every mark of the channel keyed by message id (resolved included); absent = no marks UI. */
   marks?: Map<string, ChatMark>;
+  /** The channel's marks read has settled; the open-loops strip holds its first paint until then. */
+  marksLoaded: boolean;
   /** Marked messages read from the record, for sheet rows beyond loaded history. */
   markedMessages?: Map<string, ThreadMessage>;
   /** Mark a message, or change an open pending mark's priority (same type). */
@@ -276,17 +277,15 @@ export function threadStripSlot(input: {
 /**
  * The open-loops strip input. Ready only when the posts round, the viewer side
  * and this channel's marks read have all settled, so the first painted label
- * is final. A thread without a channel id has no marks read to wait on.
+ * is final.
  */
 export function stripLoops(input: {
   openPosts: Pick<UseOpenPosts, 'ready' | 'count' | 'failed'>;
   side: { side: ViewerSide; ready: boolean };
-  marks: Map<string, ChatMark> | undefined;
-  channelId: string | undefined;
+  marksLoaded: boolean;
 }): StripLoops {
-  const marksLoaded = input.channelId === undefined || marksLoadedFor(input.marks, input.channelId);
   return {
-    ready: input.openPosts.ready && input.side.ready && marksLoaded,
+    ready: input.openPosts.ready && input.side.ready && input.marksLoaded,
     posts: input.openPosts.failed ? null : input.openPosts.count,
     side: input.side.side,
   };
@@ -2059,8 +2058,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           loops={stripLoops({
             openPosts,
             side: viewerSide,
-            marks: props.marks,
-            channelId: props.channelId,
+            marksLoaded: props.marksLoaded,
           })}
           onOpen={() => setMarksOpen(true)}
         />

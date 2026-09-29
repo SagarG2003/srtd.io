@@ -49,7 +49,6 @@ import {
 } from '@/components/chat/MessageThread';
 import { renderToStaticMarkup as renderStrip } from 'react-dom/server';
 import { MarkStrip } from '@/components/chat/MarksSheet';
-import { tagMarksLoaded } from '@/lib/chat/use-chat-marks';
 import type { ChatMark } from '@/lib/chat/marks';
 import { roleLabel } from '@/components/pages/settings/members-data';
 import { IconClock, IconTickDouble, IconTickSingle } from '@/components/ui/icons';
@@ -1871,31 +1870,26 @@ describe('open loops first paint waits for marks (B1)', () => {
   });
   const visible = (html: string): string =>
     html.replace(/<span class="sr-only">[^<]*<\/span>/, '').replace(/<[^>]+>/g, '');
-  const paint = (input: Parameters<typeof stripLoops>[0]): string =>
-    visible(
-      renderStrip(
-        <MarkStrip marks={input.marks ?? new Map()} loops={stripLoops(input)} onOpen={() => {}} />,
-      ),
-    );
+  // One strip frame as MessageThread renders it: the marks prop plus the
+  // marksLoaded prop through stripLoops.
+  const paint = (marks: Map<string, ChatMark>, input: Parameters<typeof stripLoops>[0]): string =>
+    visible(renderStrip(<MarkStrip marks={marks} loops={stripLoops(input)} onOpen={() => {}} />));
   const side = { side: 'client' as const, ready: true };
 
   it('channel switch into a thread with marks: no label until its marks are loaded', () => {
-    const oldMarks = tagMarksLoaded(new Map([['a', pending('a', 'A')]]), 'A');
-    const newMarks = tagMarksLoaded(
-      new Map([
-        ['b1', pending('b1', 'B')],
-        ['b2', pending('b2', 'B')],
-      ]),
-      'B',
-    );
+    const oldMarks = new Map([['a', pending('a', 'A')]]);
+    const newMarks = new Map([
+      ['b1', pending('b1', 'B')],
+      ['b2', pending('b2', 'B')],
+    ]);
     const posts = { ready: true, count: 1, failed: false };
     const frames = [
-      // The render right after the switch: old channel's map, new channel id.
-      paint({ openPosts: { ...posts, ready: false }, side, marks: oldMarks, channelId: 'B' }),
-      paint({ openPosts: posts, side, marks: oldMarks, channelId: 'B' }),
-      // The hook's reset: empty, untagged.
-      paint({ openPosts: posts, side, marks: new Map(), channelId: 'B' }),
-      paint({ openPosts: posts, side, marks: newMarks, channelId: 'B' }),
+      // First render after the switch: old map, marksLoaded already false.
+      paint(oldMarks, { openPosts: { ...posts, ready: false }, side, marksLoaded: false }),
+      paint(oldMarks, { openPosts: posts, side, marksLoaded: false }),
+      // The hook's reset: empty map, still loading.
+      paint(new Map(), { openPosts: posts, side, marksLoaded: false }),
+      paint(newMarks, { openPosts: posts, side, marksLoaded: true }),
     ];
     expect(frames.slice(0, 3)).toEqual(['', '', '']);
     expect(frames[3]).toBe('31 post waiting on you · 2 pending');
@@ -1903,25 +1897,23 @@ describe('open loops first paint waits for marks (B1)', () => {
 
   it('first open, posts settle before marks: no intermediate label (never Nothing open)', () => {
     const posts = { ready: true, count: 0, failed: false };
-    const before = paint({ openPosts: posts, side, marks: new Map(), channelId: 'C' });
-    expect(before).toBe('');
-    const after = paint({
-      openPosts: posts,
-      side,
-      marks: tagMarksLoaded(new Map([['c', pending('c', 'C')]]), 'C'),
-      channelId: 'C',
-    });
-    expect(after).toBe('11 pending');
+    expect(paint(new Map(), { openPosts: posts, side, marksLoaded: false })).toBe('');
+    expect(
+      paint(new Map([['c', pending('c', 'C')]]), { openPosts: posts, side, marksLoaded: true }),
+    ).toBe('11 pending');
   });
 
-  it('a failed posts read is posts null in the strip input', () => {
+  it('ready needs posts, side and the marksLoaded prop; a failed posts read is posts null', () => {
+    const ok = { ready: true, count: 4, failed: false };
+    expect(stripLoops({ openPosts: ok, side, marksLoaded: true }).ready).toBe(true);
+    expect(stripLoops({ openPosts: ok, side, marksLoaded: false }).ready).toBe(false);
     expect(
-      stripLoops({
-        openPosts: { ready: true, count: 4, failed: true },
-        side,
-        marks: tagMarksLoaded(new Map(), 'D'),
-        channelId: 'D',
-      }),
-    ).toEqual({ ready: true, posts: null, side: 'client' });
+      stripLoops({ openPosts: ok, side: { ...side, ready: false }, marksLoaded: true }).ready,
+    ).toBe(false);
+    expect(stripLoops({ openPosts: { ...ok, failed: true }, side, marksLoaded: true })).toEqual({
+      ready: true,
+      posts: null,
+      side: 'client',
+    });
   });
 });

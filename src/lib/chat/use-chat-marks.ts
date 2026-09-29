@@ -63,38 +63,12 @@ export interface UseChatMarks {
   reopen: (messageId: string) => Promise<WriteResult>;
 }
 
-// The channel whose marks read has settled, keyed by the marks map instance.
-// The thread only receives the map, so the loaded flag travels with it: a map
-// is tagged when its channel's read resolves, and every later update carries
-// the tag to the next map. The empty map set on a channel switch is untagged.
-const LOADED_FOR = new WeakMap<Map<string, ChatMark>, string>();
-
-/** Tag a marks map as the settled read of `channelId`. */
-export function tagMarksLoaded(
-  marks: Map<string, ChatMark>,
-  channelId: string,
-): Map<string, ChatMark> {
-  LOADED_FOR.set(marks, channelId);
-  return marks;
-}
-
-/** Carry `prev`'s loaded tag to `next` (an update of the same channel's marks). */
-export function carryMarksLoaded(
-  prev: Map<string, ChatMark>,
-  next: Map<string, ChatMark>,
-): Map<string, ChatMark> {
-  const channel = LOADED_FOR.get(prev);
-  if (channel !== undefined) LOADED_FOR.set(next, channel);
-  return next;
-}
-
-/** Whether `marks` is the settled marks read of `channelId`. */
-export function marksLoadedFor(
-  marks: Map<string, ChatMark> | undefined,
-  channelId: string | undefined,
-): boolean {
-  if (marks === undefined || channelId === undefined) return false;
-  return LOADED_FOR.get(marks) === channelId;
+/**
+ * Whether the open channel's marks read has settled. Keyed by channel, so a
+ * switch reads false on its first render, before the reset effect runs.
+ */
+export function marksReadSettled(loadedFor: string | null, channelId: string | null): boolean {
+  return channelId !== null && loadedFor === channelId;
 }
 
 /**
@@ -139,6 +113,8 @@ export function useChatMarks(params: {
   const db: Client = params.db ?? supabase;
   const [marks, setMarks] = useState<Map<string, ChatMark>>(new Map());
   const [markedMessages, setMarkedMessages] = useState<Map<string, ThreadMessage>>(new Map());
+  // The channel whose marks read has settled (ok or not); null until one has.
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const marksRef = useRef(marks);
   marksRef.current = marks;
   const channelRef = useRef(channelId);
@@ -177,12 +153,11 @@ export function useChatMarks(params: {
           error: result.error.message,
         });
         // Settled all the same: the strip stops holding and shows what it has.
-        setMarks((prev) =>
-          LOADED_FOR.get(prev) === forChannel ? prev : tagMarksLoaded(new Map(prev), forChannel),
-        );
+        setLoadedFor(forChannel);
         return;
       }
-      setMarks(tagMarksLoaded(indexMarks(result.data), forChannel));
+      setMarks(indexMarks(result.data));
+      setLoadedFor(forChannel);
       await loadMarkedMessages(
         result.data.map((m) => m.messageId),
         forChannel,
@@ -194,6 +169,7 @@ export function useChatMarks(params: {
   useEffect(() => {
     setMarks(new Map());
     setMarkedMessages(new Map());
+    setLoadedFor(null);
     if (channelId === null) return;
     void load(channelId);
   }, [channelId, load]);
@@ -219,7 +195,7 @@ export function useChatMarks(params: {
       }
       if (!result.data.found || result.data.mark.channelId !== forChannel) return;
       const mark = result.data.mark;
-      setMarks((prev) => carryMarksLoaded(prev, upsertMark(prev, mark)));
+      setMarks((prev) => upsertMark(prev, mark));
       await loadMarkedMessages([messageId], forChannel);
     },
     [db, loadMarkedMessages],
@@ -269,19 +245,16 @@ export function useChatMarks(params: {
       if (channelRef.current === forChannel) {
         setMarks((prev) => {
           const existing = prev.get(messageId);
-          return carryMarksLoaded(
-            prev,
-            upsertMark(prev, {
-              messageId,
-              channelId: forChannel,
-              type,
-              priority: type === 'pending' ? priority : null,
-              markedAt: existing?.markedAt ?? new Date().toISOString(),
-              resolved: false,
-              resolvedBy: null,
-              resolvedAt: null,
-            }),
-          );
+          return upsertMark(prev, {
+            messageId,
+            channelId: forChannel,
+            type,
+            priority: type === 'pending' ? priority : null,
+            markedAt: existing?.markedAt ?? new Date().toISOString(),
+            resolved: false,
+            resolvedBy: null,
+            resolvedAt: null,
+          });
         });
       }
       signal(messageId, traceId);
@@ -304,8 +277,7 @@ export function useChatMarks(params: {
         action,
         actorId: currentUserId,
         apply: (next) => {
-          if (channelRef.current === forChannel)
-            setMarks((prev) => carryMarksLoaded(prev, upsertMark(prev, next)));
+          if (channelRef.current === forChannel) setMarks((prev) => upsertMark(prev, next));
         },
       });
       if (!result.ok) {
@@ -332,7 +304,7 @@ export function useChatMarks(params: {
     [transition],
   );
 
-  const loaded = marksLoadedFor(marks, channelId ?? undefined);
+  const loaded = marksReadSettled(loadedFor, channelId);
   return useMemo(
     () => ({ marks, loaded, markedMessages, refetch, setMark, resolve, reopen }),
     [marks, loaded, markedMessages, refetch, setMark, resolve, reopen],

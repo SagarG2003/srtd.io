@@ -8,12 +8,7 @@ vi.mock('agora-chat', () => ({
 
 import type { Client } from '@srtdio/rpc';
 import { indexMarks, marksForTab, upsertMark, type ChatMark } from '@/lib/chat/marks';
-import {
-  carryMarksLoaded,
-  marksLoadedFor,
-  runMarkTransition,
-  tagMarksLoaded,
-} from '@/lib/chat/use-chat-marks';
+import { marksReadSettled, runMarkTransition } from '@/lib/chat/use-chat-marks';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MARKED_AT = '2026-09-27T10:00:00+00:00';
@@ -153,22 +148,11 @@ describe('runMarkTransition', () => {
 });
 
 describe('marks loaded flag (B1)', () => {
-  it('an untagged (switch-reset) map is not loaded; the settled read is, for its channel only', () => {
-    const reset = new Map<string, ChatMark>();
-    expect(marksLoadedFor(reset, 'c1')).toBe(false);
-    const loaded = tagMarksLoaded(indexMarks([mark({ channelId: 'c1' })]), 'c1');
-    expect(marksLoadedFor(loaded, 'c1')).toBe(true);
-    // The one render after a switch still holds the old channel's map.
-    expect(marksLoadedFor(loaded, 'c2')).toBe(false);
-    expect(marksLoadedFor(undefined, 'c1')).toBe(false);
-  });
-
-  it('updates carry the tag; updates before the read settles do not invent it', () => {
-    const loaded = tagMarksLoaded(new Map(), 'c1');
-    const next = carryMarksLoaded(loaded, upsertMark(loaded, mark({ channelId: 'c1' })));
-    expect(marksLoadedFor(next, 'c1')).toBe(true);
-    const early = new Map<string, ChatMark>();
-    const live = carryMarksLoaded(early, upsertMark(early, mark({ channelId: 'c1' })));
-    expect(marksLoadedFor(live, 'c1')).toBe(false);
+  it('true only for the channel whose read settled; a switch reads false at once', () => {
+    expect(marksReadSettled(null, 'c1')).toBe(false);
+    expect(marksReadSettled('c1', 'c1')).toBe(true);
+    // First render after a switch, before the reset effect: still the old channel's read.
+    expect(marksReadSettled('c1', 'c2')).toBe(false);
+    expect(marksReadSettled(null, null)).toBe(false);
   });
 });
