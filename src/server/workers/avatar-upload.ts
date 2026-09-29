@@ -5,14 +5,22 @@
 //      public R2 bucket, and returns a stable public CDN URL:
 //      { avatar_url }.
 //
-// This worker is deliberately SIMPLER than asset-upload: an avatar belongs to a
-// PERSON, not a workspace. So there is NO workspace_id, NO membership check, NO
-// database access, and NO service-role key. The worker only proves who the
+// This worker is deliberately SIMPLER than asset-upload: a user avatar belongs to
+// a PERSON, not a workspace. So there is NO workspace_id, NO membership check, NO
+// database access, and NO service-role key on that path. The worker only proves who the
 // caller is (verified token `sub`), validates the bytes, PUTs them, and returns
 // the URL. The acting user id comes from the verified token's `sub` claim only,
 // never from the request body, so a caller can only ever write their own avatar.
 // The frontend later takes avatar_url and calls user_profile_update; this worker
 // never touches the users table.
+//
+// Group photos ride the same route: form fields target_kind=group + target_id
+// store the bytes under groups/<group id>/ instead of <user id>/. The actor is
+// still the verified `sub`; the worker then checks, AS that caller (their own
+// Bearer JWT forwarded to PostgREST, so auth.uid() is the verified user and RLS
+// applies), the same rule group_avatar_set enforces: the group's creator or an
+// active workspace owner/admin. Any failed or hidden read denies. The frontend
+// then calls group_avatar_set, which re-checks the rule itself.
 //
 // No EXIF strip or virus scan: input is PNG-only (magic-byte checked), size
 // capped at 5 MiB, and self-produced by the in-app cropper's canvas.toBlob, so
@@ -74,6 +82,8 @@ type AvatarResponseCode =
   | 'too_large'
   | 'unsupported_format'
   | 'unauthorized'
+  | 'forbidden'
+  | 'invalid_target'
   | 'method_not_allowed'
   | 'internal_error';
 
@@ -83,6 +93,8 @@ const STATUS_BY_CODE: Record<AvatarResponseCode, number> = {
   too_large: 413,
   unsupported_format: 415,
   unauthorized: 401,
+  forbidden: 403,
+  invalid_target: 400,
   method_not_allowed: 405,
   internal_error: 500,
 };
@@ -96,6 +108,58 @@ export interface AvatarUploadDeps {
   storage: Pick<StorageClient, 'putObject'>;
   /** Verifies the Bearer token and returns the caller's `sub`, or an error. */
   verifyToken: (request: Request) => Promise<Result<string, ReadError>>;
+  /**
+   * Whether the verified caller may set this group's photo (creator, or an
+   * active workspace owner/admin). Runs as the caller, never as service role.
+   */
+  canManageGroup: (request: Request, groupId: string, userId: string) => Promise<boolean>;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Roles that may manage any group in their workspace, mirroring group_avatar_set. */
+const GROUP_MANAGER_ROLES: ReadonlySet<string> = new Set(['owner', 'admin']);
+
+/**
+ * group_avatar_set's rule, read through PostgREST AS the caller: their Bearer
+ * JWT and the public apikey header are forwarded from the inbound request, so
+ * the reads are RLS-scoped to auth.uid(). Returns false on any failed, empty or
+ * malformed read (fail closed). Only the verified `userId` is compared.
+ */
+export async function canManageGroupAsCaller(
+  request: Request,
+  groupId: string,
+  userId: string,
+  env: Pick<AvatarUploadEnv, 'SUPABASE_URL'>,
+  fetcher: (input: string, init: RequestInit) => Promise<Response>,
+): Promise<boolean> {
+  const authorization = request.headers.get('Authorization');
+  const apikey = request.headers.get('apikey');
+  if (authorization === null || apikey === null || apikey === '') return false;
+  const headers = { Authorization: authorization, apikey, Accept: 'application/json' };
+  const base = `${env.SUPABASE_URL.replace(/\/+$/, '')}/rest/v1`;
+
+  const readRows = async (url: string): Promise<Record<string, unknown>[] | null> => {
+    const res = await fetcher(url, { method: 'GET', headers });
+    if (!res.ok) return null;
+    const body: unknown = await res.json().catch(() => null);
+    return Array.isArray(body) ? (body as Record<string, unknown>[]) : null;
+  };
+
+  const groups = await readRows(
+    `${base}/groups?select=workspace_id,created_by&id=eq.${groupId}&deleted_at=is.null`,
+  );
+  const group = groups?.[0];
+  if (group === undefined || typeof group.workspace_id !== 'string') return false;
+  if (group.created_by === userId) return true;
+
+  const members = await readRows(
+    `${base}/workspace_members?select=role&workspace_id=eq.${group.workspace_id}` +
+      `&user_id=eq.${userId}&active=eq.true`,
+  );
+  return (members ?? []).some(
+    (row) => typeof row.role === 'string' && GROUP_MANAGER_ROLES.has(row.role),
+  );
 }
 
 /** The configured allowlist, falling back to the known site origins. */
@@ -139,7 +203,7 @@ function preflightResponse(request: Request, env: AvatarUploadEnv): Response {
   const headers = new Headers({
     'Access-Control-Allow-Origin': acao,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': `authorization, content-type, ${TRACE_ID_HEADER.toLowerCase()}`,
+    'Access-Control-Allow-Headers': `authorization, content-type, apikey, ${TRACE_ID_HEADER.toLowerCase()}`,
     'Access-Control-Max-Age': String(CORS_MAX_AGE_SECONDS),
     Vary: 'Origin',
   });
@@ -214,10 +278,25 @@ export async function handleAvatarUpload(
     return fail('unsupported_format', 'Avatar must be a PNG image.', traceId, acao);
   }
 
+  // Target: the caller's own avatar (default, unchanged), or a group's photo.
+  const targetKind = form.get('target_kind');
+  let folder = userId;
+  if (targetKind !== null && targetKind !== 'user') {
+    const targetId = form.get('target_id');
+    if (targetKind !== 'group' || typeof targetId !== 'string' || !UUID_RE.test(targetId)) {
+      return fail('invalid_target', 'Unknown upload target.', traceId, acao);
+    }
+    if (!(await deps.canManageGroup(request, targetId, userId))) {
+      return fail('forbidden', "You can't change this group's photo.", traceId, acao);
+    }
+    folder = `groups/${targetId.toLowerCase()}`;
+  }
+
   const sha256 = await computeSha256(bytes);
-  // Hash in the key busts CDN caches when the photo changes; the userId folder
-  // isolates each person. The URL path must equal this key exactly.
-  const key = `${userId}/${sha256}.png`;
+  // Hash in the key busts CDN caches when the photo changes; the userId (or
+  // groups/<group id>) folder isolates each owner. The URL path must equal this
+  // key exactly.
+  const key = `${folder}/${sha256}.png`;
   await deps.storage.putObject({
     bucket: env.AVATAR_BUCKET,
     key,
@@ -240,6 +319,10 @@ function buildDeps(env: AvatarUploadEnv): AvatarUploadDeps {
       tracedFetch,
     ),
     verifyToken: (request) => verifyCaller(request, getSupabaseJwks(env)),
+    canManageGroup: (request, groupId, userId) =>
+      canManageGroupAsCaller(request, groupId, userId, env, (input, init) =>
+        tracedFetch(input, init, extractTraceId(request)),
+      ),
   };
 }
 

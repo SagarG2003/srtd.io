@@ -5,8 +5,13 @@ import { IconUser } from '@/components/ui/icons';
 interface AvatarProps {
   name?: string;
   src?: string;
-  /** 'row' is the 48px dense chat-list row avatar (text-sm initials). */
-  size?: 'sm' | 'md' | 'lg' | 'xl' | 'row';
+  /**
+   * 'row' is the 48px dense chat-list row avatar (text-sm initials); 'header' is
+   * the 40px group thread header photo; 'hero' is the 112px group info photo.
+   */
+  size?: 'sm' | 'md' | 'lg' | 'xl' | 'row' | 'header' | 'hero';
+  /** 'rounded' is the 24px-radius rounded square (group info photo); default circle. */
+  shape?: 'circle' | 'rounded';
   /** 'online' adds a bottom-right presence dot; absent renders no dot. */
   presence?: 'online' | undefined;
 }
@@ -17,6 +22,18 @@ const PX: Record<NonNullable<AvatarProps['size']>, number> = {
   lg: 32,
   xl: 48,
   row: 48,
+  header: 40,
+  hero: 112,
+};
+
+const INITIALS_TYPE: Record<NonNullable<AvatarProps['size']>, string> = {
+  sm: 'text-xs',
+  md: 'text-xs',
+  lg: 'text-xs',
+  xl: 'text-xs',
+  row: 'text-sm',
+  header: 'text-sm',
+  hero: 'text-3xl',
 };
 
 const PALETTE = ['#5e6ad2', '#3e7d54', '#b8772b', '#c2392b', '#7a5ea8', '#2b8a9e'];
@@ -41,7 +58,12 @@ function initialsFor(name: string): string {
   return (first + last).toUpperCase();
 }
 
-const base = 'rounded-full inline-flex items-center justify-center select-none';
+const base = 'inline-flex items-center justify-center select-none';
+
+const SHAPE: Record<NonNullable<AvatarProps['shape']>, string> = {
+  circle: 'rounded-full',
+  rounded: 'rounded-[24px]',
+};
 
 export function Avatar({ presence, ...props }: AvatarProps) {
   if (presence !== 'online') return <AvatarFace {...props} />;
@@ -57,9 +79,10 @@ export function Avatar({ presence, ...props }: AvatarProps) {
   );
 }
 
-function AvatarFace({ name, src, size = 'md' }: Omit<AvatarProps, 'presence'>) {
+function AvatarFace({ name, src, size = 'md', shape = 'circle' }: Omit<AvatarProps, 'presence'>) {
   const [errored, setErrored] = useState(false);
   const px = PX[size];
+  const box = `${SHAPE[shape]} ${base}`;
   const style: CSSProperties = { width: px, height: px };
 
   if (src !== undefined && !errored) {
@@ -69,7 +92,7 @@ function AvatarFace({ name, src, size = 'md' }: Omit<AvatarProps, 'presence'>) {
         alt={name ?? ''}
         style={style}
         onError={() => setErrored(true)}
-        className={cn(base, 'object-cover')}
+        className={cn(box, 'object-cover')}
       />
     );
   }
@@ -78,7 +101,7 @@ function AvatarFace({ name, src, size = 'md' }: Omit<AvatarProps, 'presence'>) {
     return (
       <div
         style={{ ...style, backgroundColor: colorFor(name) }}
-        className={cn(base, 'text-white font-medium', size === 'row' ? 'text-sm' : 'text-xs')}
+        className={cn(box, 'text-white font-medium', INITIALS_TYPE[size])}
       >
         {initialsFor(name)}
       </div>
@@ -86,7 +109,7 @@ function AvatarFace({ name, src, size = 'md' }: Omit<AvatarProps, 'presence'>) {
   }
 
   return (
-    <div style={style} className={cn(base, 'bg-accent-soft border border-accent-line text-accent')}>
+    <div style={style} className={cn(box, 'bg-accent-soft border border-accent-line text-accent')}>
       <IconUser size={Math.round(px * 0.6)} />
     </div>
   );

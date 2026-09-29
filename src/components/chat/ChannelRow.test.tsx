@@ -119,12 +119,13 @@ describe('ChannelList dense row', () => {
     expect({ row: r.cls, classes: r.classes }).toMatchSnapshot();
   });
 
-  it('empty preview: "No messages yet" in tertiary ink, not italic; group glyph avatar', () => {
+  it('empty preview: "No messages yet" in tertiary ink, not italic; group initials avatar', () => {
     const r = row(group, undefined);
     expect(r.html).toContain('No messages yet');
     expect(r.html).toContain('text-fg-3');
     expect(r.html).not.toContain('italic');
-    expect(r.html).toContain('data-group-avatar');
+    // A group with no photo uses the shared initials fallback, as a user does.
+    expect(r.html).toContain('>L<');
     tokenOnly(r.cls + r.html);
     expect({ row: r.cls, classes: r.classes }).toMatchSnapshot();
   });

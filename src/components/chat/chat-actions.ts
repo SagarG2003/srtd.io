@@ -114,3 +114,26 @@ export async function leaveGroupChannel(
   onDone();
   return null;
 }
+
+/**
+ * Set or clear a group's photo via group_avatar_set (creator or workspace
+ * owner/admin, enforced by the proc with auth.uid()). `avatarUrl` null clears
+ * it. There is no @srtdio/rpc wrapper for this proc, so the call is made here
+ * with the args object passed through as the wrappers do (p_trace_id included).
+ */
+export async function setGroupAvatar(
+  client: Client,
+  params: { groupId: string; avatarUrl: string | null; traceId: string },
+  onDone: () => void,
+): Promise<DomainError | null> {
+  const args = {
+    p_group_id: params.groupId,
+    // The generated arg is `string`, but the proc takes NULL to clear the photo.
+    p_avatar_url: params.avatarUrl as string,
+    p_trace_id: params.traceId,
+  };
+  const { error } = await client.rpc('group_avatar_set', args);
+  if (error) return { code: 'unknown', message: error.message };
+  onDone();
+  return null;
+}

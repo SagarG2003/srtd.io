@@ -907,8 +907,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
           open={groupInfoOpen}
           onClose={() => setGroupInfoOpen(false)}
           workspaceId={workspaceId}
+          workspaceName={workspace?.name}
           groupId={selected.groupId}
           groupName={selected.title}
+          avatarUrl={selected.avatarUrl}
+          createdBy={selected.createdBy ?? null}
+          viewerRole={mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null}
           currentUserId={currentUserId}
           onChanged={onGroupChanged}
           onLeft={onGroupLeft}

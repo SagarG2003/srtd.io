@@ -34,8 +34,10 @@ export interface ChannelSummary {
   channelType: 'dm' | 'group';
   /** Title shown in the list: group name or the DM peer's display name. */
   title: string;
-  /** Avatar src for a DM peer; groups have none in the MVP. */
+  /** Avatar src: the DM peer's users.avatar_url, or the group's groups.avatar_url. */
   avatarUrl: string | null;
+  /** The group's creator (groups.created_by); null for DMs or when unknown. */
+  createdBy?: string | null;
   /** The Agora group id for group channels; null until the sync worker stamps it. */
   agoraGroupId: string | null;
   /** The Sorted group id (chat_channels.entity_id) for group channels; null for DMs. */
@@ -100,7 +102,8 @@ export function dmPeerId(
 /**
  * Shape raw registry rows into channel summaries. Pure, so display resolution is
  * unit-tested without a client: group channels take their name from groupsById
- * (keyed by entity_id), DM channels take the peer's name/avatar from usersById.
+ * (keyed by entity_id) along with its photo, DM channels take the peer's
+ * name/avatar from usersById.
  * Unknown ids fall back to a neutral label so a missing row never blanks the row.
  * rolesByUserId carries each DM peer's workspace role; a missing entry is null.
  */
@@ -118,7 +121,8 @@ export function shapeChannelSummaries(
         channelId: channel.channel_id,
         channelType: 'group',
         title: group?.name ?? 'Group',
-        avatarUrl: null,
+        avatarUrl: group?.avatar_url ?? null,
+        createdBy: group?.created_by ?? null,
         agoraGroupId: channel.agora_group_id,
         groupId: channel.entity_id,
         peerUserId: null,
@@ -151,8 +155,9 @@ function indexBy<T>(rows: T[], key: (row: T) => string): Map<string, T> {
 /**
  * List a workspace's chat channels, newest first, each enriched with display
  * info. Four round-trips total regardless of channel count: the channel
- * registry, then one batched groups read, one batched users read and one batched
- * workspace_members read for the DM peers' roles. Last-message
+ * registry, then one batched groups read (names AND photos; chat_channels has no
+ * FK to groups, so PostgREST cannot embed it into the first read), one batched
+ * users read and one batched workspace_members read for the DM peers' roles. Last-message
  * preview and unread counts are a later enhancement and are not built here.
  */
 export async function listChannelSummaries(
@@ -391,7 +396,10 @@ export async function listChannelClears(
 
 async function readGroups(client: Client, ids: string[]): Promise<Result<GroupRow[]>> {
   if (ids.length === 0) return { ok: true, data: [] };
-  const res = await client.from('groups').select('id, name, workspace_id').in('id', ids);
+  const res = await client
+    .from('groups')
+    .select('id, name, workspace_id, avatar_url, created_by')
+    .in('id', ids);
   if (res.error) return fail(`listChannelSummaries groups: ${res.error.message}`);
   return { ok: true, data: (res.data ?? []) as GroupRow[] };
 }

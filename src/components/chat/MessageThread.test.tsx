@@ -1586,10 +1586,15 @@ describe('ThreadHeaderIdentity', () => {
     expect(onOpenContact).toHaveBeenCalledTimes(1);
   });
 
-  it('a group header stays a plain block with no contact button', () => {
-    const root = ThreadHeaderIdentity({ ...base, isGroup: true, onOpenContact: vi.fn() });
-    expect(buttons(root)).toEqual([]);
+  it('a group header with the handler is one button that opens Group info', () => {
+    const onOpen = vi.fn();
+    const root = ThreadHeaderIdentity({ ...base, isGroup: true, onOpenContact: onOpen });
+    expect(buttons(root)).toHaveLength(1);
     expect(allText(root)).toContain('Alice Doe');
+  });
+
+  it('a group header without the handler stays a plain block', () => {
+    expect(buttons(ThreadHeaderIdentity({ ...base, isGroup: true }))).toEqual([]);
   });
 
   it('a DM without the handler renders no button', () => {

@@ -14,6 +14,7 @@ vi.mock('jose', async (importOriginal) => {
 });
 
 import worker, {
+  canManageGroupAsCaller,
   handleAvatarUpload,
   MAX_AVATAR_BYTES,
   type AvatarUploadDeps,
@@ -58,6 +59,7 @@ function deps(storage: FakeStorage): AvatarUploadDeps {
   return {
     storage,
     verifyToken: (request) => verifyCaller(request, getSupabaseJwks(env)),
+    canManageGroup: () => Promise.resolve(false),
   };
 }
 
@@ -262,5 +264,113 @@ describe('avatar-upload worker.fetch', () => {
     expect(res.status).toBe(405);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe('method_not_allowed');
+  });
+});
+
+describe('avatar-upload group target', () => {
+  const GROUP = '55555555-5555-7555-8555-555555555555';
+  const WS = '66666666-6666-7666-8666-666666666666';
+
+  function groupDeps(storage: FakeStorage, allowed: boolean): AvatarUploadDeps {
+    return { ...deps(storage), canManageGroup: () => Promise.resolve(allowed) };
+  }
+
+  it('stores a group photo under groups/<group id>/ when the caller may manage it', async () => {
+    const token = await mintToken(USER);
+    const storage = new FakeStorage();
+    const res = await handleAvatarUpload(
+      uploadRequest(token, PNG_BYTES, { target_kind: 'group', target_id: GROUP }),
+      env,
+      groupDeps(storage, true),
+      'trace-g1',
+      null,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { avatar_url: string };
+    expect(body.avatar_url).toBe(`https://cdn.srtd.io/groups/${GROUP}/${pngSha}.png`);
+    expect(storage.calls[0]?.key).toBe(`groups/${GROUP}/${pngSha}.png`);
+  });
+
+  it('returns 403 and stores nothing when the caller may not manage the group', async () => {
+    const token = await mintToken(USER);
+    const storage = new FakeStorage();
+    const res = await handleAvatarUpload(
+      uploadRequest(token, PNG_BYTES, { target_kind: 'group', target_id: GROUP }),
+      env,
+      groupDeps(storage, false),
+      'trace-g2',
+      null,
+    );
+    expect(res.status).toBe(403);
+    expect(storage.calls).toHaveLength(0);
+  });
+
+  it('returns 400 for an unknown target kind or a malformed group id', async () => {
+    const token = await mintToken(USER);
+    for (const extra of [
+      { target_kind: 'workspace', target_id: GROUP },
+      { target_kind: 'group', target_id: '../x' },
+    ]) {
+      const storage = new FakeStorage();
+      const res = await handleAvatarUpload(
+        uploadRequest(token, PNG_BYTES, extra),
+        env,
+        groupDeps(storage, true),
+        'trace-g3',
+        null,
+      );
+      expect(res.status).toBe(400);
+      expect(storage.calls).toHaveLength(0);
+    }
+  });
+
+  describe('canManageGroupAsCaller', () => {
+    function callerRequest(apikey: string | null = 'sb_publishable_x'): Request {
+      const headers = new Headers({ Authorization: 'Bearer caller-jwt' });
+      if (apikey !== null) headers.set('apikey', apikey);
+      return new Request('https://worker.test/', { method: 'POST', headers });
+    }
+
+    function fakeRest(groups: unknown[], members: unknown[]) {
+      const urls: string[] = [];
+      const auth: (string | null)[] = [];
+      const fetcher = (input: string, init: RequestInit): Promise<Response> => {
+        urls.push(input);
+        auth.push(new Headers(init.headers).get('Authorization'));
+        const rows = input.includes('/groups?') ? groups : members;
+        return Promise.resolve(new Response(JSON.stringify(rows), { status: 200 }));
+      };
+      return { fetcher, urls, auth };
+    }
+
+    it('allows the creator, forwarding the caller JWT (runs as auth.uid())', async () => {
+      const rest = fakeRest([{ workspace_id: WS, created_by: USER }], []);
+      const ok = await canManageGroupAsCaller(callerRequest(), GROUP, USER, env, rest.fetcher);
+      expect(ok).toBe(true);
+      expect(rest.auth[0]).toBe('Bearer caller-jwt');
+    });
+
+    it('allows a workspace owner or admin who is not the creator', async () => {
+      const rest = fakeRest([{ workspace_id: WS, created_by: OTHER_USER }], [{ role: 'admin' }]);
+      expect(await canManageGroupAsCaller(callerRequest(), GROUP, USER, env, rest.fetcher)).toBe(
+        true,
+      );
+      expect(rest.urls[1]).toContain(`user_id=eq.${USER}`);
+    });
+
+    it('denies a plain member, a hidden group, and a missing apikey', async () => {
+      const member = fakeRest([{ workspace_id: WS, created_by: OTHER_USER }], [{ role: 'agency' }]);
+      expect(await canManageGroupAsCaller(callerRequest(), GROUP, USER, env, member.fetcher)).toBe(
+        false,
+      );
+      const hidden = fakeRest([], []);
+      expect(await canManageGroupAsCaller(callerRequest(), GROUP, USER, env, hidden.fetcher)).toBe(
+        false,
+      );
+      const creator = fakeRest([{ workspace_id: WS, created_by: USER }], []);
+      expect(
+        await canManageGroupAsCaller(callerRequest(null), GROUP, USER, env, creator.fetcher),
+      ).toBe(false);
+    });
   });
 });
