@@ -19,11 +19,15 @@ export interface AvatarCropperHandle {
   hasPhoto: () => boolean;
   /** Produce the cropped 512x512 PNG, or null when no photo is loaded. */
   exportPng: () => Promise<File | null>;
+  /** Load an externally picked file, same path as the internal file input. */
+  loadFile: (file: File) => void;
 }
 
 interface AvatarCropperProps {
   /** Notified when a photo loads, with its object URL for the live previews. */
   onPhotoChange?: (info: { hasPhoto: boolean; previewUrl: string | null }) => void;
+  /** Hide the built-in "Choose photo" button when the caller owns the picker. */
+  hidePicker?: boolean;
 }
 
 interface Point {
@@ -50,7 +54,7 @@ function drawCrop(
 }
 
 function AvatarCropperImpl(
-  { onPhotoChange }: AvatarCropperProps,
+  { onPhotoChange, hidePicker = false }: AvatarCropperProps,
   ref: React.Ref<AvatarCropperHandle>,
 ): React.ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -166,8 +170,9 @@ function AvatarCropperImpl(
             resolve(new File([blob], 'avatar.png', { type: 'image/png' }));
           }, 'image/png');
         }),
+      loadFile: (file: File) => onPhotoChosen(file),
     }),
-    [],
+    [onPhotoChosen],
   );
 
   // Revoke the last object URL on unmount so a chosen photo never leaks.
@@ -306,14 +311,16 @@ function AvatarCropperImpl(
         ) : null}
       </div>
 
-      <Button
-        type="button"
-        variant="default"
-        size="lg"
-        onClick={() => fileInputRef.current?.click()}
-      >
-        Choose photo
-      </Button>
+      {!hidePicker ? (
+        <Button
+          type="button"
+          variant="default"
+          size="lg"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          Choose photo
+        </Button>
+      ) : null}
 
       <div className="w-full max-w-[260px]">
         <span className="mb-1 block text-xs font-medium text-fg-2">Zoom</span>
