@@ -399,6 +399,46 @@ export async function seedDmChannel(
   return channelId;
 }
 
+export interface SeededAsset {
+  assetId: string;
+  versionId: string;
+}
+
+/**
+ * Seed an asset with one image version (pinned as current) through the service
+ * role. `origin` is assets.origin: 'library' (the column default) or 'chat'.
+ */
+export async function seedAsset(
+  admin: GenericClient,
+  workspaceId: string,
+  uploadedBy: string,
+  origin: 'library' | 'chat' = 'library',
+): Promise<SeededAsset> {
+  const asset = await insertRow(admin, 'assets', {
+    workspace_id: workspaceId,
+    filename: 'file.png',
+    uploaded_by: uploadedBy,
+    origin,
+  });
+  const version = await insertRow(admin, 'asset_versions', {
+    asset_id: asset.id,
+    workspace_id: workspaceId,
+    version_number: 1,
+    kind: 'image',
+    r2_key: `key/${crypto.randomUUID()}`,
+    mime_type: 'image/png',
+    sha256: randomSha256(),
+    size_bytes: 1,
+    uploaded_by: uploadedBy,
+  });
+  const res = await admin
+    .from('assets')
+    .update({ current_version_id: version.id })
+    .eq('id', String(asset.id));
+  if (res.error) throw new Error(`assets update failed: ${res.error.message}`);
+  return { assetId: String(asset.id), versionId: String(version.id) };
+}
+
 // ---------------------------------------------------------------------------
 // Per-workspace scaffold of parent rows that the leaf tables reference
 // ---------------------------------------------------------------------------
