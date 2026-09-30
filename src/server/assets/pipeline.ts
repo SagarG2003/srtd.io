@@ -470,7 +470,8 @@ export async function renameAsset(
   },
 ): Promise<Result<AssetMetaSummary, UploadError>> {
   const asset = await repository.getAsset(input.workspaceId, input.assetId);
-  if (!asset) {
+  // A chat file is not a library asset: it reads as not found here.
+  if (!asset || asset.origin !== 'library') {
     return err({ code: 'not_found', message: 'Asset not found in this workspace.' });
   }
 
@@ -503,7 +504,8 @@ export async function getAssetSummary(
   input: { workspaceId: string; assetId: string },
 ): Promise<Result<AssetSummary, UploadError>> {
   const asset = await repository.getAsset(input.workspaceId, input.assetId);
-  if (!asset || asset.current_version_id === null) {
+  // A chat file is not a library asset: it reads as not found (no existence leak).
+  if (!asset || asset.origin !== 'library' || asset.current_version_id === null) {
     return err({ code: 'not_found', message: 'Asset not found in this workspace.' });
   }
   const current = await repository.getVersionById(input.workspaceId, asset.current_version_id);

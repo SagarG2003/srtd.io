@@ -19,6 +19,14 @@ vi.mock('@supabase/supabase-js', () => ({
           calls.ops.push(['eq', col, value]);
           return builder;
         },
+        update: (values: unknown) => {
+          calls.ops.push(['update', values]);
+          return builder;
+        },
+        in: (col: string, values: unknown) => {
+          calls.ops.push(['in', col, values]);
+          return builder;
+        },
         is: (col: string, value: unknown) => {
           calls.ops.push(['is', col, value]);
           return builder;
@@ -26,6 +34,9 @@ vi.mock('@supabase/supabase-js', () => ({
         order: () => builder,
         limit: () => builder,
         maybeSingle: () => Promise.resolve({ data: null, error: null }),
+        insert: () => Promise.resolve({ error: null }),
+        then: (resolve: (v: { data: unknown[]; error: null }) => unknown) =>
+          resolve({ data: [], error: null }),
       };
       return builder;
     },
@@ -84,5 +95,18 @@ describe('createSupabaseAssetRepository.findVersionBySha', () => {
     expect(calls.ops).toContainEqual(['eq', 'assets.origin', 'chat']);
     expect(calls.ops).toContainEqual(['eq', 'assets.uploaded_by', USER]);
     expect(calls.ops.some((op) => op[0] === 'is' && op[1] === 'assets.deleted_at')).toBe(false);
+  });
+});
+
+describe('createSupabaseAssetRepository.moveAssetsToFolder', () => {
+  it('only moves library assets (a chat file never goes into a folder)', async () => {
+    await repo().moveAssetsToFolder({
+      workspaceId: WORKSPACE,
+      assetIds: ['a1'],
+      targetFolderId: null,
+      actorUserId: USER,
+      traceId: 'trace-1',
+    });
+    expect(calls.ops).toContainEqual(['eq', 'origin', 'library']);
   });
 });

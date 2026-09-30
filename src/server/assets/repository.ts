@@ -735,6 +735,8 @@ export function createSupabaseAssetRepository(env: SupabaseAssetEnv): AssetRepos
         .update({ folder_id: input.targetFolderId })
         .in('id', input.assetIds)
         .eq('workspace_id', input.workspaceId)
+        // A chat file never goes into a folder: only library assets move.
+        .eq('origin', 'library')
         .is('deleted_at', null)
         .select('id');
       if (error) {
@@ -1047,7 +1049,12 @@ export class InMemoryAssetRepository implements AssetRepository {
     let moved = 0;
     for (const id of input.assetIds) {
       const asset = this.assets.get(id);
-      if (asset && asset.workspace_id === input.workspaceId && asset.deleted_at === null) {
+      if (
+        asset &&
+        asset.workspace_id === input.workspaceId &&
+        asset.origin === 'library' &&
+        asset.deleted_at === null
+      ) {
         this.assets.set(id, { ...asset, folder_id: input.targetFolderId });
         moved += 1;
       }

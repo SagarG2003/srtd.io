@@ -305,6 +305,56 @@ describe('runUploadPipeline', () => {
   });
 });
 
+describe('library-only asset routes never touch a chat file', () => {
+  let d: ReturnType<typeof deps>;
+  let chatAssetId: string;
+  beforeEach(async () => {
+    d = deps();
+    const chat = await runUploadPipeline(d, input({ origin: 'chat' }));
+    if (!chat.ok) throw new Error('chat upload failed');
+    chatAssetId = chat.value.assetId;
+  });
+
+  it('getAssetSummary reads a chat asset as not_found', async () => {
+    const res = await getAssetSummary(d.repository, {
+      workspaceId: WORKSPACE_A,
+      assetId: chatAssetId,
+    });
+    expect(res).toEqual({ ok: false, error: expect.objectContaining({ code: 'not_found' }) });
+  });
+
+  it('renameAsset refuses a chat asset as not_found and changes nothing', async () => {
+    const res = await renameAsset(d.repository, {
+      workspaceId: WORKSPACE_A,
+      assetId: chatAssetId,
+      name: 'Renamed',
+      actorUserId: USER,
+      traceId: TRACE,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error.code).toBe('not_found');
+    expect(d.repository.assets.get(chatAssetId)?.display_name).toBeNull();
+  });
+
+  it('moveAssetsToFolder never files a chat asset into a folder', async () => {
+    const lib = await runUploadPipeline(d, input({ bytes: makeJpeg({ scan: OTHER_SCAN }) }));
+    expect(lib.ok).toBe(true);
+    if (!lib.ok) return;
+    seedFolder(d.repository, 'Campaigns');
+    const moved = await d.repository.moveAssetsToFolder({
+      workspaceId: WORKSPACE_A,
+      assetIds: [chatAssetId, lib.value.assetId],
+      targetFolderId: FOLDER,
+      actorUserId: USER,
+      traceId: TRACE,
+    });
+    expect(moved).toBe(1);
+    expect(d.repository.assets.get(chatAssetId)?.folder_id).toBeNull();
+    expect(d.repository.assets.get(lib.value.assetId)?.folder_id).toBe(FOLDER);
+  });
+});
+
 describe('dedup never crosses origin or chat uploader', () => {
   let d: ReturnType<typeof deps>;
   beforeEach(() => {
