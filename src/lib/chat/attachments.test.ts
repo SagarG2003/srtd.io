@@ -21,6 +21,7 @@ import {
   uploadChatAttachment,
   type MessageAttachment,
   type ReplyQuote,
+  uploadRing,
 } from '@/lib/chat/attachments';
 
 function fakeFile(name: string, type: string): File {
@@ -499,5 +500,102 @@ describe('splitAlbum', () => {
 
   it('returns an empty album when there are no images', () => {
     expect(splitAlbum([pdf])).toEqual({ images: [], others: [pdf] });
+  });
+});
+
+describe('T3: voice note peaks ride the DB meta and the live ext', () => {
+  const peaks = Array.from({ length: 48 }, (_, i) => (i * 7) % 101);
+  const voice: MessageAttachment = {
+    assetId: 'ver-v',
+    name: 'voice-note.webm',
+    mime: 'audio/webm',
+    size: 10,
+    durationMs: 4000,
+    peaks,
+  };
+
+  it('DB meta: written as `peaks` and read back', () => {
+    const meta = buildAttachmentMeta([voice]);
+    expect(meta['ver-v']?.peaks).toEqual(peaks);
+    // Round trip through JSON, as Postgres stores it.
+    const back = parseAttachmentMeta(JSON.parse(JSON.stringify(meta)), ['ver-v']);
+    expect(back[0]?.peaks).toEqual(peaks);
+  });
+
+  it('live ext: carried in attachment_meta and read back', () => {
+    const ext = buildMessageExt({ attachments: [voice], sharedPostIds: [], reply: null });
+    const back = parseAttachments(JSON.parse(JSON.stringify(ext)));
+    expect(back[0]?.peaks).toEqual(peaks);
+  });
+
+  it.each([
+    ['a string', 'x'],
+    ['too long', new Array<number>(49).fill(3)],
+    ['a NaN (null in JSON)', [1, null]],
+    ['an object', { a: 1 }],
+  ])('invalid peaks (%s) are absent; the attachment still renders', (_label, bad) => {
+    const db = parseAttachmentMeta(
+      { 'ver-v': { mime: 'audio/webm', name: 'voice-note.webm', size: 1, peaks: bad } },
+      ['ver-v'],
+    );
+    expect(db[0]?.mime).toBe('audio/webm');
+    expect(db[0]).not.toHaveProperty('peaks');
+    const live = parseAttachments({
+      attachment_asset_ids: ['ver-v'],
+      attachment_meta: [
+        { assetId: 'ver-v', name: 'voice-note.webm', mime: 'audio/webm', peaks: bad },
+      ],
+    });
+    expect(live[0]?.mime).toBe('audio/webm');
+    expect(live[0]).not.toHaveProperty('peaks');
+  });
+
+  it('values out of range are clamped 0..100', () => {
+    const db = parseAttachmentMeta(
+      { 'ver-v': { mime: 'audio/webm', name: 'n', size: 1, peaks: [-5, 50, 500] } },
+      ['ver-v'],
+    );
+    expect(db[0]?.peaks).toEqual([0, 50, 100]);
+  });
+
+  it('notes without peaks stay without the key', () => {
+    const plain = { ...voice };
+    delete plain.peaks;
+    expect(buildAttachmentMeta([plain])['ver-v']).not.toHaveProperty('peaks');
+    expect(buildAttachmentExt([plain]).attachment_meta[0]).not.toHaveProperty('peaks');
+  });
+});
+
+describe('uploadRing (the X and its progress)', () => {
+  const file = new File(['abc'], 'a.png', { type: 'image/png' });
+  const att = (
+    over: Partial<MessageAttachment>,
+    local?: Partial<NonNullable<MessageAttachment['local']>>,
+  ) =>
+    ({
+      assetId: '',
+      name: 'a.png',
+      mime: 'image/png',
+      size: 100,
+      ...over,
+      local: { key: 'k', file, previewUrl: null, progress: 0, ...local },
+    }) as MessageAttachment;
+
+  it('null when nothing awaits upload (the X is gone)', () => {
+    expect(uploadRing([att({ assetId: 'v' }, { progress: 1 })])).toBeNull();
+    expect(uploadRing([{ assetId: 'v', name: 'n', mime: 'image/png' }])).toBeNull();
+  });
+
+  it('unknown (spins) while no request runs', () => {
+    expect(uploadRing([att({}, { progress: 0.4 })])).toEqual({ progress: null });
+  });
+
+  it('bytes sent over all bytes of the message', () => {
+    expect(
+      uploadRing([
+        att({ assetId: 'v', size: 100 }, { progress: 1 }),
+        att({ size: 300 }, { progress: 0.5, uploading: true }),
+      ]),
+    ).toEqual({ progress: 250 / 400 });
   });
 });

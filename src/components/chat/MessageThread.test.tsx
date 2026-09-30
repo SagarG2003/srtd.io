@@ -114,6 +114,7 @@ import {
 import { formatClockTime } from '@/lib/chat/time-format';
 import { Link } from 'react-router-dom';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
+import type { MessageAttachment } from '@/lib/chat/attachments';
 import { PresignCache } from '@/lib/asset-presign';
 import type { ChatProfile } from '@/lib/chat-reads';
 import {
@@ -194,6 +195,7 @@ function renderBubble(
     showTicks?: boolean;
     timeZone?: string;
     onRetry?: (id: string) => void;
+    onCancelUpload?: (id: string) => void;
     layout?: ChatLayout;
     viewerUserId?: string;
     onTranscribe?: () => void;
@@ -214,6 +216,7 @@ function renderBubble(
     ...(opts?.viewerUserId !== undefined ? { viewerUserId: opts.viewerUserId } : {}),
     onBadgeClick: () => {},
     ...(opts?.onRetry !== undefined ? { onRetry: opts.onRetry } : {}),
+    ...(opts?.onCancelUpload !== undefined ? { onCancelUpload: opts.onCancelUpload } : {}),
     ...(opts?.onTranscribe !== undefined ? { onTranscribe: opts.onTranscribe } : {}),
   });
 }
@@ -3709,5 +3712,143 @@ describe('J8 the mention-of-me tint follows the stored mentions', () => {
     expect(mentionsMe({ body: 'no token', mine: false, mentions: ['me'] }, 'me', true)).toBe(true);
     expect(mentionsMe({ body: '@[all]', mine: false }, 'me', true)).toBe(true);
     expect(mentionsMe({ body: '@[all]', mine: true, mentions: ['me'] }, 'me', true)).toBe(false);
+  });
+});
+
+describe('T12: the ring in light and dark, on own and peer bubbles and over a photo', () => {
+  const css = readFileSync(fileURLToPath(new URL('../../index.css', import.meta.url)), 'utf8');
+  const block = (selector: string): string => {
+    const at = css.indexOf(`${selector} {`);
+    return css.slice(at, css.indexOf('}', at));
+  };
+  const photo: MessageAttachment = {
+    assetId: '',
+    name: 'photo.png',
+    mime: 'image/png',
+    size: 3,
+    local: {
+      key: 'local-t12',
+      file: new File(['abc'], 'photo.png', { type: 'image/png' }),
+      previewUrl: 'blob:t12',
+      progress: 0.6,
+      uploading: true,
+    },
+  };
+  const pdf: MessageAttachment = {
+    assetId: '',
+    name: 'brief.pdf',
+    mime: 'application/pdf',
+    size: 3,
+    local: { key: 'local-t12f', file: null, previewUrl: null, progress: 0.6, uploading: true },
+  };
+  function ring(html: string): string {
+    const at = html.indexOf('<button type="button" data-upload-ring');
+    return html.slice(at, html.indexOf('</button>', at) + '</button>'.length);
+  }
+  function paint(attachments: MessageAttachment[], mine: boolean, theme: 'light' | 'dark') {
+    return renderStrip(
+      <div className={theme === 'dark' ? 'dark' : undefined}>
+        <div className={mine ? OWN_BUBBLE_CONTENT : undefined}>
+          <MessageAttachments
+            attachments={attachments}
+            cache={cache}
+            presignEnabled
+            album={attachments[0]?.mime === 'image/png'}
+            onCancelUpload={() => {}}
+          />
+        </div>
+      </div>,
+    );
+  }
+
+  it.each([
+    ['own bubble', [pdf], true],
+    ['peer bubble', [pdf], false],
+    ['over a photo', [photo], true],
+  ] as const)('%s: same ring markup in light and dark (snapshot)', (_label, attachments, mine) => {
+    const light = ring(paint([...attachments], mine, 'light'));
+    const dark = ring(paint([...attachments], mine, 'dark'));
+    expect(light).toBe(dark);
+    expect(light).toMatchSnapshot();
+  });
+
+  it('draws only on overlay tokens that exist in both themes', () => {
+    const html = ring(paint([pdf], false, 'light'));
+    const tokens = [...html.matchAll(/(?:bg|text)-(overlay(?:-[a-z]+)?)\b/g)].map((m) => m[1]);
+    expect(new Set(tokens)).toEqual(new Set(['overlay', 'overlay-fg', 'overlay-dot']));
+    for (const token of tokens) {
+      expect(block(':root')).toContain(`--${token}:`);
+      expect(block('.dark')).toContain(`--${token}:`);
+    }
+    // No raw colour, no theme variant, no hard-coded white/black.
+    expect(html).not.toMatch(new RegExp(['white', 'black', ['dark', ':'].join('')].join('|')));
+  });
+
+  it('the own-bubble restyle never reaches the ring (no translucent tile)', () => {
+    const html = ring(paint([pdf], true, 'light'));
+    const classes = new Set(
+      [...html.matchAll(/class="([^"]*)"/g)].flatMap((m) => (m[1] ?? '').split(/\s+/)),
+    );
+    const restyled = [...OWN_BUBBLE_CONTENT.matchAll(/\[&_\.([a-z0-9-]+)/g)].map((m) => m[1]);
+    for (const name of restyled) expect(classes.has(name ?? '')).toBe(false);
+    // The hover tint skips the ring's button.
+    expect(OWN_BUBBLE_CONTENT).toContain('[&_button:not([data-upload-ring]):hover]');
+    expect(OWN_BUBBLE_CONTENT).not.toContain('[&_button:hover]');
+  });
+
+  it('the tap target is at least 44x44 and reduced motion stops the spin', () => {
+    const html = ring(
+      paint([{ ...pdf, local: { ...pdf.local!, uploading: false } }], false, 'light'),
+    );
+    expect(html).toContain('h-12 w-12');
+    expect(html).toContain('animate-spin motion-reduce:animate-none');
+  });
+});
+
+describe('the X on an own uploading bubble', () => {
+  const uploading: MessageAttachment = {
+    assetId: '',
+    name: 'brief.pdf',
+    mime: 'application/pdf',
+    size: 3,
+    local: { key: 'local-x', file: null, previewUrl: null, progress: 0.2, uploading: true },
+  };
+  function cancelOf(root: ReactElement): (() => void) | undefined {
+    let found: (() => void) | undefined;
+    walk(root, (el) => {
+      if (el.type === MessageAttachments) {
+        found = (el.props as { onCancelUpload?: () => void }).onCancelUpload;
+      }
+    });
+    return found;
+  }
+
+  it('an own sending bubble hands the cancel (with its id) to its attachments', () => {
+    const onCancelUpload = vi.fn();
+    const root = renderBubble(
+      makeMessage({
+        id: 'up-1',
+        mine: true,
+        senderUserId: 'me',
+        body: 'caption',
+        state: 'sending',
+        attachments: [uploading],
+      }),
+      { onCancelUpload },
+    );
+    cancelOf(root)?.();
+    expect(onCancelUpload).toHaveBeenCalledWith('up-1');
+  });
+
+  it.each([
+    ['sent', { state: 'sent' as const, mine: true }],
+    ['failed', { state: 'failed' as const, mine: true }],
+    ['files missing', { state: 'failed' as const, mine: true, filesMissing: true }],
+    ['a peer message', { state: 'sent' as const, mine: false }],
+  ])('%s: no cancel offered', (_label, over) => {
+    const root = renderBubble(makeMessage({ ...over, attachments: [uploading] }), {
+      onCancelUpload: vi.fn(),
+    });
+    expect(cancelOf(root)).toBeUndefined();
   });
 });

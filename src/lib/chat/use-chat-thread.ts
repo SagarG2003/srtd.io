@@ -877,7 +877,8 @@ export function useChatThread(params: {
   );
 
   // Background sender updates for the open channel: a retry flips a bubble's
-  // state, upload progress refreshes its tiles, a recorded row replaces the
+  // state, upload progress refreshes its tiles, a cancelled send's bubble
+  // goes (the store released its files and previews), a recorded row replaces the
   // optimistic bubble (keeping the local previews, so the tile never swaps).
   // A send that records while its channel is not open has no bubble left to
   // show its previews: their object URLs are released.
@@ -901,6 +902,12 @@ export function useChatThread(params: {
         if (event.type === 'progress') {
           const { id, attachments } = event;
           setMessages((prev) => setMessageAttachments(prev, id, attachments));
+          return;
+        }
+        // Cancelled with the X: the bubble (caption included) goes at once.
+        if (event.type === 'cancelled') {
+          const { id } = event;
+          setMessages((prev) => removeMessages(prev, [id]));
           return;
         }
         // A restored send whose files could not be read back reads "Photos

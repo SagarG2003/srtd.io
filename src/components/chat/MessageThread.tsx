@@ -138,7 +138,7 @@ import {
   ownMessageActions,
   scheduleWindowBoundary,
 } from '@/components/chat/MessageActionMenu';
-import { useServerNow } from '@/components/chat/ChatStoreProvider';
+import { useCancelUpload, useServerNow } from '@/components/chat/ChatStoreProvider';
 import { SharedBriefCards } from '@/components/chat/BriefCard';
 import { MarkBadge, SelectCheckbox, SelectLock } from '@/components/chat/MarkBits';
 import {
@@ -260,6 +260,11 @@ interface MessageThreadProps {
    * lost to a reload it is the Remove (the thread drops the entry).
    */
   onRetry?: (messageId: string) => void;
+  /**
+   * The X on an own uploading send: cancel it (its bubble goes). Defaults to
+   * the chat store's outbox for this channel when a provider is present.
+   */
+  onCancelUpload?: (messageId: string) => void;
   /** Present on small screens only; renders a back affordance to the list. */
   onBack?: () => void;
   /** Present for group channels only; opens the group management panel. */
@@ -1128,11 +1133,13 @@ export const SELECTED_ROW_TINT = 'pointer-events-none absolute inset-0 -z-10 bg-
  * restyled for the solid fill without touching the shared child components:
  * ink goes accent-fg (secondary at opacity-80), surfaces a white/16 overlay,
  * the quote rule and played waveform white/70, icons follow currentColor. White
- * is accent-fg's value in both themes. Peer bubbles never get this class.
+ * is accent-fg's value in both themes. Peer bubbles never get this class. The
+ * UploadRing (data-upload-ring) is left alone: it draws on overlay tokens and
+ * stays a solid dark circle, never a translucent tile.
  */
 export const OWN_BUBBLE_CONTENT = cn(
   '[&_.bg-panel]:bg-white/[.16] [&_.bg-panel-3]:bg-white/[.16] [&_.border-border]:border-white/[.16]',
-  '[&_button:hover]:bg-white/[.24] [&_a:hover>span]:bg-white/[.24]',
+  '[&_button:not([data-upload-ring]):hover]:bg-white/[.24] [&_a:hover>span]:bg-white/[.24]',
   '[&_.bg-accent]:bg-white/70 [&_.bg-accent.text-accent-fg]:bg-white/[.16] [&_.bg-fg-3]:bg-white/40',
   '[&_.text-fg]:text-accent-fg [&_.text-accent]:text-accent-fg',
   '[&_.text-fg-2]:text-accent-fg [&_.text-fg-2]:opacity-80',
@@ -1449,6 +1456,8 @@ export function MessageBubble(props: {
   meta?: BubbleMeta;
   onBadgeClick: () => void;
   onRetry?: (messageId: string) => void;
+  /** Cancels this own send while its files upload (the UploadRing's X). */
+  onCancelUpload?: (messageId: string) => void;
   onJumpToMessage?: (messageId: string) => void;
   /** The message's mark; drives the badge. */
   mark?: ChatMark | undefined;
@@ -1517,6 +1526,16 @@ export function MessageBubble(props: {
   const swipe = selection === undefined && message.state === 'sent' ? props.swipe : undefined;
   const chip = props.postRefs?.chip;
   const cardRefs = cardRefsFor(message.id, selection, props.postRefs);
+  // An own send still uploading can be cancelled with the ring's X; once
+  // recorded, refused or missing its files it cannot.
+  const onCancelUpload = props.onCancelUpload;
+  const cancelUpload =
+    mine &&
+    message.state === 'sending' &&
+    message.filesMissing !== true &&
+    onCancelUpload !== undefined
+      ? () => onCancelUpload(message.id)
+      : undefined;
   const column = cn('flex min-w-0 flex-col gap-1', sized(BUBBLE_MAX, layout), mine && 'items-end');
   const senderLine = showMeta ? (
     <span className={cn('text-fg', sized(GROUP_SENDER_TYPE, layout))}>{name}</span>
@@ -1694,6 +1713,7 @@ export function MessageBubble(props: {
                 attachments={message.attachments}
                 cache={cache}
                 presignEnabled={presignEnabled}
+                onCancelUpload={cancelUpload}
                 voice={{
                   messageId: message.id,
                   mine,
@@ -1713,6 +1733,7 @@ export function MessageBubble(props: {
                   cache={cache}
                   presignEnabled={presignEnabled}
                   album
+                  onCancelUpload={cancelUpload}
                   caption={hasBody ? body : undefined}
                   onImageClick={(_attachment, index) => props.onOpenImage?.(index)}
                 />
@@ -1730,6 +1751,7 @@ export function MessageBubble(props: {
                   attachments={message.attachments}
                   cache={cache}
                   presignEnabled={presignEnabled}
+                  onCancelUpload={cancelUpload}
                 />
                 <SharedPostCards postIds={message.sharedPostIds} {...cardRefs} />
                 <SharedBriefCards briefIds={message.sharedBriefIds} />
@@ -2004,6 +2026,7 @@ function MessageRow(props: {
     reactionsOnly?: boolean,
   ) => void;
   onRetry?: (messageId: string) => void;
+  onCancelUpload?: (messageId: string) => void;
   onJumpToMessage?: (messageId: string) => void;
   mark: ChatMark | undefined;
   onChangePriority?: (messageId: string) => void;
@@ -2165,6 +2188,7 @@ function MessageRow(props: {
           : {}),
       }}
       {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
+      {...(props.onCancelUpload !== undefined ? { onCancelUpload: props.onCancelUpload } : {})}
       {...(props.onJumpToMessage !== undefined ? { onJumpToMessage: props.onJumpToMessage } : {})}
       mark={props.mark}
       {...(onChangePriority !== undefined
@@ -2407,6 +2431,7 @@ function ThreadBody(
     | 'profiles'
     | 'onToggleReaction'
     | 'onRetry'
+    | 'onCancelUpload'
     | 'timeZone'
   > & {
     cache: PresignCache;
@@ -2932,6 +2957,9 @@ function ThreadBody(
                   }
                 : {})}
               {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
+              {...(props.onCancelUpload !== undefined
+                ? { onCancelUpload: props.onCancelUpload }
+                : {})}
             />
           ),
           props.filtering === true && props.hasMore === true
@@ -3508,6 +3536,16 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // Everything per chat is keyed on the channel id (the parent also remounts
   // the thread per channel), never the title.
   const channelId = props.channelId;
+  // The X on an own uploading send: the caller's handler, else this chat's outbox.
+  const storeCancel = useCancelUpload();
+  const propCancel = props.onCancelUpload;
+  const onCancelUpload = useMemo<((messageId: string) => void) | undefined>(() => {
+    if (propCancel !== undefined) return propCancel;
+    if (storeCancel === null || channelId === undefined) return undefined;
+    return (messageId: string) => {
+      storeCancel(channelId, messageId);
+    };
+  }, [propCancel, storeCancel, channelId]);
   const channelKey = channelId ?? props.title;
   // The reply chip is part of this chat's draft: it starts from the draft map
   // on the first render (a switch back paints it on its first frame).
@@ -4049,6 +4087,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           ? { onNewestVisible: props.onNewestVisible }
           : {})}
         {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
+        {...(onCancelUpload !== undefined ? { onCancelUpload } : {})}
         {...(props.onToggleReaction !== undefined
           ? { onToggleReaction: props.onToggleReaction }
           : {})}

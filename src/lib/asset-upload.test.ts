@@ -27,6 +27,7 @@ import {
   type RenameConfig,
   type UploadConfig,
   type UploadFetcher,
+  xhrPost,
 } from '@/lib/asset-upload';
 
 /** A File of an arbitrary reported size without allocating the bytes. */
@@ -739,5 +740,77 @@ describe('uploadAssetFile over XMLHttpRequest (progress)', () => {
       ok: false,
       message: uploadErrorMessage('network'),
     });
+  });
+});
+
+describe('xhrPost honours an AbortSignal (cancelled chat send)', () => {
+  /** A request that never answers until aborted; abort() fires onabort like a browser. */
+  function hangingXhr() {
+    const request = {
+      aborted: 0,
+      sent: false,
+      status: 0,
+      responseText: '',
+      upload: { onprogress: null as ((event: ProgressEvent) => void) | null },
+      onload: null as (() => void) | null,
+      onerror: null as (() => void) | null,
+      onabort: null as (() => void) | null,
+      ontimeout: null as (() => void) | null,
+      open() {},
+      setRequestHeader() {},
+      send() {
+        request.sent = true;
+      },
+      abort() {
+        request.aborted += 1;
+        request.onabort?.();
+      },
+    };
+    return request;
+  }
+
+  it('aborting the signal aborts the in-flight request and rejects', async () => {
+    const request = hangingXhr();
+    const controller = new AbortController();
+    const pending = xhrPost('https://u', {}, new FormData(), {
+      traceId: 't',
+      signal: controller.signal,
+      createRequest: () => request as unknown as XMLHttpRequest,
+    });
+    expect(request.sent).toBe(true);
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    expect(request.aborted).toBe(1);
+  });
+
+  it('an already-aborted signal never opens a request', async () => {
+    const request = hangingXhr();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      xhrPost('https://u', {}, new FormData(), {
+        traceId: 't',
+        signal: controller.signal,
+        createRequest: () => request as unknown as XMLHttpRequest,
+      }),
+    ).rejects.toThrow();
+    expect(request.sent).toBe(false);
+  });
+
+  it('a finished request stops listening (a later abort is a no-op)', async () => {
+    const request = fakeXhr({
+      status: 201,
+      body: { asset: { assetId: 'a-1', versionId: 'v-1', reused: false } },
+    });
+    const controller = new AbortController();
+    const abort = vi.fn();
+    (request as unknown as { abort: () => void }).abort = abort;
+    await xhrPost('https://u', {}, new FormData(), {
+      traceId: 't',
+      signal: controller.signal,
+      createRequest: () => request as unknown as XMLHttpRequest,
+    });
+    controller.abort();
+    expect(abort).not.toHaveBeenCalled();
   });
 });

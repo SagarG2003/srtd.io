@@ -43,7 +43,8 @@ export interface ChatAttachments {
    * never throws (asset-upload Result contract). An upload with no progress
    * for UPLOAD_STALL_MS (or no answer UPLOAD_RESPONSE_WAIT_MS after its last
    * byte) is aborted and fails like a network error; a failure carries the
-   * XHR status, and a 401 refreshes the session and retries once.
+   * XHR status, and a 401 refreshes the session and retries once. An aborted
+   * `signal` (the X on the bubble) aborts the request and skips that retry.
    */
   uploadFile: AttachmentUploader;
   /**
@@ -82,7 +83,11 @@ export function useChatAttachments(): ChatAttachments {
   );
 
   const uploadFile = useCallback(
-    async (file: File, onProgress?: (fraction: number) => void): Promise<ChatAttachmentUpload> => {
+    async (
+      file: File,
+      onProgress?: (fraction: number) => void,
+      signal?: AbortSignal,
+    ): Promise<ChatAttachmentUpload> => {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
         return { ok: false, message: CHAT_UPLOAD_FAILED };
       }
@@ -114,6 +119,7 @@ export function useChatAttachments(): ChatAttachments {
             xhr: {
               traceId: newTrace(),
               ...(onProgress !== undefined ? { onProgress } : {}),
+              ...(signal !== undefined ? { signal } : {}),
               createRequest: () => {
                 const request = new XMLHttpRequest();
                 held.request = request;
@@ -127,7 +133,7 @@ export function useChatAttachments(): ChatAttachments {
           held.watch?.stop();
         }
       };
-      return uploadWithSessionRetry(attempt, refreshChatSession);
+      return uploadWithSessionRetry(attempt, refreshChatSession, signal);
     },
     [uploadEndpoint, workspaceId, newTrace],
   );

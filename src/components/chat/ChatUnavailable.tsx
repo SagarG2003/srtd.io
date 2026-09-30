@@ -7,13 +7,13 @@ import { useChat } from '@/lib/chat/chat-context';
 /**
  * The unavailable panel as a pure view, so the Retry wiring is unit-testable
  * without a provider: the shared EmptyState with a 44px-tall primary Retry.
+ * Copy per decision 64: "Couldn't load chats", never connection wording.
  */
 export function chatUnavailableView(props: { onRetry: () => void }): ReactElement {
   return (
     <EmptyState
       icon={<IconChat size={22} />}
-      title="Chat unavailable"
-      description="We could not connect to chat right now. The rest of Sorted keeps working."
+      title="Couldn't load chats"
       action={
         <Button variant="primary" size="lg" className="min-w-[120px]" onClick={props.onRetry}>
           Retry

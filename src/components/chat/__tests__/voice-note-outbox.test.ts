@@ -69,3 +69,20 @@ describe('voice note enqueue', () => {
     sender.dispose();
   });
 });
+
+describe('T3: the composer carries the recorder peaks', () => {
+  const file = new File(['ogg'], 'voice-note.webm', { type: 'audio/webm' });
+
+  it('voiceNoteAttachment keeps peaks when the recorder captured them', () => {
+    const peaks = Array.from({ length: 48 }, (_, i) => i);
+    const attachment = voiceNoteAttachment(file, 4000, vi.fn(), peaks);
+    expect(attachment.peaks).toEqual(peaks);
+    // A copy: the recorder's array is never shared.
+    expect(attachment.peaks).not.toBe(peaks);
+  });
+
+  it('no peaks (no AudioContext): the note sends exactly as before', () => {
+    expect(voiceNoteAttachment(file, 4000, vi.fn())).not.toHaveProperty('peaks');
+    expect(voiceNoteAttachment(file, 4000, vi.fn(), [])).not.toHaveProperty('peaks');
+  });
+});

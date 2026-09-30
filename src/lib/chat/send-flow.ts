@@ -31,6 +31,16 @@
 // running; one whose files are gone (filesMissing) never runs and does not
 // hold up the queue.
 //
+// Cancel (the X on an uploading bubble): each entry owns one AbortController
+// whose signal rides every upload of it. cancel() aborts the in-flight request,
+// skips the uploads still to run, drops the entry (its stored files and
+// previews go through onCancelled), clears its backoff timer and frees the
+// lane at once, so the next queued send starts now. A cancelled upload's
+// answer is ignored: never "Not sent", a retry or a backoff. The record call is
+// the point of no return: deliver checks for a cancel synchronously right
+// before it, and once it has fired a cancel is ignored and the bubble stays.
+// Files already uploaded for a cancelled message stay as orphan assets.
+//
 // Mentions ride in the body as @[uuid] tokens; every attempt derives p_mentions
 // from the body, so a retry (or a send restored from storage) resends them.
 // When the server refuses a mention ('mentioned people must be in this chat')
@@ -382,17 +392,26 @@ export interface UploadAttemptResult {
 /** How a session refresh went: a new token, a refusal, or no answer (offline). */
 export type SessionRefresh = 'refreshed' | 'rejected' | 'unreachable';
 
+/** The result of an upload the sender cancelled (the X); the outbox never reads it as a failure. */
+export const UPLOAD_CANCELLED = 'upload cancelled';
+
 /**
  * Run one chat upload; on a 401 refresh the session once and retry once. A
  * failure comes back carrying the status its classification reads
  * (uploadFailureStatus): a second 401, or a refresh the server refused, is
  * 401 (permanent); a refresh that could not reach the server is 0
- * (transient). Never throws.
+ * (transient). A cancelled send (aborted `signal`) never refreshes or
+ * re-uploads. Never throws.
  */
 export async function uploadWithSessionRetry(
   attempt: () => Promise<UploadAttemptResult>,
   refreshSession: () => Promise<SessionRefresh>,
+  signal?: AbortSignal,
 ): Promise<ChatAttachmentUpload> {
+  const cancelled: ChatAttachmentUpload = { ok: false, message: UPLOAD_CANCELLED };
+  // Read fresh each time: the X can land during any await below.
+  const isCancelled = (): boolean => signal?.aborted === true;
+  if (isCancelled()) return cancelled;
   const withStatus = (
     outcome: UploadAttemptResult,
     status: number | null,
@@ -408,6 +427,8 @@ export async function uploadWithSessionRetry(
     return { ok: false, message: String(error) };
   }
   if (first.result.ok || first.status !== 401) return withStatus(first, first.status);
+  // Cancelled during the first attempt: no refresh, no second upload.
+  if (isCancelled()) return cancelled;
   let refreshed: SessionRefresh;
   try {
     refreshed = await refreshSession();
@@ -416,6 +437,8 @@ export async function uploadWithSessionRetry(
   }
   if (refreshed === 'unreachable') return withStatus(first, 0);
   if (refreshed === 'rejected') return withStatus(first, 401);
+  // Cancelled while the session refreshed: no second upload.
+  if (isCancelled()) return cancelled;
   try {
     const second = await attempt();
     return withStatus(second, second.status);
@@ -444,6 +467,11 @@ export interface OutboxSenderDeps {
   onAttemptFailed: (context: Record<string, unknown>) => void;
   /** Uploads a file whose attachment carries no uploader (restored after a reload). */
   upload?: AttachmentUploader;
+  /**
+   * An entry was cancelled (and has left the outbox): release what it holds
+   * outside the sender (stored files, object URLs).
+   */
+  onCancelled?: (channelId: string, entry: OutboxEntry) => void;
   /** Whether the device is online; a backoff attempt is skipped while it is not. */
   isOnline?: () => boolean;
   /** Device clock (the Retry tap re-stamps an entry); defaults to Date.now. */
@@ -458,6 +486,11 @@ export interface OutboxSender {
   /** Retry on a refused ('failed') entry: back in line, same id. */
   retry: (channelId: string, id: string) => void;
   settle: (channelId: string, id: string) => void;
+  /**
+   * The X on an uploading send: abort, drop and free the lane now. False
+   * (ignored) once its record call fired or when nothing of it uploads.
+   */
+  cancel: (channelId: string, id: string) => boolean;
   dropChannel: (channelId: string) => void;
   /**
    * A restoring entry's files came back from IndexedDB (its attachments, with
@@ -493,11 +526,18 @@ function replaceAt(
   return attachments.map((a, i) => (i === index ? next : a));
 }
 
+/** The attempt a lane is running; release() makes every later answer of it a no-op. */
+interface Attempt {
+  id: string;
+  release: () => void;
+}
+
 /** One channel's queue runner. */
 interface Lane {
   busy: boolean;
   timer: unknown;
   failures: number;
+  attempt: Attempt | null;
 }
 
 type AttemptFailure = { error: string; errorClass: SendErrorClass };
@@ -515,6 +555,21 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
   const lanes = new Map<string, Lane>();
   const isOnline = deps.isOnline ?? deviceOnline;
   const now = deps.now ?? ((): number => Date.now());
+  // One abort controller per entry, shared by every upload of it.
+  const controllers = new Map<string, AbortController>();
+  // Entries whose record call has fired: past the point of no return.
+  const committed = new Set<string>();
+  const controllerFor = (id: string): AbortController => {
+    const known = controllers.get(id);
+    if (known !== undefined) return known;
+    const controller = new AbortController();
+    controllers.set(id, controller);
+    return controller;
+  };
+  const forget = (id: string): void => {
+    controllers.delete(id);
+    committed.delete(id);
+  };
 
   const commit = (next: Outbox): void => {
     if (next === outbox) return;
@@ -525,7 +580,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
   const laneFor = (channelId: string): Lane => {
     const existing = lanes.get(channelId);
     if (existing !== undefined) return existing;
-    const lane: Lane = { busy: false, timer: null, failures: 0 };
+    const lane: Lane = { busy: false, timer: null, failures: 0, attempt: null };
     lanes.set(channelId, lane);
     return lane;
   };
@@ -590,6 +645,9 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       if (upload === undefined) {
         return { ok: false, error: 'attachment upload unavailable', errorClass: 'transient' };
       }
+      const signal = controllerFor(id).signal;
+      // Cancelled: the uploads still to run are skipped.
+      if (signal.aborted) return { ok: true, entry: null };
       const publish = (next: MessageAttachment, persist: boolean): void => {
         const latest = current(channelId, id);
         if (latest === undefined || !isLive(channelId, lane)) return;
@@ -599,15 +657,27 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
         else outbox = updated;
         deps.onEvent({ type: 'progress', channelId, id, attachments: list });
       };
+      // The request runs: the ring shows real progress from here.
+      publish({ ...target, local: { ...local, uploading: true } }, false);
       let result: ChatAttachmentUpload;
       try {
-        result = await upload(file, (fraction) =>
-          publish({ ...target, local: { ...local, progress: fraction } }, false),
+        result = await upload(
+          file,
+          (fraction) =>
+            publish({ ...target, local: { ...local, progress: fraction, uploading: true } }, false),
+          signal,
         );
       } catch (error) {
         result = { ok: false, message: String(error) };
       }
+      // Cancelled mid-upload: whatever came back is ignored.
+      if (signal.aborted) return { ok: true, entry: null };
       if (!result.ok) {
+        // Waiting for the next attempt: the ring spins again.
+        const latest = current(channelId, id)?.local.attachments[index];
+        if (latest?.local !== undefined) {
+          publish({ ...latest, local: { ...latest.local, uploading: false } }, false);
+        }
         return {
           ok: false,
           error: result.message,
@@ -618,7 +688,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
         {
           ...target,
           assetId: result.versionId,
-          local: { ...local, progress: 1 },
+          local: { ...local, progress: 1, uploading: false },
         },
         true,
       );
@@ -628,6 +698,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
   const onRecorded = (channelId: string, lane: Lane, message: ThreadMessage): void => {
     lane.busy = false;
     lane.failures = 0;
+    forget(message.id);
     if (!isLive(channelId, lane)) return;
     const held = selectOutbox(outbox, channelId).some((e) => e.id === message.id);
     // Sends queued behind it never read earlier than its server time.
@@ -687,17 +758,33 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     lane.busy = true;
     const traceId = deps.newTraceId();
     let settled = false;
+    const attempt: Attempt = {
+      id: head.id,
+      release: () => {
+        settled = true;
+      },
+    };
+    lane.attempt = attempt;
+    const done = (): void => {
+      if (lane.attempt === attempt) lane.attempt = null;
+    };
     const recorded = (message: ThreadMessage): void => {
       if (settled) return;
       settled = true;
+      done();
       onRecorded(channelId, lane, message);
     };
     const failed = (reason: string, failure: AttemptFailure): void => {
       if (settled) return;
       settled = true;
+      done();
       onFailed(channelId, lane, head, traceId, reason, failure);
     };
     const deliver = (entry: OutboxEntry): void => {
+      // The point of no return, checked synchronously right before the record
+      // call: a cancelled entry (released, or gone) never records.
+      if (settled || controllers.get(entry.id)?.signal.aborted === true) return;
+      committed.add(entry.id);
       void deps.deliver(channelId, entry, traceId, recorded).then(
         (outcome) => {
           if (outcome.ok) recorded(outcome.message);
@@ -725,8 +812,11 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
         deliver(uploaded.entry);
         return;
       }
+      // Cancelled: cancel() already freed the lane (a new attempt may run).
+      if (settled) return;
       // Settled, dropped, lost or stopped while uploading: release the lane.
       settled = true;
+      done();
       lane.busy = false;
       if (isLive(channelId, lane)) pump(channelId);
     });
@@ -758,16 +848,55 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       if (disposed) return;
       const wasHead = headOf(selectOutbox(outbox, channelId))?.id === id;
       commit(outboxRemove(outbox, channelId, id));
+      forget(id);
       const lane = lanes.get(channelId);
       if (!wasHead || lane === undefined) return;
       stopTimer(lane);
       lane.failures = 0;
       pump(channelId);
     },
+    cancel: (channelId, id) => {
+      if (disposed) return false;
+      const entry = current(channelId, id);
+      // Only an uploading send has the X; once its record call fired the
+      // cancel is ignored and the bubble stays.
+      if (
+        entry === undefined ||
+        committed.has(id) ||
+        entry.state !== 'sending' ||
+        entry.filesMissing === true ||
+        !entry.local.attachments.some(awaitsUpload)
+      ) {
+        return false;
+      }
+      controllerFor(id).abort();
+      const lane = lanes.get(channelId);
+      const wasHead = headOf(selectOutbox(outbox, channelId))?.id === id;
+      const running = lane?.attempt?.id === id ? lane.attempt : null;
+      commit(outboxRemove(outbox, channelId, id));
+      forget(id);
+      deps.onCancelled?.(channelId, entry);
+      deps.onEvent({ type: 'cancelled', channelId, id });
+      if (lane !== undefined && (running !== null || wasHead)) {
+        // The lane is free at once: its answer is ignored, the next send runs now.
+        running?.release();
+        if (running !== null) lane.attempt = null;
+        lane.busy = false;
+        stopTimer(lane);
+        lane.failures = 0;
+        pump(channelId);
+      }
+      return true;
+    },
     dropChannel: (channelId) => {
       const lane = lanes.get(channelId);
       if (lane !== undefined) stopTimer(lane);
       lanes.delete(channelId);
+      // A cleared chat stops its uploads too; their answers are ignored.
+      for (const e of selectOutbox(outbox, channelId)) {
+        controllers.get(e.id)?.abort();
+        forget(e.id);
+      }
       commit(outboxDropChannel(outbox, channelId));
     },
     restoreFiles: (channelId, id, attachments) => {

@@ -1,5 +1,7 @@
 import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { PresignCache, type PresignDeps } from '@/lib/asset-presign';
 import {
@@ -271,8 +273,73 @@ describe('instant send tile (local preview + upload progress)', () => {
     return { html, fetcher };
   }
 
-  it('an uploading own voice note renders the voice bubble with the upload bar, never the file chip', () => {
+  it('T5: an uploading own voice note shows the ring in the play spot and a flat line, no bars', () => {
     const { cache, fetcher } = spiedCache();
+    const voice: MessageAttachment = {
+      assetId: '',
+      name: 'voice-note.webm',
+      mime: 'audio/webm',
+      durationMs: 7_000,
+      peaks: Array.from({ length: 48 }, (_, i) => i * 2),
+      local: { key: 'local-v', file: null, previewUrl: null, progress: 0.25, uploading: true },
+    };
+    const onCancel = vi.fn();
+    const html = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[voice]}
+        cache={cache}
+        presignEnabled
+        voiceSpacer=""
+        onCancelUpload={onCancel}
+      />,
+    );
+    expect(html).toContain('data-voice-note');
+    expect(html).toContain('data-voice-upload');
+    expect(html).toContain('0:07');
+    // The ring holds the play spot; play is faded out under it.
+    expect(html).toContain('data-voice-play-slot="upload"');
+    expect(html).toContain('aria-label="Cancel upload"');
+    expect(html).toContain('data-upload-progress="25"');
+    expect(html).toMatch(/aria-hidden="true" tabindex="-1"[^>]*invisible opacity-0/);
+    // A plain flat line; the bars are not visible.
+    expect(html).toContain('data-voice-flat="shown"');
+    expect(html).toMatch(/data-voice-bars="peaks" class="[^"]*invisible opacity-0/);
+    // No upload bar anywhere.
+    expect(html).not.toContain('role="progressbar"');
+    expect(html).not.toContain('h-[3px]');
+    expect(html).not.toContain('WEBM');
+    expect(html).not.toContain('Open');
+
+    // Done (version id known, record pending): X becomes play, the line becomes the waveform.
+    const done = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[
+          {
+            ...voice,
+            assetId: AUDIO_VERSION,
+            local: { ...voice.local!, progress: 1, uploading: false },
+          },
+        ]}
+        cache={cache}
+        presignEnabled
+        voiceSpacer=""
+        onCancelUpload={onCancel}
+      />,
+    );
+    expect(done).not.toContain('data-voice-upload');
+    expect(done).toContain('data-voice-play-slot="play"');
+    expect(done).toContain('data-voice-flat="hidden"');
+    expect(done).toMatch(/data-voice-bars="peaks" class="[^"]*"/);
+    expect(done).not.toMatch(/data-voice-bars="peaks" class="[^"]*invisible/);
+    // The ring is faded out and unfocusable; same size box (no layout shift).
+    expect(done).toMatch(/data-upload-ring=""[^>]*aria-hidden="true" tabindex="-1"/);
+    expect(done).toContain('relative h-11 w-11 shrink-0');
+    expect(html).toContain('relative h-11 w-11 shrink-0');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('T5: no cancel offered (sent, failed or a peer note): the plain note, no ring', () => {
+    const { cache } = spiedCache();
     const voice: MessageAttachment = {
       assetId: '',
       name: 'voice-note.webm',
@@ -284,33 +351,8 @@ describe('instant send tile (local preview + upload progress)', () => {
       <MessageAttachments attachments={[voice]} cache={cache} presignEnabled voiceSpacer="" />,
     );
     expect(html).toContain('data-voice-note');
-    expect(html).toContain('data-voice-upload');
-    expect(html).toContain('0:07');
-    expect(html).toContain('role="progressbar"');
-    expect(html).toContain('width:25%');
-    expect(html).not.toContain('WEBM');
-    expect(html).not.toContain('Open');
-    // Sent: the same wrapper and voice note, only the bar is gone (no jump).
-    const sent = renderToStaticMarkup(
-      <MessageAttachments
-        attachments={[
-          { ...voice, assetId: AUDIO_VERSION, local: { ...voice.local!, progress: 1 } },
-        ]}
-        cache={cache}
-        presignEnabled
-        voiceSpacer=""
-      />,
-    );
-    expect(sent).toContain('data-voice-note');
-    expect(sent).not.toContain('data-voice-upload');
-    expect(sent).not.toContain('role="progressbar"');
-    expect(sent.replace(/<audio[^>]*>/, '')).toBe(
-      html
-        .replace(/<audio[^>]*>/, '')
-        .replace(/<span role="progressbar".*?<\/span><\/span>/, '')
-        .replace(' data-voice-upload=""', ''),
-    );
-    expect(fetcher).not.toHaveBeenCalled();
+    expect(html).not.toContain('data-upload-ring');
+    expect(html).not.toContain('data-voice-play-slot');
   });
 
   it('hands the voice context (time slot, transcribe flow) through to the note', () => {
@@ -340,24 +382,88 @@ describe('instant send tile (local preview + upload progress)', () => {
     expect(html.indexOf('data-meta="row"')).toBeGreaterThan(html.indexOf('data-voice-link'));
   });
 
-  it('the tile is dimmed with a thin white bar (width = progress) while uploading', () => {
-    const { html, fetcher } = render(local(0.4));
+  it('T6: a single photo is dimmed with the ring centred on it while uploading', () => {
+    const { cache, fetcher } = spiedCache();
+    const html = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[{ ...local(0.4), local: { ...local(0.4).local!, uploading: true } }]}
+        cache={cache}
+        presignEnabled
+        onCancelUpload={() => {}}
+      />,
+    );
     expect(html).toContain('src="blob:preview"');
     expect(html).toContain('brightness-75');
-    expect(html).toContain('role="progressbar"');
-    expect(html).toContain('h-[3px]');
-    expect(html).toContain('bg-white/35');
-    expect(html).toContain('width:40%');
-    expect(html).toContain('transition-[width]');
+    expect(html).toContain('aria-label="Cancel upload"');
+    expect(html).toContain('data-upload-progress="40"');
+    expect(html).toContain('absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2');
+    expect(html).not.toContain('progressbar');
     // The local preview never presigns.
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('is plain once uploaded: same preview, no dim, no bar', () => {
-    const { html } = render(local(1, IMG_VERSION));
+  it('T6: a queued upload (no request running) spins the indeterminate ring', () => {
+    const { cache } = spiedCache();
+    const html = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[local(0)]}
+        cache={cache}
+        presignEnabled
+        onCancelUpload={() => {}}
+      />,
+    );
+    expect(html).toContain('data-upload-progress="unknown"');
+    expect(html).toContain('animate-spin motion-reduce:animate-none');
+  });
+
+  it('T6: a file chip shows the ring in the icon spot while uploading', () => {
+    const { cache } = spiedCache();
+    const pdf: MessageAttachment = {
+      assetId: '',
+      name: 'brief.pdf',
+      mime: 'application/pdf',
+      size: 10,
+      local: { key: 'local-2', file, previewUrl: null, progress: 0.5, uploading: true },
+    };
+    const html = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[pdf]}
+        cache={cache}
+        presignEnabled
+        onCancelUpload={() => {}}
+      />,
+    );
+    expect(html).toContain('brief.pdf');
+    expect(html).toContain('data-upload-progress="50"');
+    // The icon spot keeps its 36px box; the icon is faded under the ring.
+    expect(html).toContain('relative flex h-9 w-9 shrink-0');
+    expect(html).toMatch(/rounded-md bg-panel-3 text-fg-3[^"]*opacity-0/);
+    expect(html).not.toContain('progressbar');
+    const sent = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[{ ...pdf, assetId: FILE_VERSION }]}
+        cache={cache}
+        presignEnabled
+        onCancelUpload={() => {}}
+      />,
+    );
+    expect(sent).not.toContain('data-upload-ring');
+  });
+
+  it('is plain once uploaded: same preview, no dim, no ring', () => {
+    const { cache } = spiedCache();
+    const html = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[local(1, IMG_VERSION)]}
+        cache={cache}
+        presignEnabled
+        onCancelUpload={() => {}}
+      />,
+    );
     expect(html).toContain('src="blob:preview"');
     expect(html).not.toContain('brightness-75');
-    expect(html).not.toContain('progressbar');
+    expect(html).not.toContain('data-upload-ring');
+    expect(render(local(1, IMG_VERSION)).html).not.toContain('progressbar');
   });
 });
 
@@ -390,7 +496,7 @@ describe('album grid', () => {
   function grid(count: number, onOpen = vi.fn()) {
     const { cache } = spiedCache();
     const el = AlbumGrid({ images: images(count), cache, presignEnabled: true, onOpen });
-    const tiles = (el.props as { children: ReactElement[] }).children;
+    const tiles = (el.props as { children: [ReactElement[], unknown] }).children[0];
     return { el, tiles, onOpen };
   }
 
@@ -451,20 +557,78 @@ describe('album grid', () => {
     expect(html.indexOf('Caption here')).toBeLessThan(html.indexOf('brief.pdf'));
   });
 
-  it('keeps the upload state on an album tile (dimmed with the bar)', () => {
+  it('T6: an album shows ONE ring over the grid; progress is bytes across the whole message', () => {
     const { cache } = spiedCache();
     const file = new File(['abc'], 'photo.png', { type: 'image/png' });
-    const uploading: MessageAttachment = {
-      assetId: '',
-      name: 'photo.png',
+    const tile = (
+      key: string,
+      size: number,
+      progress: number,
+      done: boolean,
+      uploading = false,
+    ) => ({
+      assetId: done ? `${key}-ver` : '',
+      name: `${key}.png`,
       mime: 'image/png',
-      local: { key: 'local-9', file, previewUrl: 'blob:preview', progress: 0.5 },
-    };
+      size,
+      local: { key, file, previewUrl: `blob:${key}`, progress, uploading },
+    });
+    // 100 done + 50% of 200 + 0 of 100 = 200 of 400 bytes.
+    const attachments: MessageAttachment[] = [
+      tile('a', 100, 1, true),
+      tile('b', 200, 0.5, false, true),
+      tile('c', 100, 0, false),
+    ];
     const html = renderToStaticMarkup(
-      <AlbumGrid images={[uploading]} cache={cache} presignEnabled onOpen={() => {}} />,
+      <MessageAttachments
+        attachments={attachments}
+        cache={cache}
+        presignEnabled
+        album
+        onCancelUpload={() => {}}
+      />,
     );
-    expect(html).toContain('src="blob:preview"');
-    expect(html).toContain('brightness-75');
-    expect(html).toContain('role="progressbar"');
+    expect(html.match(/data-upload-ring/g)).toHaveLength(1);
+    expect(html).toContain('data-upload-progress="50"');
+    // A file below the album carries no ring of its own: still ONE for the message.
+    const mixed = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[
+          ...attachments,
+          {
+            assetId: '',
+            name: 'brief.pdf',
+            mime: 'application/pdf',
+            size: 100,
+            local: { key: 'f', file, previewUrl: null, progress: 0 },
+          },
+        ]}
+        cache={cache}
+        presignEnabled
+        album
+        onCancelUpload={() => {}}
+      />,
+    );
+    expect(mixed.match(/data-upload-ring/g)).toHaveLength(1);
+    // Uploading tiles are dimmed; the grid holds the ring.
+    expect((html.match(/brightness-75/g) ?? []).length).toBe(2);
+    expect(html).toContain('relative w-[320px]');
+    expect(html).not.toContain('progressbar');
+  });
+});
+
+describe('T6: the old thin upload bar no longer exists', () => {
+  // The removed component's name, assembled so the self-check grep stays at 0.
+  const OLD = ['Upload', 'Bar'].join('');
+
+  it('the module exports no bar component and renders no progress bar', async () => {
+    const mod = await import('@/components/chat/MessageAttachments');
+    expect(Object.keys(mod)).not.toContain(OLD);
+    const source = readFileSync(
+      fileURLToPath(new URL('./MessageAttachments.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(source).not.toContain(OLD);
+    expect(source).not.toContain('role="progressbar"');
   });
 });

@@ -217,6 +217,32 @@ function restoredPreview(file: File): string | null {
   }
 }
 
+/**
+ * Release what a cancelled send held outside the sender: its IndexedDB files
+ * (after a save still in flight lands, so none is left behind) and the object
+ * URLs of its previews and recorded audio. Never throws.
+ */
+export function releaseCancelled(
+  files: OutboxFileAdapter | null,
+  entry: Pick<store.OutboxEntry, 'id' | 'local'>,
+  saving: Promise<unknown> = Promise.resolve(),
+): Promise<void> {
+  revokeLocalPreviews(entry.local.attachments);
+  return saving.then(
+    () => deleteOutboxFiles(files, [entry.id]),
+    () => deleteOutboxFiles(files, [entry.id]),
+  );
+}
+
+/**
+ * The X on an uploading bubble for one chat: cancel that send (ignored once
+ * its record call fired). Null outside a provider.
+ */
+export function useCancelUpload(): ((channelId: string, id: string) => boolean) | null {
+  const outbox = useContext(ChatStoreContext)?.outbox ?? null;
+  return outbox !== null ? outbox.cancel : null;
+}
+
 /** A verified message held for a roster re-read, with the list update it commits. */
 interface HeldIncoming {
   row: ChatMessageRow;
@@ -687,6 +713,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   const clockSamplerRef = useRef<store.ClockSampler>(store.createClockSampler());
   // The current sender's file store (IndexedDB); null where there is none.
   const filesRef = useRef<OutboxFileAdapter | null>(null);
+  // File saves still in flight by entry id (a cancel deletes after its save lands).
+  const savesRef = useRef<Map<string, Promise<boolean>>>(new Map());
   // Uploads for sends restored after a reload (their attachments carry no
   // uploader) and for voice notes; read at call time.
   const chatAttachments = useChatAttachments();
@@ -706,11 +734,16 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         senderRef.current?.enqueue(channelId, entry);
         // Its files survive a reload until the row lands (best-effort).
         if (entry.local.attachments.some((a) => a.assetId === '' && a.local?.file != null)) {
-          void saveOutboxFiles(filesRef.current, entry);
+          const saving = saveOutboxFiles(filesRef.current, entry);
+          savesRef.current.set(entry.id, saving);
+          void saving.finally(() => {
+            if (savesRef.current.get(entry.id) === saving) savesRef.current.delete(entry.id);
+          });
         }
       },
       retry: (channelId, id) => senderRef.current?.retry(channelId, id),
       settle: (channelId, id) => senderRef.current?.settle(channelId, id),
+      cancel: (channelId, id) => senderRef.current?.cancel(channelId, id) ?? false,
       subscribe: (listener) => {
         const listeners = outboxListenersRef.current;
         listeners.add(listener);
@@ -1136,12 +1169,15 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         onAttemptFailed: (context) => logger.warn('chat: message record attempt failed', context),
         // A Retry tap re-stamps its entry with the estimated server time now.
         now: () => store.serverNowMs(stateRef.current, Date.now()),
-        upload: (file, onProgress) => {
+        upload: (file, onProgress, signal) => {
           const upload = uploadRef.current;
           return upload !== null
-            ? upload(file, onProgress)
+            ? upload(file, onProgress, signal)
             : Promise.resolve({ ok: false, message: 'Upload is unavailable.' });
         },
+        // A cancelled send: its stored files and object URLs go now.
+        onCancelled: (_channelId, entry) =>
+          void releaseCancelled(files, entry, savesRef.current.get(entry.id)),
       },
       persisted,
     );
@@ -1158,6 +1194,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
             return;
           }
           sender.restoreFiles(channelId, entry.id, attachments);
+          // Cancelled while its files were read back: the previews have no bubble.
+          if (!sender.entries(channelId).some((e) => e.id === entry.id)) {
+            revokeLocalPreviews(attachments ?? []);
+          }
         });
       }
     }
