@@ -15,6 +15,7 @@ import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { generateTraceId } from '@/lib/trace';
 import { createCmdMessage } from '@/lib/chat/message-factory';
+import { withReadTimeout } from '@/lib/chat-reads';
 import { loadMessagesByIds } from '@/lib/chat/history';
 import {
   applyTransition,
@@ -145,7 +146,8 @@ export function useChatMarks(params: {
 
   const load = useCallback(
     async (forChannel: string): Promise<void> => {
-      const result = await loadChannelMarks(db, forChannel);
+      // Bounded at 5s: a hung read settles as failed, so the strip never holds.
+      const result = await withReadTimeout(() => loadChannelMarks(db, forChannel));
       if (channelRef.current !== forChannel) return;
       if (!result.ok) {
         logger.warn('chat: marks load failed', {
@@ -184,7 +186,7 @@ export function useChatMarks(params: {
     async (messageId: string): Promise<void> => {
       const forChannel = channelRef.current;
       if (forChannel === null) return;
-      const result = await loadMarkByMessageId(db, messageId);
+      const result = await withReadTimeout(() => loadMarkByMessageId(db, messageId));
       if (channelRef.current !== forChannel) return;
       if (!result.ok) {
         logger.warn('chat: mark load failed', {

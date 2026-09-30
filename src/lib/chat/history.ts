@@ -17,9 +17,14 @@
 // which also gates the store's unread bumps) and the conversation previews
 // keep the deleted_at filter: a deleted message is never counted or shown as
 // a chat's last line.
+//
+// Every read here is bounded by withReadTimeout (5s): a hang resolves to a
+// failed Result, so no caller can wait forever on one.
 
 import type { Client, Result } from '@srtdio/rpc';
 import type { Database } from '@srtdio/schemas';
+import { withReadTimeout } from '@/lib/chat-reads';
+import { parseAttachmentMeta } from '@/lib/chat/attachments';
 import type { ChatMessageRow, MessageCursor, MessageReaction } from '@/lib/chat/thread';
 
 /** History page size; also the "has more" probe (a full page means keep paging). */
@@ -67,60 +72,66 @@ function toPage(rows: ChatMessageRow[]): HistoryPage {
 }
 
 /** The newest page of a channel (50 rows, returned oldest-first). */
-export async function loadLatestMessages(
+export function loadLatestMessages(
   client: Client,
   channelId: string,
 ): Promise<Result<HistoryPage>> {
-  const res = await client
-    .from('chat_messages')
-    .select(MESSAGE_COLUMNS)
-    .eq('channel_id', channelId)
-    .order('created_at', { ascending: false })
-    .order('id', { ascending: false })
-    .limit(HISTORY_PAGE_SIZE);
-  if (res.error) return fail(`loadLatestMessages: ${res.error.message}`);
-  return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
+  return withReadTimeout(async () => {
+    const res = await client
+      .from('chat_messages')
+      .select(MESSAGE_COLUMNS)
+      .eq('channel_id', channelId)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(HISTORY_PAGE_SIZE);
+    if (res.error) return fail(`loadLatestMessages: ${res.error.message}`);
+    return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
+  });
 }
 
 /**
  * The page before `cursor` (the oldest loaded row), returned oldest-first. A
  * `signal` cancels the request (.abortSignal); an aborted read is a failure.
  */
-export async function loadOlderMessages(
+export function loadOlderMessages(
   client: Client,
   channelId: string,
   cursor: MessageCursor,
   signal?: AbortSignal,
 ): Promise<Result<HistoryPage>> {
-  const query = client
-    .from('chat_messages')
-    .select(MESSAGE_COLUMNS)
-    .eq('channel_id', channelId)
-    .or(olderThanFilter(cursor))
-    .order('created_at', { ascending: false })
-    .order('id', { ascending: false })
-    .limit(HISTORY_PAGE_SIZE);
-  const res = await (signal !== undefined ? query.abortSignal(signal) : query);
-  if (res.error) return fail(`loadOlderMessages: ${res.error.message}`);
-  return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
+  return withReadTimeout(async () => {
+    const query = client
+      .from('chat_messages')
+      .select(MESSAGE_COLUMNS)
+      .eq('channel_id', channelId)
+      .or(olderThanFilter(cursor))
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(HISTORY_PAGE_SIZE);
+    const res = await (signal !== undefined ? query.abortSignal(signal) : query);
+    if (res.error) return fail(`loadOlderMessages: ${res.error.message}`);
+    return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
+  });
 }
 
 /** Everything recorded after `cursor` (the newest loaded row), oldest-first. */
-export async function loadNewerMessages(
+export function loadNewerMessages(
   client: Client,
   channelId: string,
   cursor: MessageCursor,
 ): Promise<Result<ChatMessageRow[]>> {
-  const res = await client
-    .from('chat_messages')
-    .select(MESSAGE_COLUMNS)
-    .eq('channel_id', channelId)
-    .or(newerThanFilter(cursor))
-    .order('created_at', { ascending: true })
-    .order('id', { ascending: true })
-    .limit(CATCH_UP_LIMIT);
-  if (res.error) return fail(`loadNewerMessages: ${res.error.message}`);
-  return { ok: true, data: (res.data ?? []) as ChatMessageRow[] };
+  return withReadTimeout(async () => {
+    const res = await client
+      .from('chat_messages')
+      .select(MESSAGE_COLUMNS)
+      .eq('channel_id', channelId)
+      .or(newerThanFilter(cursor))
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(CATCH_UP_LIMIT);
+    if (res.error) return fail(`loadNewerMessages: ${res.error.message}`);
+    return { ok: true, data: (res.data ?? []) as ChatMessageRow[] };
+  });
 }
 
 /** One row looked up by id: found, or absent (never recorded, deleted, or not visible under RLS). */
@@ -131,19 +142,18 @@ export type MessageLookup = { found: true; row: ChatMessageRow } | { found: fals
  * Agora message against the record before it renders: only a row the caller
  * can read is shown.
  */
-export async function loadMessageById(
-  client: Client,
-  messageId: string,
-): Promise<Result<MessageLookup>> {
-  const res = await client
-    .from('chat_messages')
-    .select(MESSAGE_COLUMNS)
-    .eq('id', messageId)
-    .is('deleted_at', null)
-    .maybeSingle();
-  if (res.error) return fail(`loadMessageById: ${res.error.message}`);
-  const row = res.data as ChatMessageRow | null;
-  return { ok: true, data: row === null ? { found: false } : { found: true, row } };
+export function loadMessageById(client: Client, messageId: string): Promise<Result<MessageLookup>> {
+  return withReadTimeout(async () => {
+    const res = await client
+      .from('chat_messages')
+      .select(MESSAGE_COLUMNS)
+      .eq('id', messageId)
+      .is('deleted_at', null)
+      .maybeSingle();
+    if (res.error) return fail(`loadMessageById: ${res.error.message}`);
+    const row = res.data as ChatMessageRow | null;
+    return { ok: true, data: row === null ? { found: false } : { found: true, row } };
+  });
 }
 
 /**
@@ -155,12 +165,14 @@ export async function loadMessagesByIds(
   messageIds: readonly string[],
 ): Promise<Result<ChatMessageRow[]>> {
   if (messageIds.length === 0) return { ok: true, data: [] };
-  const res = await client
-    .from('chat_messages')
-    .select(MESSAGE_COLUMNS)
-    .in('id', [...messageIds]);
-  if (res.error) return fail(`loadMessagesByIds: ${res.error.message}`);
-  return { ok: true, data: (res.data ?? []) as ChatMessageRow[] };
+  return withReadTimeout(async () => {
+    const res = await client
+      .from('chat_messages')
+      .select(MESSAGE_COLUMNS)
+      .in('id', [...messageIds]);
+    if (res.error) return fail(`loadMessagesByIds: ${res.error.message}`);
+    return { ok: true, data: (res.data ?? []) as ChatMessageRow[] };
+  });
 }
 
 /** Aggregate reaction rows per message: one entry per emoji with count + mine. */
@@ -194,14 +206,16 @@ export async function loadReactions(
   signal?: AbortSignal,
 ): Promise<Result<Map<string, MessageReaction[]>>> {
   if (messageIds.length === 0) return { ok: true, data: new Map() };
-  const query = client
-    .from('chat_reactions')
-    .select('message_id, emoji, user_id')
-    .in('message_id', [...messageIds]);
-  const res = await (signal !== undefined ? query.abortSignal(signal) : query);
-  if (res.error) return fail(`loadReactions: ${res.error.message}`);
-  const rows = (res.data ?? []) as Pick<ChatReactionRow, 'message_id' | 'emoji' | 'user_id'>[];
-  return { ok: true, data: aggregateReactions(rows, currentUserId) };
+  return withReadTimeout(async () => {
+    const query = client
+      .from('chat_reactions')
+      .select('message_id, emoji, user_id')
+      .in('message_id', [...messageIds]);
+    const res = await (signal !== undefined ? query.abortSignal(signal) : query);
+    if (res.error) return fail(`loadReactions: ${res.error.message}`);
+    const rows = (res.data ?? []) as Pick<ChatReactionRow, 'message_id' | 'emoji' | 'user_id'>[];
+    return { ok: true, data: aggregateReactions(rows, currentUserId) };
+  });
 }
 
 /** The peer's read position in a DM, when they have one. */
@@ -210,7 +224,15 @@ export type PeerReadCursor =
   | { found: false };
 
 /** One select for the DM peer's cursor; drives the seen ticks on own bubbles. */
-export async function loadPeerReadCursor(
+export function loadPeerReadCursor(
+  client: Client,
+  channelId: string,
+  peerUserId: string,
+): Promise<Result<PeerReadCursor>> {
+  return withReadTimeout(() => readPeerCursor(client, channelId, peerUserId));
+}
+
+async function readPeerCursor(
   client: Client,
   channelId: string,
   peerUserId: string,
@@ -247,7 +269,14 @@ export interface UnreadCount {
  * chat_read_cursors does the gating). The proc takes no trace parameter (it is a
  * read, not a write), so its args are built ahead of the call.
  */
-export async function loadUnreadCounts(
+export function loadUnreadCounts(
+  client: Client,
+  workspaceId: string,
+): Promise<Result<UnreadCount[]>> {
+  return withReadTimeout(() => readUnreadCounts(client, workspaceId));
+}
+
+async function readUnreadCounts(
   client: Client,
   workspaceId: string,
 ): Promise<Result<UnreadCount[]>> {
@@ -267,23 +296,58 @@ export async function loadUnreadCounts(
   };
 }
 
+/**
+ * What a list line is made from: the body, plus what the message carries when
+ * it has no text (the line then names the first of: Post, Brief, Photo, File,
+ * Voice message). One shape for the live path, the reload and own sends.
+ */
+export interface PreviewContent {
+  body: string;
+  /** Any attachment or share at all (the 'Attachment' fallback when nothing finer is known). */
+  hasAttachments: boolean;
+  /** Each attachment's mime ('' when its meta is unknown). */
+  attachmentMimes?: readonly string[];
+  sharedPostCount?: number;
+  sharedBriefCount?: number;
+}
+
+/** The columns a preview line reads from a chat_messages row. */
+export type PreviewRow = Pick<
+  ChatMessageRow,
+  'body' | 'attachment_asset_ids' | 'attachment_meta' | 'shared_post_ids' | 'shared_brief_ids'
+>;
+
+/** A recorded row's preview content (live verify, the reload scan). Pure. */
+export function rowPreviewContent(row: PreviewRow): PreviewContent {
+  const assetIds = row.attachment_asset_ids ?? [];
+  const sharedPostCount = (row.shared_post_ids ?? []).length;
+  const sharedBriefCount = (row.shared_brief_ids ?? []).length;
+  return {
+    body: row.body ?? '',
+    hasAttachments: assetIds.length > 0 || sharedPostCount > 0 || sharedBriefCount > 0,
+    attachmentMimes: parseAttachmentMeta(row.attachment_meta, assetIds).map((a) => a.mime),
+    sharedPostCount,
+    sharedBriefCount,
+  };
+}
+
 /** The latest recorded message of one channel, for the conversation card line. */
-export interface ConversationPreview {
+export interface ConversationPreview extends PreviewContent {
   channelId: string;
   messageId: string;
   senderUserId: string | null;
-  body: string;
-  hasAttachments: boolean;
   createdAt: string;
 }
 
+/** The columns the preview scan selects. */
+const PREVIEW_COLUMNS =
+  'id, channel_id, sender_user_id, body, attachment_asset_ids, attachment_meta, shared_post_ids, shared_brief_ids, created_at';
+
+type PreviewScanRow = Pick<ChatMessageRow, 'id' | 'channel_id' | 'sender_user_id' | 'created_at'> &
+  Partial<PreviewRow>;
+
 /** Reduce a newest-first scan to the first (latest) row per channel. */
-export function latestPerChannel(
-  rows: readonly Pick<
-    ChatMessageRow,
-    'id' | 'channel_id' | 'sender_user_id' | 'body' | 'attachment_asset_ids' | 'created_at'
-  >[],
-): ConversationPreview[] {
+export function latestPerChannel(rows: readonly PreviewScanRow[]): ConversationPreview[] {
   const seen = new Set<string>();
   const previews: ConversationPreview[] = [];
   for (const row of rows) {
@@ -293,8 +357,13 @@ export function latestPerChannel(
       channelId: row.channel_id,
       messageId: row.id,
       senderUserId: row.sender_user_id,
-      body: row.body ?? '',
-      hasAttachments: (row.attachment_asset_ids ?? []).length > 0,
+      ...rowPreviewContent({
+        body: row.body ?? null,
+        attachment_asset_ids: row.attachment_asset_ids ?? null,
+        attachment_meta: row.attachment_meta ?? null,
+        shared_post_ids: row.shared_post_ids ?? null,
+        shared_brief_ids: row.shared_brief_ids ?? null,
+      }),
       createdAt: row.created_at,
     });
   }
@@ -307,21 +376,19 @@ export function latestPerChannel(
  * message is older than the scan window simply gets no preview line; its
  * ordering and badge still come from chat_unread_counts.
  */
-export async function loadConversationPreviews(
+export function loadConversationPreviews(
   client: Client,
   workspaceId: string,
 ): Promise<Result<ConversationPreview[]>> {
-  const res = await client
-    .from('chat_messages')
-    .select('id, channel_id, sender_user_id, body, attachment_asset_ids, created_at')
-    .eq('workspace_id', workspaceId)
-    .is('deleted_at', null)
-    .order('created_at', { ascending: false })
-    .limit(PREVIEW_SCAN_LIMIT);
-  if (res.error) return fail(`loadConversationPreviews: ${res.error.message}`);
-  const rows = (res.data ?? []) as Pick<
-    ChatMessageRow,
-    'id' | 'channel_id' | 'sender_user_id' | 'body' | 'attachment_asset_ids' | 'created_at'
-  >[];
-  return { ok: true, data: latestPerChannel(rows) };
+  return withReadTimeout(async () => {
+    const res = await client
+      .from('chat_messages')
+      .select(PREVIEW_COLUMNS)
+      .eq('workspace_id', workspaceId)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false })
+      .limit(PREVIEW_SCAN_LIMIT);
+    if (res.error) return fail(`loadConversationPreviews: ${res.error.message}`);
+    return { ok: true, data: latestPerChannel((res.data ?? []) as PreviewScanRow[]) };
+  });
 }

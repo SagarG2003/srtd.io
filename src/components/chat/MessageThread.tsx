@@ -53,6 +53,7 @@ import {
   tokenize,
 } from '@/lib/chat/message-links';
 import { Avatar } from '@/components/ui/Avatar';
+import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { IconButton } from '@/components/ui/IconButton';
 import {
@@ -203,6 +204,10 @@ interface MessageThreadProps {
   profiles: Map<string, ChatProfile>;
   messages: ThreadMessage[];
   loading: boolean;
+  /** The latest page failed or timed out: "Couldn't load messages" + Retry, never the empty state. */
+  loadFailed?: boolean;
+  /** Re-run the latest-page load (the failed state's Retry). */
+  onRetryLoad?: () => void;
   /** An older page is loading (scroll-to-top); renders a slim row at the top. */
   loadingOlder?: boolean;
   /** Whether scrolling to the top should request an older page. */
@@ -2319,6 +2324,8 @@ function ThreadBody(
     MessageThreadProps,
     | 'messages'
     | 'loading'
+    | 'loadFailed'
+    | 'onRetryLoad'
     | 'loadingOlder'
     | 'hasMore'
     | 'onLoadOlder'
@@ -2710,6 +2717,9 @@ function ThreadBody(
     window.setTimeout(() => flash.classList.remove(...ring), 1200);
   };
   if (props.loading) return threadSkeleton();
+  if (props.loadFailed === true && props.messages.length === 0 && props.filtering !== true) {
+    return threadLoadError(props.onRetryLoad);
+  }
   if (props.messages.length === 0 && props.filtering !== true) {
     return (
       <div className="flex flex-1 flex-col justify-center">
@@ -2943,6 +2953,64 @@ export function DayPill({ label, layout }: { label: string; layout: ChatLayout }
       </span>
     </li>
   );
+}
+
+/** The latest page failed or timed out: one line and a 44px Retry, in place of the empty state. */
+export function threadLoadError(onRetry: (() => void) | undefined): ReactElement {
+  return (
+    <div data-thread-load-error="" className="flex flex-1 flex-col justify-center">
+      <EmptyState
+        icon={<IconChat size={22} />}
+        title="Couldn't load messages"
+        {...(onRetry !== undefined
+          ? {
+              action: (
+                <Button size="lg" variant="primary" className="min-w-[44px]" onClick={onRetry}>
+                  Retry
+                </Button>
+              ),
+            }
+          : {})}
+      />
+    </div>
+  );
+}
+
+/**
+ * A chat being opened before its row is known (a deep link, an Activity tap,
+ * a reload inside the thread): the thread's own header and message
+ * placeholders from the first frame, never another screen first.
+ */
+export function threadOpeningSkeleton(layout: ChatLayout = 'touch'): ReactElement {
+  return (
+    <div data-thread-opening="" aria-busy="true" className="flex h-full min-h-0 flex-col bg-bg">
+      <div
+        className={cn(
+          'flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel',
+          sized(HEADER_PAD, layout),
+        )}
+      >
+        <div className="h-9 w-9 shrink-0 animate-pulse rounded-full bg-panel-2" />
+        <div className="h-3.5 w-32 animate-pulse rounded bg-panel-2" />
+      </div>
+      {threadSkeleton()}
+    </div>
+  );
+}
+
+/** The distinct shared post and brief ids across a thread's messages (deleted ones skipped). Pure. */
+export function threadCardIds(messages: readonly ThreadMessage[]): {
+  postIds: string[];
+  briefIds: string[];
+} {
+  const posts = new Set<string>();
+  const briefs = new Set<string>();
+  for (const m of messages) {
+    if (m.deleted === true) continue;
+    for (const id of m.sharedPostIds) posts.add(id);
+    for (const id of m.sharedBriefIds) briefs.add(id);
+  }
+  return { postIds: [...posts], briefIds: [...briefs] };
 }
 
 /** Placeholder bubble widths for the loading thread, alternating sides. */
@@ -3809,6 +3877,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         filtering={filterPostId !== null}
         filterRef={filterPost != null ? postRefKey(workspaceKey, filterPost.number) : null}
         loading={bodyLoading}
+        {...(props.loadFailed !== undefined ? { loadFailed: props.loadFailed } : {})}
+        {...(props.onRetryLoad !== undefined ? { onRetryLoad: props.onRetryLoad } : {})}
         profiles={props.profiles}
         cache={presignCache}
         presignEnabled={presignEnabled}

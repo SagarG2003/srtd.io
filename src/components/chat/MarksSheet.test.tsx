@@ -306,14 +306,34 @@ describe('MarkStrip: open loops', () => {
 
 describe('Open tab posts section', () => {
   it('row lines: KEY · title, then format · target date · where it is', () => {
-    expect(openPostLines(openPost(), 'gbl', true)).toEqual({
+    expect(openPostLines(openPost(), 'gbl', true, 'UTC')).toEqual({
       title: 'GBL-12 · Launch teaser',
       meta: 'Carousel · Oct 2 · in this chat',
     });
-    expect(openPostLines(openPost({ target_date: null }), null, false)).toEqual({
+    expect(openPostLines(openPost({ target_date: null }), null, false, 'UTC')).toEqual({
       title: 'Launch teaser',
       meta: 'Carousel · not shared here yet',
     });
+  });
+
+  it('P6: a timestamptz target date renders in the workspace zone (never blank)', () => {
+    const post = openPost({ target_date: '2026-10-02T20:30:00+00:00' });
+    expect(openPostLines(post, 'gbl', true, 'UTC').meta).toBe('Carousel · Oct 2 · in this chat');
+    // 20:30 UTC is already Oct 3 in Kolkata.
+    expect(openPostLines(post, 'gbl', true, 'Asia/Kolkata').meta).toBe(
+      'Carousel · Oct 3 · in this chat',
+    );
+    const html = renderToStaticMarkup(
+      <OpenPostSheetRow
+        post={post}
+        workspaceKey="gbl"
+        shared={false}
+        timeZone="UTC"
+        onJump={() => {}}
+        onShare={() => {}}
+      />,
+    );
+    expect(html).toContain('Oct 2');
   });
 
   it('Jump when a card is in this chat, Share here otherwise', () => {
@@ -323,6 +343,7 @@ describe('Open tab posts section', () => {
       post: openPost(),
       workspaceKey: 'gbl',
       shared: true,
+      timeZone: 'UTC',
       onJump,
       onShare,
     });
@@ -336,6 +357,7 @@ describe('Open tab posts section', () => {
       post: openPost(),
       workspaceKey: 'gbl',
       shared: false,
+      timeZone: 'UTC',
       onJump,
       onShare,
     });
@@ -352,6 +374,7 @@ describe('Open tab posts section', () => {
         post={openPost()}
         workspaceKey="gbl"
         shared={false}
+        timeZone="UTC"
         onJump={() => {}}
         onShare={() => {}}
       />,
@@ -369,6 +392,7 @@ describe('Open tab posts section', () => {
         posts={[openPost(), openPost({ id: 'p2', number: 13, title: 'Reel cut' })]}
         workspaceKey="gbl"
         sharedIds={new Set(['p2'])}
+        timeZone="UTC"
         onJump={onJump}
         onShare={onShare}
       />,
@@ -384,6 +408,7 @@ describe('Open tab posts section', () => {
       heading: 'x',
       workspaceKey: 'gbl',
       sharedIds: new Set<string>(),
+      timeZone: 'UTC',
       onJump: vi.fn(),
       onShare: vi.fn(),
     };

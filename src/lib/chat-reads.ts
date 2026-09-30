@@ -57,7 +57,7 @@ function fail<T>(message: string): Result<T> {
   return { ok: false, error: { code: 'unknown', message } };
 }
 
-/** A member-list or name read that has not answered by now counts as failed. */
+/** A chat read (list, history, names, cards) that has not answered by now counts as failed. */
 export const READ_TIMEOUT_MS = 5_000;
 
 /**
@@ -158,9 +158,17 @@ function indexBy<T>(rows: T[], key: (row: T) => string): Map<string, T> {
  * registry, then one batched groups read (names AND photos; chat_channels has no
  * FK to groups, so PostgREST cannot embed it into the first read), one batched
  * users read and one batched workspace_members read for the DM peers' roles. Last-message
- * preview and unread counts are a later enhancement and are not built here.
+ * preview and unread counts are a later enhancement and are not built here. The
+ * four reads share one 5s budget: a hang is a failed Result, never a wait.
  */
-export async function listChannelSummaries(
+export function listChannelSummaries(
+  client: Client,
+  params: { workspaceId: string; currentUserId: string },
+): Promise<Result<ChannelSummary[]>> {
+  return withReadTimeout(() => readChannelSummaries(client, params));
+}
+
+async function readChannelSummaries(
   client: Client,
   params: { workspaceId: string; currentUserId: string },
 ): Promise<Result<ChannelSummary[]>> {
@@ -376,22 +384,24 @@ export interface ChannelClearRecord {
 /**
  * The caller's chat_channel_clears rows for a workspace. RLS scopes the read to
  * the caller's own rows, so no user filter is passed. The list hides a channel
- * whose newest known message is not newer than its clear.
+ * whose newest known message is not newer than its clear. 5s timeout.
  */
-export async function listChannelClears(
+export function listChannelClears(
   client: Client,
   params: { workspaceId: string },
 ): Promise<Result<ChannelClearRecord[]>> {
-  const res = await client
-    .from('chat_channel_clears')
-    .select('channel_id, cleared_at')
-    .eq('workspace_id', params.workspaceId);
-  if (res.error) return fail(`listChannelClears: ${res.error.message}`);
-  const rows = (res.data ?? []) as Pick<ChannelClearRow, 'channel_id' | 'cleared_at'>[];
-  return {
-    ok: true,
-    data: rows.map((r) => ({ channelId: r.channel_id, clearedAt: r.cleared_at })),
-  };
+  return withReadTimeout(async () => {
+    const res = await client
+      .from('chat_channel_clears')
+      .select('channel_id, cleared_at')
+      .eq('workspace_id', params.workspaceId);
+    if (res.error) return fail(`listChannelClears: ${res.error.message}`);
+    const rows = (res.data ?? []) as Pick<ChannelClearRow, 'channel_id' | 'cleared_at'>[];
+    return {
+      ok: true,
+      data: rows.map((r) => ({ channelId: r.channel_id, clearedAt: r.cleared_at })),
+    };
+  });
 }
 
 async function readGroups(client: Client, ids: string[]): Promise<Result<GroupRow[]>> {

@@ -1,52 +1,43 @@
 // Renders the briefs shared into one message as cards, mirroring PostCard: the
-// message's ids resolve in ONE workspace-scoped RLS read, keyed on the ids so a
-// re-render never re-reads. A brief the viewer cannot see renders as an
-// "unavailable" card. Tapping a card opens the brief in the app.
+// ids resolve through the thread's card cache, so every brief shared across the
+// loaded thread comes back in ONE workspace-scoped RLS read (chunks of 100, 5s
+// each), never one read per bubble. A brief the viewer cannot see, or whose
+// read failed or timed out, renders as an "unavailable" card. Tapping a card
+// opens the brief in the app.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Tag } from '@/components/ui/Tag';
-import { SHARED_CARD } from '@/components/chat/PostCard';
+import { SHARED_CARD, useThreadCardCache } from '@/components/chat/PostCard';
 import { IconBriefs } from '@/components/ui/icons';
-import { supabase } from '@/lib/supabase';
-import { useWorkspace } from '@/lib/workspace-context';
 import {
   briefRoute,
   briefStatusLabel,
-  readBriefsByIds,
   sharedBriefViews,
-  type BriefCardFields,
   type SharedBriefView,
 } from '@/lib/chat/briefs';
 
 function useSharedBriefs(briefIds: string[]): { views: SharedBriefView[]; loading: boolean } {
-  const { workspaceId } = useWorkspace();
-  const [briefs, setBriefs] = useState<BriefCardFields[]>([]);
-  const [loading, setLoading] = useState(true);
+  const cache = useThreadCardCache();
   const key = briefIds.join(',');
+  const idsRef = useRef(briefIds);
+  idsRef.current = briefIds;
 
   useEffect(() => {
-    if (workspaceId === null || briefIds.length === 0) {
-      setLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-    void readBriefsByIds(supabase, { workspaceId, ids: briefIds }).then((result) => {
-      if (cancelled) return;
-      setLoading(false);
-      setBriefs(result.ok ? result.data : []);
-    });
-    return () => {
-      cancelled = true;
-    };
-    // `key` stands for the id list; a new array with the same ids never re-reads.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, workspaceId]);
+    if (idsRef.current.length > 0) cache?.request({ briefIds: idsRef.current });
+  }, [cache, key]);
 
-  const views = useMemo(() => sharedBriefViews(briefIds, briefs), [briefIds, briefs]);
-  return { views, loading };
+  const snapshot =
+    cache !== null && briefIds.length > 0 ? cache.briefs(briefIds) : { loading: false, briefs: [] };
+  const version = cache?.version() ?? 0;
+  const views = useMemo(
+    () => sharedBriefViews(briefIds, snapshot.briefs),
+    // The snapshot is keyed by the ids and the cache version.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key, cache, version],
+  );
+  return { views, loading: snapshot.loading };
 }
 
 export function SharedBriefCards({ briefIds }: { briefIds: string[] }): ReactElement {

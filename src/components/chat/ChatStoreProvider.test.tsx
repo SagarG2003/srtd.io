@@ -190,6 +190,8 @@ describe('loadChatList', () => {
       counts: () => (started.push('counts'), base.counts()),
     };
     const pending = loadChatList(tracked, SCOPE, ME);
+    // Each read starts inside its 5s timeout wrapper, all in the same tick.
+    await Promise.resolve();
     expect(started.sort()).toEqual(['clears', 'counts', 'previews', 'roster']);
     await pending;
   });
@@ -476,6 +478,7 @@ describe('chat list mentions', () => {
       { ok: true, data: [preview(`hi @[${ANA}]`), preview(`and @[${GONE}] @[${ANA}]`)] },
       readNames,
       'w1',
+      'x',
     );
     expect(readNames).toHaveBeenCalledTimes(1);
     expect(readNames).toHaveBeenCalledWith([ANA, GONE], expect.any(AbortSignal));
@@ -484,7 +487,7 @@ describe('chat list mentions', () => {
       'and @Unknown member @Ana',
     ]);
     // Known names need no second read.
-    await resolvePreviewMentions({ ok: true, data: [preview(`@[${ANA}]`)] }, readNames, 'w1');
+    await resolvePreviewMentions({ ok: true, data: [preview(`@[${ANA}]`)] }, readNames, 'w1', 'x');
     expect(readNames).toHaveBeenCalledTimes(1);
   });
 

@@ -36,7 +36,7 @@ import { useWorkspace } from '@/lib/workspace-context';
 import { readPostsByIds } from '@srtdio/posts';
 import type { ChatProfile } from '@/lib/chat-reads';
 import { readBriefsByIds } from '@/lib/chat/briefs';
-import { formatClockTime, formatShortDateOnly } from '@/lib/chat/time-format';
+import { formatClockTime, formatShortDate } from '@/lib/chat/time-format';
 import type { OpenPostRow } from '@/lib/chat/use-open-posts';
 import type { WriteResult } from '@/lib/chat/record';
 import type { ThreadMessage } from '@/lib/chat/thread';
@@ -183,17 +183,18 @@ function OpenPostThumb(props: { assetVersionId: string | null; monogram: string 
 export const IN_THIS_CHAT = 'in this chat';
 export const NOT_SHARED_HERE = 'not shared here yet';
 
-/** The two text lines of an open post row. Pure. */
+/** The two text lines of an open post row; target_date is a timestamptz, shown in the workspace zone. Pure. */
 export function openPostLines(
   post: OpenPostRow,
   workspaceKey: string | null,
   shared: boolean,
+  timeZone: string,
 ): { title: string; meta: string } {
   const ref =
     workspaceKey !== null && workspaceKey !== ''
       ? formatEntityRef(workspaceKey, post.number)
       : null;
-  const date = post.target_date !== null ? formatShortDateOnly(post.target_date) : '';
+  const date = post.target_date !== null ? formatShortDate(post.target_date, timeZone) : '';
   return {
     title: ref !== null ? `${ref} · ${post.title}` : post.title,
     meta: [formatLabel(post.format), date, shared ? IN_THIS_CHAT : NOT_SHARED_HERE]
@@ -207,10 +208,12 @@ export function OpenPostSheetRow(props: {
   post: OpenPostRow;
   workspaceKey: string | null;
   shared: boolean;
+  /** The workspace IANA zone the target date renders in. */
+  timeZone: string;
   onJump: () => void;
   onShare: () => void;
 }): ReactElement {
-  const lines = openPostLines(props.post, props.workspaceKey, props.shared);
+  const lines = openPostLines(props.post, props.workspaceKey, props.shared, props.timeZone);
   const key =
     props.workspaceKey !== null && props.workspaceKey !== ''
       ? props.workspaceKey.toUpperCase()
@@ -251,7 +254,7 @@ export interface OpenPostsSection {
 }
 
 /** The posts section above the Open marks; nothing when no post is waiting. */
-export function OpenPostsList(props: OpenPostsSection): ReactElement | null {
+export function OpenPostsList(props: OpenPostsSection & { timeZone: string }): ReactElement | null {
   if (props.posts === null || props.posts.length === 0) return null;
   return (
     <section data-open-posts="" className="flex flex-col gap-1">
@@ -263,6 +266,7 @@ export function OpenPostsList(props: OpenPostsSection): ReactElement | null {
             post={post}
             workspaceKey={props.workspaceKey}
             shared={props.sharedIds.has(post.id)}
+            timeZone={props.timeZone}
             onJump={() => props.onJump(post.id)}
             onShare={() => props.onShare(post.id)}
           />
@@ -535,7 +539,7 @@ export function MarksList(props: MarksListProps): ReactElement {
         ))}
       </div>
       {tab === 'open' && props.openPosts !== undefined ? (
-        <OpenPostsList {...props.openPosts} />
+        <OpenPostsList {...props.openPosts} timeZone={props.timeZone} />
       ) : null}
       {body === 'no-open-marks' ? (
         <p data-no-open-marks="" className="px-2 text-xs text-fg-3">

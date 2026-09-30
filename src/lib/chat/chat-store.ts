@@ -11,15 +11,32 @@
 // the storage as a parameter and never throw.
 
 import type { ChannelSummary } from '@/lib/chat-reads';
-import type { ConversationPreview, UnreadCount } from '@/lib/chat/history';
+import type { ConversationPreview, PreviewContent, UnreadCount } from '@/lib/chat/history';
 import type { LocalMessageContent, ThreadMessage } from '@/lib/chat/thread';
-import { withoutLocal, type MessageAttachment, type ReplyQuote } from '@/lib/chat/attachments';
+import {
+  classifyAttachment,
+  withoutLocal,
+  type MessageAttachment,
+  type ReplyQuote,
+} from '@/lib/chat/attachments';
 
 /** Sender label written before the preview when the current user sent it. */
 export const OWN_PREFIX = 'You';
 
-/** Preview line for a recorded message with attachments and no text. */
+/** Preview line for a message with attachments and no text, when nothing finer is known. */
 export const ATTACHMENT_PREVIEW = 'Attachment';
+
+/** Preview lines for a message with no text, by what it carries (first applicable wins). */
+export const PREVIEW_LABELS = {
+  post: 'Post',
+  brief: 'Brief',
+  photo: 'Photo',
+  file: 'File',
+  voice: 'Voice message',
+} as const;
+
+/** A registry name lookup (display name by user id; undefined when not loaded). */
+export type PreviewNameOf = (userId: string) => string | undefined;
 
 /** One conversation's preview + unread, as the chat list and badge read it. */
 export interface ConversationSummary {
@@ -141,10 +158,82 @@ function setConversation(
   return { ...state, conversations: { ...state.conversations, [channelId]: next } };
 }
 
-/** The card line for a recorded preview: its body, or a label for attachment-only. */
-export function previewText(preview: Pick<ConversationPreview, 'body' | 'hasAttachments'>): string {
-  if (preview.body.trim() !== '') return preview.body;
-  return preview.hasAttachments ? ATTACHMENT_PREVIEW : '';
+/**
+ * The card line for a message: its body, or for a message with no text the
+ * first of Post, Brief, Photo, File, Voice message that it carries. The one
+ * function behind the live line, the reload scan and own sends. Pure.
+ */
+export function previewText(content: PreviewContent): string {
+  if (content.body.trim() !== '') return content.body;
+  if ((content.sharedPostCount ?? 0) > 0) return PREVIEW_LABELS.post;
+  if ((content.sharedBriefCount ?? 0) > 0) return PREVIEW_LABELS.brief;
+  const kinds = (content.attachmentMimes ?? []).map((mime) =>
+    mime === '' ? 'file' : classifyAttachment(mime),
+  );
+  if (kinds.includes('image')) return PREVIEW_LABELS.photo;
+  if (kinds.includes('file')) return PREVIEW_LABELS.file;
+  if (kinds.includes('audio')) return PREVIEW_LABELS.voice;
+  return content.hasAttachments ? ATTACHMENT_PREVIEW : '';
+}
+
+/** A thread message's preview content (own send, forward). Pure. */
+export function messagePreviewContent(
+  message: Pick<ThreadMessage, 'body' | 'attachments' | 'sharedPostIds' | 'sharedBriefIds'>,
+): PreviewContent {
+  return {
+    body: message.body,
+    hasAttachments:
+      message.attachments.length > 0 ||
+      message.sharedPostIds.length > 0 ||
+      message.sharedBriefIds.length > 0,
+    attachmentMimes: message.attachments.map((a) => a.mime),
+    sharedPostCount: message.sharedPostIds.length,
+    sharedBriefCount: message.sharedBriefIds.length,
+  };
+}
+
+/** The first word of a display name ('' for a blank one). */
+function firstNameOf(displayName: string): string {
+  return displayName.trim().split(/\s+/)[0] ?? '';
+}
+
+/**
+ * The sender label before a line: 'You' for own messages; in a group, the
+ * sender's first name from names already loaded, and nothing when it is not
+ * loaded (never a placeholder). DMs label only own messages. Pure.
+ */
+export function previewPrefix(input: {
+  senderUserId: string | null;
+  currentUserId: string;
+  isGroup: boolean;
+  nameOf?: PreviewNameOf | undefined;
+}): string | undefined {
+  const { senderUserId } = input;
+  if (senderUserId === null) return undefined;
+  if (senderUserId === input.currentUserId) return OWN_PREFIX;
+  if (!input.isGroup) return undefined;
+  const first = firstNameOf(input.nameOf?.(senderUserId) ?? '');
+  return first !== '' ? first : undefined;
+}
+
+function isGroupChannel(state: ChatStoreState, channelId: string): boolean {
+  return state.roster.some((c) => c.channelId === channelId && c.channelType === 'group');
+}
+
+/**
+ * An edit landed (own, or a live edit verified against its row): when the
+ * edited message is the line a channel shows, the line takes the new text;
+ * sender, time and unread stay. Any other edit changes nothing. Pure.
+ */
+export function applyEditedPreview(
+  state: ChatStoreState,
+  edit: { channelId: string; messageId: string; text: string },
+): ChatStoreState {
+  const existing = state.conversations[edit.channelId];
+  if (existing?.lastMessageId !== edit.messageId || existing.lastMessageText === edit.text) {
+    return state;
+  }
+  return setConversation(state, edit.channelId, { ...existing, lastMessageText: edit.text });
 }
 
 /**
@@ -196,6 +285,8 @@ export interface InitialLoad {
   previews: readonly ConversationPreview[];
   counts: readonly UnreadCount[];
   currentUserId: string;
+  /** Names already loaded, for group lines' sender first names. */
+  nameOf?: PreviewNameOf;
 }
 
 /**
@@ -214,7 +305,7 @@ export function loadReady(state: ChatStoreState, load: InitialLoad): ChatStoreSt
     serverClockOffsetMs: state.serverClockOffsetMs,
   };
   const withClears = applyClears(seeded, load.clears);
-  const withPreviews = applyPreviews(withClears, load.previews, load.currentUserId);
+  const withPreviews = applyPreviews(withClears, load.previews, load.currentUserId, load.nameOf);
   return { ...applyUnreadCounts(withPreviews, load.counts), status: 'ready' };
 }
 
@@ -275,23 +366,28 @@ export function applyUnreadCounts(
 /**
  * Overlay the latest-message previews from the record: sets each channel's line
  * (and time) without touching unread. A preview by the current user carries the
- * 'You' prefix so the card reads correctly.
+ * 'You' prefix; in a group, another sender's first name (when loaded).
  */
 export function applyPreviews(
   state: ChatStoreState,
   previews: readonly ConversationPreview[],
   currentUserId: string,
+  nameOf?: PreviewNameOf,
 ): ChatStoreState {
   const conversations = { ...state.conversations };
   for (const preview of previews) {
     const existing = conversations[preview.channelId] ?? emptySummary();
     const ts = Date.parse(preview.createdAt);
-    const isOwn = preview.senderUserId !== null && preview.senderUserId === currentUserId;
     conversations[preview.channelId] = summary(
       previewText(preview),
       Number.isNaN(ts) ? existing.lastMessageTs : Math.max(existing.lastMessageTs, ts),
       existing.unread,
-      isOwn ? OWN_PREFIX : undefined,
+      previewPrefix({
+        senderUserId: preview.senderUserId,
+        currentUserId,
+        isGroup: isGroupChannel(state, preview.channelId),
+        nameOf,
+      }),
       preview.messageId,
     );
   }
@@ -324,6 +420,7 @@ export function applyChannelPreviews(
   channelIds: readonly string[],
   previews: readonly ConversationPreview[],
   currentUserId: string,
+  nameOf?: PreviewNameOf,
 ): ChatStoreState {
   if (channelIds.length === 0) return state;
   const wanted = new Set(channelIds);
@@ -339,12 +436,16 @@ export function applyChannelPreviews(
       conversations[channelId] = summary('', existing.lastMessageTs, existing.unread);
       continue;
     }
-    const isOwn = preview.senderUserId !== null && preview.senderUserId === currentUserId;
     conversations[channelId] = summary(
       previewText(preview),
       existing.lastMessageTs,
       existing.unread,
-      isOwn ? OWN_PREFIX : undefined,
+      previewPrefix({
+        senderUserId: preview.senderUserId,
+        currentUserId,
+        isGroup: isGroupChannel(state, channelId),
+        nameOf,
+      }),
       preview.messageId,
     );
   }
