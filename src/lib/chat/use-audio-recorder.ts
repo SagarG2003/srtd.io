@@ -12,6 +12,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+/** The shortest voice note worth sending; anything shorter is discarded. */
+export const MIN_VOICE_NOTE_MS = 1000;
+
 /** Strip codecs/params off a MIME type: 'audio/webm;codecs=opus' -> 'audio/webm'. */
 export function baseMime(mime: string): string {
   const head = mime.split(';')[0] ?? '';
@@ -48,12 +51,14 @@ export function recordingFileName(mime: string): string {
 /**
  * A finished recording: the blob, its base mime ('audio/webm' when the
  * recorder named none) and the recorder's own mimeType as reported (may be
- * ''), so the sender can sniff the bytes for the truthful type.
+ * ''), so the sender can sniff the bytes for the truthful type. durationMs
+ * is the exact time from start() to the recorder's 'stop' event.
  */
 export interface RecordingResult {
   blob: Blob;
   mime: string;
   recorderMime: string;
+  durationMs: number;
 }
 
 export interface AudioRecorder {
@@ -72,6 +77,7 @@ export function useAudioRecorder(): AudioRecorder {
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startedAtRef = useRef(0);
 
   const clearTimer = useCallback((): void => {
     if (intervalRef.current !== null) {
@@ -104,20 +110,25 @@ export function useAudioRecorder(): AudioRecorder {
     });
     recorderRef.current = recorder;
     recorder.start();
+    startedAtRef.current = performance.now();
     setRecording(true);
     setSeconds(0);
     clearTimer();
+    // The live on-screen timer only; the sent length is durationMs.
     intervalRef.current = setInterval(() => setSeconds((value) => value + 1), 1000);
     return true;
   }, [clearTimer]);
 
   const stop = useCallback((): Promise<RecordingResult | null> => {
+    // The ref, not the recording state: set and cleared in the same places,
+    // and never stale inside this closure.
     const recorder = recorderRef.current;
-    if (!recording || recorder === null) return Promise.resolve(null);
+    if (recorder === null) return Promise.resolve(null);
     return new Promise((resolve) => {
       recorder.addEventListener(
         'stop',
         () => {
+          const durationMs = Math.max(0, Math.round(performance.now() - startedAtRef.current));
           const mime = baseMime(recorder.mimeType) || 'audio/webm';
           const chunks = chunksRef.current;
           stopTracks();
@@ -132,24 +143,25 @@ export function useAudioRecorder(): AudioRecorder {
             blob: new Blob(chunks, { type: mime }),
             mime,
             recorderMime: recorder.mimeType,
+            durationMs,
           });
         },
         { once: true },
       );
       recorder.stop();
     });
-  }, [recording, stopTracks, clearTimer]);
+  }, [stopTracks, clearTimer]);
 
   const cancel = useCallback((): void => {
-    if (!recording) return;
     const recorder = recorderRef.current;
-    if (recorder !== null && recorder.state !== 'inactive') recorder.stop();
+    if (recorder === null) return;
+    if (recorder.state !== 'inactive') recorder.stop();
     chunksRef.current = [];
     recorderRef.current = null;
     stopTracks();
     clearTimer();
     setRecording(false);
-  }, [recording, stopTracks, clearTimer]);
+  }, [stopTracks, clearTimer]);
 
   useEffect(() => {
     return () => {
