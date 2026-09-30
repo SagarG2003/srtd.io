@@ -80,6 +80,11 @@ export interface ThreadMessage {
   time: number;
   /** True while `createdAt` comes from Agora (or a pending send), not Postgres. */
   provisionalTime: boolean;
+  /**
+   * An unrecorded own send: the device clock at the Send tap, which its time
+   * label shows until the row lands (createdAt stays '' until then).
+   */
+  localSentMs?: number;
   /** True when the current user sent it (own bubble). */
   mine: boolean;
   /** Asset attachments; from the row's ids + attachment_meta, or the live `ext`. */
@@ -528,8 +533,19 @@ export function mapLiveTextMessage(
   };
 }
 
-/** Total order on messages: server time, then id (uuid_v7 is time-ordered too). */
+/** An own send not yet recorded (sending or refused); it sorts after every recorded message. */
+function isUnrecorded(message: ThreadMessage): boolean {
+  return message.state !== 'sent';
+}
+
+/**
+ * Total order on messages: recorded (and live) messages by server time, then
+ * id (uuid_v7 is time-ordered too); unrecorded own sends after all of them,
+ * in send order.
+ */
 export function compareMessages(a: ThreadMessage, b: ThreadMessage): number {
+  const aPending = isUnrecorded(a);
+  if (aPending !== isUnrecorded(b)) return aPending ? 1 : -1;
   if (a.time !== b.time) return a.time - b.time;
   if (a.id < b.id) return -1;
   if (a.id > b.id) return 1;
@@ -722,9 +738,12 @@ export function setMessageAttachments(
 }
 
 /**
- * Build the optimistic own bubble appended at tap time. It orders after the
- * newest loaded message (never by the local clock); the server created_at
- * replaces it when chat_message_send returns.
+ * Build the optimistic own bubble appended at tap time. Its time label reads
+ * `sentMs`, the device clock at the Send tap (never another message's time,
+ * never epoch); its ordering time is that clock, nudged just after the newest
+ * loaded message when the device clock runs behind, so the bubble and its day
+ * pill render in their final place at once. The recorded row (same id, server
+ * created_at) replaces it when chat_message_send returns.
  */
 export function pendingMessage(params: {
   id: string;
@@ -732,9 +751,10 @@ export function pendingMessage(params: {
   text: string;
   local: LocalMessageContent;
   after: ThreadMessage[];
+  sentMs: number;
 }): ThreadMessage {
   const last = params.after[params.after.length - 1];
-  const time = last !== undefined ? last.time + 1 : 0;
+  const time = last !== undefined ? Math.max(params.sentMs, last.time + 1) : params.sentMs;
   return {
     id: params.id,
     senderUserId: params.currentUserId,
@@ -742,6 +762,7 @@ export function pendingMessage(params: {
     createdAt: '',
     time,
     provisionalTime: true,
+    localSentMs: params.sentMs,
     mine: true,
     attachments: [...params.local.attachments],
     sharedPostIds: [...params.local.sharedPostIds],
@@ -759,19 +780,23 @@ export interface UnrecordedSend {
   text: string;
   local: LocalMessageContent;
   state: 'sending' | 'failed';
+  /** Device clock at the Send tap; absent on a send persisted before it was kept. */
+  createdMs?: number;
   filesMissing?: true;
 }
 
 /**
  * Lay a channel's unrecorded sends over its loaded list: each renders as an own
- * bubble in its outbox state ('sending' or 'failed' with Retry), ordered after
- * the newest loaded message. An id the list already holds as recorded is
- * skipped (its row exists, so the send landed).
+ * bubble in its outbox state ('sending' or 'failed' with Retry) at its Send-tap
+ * time, ordered after the newest loaded message. An id the list already holds
+ * as recorded is skipped (its row exists, so the send landed). `nowMs` stands
+ * in for a send persisted without its tap time.
  */
 export function withOutboxBubbles(
   messages: ThreadMessage[],
   entries: readonly UnrecordedSend[],
   currentUserId: string,
+  nowMs: number = Date.now(),
 ): ThreadMessage[] {
   if (entries.length === 0) return messages;
   const recordedIds = new Set(messages.filter((m) => m.state === 'sent').map((m) => m.id));
@@ -785,6 +810,7 @@ export function withOutboxBubbles(
       text: entry.text,
       local: entry.local,
       after: list,
+      sentMs: entry.createdMs ?? nowMs,
     });
     list = [
       ...list,

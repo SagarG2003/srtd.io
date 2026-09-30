@@ -5,22 +5,29 @@
 // publish, the rendered message carries the RETURNED row's server created_at,
 // a live publish failure or a publish slower than LIVE_PUBLISH_TIMEOUT_MS never
 // fails the send (the row exists; receivers catch up from Postgres), and a
-// record failure or timeout reports 'failed'.
+// record failure or timeout reports 'failed' with its class (send-errors.ts).
 //
 // createOutboxSender runs those sends in the background, one channel queue at a
-// time (FIFO per channel: a later message never records before an earlier one).
-// A failed record retries with backoff (2s, 4s, 8s, 16s, then every 30s) using
-// the SAME message id and a fresh trace id per attempt; the bubble stays
-// 'sending' and only turns 'failed' once the head has failed continuously for
-// FAILED_AFTER_MS. kick() (reconnect, tab visible, online) retries at once.
+// time (FIFO per channel: a later message never records before an earlier
+// pending one). A transient failure (network, timeout, 408 / 429 / 5xx, an
+// upload error or stall) never shows: the bubble keeps its clock and the
+// attempt repeats with backoff (2s, 4s, 8s, 16s, then every 30s, with no end)
+// using the SAME message id and a fresh trace id per attempt; kick()
+// (reconnect, tab visible, online) retries at once. Only a permanent failure
+// (the server refused this message) turns the bubble 'failed' ("Not sent" +
+// Retry); the queue then moves on to the next message, and Retry puts the
+// refused one back in line.
 //
-// Instant attachment sends: an entry may carry picked files (attachment.local)
-// whose asset id is still ''. Each attempt first uploads those, in order and one
-// at a time, reporting progress as 'progress' events, and stores every returned
-// version id on the entry; only then does it record once with all the ids. An
-// upload failure is a failed attempt (same backoff and FAILED_AFTER_MS), and a
-// retry uploads only the files that still have no version id. An entry restored
-// with its files lost (filesMissing) never runs and does not hold up the queue.
+// Instant attachment sends: an entry may carry picked files or a recorded voice
+// note (attachment.local) whose asset id is still ''. Each attempt first
+// uploads those, in order and one at a time, reporting progress as 'progress'
+// events, and stores every returned version id on the entry; only then does it
+// record once with all the ids. A voice note is transcribed alongside its
+// upload, best-effort (TRANSCRIBE_TIMEOUT_MS, then it sends without one). A
+// retry uploads only the files that still have no version id. An entry
+// restored while its files are read back (restoring) holds its place without
+// running; one whose files are gone (filesMissing) never runs and does not
+// hold up the queue.
 //
 // Mentions ride in the body as @[uuid] tokens; every attempt derives p_mentions
 // from the body, so a retry (or a send restored from storage) resends them.
@@ -45,6 +52,7 @@ import {
   awaitsUpload,
   buildAttachmentMeta,
   type AttachmentMetaMap,
+  type AttachmentUploader,
   type ChatAttachmentUpload,
   type MessageAttachment,
 } from '@/lib/chat/attachments';
@@ -56,6 +64,12 @@ import {
   mentionsAfterRefusal,
 } from '@/lib/chat/mentions';
 import type { Result } from '@srtdio/rpc';
+import {
+  classifyRecordFailure,
+  classifyUploadFailure,
+  type SendErrorClass,
+} from '@/lib/chat/send-errors';
+import { TRANSCRIBE_TIMEOUT_MS, type TranscribeResult } from '@/lib/chat/transcribe';
 import {
   rowToThreadMessage,
   type LocalMessageContent,
@@ -119,7 +133,13 @@ export interface SendFlowDeps {
 
 export type SendOutcome =
   | { ok: true; message: ThreadMessage; livePublished: boolean }
-  | { ok: false; reason: 'timeout' | 'error'; error: string };
+  | {
+      ok: false;
+      reason: 'timeout' | 'error';
+      error: string;
+      /** Absent is 'transient' (keep trying). */
+      errorClass?: SendErrorClass;
+    };
 
 /** Race the publish against a timer; the timer is always cleared. */
 export async function publishWithTimeout(
@@ -198,7 +218,12 @@ export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<Sen
     }
   }
   if (!recorded.ok) {
-    return { ok: false, reason: recorded.reason, error: recorded.message };
+    return {
+      ok: false,
+      reason: recorded.reason,
+      error: recorded.message,
+      errorClass: classifyRecordFailure(recorded),
+    };
   }
   const message = rowToThreadMessage(recorded.row, input.currentUserId, input.local);
   deps.onRecorded?.(message);
@@ -230,17 +255,82 @@ export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<Sen
   return { ok: true, message, livePublished: true };
 }
 
-/** The longest wait between two record attempts. */
+/** The longest wait between two attempts. */
 export const RETRY_CAP_MS = 30_000;
-/** Waits between record attempts; the last one repeats until FAILED_AFTER_MS. */
+/** Waits between attempts after a transient failure; the last one repeats with no end. */
 export const RETRY_DELAYS_MS: readonly number[] = [2_000, 4_000, 8_000, 16_000, RETRY_CAP_MS];
-/** Continuous failure after which the queue stops and the bubble reads "Not sent". */
-export const FAILED_AFTER_MS = 120_000;
 
 /** The wait before the next attempt after `failures` consecutive failures (>= 1). */
 export function retryDelayMs(failures: number): number {
   const index = Math.min(Math.max(failures, 1), RETRY_DELAYS_MS.length) - 1;
   return RETRY_DELAYS_MS[index] ?? RETRY_CAP_MS;
+}
+
+/** A chat upload with no progress event for this long is aborted (a transient failure). */
+export const UPLOAD_STALL_MS = 30_000;
+
+/** The slice of an XMLHttpRequest the stall watch needs. */
+export interface StallWatchable {
+  upload: Pick<EventTarget, 'addEventListener' | 'removeEventListener'>;
+  addEventListener: (type: string, listener: () => void) => void;
+  removeEventListener: (type: string, listener: () => void) => void;
+  abort: () => void;
+}
+
+export interface StallWatch {
+  /** Stop watching: clears the timer and every listener (idempotent). */
+  stop: () => void;
+}
+
+/**
+ * Abort `request` when it goes UPLOAD_STALL_MS without any sign of life (an
+ * upload progress or start event, a response progress or state change). The
+ * abort surfaces as the XHR transport failure the upload already maps to a
+ * transient error, so the outbox retries and the queue behind it moves on.
+ * Stops by itself on loadend; the caller also stops it when the upload settles.
+ */
+export function watchUploadStall(
+  request: StallWatchable,
+  opts: {
+    stallMs?: number;
+    setTimer?: (fn: () => void, delayMs: number) => unknown;
+    clearTimer?: (handle: unknown) => void;
+  } = {},
+): StallWatch {
+  const stallMs = opts.stallMs ?? UPLOAD_STALL_MS;
+  const setTimer =
+    opts.setTimer ?? ((fn: () => void, delayMs: number): unknown => setTimeout(fn, delayMs));
+  const clearTimer = opts.clearTimer ?? ((handle: unknown): void => clearTimeout(handle as number));
+  let timer: unknown = null;
+  let stopped = false;
+  const disarm = (): void => {
+    if (timer !== null) clearTimer(timer);
+    timer = null;
+  };
+  const arm = (): void => {
+    if (stopped) return;
+    disarm();
+    timer = setTimer(() => {
+      timer = null;
+      stop();
+      request.abort();
+    }, stallMs);
+  };
+  const UPLOAD_EVENTS = ['loadstart', 'progress', 'load'] as const;
+  const REQUEST_EVENTS = ['progress', 'readystatechange'] as const;
+  function stop(): void {
+    if (stopped) return;
+    stopped = true;
+    disarm();
+    for (const type of UPLOAD_EVENTS) request.upload.removeEventListener(type, arm);
+    for (const type of REQUEST_EVENTS) request.removeEventListener(type, arm);
+    request.removeEventListener('loadend', stop);
+  }
+  for (const type of UPLOAD_EVENTS) request.upload.addEventListener(type, arm);
+  for (const type of REQUEST_EVENTS) request.addEventListener(type, arm);
+  request.addEventListener('loadend', stop);
+  arm();
+  return { stop };
 }
 
 export interface OutboxSenderDeps {
@@ -261,7 +351,12 @@ export interface OutboxSenderDeps {
   onChange: (outbox: Outbox) => void;
   /** One failed attempt, for the log. */
   onAttemptFailed: (context: Record<string, unknown>) => void;
-  now?: () => number;
+  /** Uploads a file whose attachment carries no uploader (restored after a reload). */
+  upload?: AttachmentUploader;
+  /** Best-effort voice note transcription; absent sends voice notes without one. */
+  transcribe?: (blob: Blob) => Promise<TranscribeResult>;
+  /** Override for tests; defaults to TRANSCRIBE_TIMEOUT_MS. */
+  transcribeTimeoutMs?: number;
   setTimer?: (fn: () => void, delayMs: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }
@@ -269,18 +364,33 @@ export interface OutboxSenderDeps {
 export interface OutboxSender {
   entries: (channelId: string) => readonly OutboxEntry[];
   enqueue: (channelId: string, entry: OutboxEntry) => void;
+  /** Retry on a refused ('failed') entry: back in line, same id. */
   retry: (channelId: string, id: string) => void;
   settle: (channelId: string, id: string) => void;
   dropChannel: (channelId: string) => void;
+  /**
+   * A restoring entry's files came back from IndexedDB (its attachments, with
+   * the files attached) and it resumes; null: they are gone, so it turns
+   * filesMissing ('failed', Remove only).
+   */
+  restoreFiles: (
+    channelId: string,
+    id: string,
+    attachments: readonly MessageAttachment[] | null,
+  ) => void;
   /** Attempt every waiting queue now (reconnect, tab visible, online). */
   kick: () => void;
   /** Stop: clear every timer and ignore every answer still in flight. */
   dispose: () => void;
 }
 
-/** The entry a channel's queue runs next: the oldest one that can still be sent. */
+/**
+ * The entry a channel's queue runs next: the oldest one still pending. A
+ * refused ('failed') entry waits on Retry and one whose files are gone waits
+ * on Remove; neither holds up the messages behind it.
+ */
 function headOf(entries: readonly OutboxEntry[]): OutboxEntry | undefined {
-  return entries.find((e) => e.filesMissing !== true);
+  return entries.find((e) => e.filesMissing !== true && e.state === 'sending');
 }
 
 /** Copy of `attachments` with one item replaced. */
@@ -292,26 +402,40 @@ function replaceAt(
   return attachments.map((a, i) => (i === index ? next : a));
 }
 
+/** A recorded voice note that has not been transcribed yet. */
+function wantsTranscript(attachment: MessageAttachment): boolean {
+  return (
+    attachment.durationMs !== undefined &&
+    attachment.mime.startsWith('audio/') &&
+    attachment.transcript === undefined
+  );
+}
+
 /** One channel's queue runner. */
 interface Lane {
   busy: boolean;
   timer: unknown;
   failures: number;
-  failingSince: number | null;
 }
+
+type AttemptFailure = { error: string; errorClass: SendErrorClass };
 
 /**
  * The background sender over an outbox (restored entries resume at once).
- * Nothing here throws; a deliver that rejects counts as a failed attempt.
+ * Nothing here throws; a deliver that rejects counts as a transient failure.
  */
 export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {}): OutboxSender {
-  const now = deps.now ?? ((): number => Date.now());
   const setTimer =
     deps.setTimer ?? ((fn: () => void, delayMs: number): unknown => setTimeout(fn, delayMs));
   const clearTimer = deps.clearTimer ?? ((handle: unknown): void => clearTimeout(handle as number));
   let outbox: Outbox = initial;
   let disposed = false;
   const lanes = new Map<string, Lane>();
+  // Voice notes already sent to transcription this session (by local key): a
+  // retry after a failed upload never transcribes again.
+  const transcribed = new Set<string>();
+  // Transcription timeouts still armed, cleared on dispose.
+  const transcribeTimers = new Set<unknown>();
 
   const commit = (next: Outbox): void => {
     if (next === outbox) return;
@@ -322,7 +446,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
   const laneFor = (channelId: string): Lane => {
     const existing = lanes.get(channelId);
     if (existing !== undefined) return existing;
-    const lane: Lane = { busy: false, timer: null, failures: 0, failingSince: null };
+    const lane: Lane = { busy: false, timer: null, failures: 0 };
     lanes.set(channelId, lane);
     return lane;
   };
@@ -339,35 +463,69 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     deps.onEvent({ type: 'state', channelId, id, state });
   };
 
-  /** Failed entries go back to 'sending' with a fresh failure window (lost files stay failed). */
-  const resume = (channelId: string): void => {
-    const lane = laneFor(channelId);
-    lane.failures = 0;
-    lane.failingSince = null;
-    for (const entry of selectOutbox(outbox, channelId)) {
-      if (entry.state === 'failed' && entry.filesMissing !== true) {
-        setState(channelId, entry.id, 'sending');
-      }
-    }
-    pump(channelId);
-  };
-
   /** The entry as the outbox holds it now; undefined once settled or dropped. */
   const current = (channelId: string, id: string): OutboxEntry | undefined =>
     selectOutbox(outbox, channelId).find((e) => e.id === id);
 
+  const isLive = (channelId: string, lane: Lane): boolean =>
+    !disposed && lanes.get(channelId) === lane;
+
+  /** Its files are gone: 'failed' with filesMissing (Remove only); the queue moves on. */
+  const markFilesMissing = (channelId: string, id: string): void => {
+    const entry = current(channelId, id);
+    if (entry === undefined) return;
+    const lost: OutboxEntry = { ...entry, state: 'failed', filesMissing: true };
+    delete lost.restoring;
+    commit(outboxPut(outbox, channelId, lost));
+    deps.onEvent({ type: 'state', channelId, id, state: 'failed' });
+  };
+
+  /** Transcribe with a timeout; resolves to the transcript or undefined. Never rejects. */
+  const transcribeBounded = (file: File): Promise<string | undefined> => {
+    const transcribe = deps.transcribe;
+    if (transcribe === undefined) return Promise.resolve(undefined);
+    return new Promise<string | undefined>((resolve) => {
+      let done = false;
+      const finish = (value: string | undefined): void => {
+        if (done) return;
+        done = true;
+        clearTimer(timer);
+        transcribeTimers.delete(timer);
+        resolve(value);
+      };
+      const timer = setTimer(
+        () => finish(undefined),
+        deps.transcribeTimeoutMs ?? TRANSCRIBE_TIMEOUT_MS,
+      );
+      transcribeTimers.add(timer);
+      let pending: Promise<TranscribeResult>;
+      try {
+        pending = transcribe(file);
+      } catch {
+        finish(undefined);
+        return;
+      }
+      pending.then(
+        (result) =>
+          finish(result.ok && result.transcript.trim() !== '' ? result.transcript : undefined),
+        () => finish(undefined),
+      );
+    });
+  };
+
   /**
-   * Upload the entry's files that have no version id yet, in order. Progress
-   * ticks update memory only (no persistence write per tick); each finished
-   * upload is committed, so a retry or a reload keeps its version id. Resolves
-   * to the entry ready to record, null when it left the outbox (or the sender
-   * stopped) mid-way, or the first failure.
+   * Upload the entry's files that have no version id yet, in order (a voice
+   * note transcribed alongside). Progress ticks update memory only (no
+   * persistence write per tick); each finished upload is committed, so a
+   * retry or a reload keeps its version id. Resolves to the entry ready to
+   * record, null when it left the outbox (or the sender stopped, or its files
+   * are gone) mid-way, or the first failure with its class.
    */
   const uploadPending = async (
     channelId: string,
     lane: Lane,
     id: string,
-  ): Promise<{ ok: true; entry: OutboxEntry | null } | { ok: false; error: string }> => {
+  ): Promise<{ ok: true; entry: OutboxEntry | null } | ({ ok: false } & AttemptFailure)> => {
     for (;;) {
       if (!isLive(channelId, lane)) return { ok: true, entry: null };
       const entry = current(channelId, id);
@@ -378,8 +536,14 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       const target = attachments[index];
       const local = target?.local;
       if (target === undefined || local === undefined) return { ok: true, entry };
-      if (local.file === null || local.upload === undefined) {
-        return { ok: false, error: 'attachment file unavailable' };
+      if (local.file === null) {
+        markFilesMissing(channelId, id);
+        return { ok: true, entry: null };
+      }
+      const file = local.file;
+      const upload = local.upload ?? deps.upload;
+      if (upload === undefined) {
+        return { ok: false, error: 'attachment upload unavailable', errorClass: 'transient' };
       }
       const publish = (next: MessageAttachment, persist: boolean): void => {
         const latest = current(channelId, id);
@@ -390,26 +554,47 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
         else outbox = updated;
         deps.onEvent({ type: 'progress', channelId, id, attachments: list });
       };
+      const transcript =
+        wantsTranscript(target) && !transcribed.has(local.key)
+          ? (transcribed.add(local.key), transcribeBounded(file))
+          : Promise.resolve(undefined);
       let result: ChatAttachmentUpload;
       try {
-        result = await local.upload(local.file, (fraction) =>
+        result = await upload(file, (fraction) =>
           publish({ ...target, local: { ...local, progress: fraction } }, false),
         );
       } catch (error) {
-        return { ok: false, error: String(error) };
+        result = { ok: false, message: String(error) };
       }
-      if (!result.ok) return { ok: false, error: result.message };
-      publish({ ...target, assetId: result.versionId, local: { ...local, progress: 1 } }, true);
+      const text = await transcript;
+      const withTranscript = text !== undefined ? { transcript: text } : {};
+      if (!result.ok) {
+        // Keep a transcript that did arrive, so the retry does not need one.
+        if (text !== undefined) {
+          const latest = current(channelId, id)?.local.attachments[index];
+          if (latest !== undefined) publish({ ...latest, ...withTranscript }, true);
+        }
+        return {
+          ok: false,
+          error: result.message,
+          errorClass: classifyUploadFailure(result.message),
+        };
+      }
+      publish(
+        {
+          ...target,
+          ...withTranscript,
+          assetId: result.versionId,
+          local: { ...local, progress: 1 },
+        },
+        true,
+      );
     }
   };
-
-  const isLive = (channelId: string, lane: Lane): boolean =>
-    !disposed && lanes.get(channelId) === lane;
 
   const onRecorded = (channelId: string, lane: Lane, message: ThreadMessage): void => {
     lane.busy = false;
     lane.failures = 0;
-    lane.failingSince = null;
     if (!isLive(channelId, lane)) return;
     const held = selectOutbox(outbox, channelId).some((e) => e.id === message.id);
     commit(outboxRemove(outbox, channelId, message.id));
@@ -423,7 +608,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     head: OutboxEntry,
     traceId: string,
     reason: string,
-    error: string,
+    failure: AttemptFailure,
   ): void => {
     lane.busy = false;
     if (!isLive(channelId, lane)) return;
@@ -432,28 +617,24 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       message_id: head.id,
       channel_id: channelId,
       reason,
-      error,
+      error: failure.error,
+      error_class: failure.errorClass,
       failures: lane.failures + 1,
     });
-    // Settled by a catch-up (or dropped) while this attempt was in flight.
+    // Settled by a catch-up (or dropped, or refused) while this attempt was in flight.
     if (headOf(selectOutbox(outbox, channelId))?.id !== head.id) {
       lane.failures = 0;
-      lane.failingSince = null;
+      pump(channelId);
+      return;
+    }
+    if (failure.errorClass === 'permanent') {
+      // The server refused this message: "Not sent" + Retry; the rest go on.
+      lane.failures = 0;
+      setState(channelId, head.id, 'failed');
       pump(channelId);
       return;
     }
     lane.failures += 1;
-    const at = now();
-    lane.failingSince ??= at;
-    if (at - lane.failingSince >= FAILED_AFTER_MS) {
-      lane.failures = 0;
-      lane.failingSince = null;
-      // FIFO: everything queued behind the head stops with it.
-      for (const entry of selectOutbox(outbox, channelId)) {
-        if (entry.state === 'sending') setState(channelId, entry.id, 'failed');
-      }
-      return;
-    }
     lane.timer = setTimer(() => {
       lane.timer = null;
       pump(channelId);
@@ -465,7 +646,8 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     const lane = laneFor(channelId);
     if (lane.busy || lane.timer !== null) return;
     const head = headOf(selectOutbox(outbox, channelId));
-    if (head === undefined || head.state !== 'sending') return;
+    // A restoring head holds its place until its files are back.
+    if (head === undefined || head.restoring === true) return;
     lane.busy = true;
     const traceId = deps.newTraceId();
     let settled = false;
@@ -474,18 +656,23 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       settled = true;
       onRecorded(channelId, lane, message);
     };
-    const failed = (reason: string, error: string): void => {
+    const failed = (reason: string, failure: AttemptFailure): void => {
       if (settled) return;
       settled = true;
-      onFailed(channelId, lane, head, traceId, reason, error);
+      onFailed(channelId, lane, head, traceId, reason, failure);
     };
     const deliver = (entry: OutboxEntry): void => {
       void deps.deliver(channelId, entry, traceId, recorded).then(
         (outcome) => {
           if (outcome.ok) recorded(outcome.message);
-          else failed(outcome.reason, outcome.error);
+          else {
+            failed(outcome.reason, {
+              error: outcome.error,
+              errorClass: outcome.errorClass ?? 'transient',
+            });
+          }
         },
-        (error: unknown) => failed('error', String(error)),
+        (error: unknown) => failed('error', { error: String(error), errorClass: 'transient' }),
       );
     };
     // A text-only (or fully uploaded) entry records in this same tick.
@@ -495,14 +682,14 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     }
     void uploadPending(channelId, lane, head.id).then((uploaded) => {
       if (!uploaded.ok) {
-        failed('upload', uploaded.error);
+        failed('upload', uploaded);
         return;
       }
       if (uploaded.entry !== null) {
         deliver(uploaded.entry);
         return;
       }
-      // Settled, dropped or stopped while uploading: release the lane.
+      // Settled, dropped, lost or stopped while uploading: release the lane.
       settled = true;
       lane.busy = false;
       if (isLive(channelId, lane)) pump(channelId);
@@ -516,15 +703,18 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     enqueue: (channelId, entry) => {
       if (disposed) return;
       commit(outboxPut(outbox, channelId, entry));
-      // A new message also resumes a stopped queue, so it never waits behind a
-      // failed one it cannot overtake.
-      resume(channelId);
+      pump(channelId);
     },
     retry: (channelId, id) => {
       if (disposed) return;
       const entry = selectOutbox(outbox, channelId).find((e) => e.id === id);
-      if (entry === undefined || entry.state !== 'failed') return;
-      resume(channelId);
+      if (entry === undefined || entry.state !== 'failed' || entry.filesMissing === true) return;
+      setState(channelId, id, 'sending');
+      // Back in line at once: a backoff wait for the head restarts now.
+      const lane = laneFor(channelId);
+      stopTimer(lane);
+      lane.failures = 0;
+      pump(channelId);
     },
     settle: (channelId, id) => {
       if (disposed) return;
@@ -534,7 +724,6 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       if (!wasHead || lane === undefined) return;
       stopTimer(lane);
       lane.failures = 0;
-      lane.failingSince = null;
       pump(channelId);
     },
     dropChannel: (channelId) => {
@@ -542,6 +731,20 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       if (lane !== undefined) stopTimer(lane);
       lanes.delete(channelId);
       commit(outboxDropChannel(outbox, channelId));
+    },
+    restoreFiles: (channelId, id, attachments) => {
+      if (disposed) return;
+      const entry = current(channelId, id);
+      if (entry === undefined || entry.restoring !== true) return;
+      if (attachments === null) {
+        markFilesMissing(channelId, id);
+      } else {
+        const back: OutboxEntry = { ...entry, local: { ...entry.local, attachments } };
+        delete back.restoring;
+        commit(outboxPut(outbox, channelId, back));
+        deps.onEvent({ type: 'progress', channelId, id, attachments });
+      }
+      pump(channelId);
     },
     kick: () => {
       if (disposed) return;
@@ -555,6 +758,8 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       disposed = true;
       for (const lane of lanes.values()) stopTimer(lane);
       lanes.clear();
+      for (const timer of transcribeTimers) clearTimer(timer);
+      transcribeTimers.clear();
     },
   };
 }

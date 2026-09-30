@@ -748,12 +748,14 @@ function senderAvatarProps(
 
 /**
  * The one timestamp a message's time label and aria-label both read: the server
- * createdAt, or the Agora time only while createdAt is absent (provisional).
+ * createdAt; while createdAt is absent, the Send-tap clock of an unrecorded own
+ * send, else the Agora time (provisional).
  */
 export function messageTimeSource(
-  message: Pick<ThreadMessage, 'createdAt' | 'time'>,
+  message: Pick<ThreadMessage, 'createdAt' | 'time' | 'localSentMs'>,
 ): string | number {
-  return message.createdAt !== '' ? message.createdAt : message.time;
+  if (message.createdAt !== '') return message.createdAt;
+  return message.localSentMs ?? message.time;
 }
 
 /**
@@ -3273,8 +3275,7 @@ export function resetSelectionHistory(): void {
 
 /** The thread pane: header (+ optional back), message list, and composer. */
 export function MessageThread(props: MessageThreadProps): ReactElement {
-  const { canAttach, presignEnabled, presignCache, uploadFile, transcribe, canTranscribe } =
-    useChatAttachments();
+  const { canAttach, presignEnabled, presignCache, uploadFile } = useChatAttachments();
   // Everything per chat is keyed on the channel id (the parent also remounts
   // the thread per channel), never the title.
   const channelId = props.channelId;
@@ -3844,7 +3845,6 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           sharedPostIds={sharedInChat}
           onBringPost={bringPost}
           {...(canAttach ? { uploadFile } : {})}
-          {...(canTranscribe ? { transcribe } : {})}
           {...(editing !== null && onEditMessage !== undefined
             ? {
                 editing,

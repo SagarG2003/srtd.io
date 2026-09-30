@@ -9,9 +9,11 @@
 // on open, on every reconnect, and 2s after the last incoming live message, so
 // Postgres stays the truth for the badge. The provider also owns the
 // per-channel outbox and its background sender (send-flow.ts): sends record and
-// publish here, retry with backoff (and at once on reconnect, tab visible and
-// online), persist to localStorage for this workspace and user so a reload
-// resumes them, and are wiped from storage on sign-out. A channel switch or
+// publish here, retry with backoff for as long as it takes (and at once on
+// reconnect, tab visible and online; only a server refusal reads "Not sent"),
+// persist to localStorage for this workspace and user, their picked files and
+// voice notes to IndexedDB (outbox-files.ts), so a reload resumes them, and
+// are wiped from both on sign-out. A channel switch or
 // leaving the chat page never drops a sending or failed bubble. A message for a
 // conversation the user is not viewing fires a toast and stays unread; a message for the open
 // conversation is marked read locally (the thread writes the cursor). All store
@@ -61,6 +63,19 @@ import { useChat } from '@/lib/chat/chat-context';
 import { createTextMessage } from '@/lib/chat/message-factory';
 import { sendMessageRecord } from '@/lib/chat/record';
 import { createOutboxSender, runSend, type OutboxSender } from '@/lib/chat/send-flow';
+import {
+  clearOutboxFiles,
+  deleteOutboxFiles,
+  openIndexedDbFiles,
+  pruneOutboxFiles,
+  restoreOutboxFiles,
+  saveOutboxFiles,
+  type OutboxFileAdapter,
+} from '@/lib/chat/outbox-files';
+import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
+import { revokeLocalPreviews, type AttachmentUploader } from '@/lib/chat/attachments';
+import type { TranscribeResult } from '@/lib/chat/transcribe';
+import { isImageMime } from '@srtdio/storage';
 import {
   mapLiveTextMessage,
   parseLiveEvent,
@@ -149,6 +164,25 @@ function indexSummaries(roster: readonly ChannelSummary[]): Map<string, ChannelS
 function browserStorage(): OutboxStorage | null {
   try {
     return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** The file store for pending sends, or null where IndexedDB is unavailable. */
+function browserFiles(): OutboxFileAdapter | null {
+  try {
+    return openIndexedDbFiles();
+  } catch {
+    return null;
+  }
+}
+
+/** A restored image's tile preview (revoked with the bubble, like a picked file's). */
+function restoredPreview(file: File): string | null {
+  if (!isImageMime(file.type)) return null;
+  try {
+    return URL.createObjectURL(file);
   } catch {
     return null;
   }
@@ -379,6 +413,15 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   const onMessagesDeletedRef = useRef<(messageIds: readonly string[]) => void>(() => {});
   // Which record attempts may sample the server clock (session-wide).
   const clockSamplerRef = useRef<store.ClockSampler>(store.createClockSampler());
+  // The current sender's file store (IndexedDB); null where there is none.
+  const filesRef = useRef<OutboxFileAdapter | null>(null);
+  // Uploads and transcription for sends restored after a reload (their
+  // attachments carry no uploader) and for voice notes; read at call time.
+  const chatAttachments = useChatAttachments();
+  const uploadRef = useRef<AttachmentUploader | null>(null);
+  uploadRef.current = chatAttachments.canAttach ? chatAttachments.uploadFile : null;
+  const transcribeRef = useRef<((blob: Blob) => Promise<TranscribeResult>) | null>(null);
+  transcribeRef.current = chatAttachments.canTranscribe ? chatAttachments.transcribe : null;
   // Stable facade over the current sender, which is replaced per workspace/user.
   const outbox = useMemo<ChannelOutbox>(
     () => ({
@@ -386,6 +429,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       enqueue: (channelId, entry) => {
         clockSamplerRef.current.fresh(entry.id);
         senderRef.current?.enqueue(channelId, entry);
+        // Its files survive a reload until the row lands (best-effort).
+        if (entry.local.attachments.some((a) => a.assetId === '' && a.local?.file != null)) {
+          void saveOutboxFiles(filesRef.current, entry);
+        }
       },
       retry: (channelId, id) => senderRef.current?.retry(channelId, id),
       settle: (channelId, id) => senderRef.current?.settle(channelId, id),
@@ -553,8 +600,20 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     const storage = browserStorage();
     // Persisted sends are replays (never marked fresh): their acks carry the
     // original created_at.
-    const persisted = store.readPersistedOutbox(storage, scopeKey);
+    const files = browserFiles();
+    filesRef.current = files;
+    // With a file store, sends whose files never finished uploading wait for
+    // their bytes (clock) instead of reading "Photos not sent".
+    const read = store.readPersistedOutbox(storage, scopeKey);
+    const persisted = files !== null ? store.awaitRestoredFiles(read) : read;
     const clockSampler = clockSamplerRef.current;
+    // Entry ids the outbox holds, to drop their files once they leave it.
+    let heldIds = new Set(Object.values(persisted).flatMap((list) => list.map((e) => e.id)));
+    // Blobs of sends neither persisted (any scope) nor queued since are orphans.
+    const keepIds = store.persistedOutboxIds(storage);
+    if (keepIds !== null) {
+      void pruneOutboxFiles(files, (id) => keepIds.has(id) || heldIds.has(id));
+    }
     const sender = createOutboxSender(
       {
         deliver: (channelId, entry, traceId, onRecorded) => {
@@ -630,17 +689,50 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           for (const listener of outboxListenersRef.current) listener(event);
         },
         // A queued send quoting a deleted message never persists its quote text.
-        onChange: (next) =>
+        onChange: (next) => {
           store.writePersistedOutbox(
             storage,
             scopeKey,
             store.stripDeletedQuotes(next, deletedIdsRef.current),
-          ),
+          );
+          // Recorded, settled, removed or dropped: its files are not needed.
+          const nextIds = new Set(Object.values(next).flatMap((list) => list.map((e) => e.id)));
+          const gone = [...heldIds].filter((id) => !nextIds.has(id));
+          heldIds = nextIds;
+          if (gone.length > 0) void deleteOutboxFiles(files, gone);
+        },
         onAttemptFailed: (context) => logger.warn('chat: message record attempt failed', context),
+        upload: (file, onProgress) => {
+          const upload = uploadRef.current;
+          return upload !== null
+            ? upload(file, onProgress)
+            : Promise.resolve({ ok: false, message: 'Upload is unavailable.' });
+        },
+        transcribe: (blob) => {
+          const transcribe = transcribeRef.current;
+          return transcribe !== null
+            ? transcribe(blob)
+            : Promise.resolve({ ok: false, message: 'Transcription is unavailable.' });
+        },
       },
       persisted,
     );
     senderRef.current = sender;
+    // Bring restored sends' files back from IndexedDB; each resumes in its
+    // place in the queue, or turns filesMissing when its bytes are gone.
+    for (const [channelId, list] of Object.entries(persisted)) {
+      for (const entry of list) {
+        if (entry.restoring !== true) continue;
+        void restoreOutboxFiles(files, entry, restoredPreview).then((attachments) => {
+          // Torn down meanwhile: the previews made for it have no bubble.
+          if (senderRef.current !== sender) {
+            revokeLocalPreviews(attachments ?? []);
+            return;
+          }
+          sender.restoreFiles(channelId, entry.id, attachments);
+        });
+      }
+    }
     const kick = (): void => sender.kick();
     const onVisibility = (): void => {
       if (document.visibilityState === 'visible') kick();
@@ -648,6 +740,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     const onSignout = (): void => {
       sender.dispose();
       store.clearPersistedOutbox(storage);
+      void clearOutboxFiles(files);
     };
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('online', kick);
@@ -658,6 +751,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       window.removeEventListener(SIGNOUT_EVENT, onSignout);
       sender.dispose();
       if (senderRef.current === sender) senderRef.current = null;
+      if (filesRef.current === files) filesRef.current = null;
+      files?.close();
     };
   }, [workspaceId, currentUserId]);
 

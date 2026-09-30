@@ -16,7 +16,6 @@ import {
 } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { useAudioRecorder, recordingFileName } from '@/lib/chat/use-audio-recorder';
-import type { TranscribeResult } from '@/lib/chat/transcribe';
 import { AttachmentMenu } from '@/components/chat/AttachmentMenu';
 import { PostPicker } from '@/components/chat/PostPicker';
 import { MentionPicker, stepActive } from '@/components/chat/MentionPicker';
@@ -93,11 +92,10 @@ interface ComposerProps {
   disabled: boolean;
   /**
    * Upload one file via the asset pipeline (with progress); absent disables
-   * attaching. Picked files carry it to the outbox; voice notes call it here.
+   * attaching. Picked files and voice notes carry it to the outbox, which
+   * uploads (and transcribes a voice note) in the background.
    */
   uploadFile?: AttachmentUploader | undefined;
-  /** Transcribe a recorded voice note; absent sends the audio with no transcript. */
-  transcribe?: ((blob: Blob) => Promise<TranscribeResult>) | undefined;
   /** Called on each keystroke so the parent can broadcast a throttled typing signal. */
   onTyping?: (() => void) | undefined;
   /**
@@ -664,6 +662,19 @@ export function draftAttachments(
   return pending.map((item) => toLocalAttachment(item.file, item.previewUrl, upload));
 }
 
+/**
+ * A recorded voice note as an instant-send attachment: the local file (no
+ * version id yet, no preview) plus its recorded length, so the outbox uploads
+ * it, transcribes it best-effort and records it like any picked file. Pure.
+ */
+export function voiceNoteAttachment(
+  file: File,
+  durationMs: number,
+  upload: AttachmentUploader | undefined,
+): MessageAttachment {
+  return { ...toLocalAttachment(file, null, upload), durationMs };
+}
+
 /** Whether Send is enabled: text, a picked file, or a shared post or brief. Never waits on an upload. */
 export function composerCanSend(input: {
   disabled: boolean;
@@ -987,6 +998,9 @@ export function Composer(props: ComposerProps): ReactElement {
     recorder.cancel();
   }
 
+  // The recording goes to the outbox like a picked file: the bubble shows its
+  // clock at once, the blob is kept (IndexedDB) until the row lands, and the
+  // upload and a best-effort transcript run in the background with retries.
   async function stopSend(): Promise<void> {
     setVoiceBusy(true);
     const durationMs = recorder.seconds * 1000;
@@ -996,32 +1010,9 @@ export function Composer(props: ComposerProps): ReactElement {
       return;
     }
     const file = new File([rec.blob], recordingFileName(rec.mime), { type: rec.mime });
-    let transcript: string | undefined;
-    if (props.transcribe !== undefined) {
-      const t = await props.transcribe(rec.blob);
-      if (t.ok && t.transcript.trim() !== '') transcript = t.transcript;
-    }
-    const up =
-      props.uploadFile !== undefined
-        ? await props.uploadFile(file)
-        : ({ ok: false, message: 'Upload is unavailable.' } as const);
-    if (!up.ok) {
-      logger.warn('chat composer: voice upload failed', { error: up.message });
-      toast.show({ title: SEND_FAILED_COPY });
-      setVoiceBusy(false);
-      return;
-    }
-    const attachment: MessageAttachment = {
-      assetId: up.versionId,
-      name: file.name,
-      mime: file.type,
-      size: file.size,
-      durationMs,
-      ...(transcript !== undefined ? { transcript } : {}),
-    };
     const taken = dispatchSend(props.onSend, {
       text: '',
-      attachments: [attachment],
+      attachments: [voiceNoteAttachment(file, durationMs, props.uploadFile)],
       sharedPostIds: [],
       reply: props.reply?.quote ?? null,
       sharedBriefIds: [],

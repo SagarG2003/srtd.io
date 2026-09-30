@@ -9,7 +9,8 @@
 // on the store's outbox and returns at once: the optimistic bubble shows in
 // the same tick, and the background sender records it (chat_message_send
 // FIRST; the returned row with its server created_at is what the thread shows),
-// publishes it live, and retries it with the same id. Unrecorded sends live in
+// publishes it live, and retries it with the same id for as long as it takes
+// (only a server refusal reads "Not sent"). Unrecorded sends live in
 // the per-channel outbox, so switching channels keeps a sending or failed
 // bubble and its Retry payload.
 
@@ -727,7 +728,18 @@ export function useChatThread(params: {
           setMessages((prev) => setMessageAttachments(prev, id, attachments));
           return;
         }
-        setMessages((prev) => setMessageState(prev, event.id, event.state));
+        // A restored send whose files could not be read back reads "Photos
+        // not sent" (Remove only), as when it is laid over a fresh load.
+        const lost =
+          outboxRef.current.entries(event.channelId).find((e) => e.id === event.id)
+            ?.filesMissing === true;
+        setMessages((prev) =>
+          lost
+            ? prev.map((m) =>
+                m.id === event.id ? { ...m, state: event.state, filesMissing: true } : m,
+              )
+            : setMessageState(prev, event.id, event.state),
+        );
       }),
     [outbox],
   );
@@ -765,6 +777,8 @@ export function useChatThread(params: {
           reply,
         },
         state: 'sending',
+        // The bubble's time and day pill: the device clock at the tap.
+        createdMs: Date.now(),
       };
       setMessages((prev) => withOutboxBubbles(prev, [entry], currentUserId));
       outboxRef.current.enqueue(forChannel, entry);

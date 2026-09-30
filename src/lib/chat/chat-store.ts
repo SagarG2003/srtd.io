@@ -541,9 +541,10 @@ export function selectConversation(
 
 /**
  * One own send that has not reached the record yet: in flight or retrying in
- * the background ('sending'), or failed after FAILED_AFTER_MS and waiting on
- * Retry. Kept per channel, outside any open thread, so
- * switching channels neither loses a failed bubble nor its Retry payload.
+ * the background ('sending', for as long as it takes), or refused by the
+ * server and waiting on Retry ('failed'). Kept per channel, outside any open
+ * thread, so switching channels neither loses a failed bubble nor its Retry
+ * payload.
  */
 export interface OutboxEntry {
   id: string;
@@ -554,11 +555,20 @@ export interface OutboxEntry {
    */
   local: LocalMessageContent;
   state: 'sending' | 'failed';
+  /** Device clock (epoch ms) at the Send tap: the pending bubble's time and day. */
+  createdMs?: number;
   /**
    * Restored from storage with files that never finished uploading: the File
-   * did not survive the reload, so it can only be removed ('failed', no Retry).
+   * could not be brought back (no IndexedDB, or its blob is gone), so it can
+   * only be removed ('failed', no Retry).
    */
   filesMissing?: true;
+  /**
+   * Restored from storage while its files are read back from IndexedDB: it
+   * shows its clock and holds its place in the queue, but does not run until
+   * the files are back (or turns filesMissing when they are not).
+   */
+  restoring?: true;
 }
 
 /** Unrecorded own sends keyed by our channel_id, oldest first per channel. */
@@ -730,12 +740,13 @@ function parseReply(value: unknown): ReplyQuote | null | undefined {
 
 /**
  * One persisted entry back to an OutboxEntry; null when malformed. It resumes
- * 'sending' unless an attachment never got its version id: that File is gone,
- * so the entry is 'failed' with filesMissing (Remove only).
+ * 'sending' unless an attachment never got its version id: that File is not
+ * in localStorage, so the entry is 'failed' with filesMissing (Remove only)
+ * until outbox-files.ts brings it back (see awaitRestoredFiles).
  */
 function parseEntry(value: unknown): OutboxEntry | null {
   if (!isRecord(value) || !isRecord(value.local)) return null;
-  const { id, text } = value;
+  const { id, text, createdMs } = value;
   const { attachments, sharedPostIds, sharedBriefIds, reply } = value.local;
   if (typeof id !== 'string' || typeof text !== 'string') return null;
   if (!Array.isArray(attachments) || !isStringArray(sharedPostIds)) return null;
@@ -756,8 +767,32 @@ function parseEntry(value: unknown): OutboxEntry | null {
       reply: parsedReply,
     },
     state: filesMissing ? 'failed' : 'sending',
+    ...(typeof createdMs === 'number' && Number.isFinite(createdMs) && createdMs > 0
+      ? { createdMs }
+      : {}),
     ...(filesMissing ? { filesMissing: true as const } : {}),
   };
+}
+
+/**
+ * Restored entries whose files were not in localStorage wait for IndexedDB
+ * instead of reading "Photos not sent": 'sending' + restoring, same place in
+ * the queue. Used only where outbox-files.ts can try to bring the files back.
+ * The same outbox when none match. Pure.
+ */
+export function awaitRestoredFiles(outbox: Outbox): Outbox {
+  let changed = false;
+  const next: Record<string, readonly OutboxEntry[]> = {};
+  for (const [channelId, list] of Object.entries(outbox)) {
+    next[channelId] = list.map((entry) => {
+      if (entry.filesMissing !== true) return entry;
+      changed = true;
+      const waiting: OutboxEntry = { ...entry, state: 'sending', restoring: true };
+      delete waiting.filesMissing;
+      return waiting;
+    });
+  }
+  return changed ? next : outbox;
 }
 
 function readRaw(storage: OutboxStorage): Record<string, unknown> | null {
@@ -796,6 +831,29 @@ export function readPersistedOutbox(storage: OutboxStorage | null, scope: Outbox
 }
 
 /**
+ * Every entry id the persisted outbox holds, whatever its workspace and user
+ * (the file store keeps blobs for exactly these). Empty when nothing is
+ * stored; null when storage is missing or unreadable (keep every blob).
+ */
+export function persistedOutboxIds(storage: OutboxStorage | null): Set<string> | null {
+  if (storage === null) return null;
+  try {
+    const ids = new Set<string>();
+    const stored = readRaw(storage);
+    if (stored === null || !isRecord(stored.outbox)) return ids;
+    for (const list of Object.values(stored.outbox)) {
+      if (!Array.isArray(list)) continue;
+      for (const entry of list) {
+        if (isRecord(entry) && typeof entry.id === 'string') ids.add(entry.id);
+      }
+    }
+    return ids;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Persist this scope's pending sends (bodies included) under the one key, so
  * the blob only ever holds a single workspace and user. An empty outbox
  * removes the key when it is this scope's. Never throws.
@@ -818,15 +876,19 @@ export function writePersistedOutbox(
       }
       return;
     }
-    const persisted: Record<string, { id: string; text: string; local: LocalMessageContent }[]> =
-      {};
+    const persisted: Record<
+      string,
+      { id: string; text: string; local: LocalMessageContent; createdMs?: number }[]
+    > = {};
     for (const [channelId, list] of pending) {
-      // A File and its object URL cannot be stored: only the attachment fields
-      // are, so an unfinished upload restores with an empty asset id.
+      // A File and its object URL cannot be stored here: only the attachment
+      // fields are, so an unfinished upload restores with an empty asset id
+      // (its bytes live in IndexedDB, outbox-files.ts).
       persisted[channelId] = list.map((e) => ({
         id: e.id,
         text: e.text,
         local: { ...e.local, attachments: e.local.attachments.map(withoutLocal) },
+        ...(e.createdMs !== undefined ? { createdMs: e.createdMs } : {}),
       }));
     }
     storage.setItem(

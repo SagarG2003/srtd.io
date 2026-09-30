@@ -4,6 +4,9 @@
 // header); tests pass a mock. Expected failures return a Result, never throw, so
 // a missing or failed transcription degrades to "send without a transcript".
 
+/** Transcription is best-effort: a voice note sends without a transcript after this long. */
+export const TRANSCRIBE_TIMEOUT_MS = 15_000;
+
 export type TranscribeResult = { ok: true; transcript: string } | { ok: false; message: string };
 
 export interface TranscribeParams {
@@ -11,11 +14,15 @@ export interface TranscribeParams {
   endpoint: string;
   token: string;
   fetcher: (input: string, init: RequestInit) => Promise<Response>;
+  /** Abort after this long; defaults to TRANSCRIBE_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 const FAILURE_MESSAGE = 'Could not transcribe the voice note.';
 
 export async function transcribeAudio(params: TranscribeParams): Promise<TranscribeResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? TRANSCRIBE_TIMEOUT_MS);
   try {
     const response = await params.fetcher(params.endpoint, {
       method: 'POST',
@@ -24,6 +31,7 @@ export async function transcribeAudio(params: TranscribeParams): Promise<Transcr
         'content-type': params.blob.type !== '' ? params.blob.type : 'application/octet-stream',
       },
       body: params.blob,
+      signal: controller.signal,
     });
     if (!response.ok) return { ok: false, message: FAILURE_MESSAGE };
     const body: unknown = await response.json();
@@ -38,5 +46,7 @@ export async function transcribeAudio(params: TranscribeParams): Promise<Transcr
     return { ok: false, message: FAILURE_MESSAGE };
   } catch {
     return { ok: false, message: FAILURE_MESSAGE };
+  } finally {
+    clearTimeout(timer);
   }
 }

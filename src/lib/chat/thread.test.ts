@@ -533,7 +533,7 @@ describe('list transitions', () => {
     ).toEqual(['failed', 'sent']);
   });
 
-  it('pendingMessage orders after the newest loaded message and never reads a clock', () => {
+  it('pendingMessage orders after the newest loaded message and shows its Send-tap time', () => {
     const last = mine({ id: 'z', time: 1000 });
     const pending = pendingMessage({
       id: 'p',
@@ -541,8 +541,16 @@ describe('list transitions', () => {
       text: 'draft',
       local: { attachments: [], sharedPostIds: [], reply: null },
       after: [last],
+      sentMs: 500,
     });
-    expect(pending).toMatchObject({ id: 'p', time: 1001, state: 'sending', provisionalTime: true });
+    // A device clock behind the newest row: ordered just after it, labelled at the tap.
+    expect(pending).toMatchObject({
+      id: 'p',
+      time: 1001,
+      localSentMs: 500,
+      state: 'sending',
+      provisionalTime: true,
+    });
   });
 });
 

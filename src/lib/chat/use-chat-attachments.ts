@@ -16,7 +16,12 @@ import {
   type AttachmentUploader,
   type ChatAttachmentUpload,
 } from '@/lib/chat/attachments';
-import { transcribeAudio, type TranscribeResult } from '@/lib/chat/transcribe';
+import {
+  TRANSCRIBE_TIMEOUT_MS,
+  transcribeAudio,
+  type TranscribeResult,
+} from '@/lib/chat/transcribe';
+import { watchUploadStall, type StallWatch } from '@/lib/chat/send-flow';
 
 export interface ChatAttachments {
   /** Whether the composer can upload (endpoint configured + a workspace selected). */
@@ -27,7 +32,8 @@ export interface ChatAttachments {
   presignCache: PresignCache;
   /**
    * Upload one picked file over XHR, reporting progress (0..1) when asked;
-   * never throws (asset-upload Result contract).
+   * never throws (asset-upload Result contract). An upload with no progress
+   * for UPLOAD_STALL_MS is aborted and fails like a network error.
    */
   uploadFile: AttachmentUploader;
   /** Transcribe a recorded voice note; never throws (Result contract). */
@@ -67,13 +73,28 @@ export function useChatAttachments(): ChatAttachments {
       if (token === null || token === '') {
         return { ok: false, message: 'Your session expired. Sign in again.' };
       }
-      return uploadChatAttachment({
-        file,
-        workspaceId,
-        token,
-        endpoint: uploadEndpoint,
-        xhr: { traceId: newTrace(), ...(onProgress !== undefined ? { onProgress } : {}) },
-      });
+      // The stall watch rides on the request the shared XHR transport opens;
+      // it is stopped however the upload settles.
+      const stall: { watch: StallWatch | null } = { watch: null };
+      try {
+        return await uploadChatAttachment({
+          file,
+          workspaceId,
+          token,
+          endpoint: uploadEndpoint,
+          xhr: {
+            traceId: newTrace(),
+            ...(onProgress !== undefined ? { onProgress } : {}),
+            createRequest: () => {
+              const request = new XMLHttpRequest();
+              stall.watch = watchUploadStall(request);
+              return request;
+            },
+          },
+        });
+      } finally {
+        stall.watch?.stop();
+      }
     },
     [uploadEndpoint, workspaceId, newTrace],
   );
@@ -92,6 +113,7 @@ export function useChatAttachments(): ChatAttachments {
         endpoint: transcribeEndpoint,
         token,
         fetcher: (input, init) => fetchWithTrace(input, init, newTrace()),
+        timeoutMs: TRANSCRIBE_TIMEOUT_MS,
       });
     },
     [transcribeEndpoint, newTrace],
