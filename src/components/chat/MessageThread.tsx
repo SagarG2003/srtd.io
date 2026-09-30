@@ -140,6 +140,7 @@ import {
 import { useOpenPosts, type UseOpenPosts } from '@/lib/chat/use-open-posts';
 import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { ContactSheet } from '@/components/chat/ContactSheet';
+import type { GroupInfoTabsWiring } from '@/components/chat/GroupInfoSheet';
 import { SelectionBar, SelectionHeader } from '@/components/chat/SelectionBar';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { withDaySeparators } from '@/components/chat/day-separators';
@@ -247,6 +248,11 @@ interface MessageThreadProps {
   onBack?: () => void;
   /** Present for group channels only; opens the group management panel. */
   onOpenInfo?: () => void;
+  /**
+   * Group channels only: renders the group info page with the chat info tabs
+   * wiring this thread holds (the same values the DM Contact page receives).
+   */
+  renderGroupInfo?: (tabs: GroupInfoTabsWiring) => ReactNode;
   /** True for group channels; drives per-run avatars and sender names. Absent = DM. */
   isGroup?: boolean;
   /** Sorted user ids currently typing (peers only); drives the indicator row. */
@@ -3550,6 +3556,21 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     },
     [messagesById, markedMessages, profiles, workspaceId],
   );
+  // The Marks tab of the chat info pages (DM Contact, group info); null without marks wiring.
+  const infoMarks =
+    props.marks !== undefined &&
+    props.onResolveMark !== undefined &&
+    props.onReopenMark !== undefined
+      ? {
+          marks,
+          messageFor,
+          profiles: props.profiles,
+          currentUserId: props.currentUserId ?? '',
+          timeZone: props.timeZone,
+          onResolve: props.onResolveMark,
+          onReopen: props.onReopenMark,
+        }
+      : null;
 
   // The About post resolved to nothing (RLS, failed read): drop it and say so.
   const aboutPost = aboutDraft !== null ? postRef(aboutDraft.postId) : undefined;
@@ -3897,24 +3918,22 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           timeZone={props.timeZone}
           cache={presignCache}
           presignEnabled={presignEnabled}
-          marks={
-            props.marks !== undefined &&
-            props.onResolveMark !== undefined &&
-            props.onReopenMark !== undefined
-              ? {
-                  marks,
-                  messageFor,
-                  profiles: props.profiles,
-                  currentUserId: props.currentUserId ?? '',
-                  timeZone: props.timeZone,
-                  onResolve: props.onResolveMark,
-                  onReopen: props.onReopenMark,
-                }
-              : null
-          }
+          marks={infoMarks}
           onJump={jumpToAll}
         />
       ) : null}
+      {props.isGroup === true && props.channelId !== undefined
+        ? props.renderGroupInfo?.({
+            channelId: props.channelId,
+            profiles: props.profiles,
+            currentUserId: props.currentUserId ?? '',
+            timeZone: props.timeZone,
+            cache: presignCache,
+            presignEnabled,
+            marks: infoMarks,
+            onJump: jumpToAll,
+          })
+        : null}
       {onForward !== undefined && forwardChannels !== undefined ? (
         <ForwardPicker
           open={forwardFor !== null && forwardFor.length > 0}

@@ -1,20 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChangeEvent, ReactElement, ReactNode } from 'react';
-import { Sheet } from '@/components/ui/Sheet';
+// Group info, full screen over the app like the DM Contact page: the group
+// photo (camera badge opens the shared photo sheet), name and subtitle, the
+// shared chat info tabs in preview mode, then NAME, MEMBERS and Leave group.
+// The page opens and closes without motion; colours are tokens only, so light
+// and dark match.
+
+import { useCallback, useEffect, useState } from 'react';
+import type { ReactElement, ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { IconButton } from '@/components/ui/IconButton';
 import { Avatar } from '@/components/ui/Avatar';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
-import {
-  IconCamera,
-  IconImage,
-  IconPlus,
-  IconSignOut,
-  IconTrash,
-  IconX,
-} from '@/components/ui/icons';
-import { cn } from '@/lib/cn';
+import { PhotoOptionsSheet, type PhotoOptionsSheetProps } from '@/components/ui/PhotoOptionsSheet';
+import { IconCamera, IconChevronLeft, IconPlus, IconSignOut, IconX } from '@/components/ui/icons';
 import { env } from '@/lib/env';
 import { fetchWithTrace } from '@/lib/fetch';
 import { supabase } from '@/lib/supabase';
@@ -29,6 +28,7 @@ import {
   renameGroupChannel,
   setGroupAvatar,
 } from '@/components/chat/chat-actions';
+import { ChatInfoTabs, type ChatInfoTabsProps } from '@/components/chat/ChatInfoTabs';
 import { MemberPicker } from '@/components/chat/MemberPicker';
 import {
   excludeMembers,
@@ -170,6 +170,12 @@ export function MembersRefreshNotice(props: { onRetry: () => void }): ReactEleme
   );
 }
 
+/**
+ * The chat info tabs wiring the thread already holds (the same values the DM
+ * Contact page receives): the group page adds mode, open, frame and Escape.
+ */
+export type GroupInfoTabsWiring = Omit<ChatInfoTabsProps, 'mode' | 'open' | 'frame' | 'onEscape'>;
+
 interface GroupInfoSheetProps {
   open: boolean;
   onClose: () => void;
@@ -189,6 +195,8 @@ interface GroupInfoSheetProps {
   onChanged: () => void;
   /** Called after the current user leaves the group. */
   onLeft: () => void;
+  /** The thread's chat info tabs wiring (profiles, presign cache, marks, jump). */
+  tabs: GroupInfoTabsWiring;
 }
 
 /** "Group · <n> members · <workspace>"; the count only once the member list is in. Pure. */
@@ -200,53 +208,220 @@ export function groupInfoSubtitle(memberCount: number | null, workspaceName?: st
   return parts.join(' · ');
 }
 
+export type GroupInfoSection = 'hero' | 'tabs' | 'name' | 'members' | 'leave';
+
 /**
- * The sections the sheet shows, top to bottom. PHOTO and NAME exist only for a
- * viewer who may edit the group's info (creator or workspace owner/admin); a
- * plain member never sees them (hidden, not greyed). Pure.
+ * The page's sections, top to bottom. NAME exists only for a viewer who may
+ * edit the group's info (creator or workspace owner/admin); Leave only for a
+ * current member. Hidden, never greyed. Pure.
  */
-export function groupInfoSections(canEdit: boolean): ReadonlyArray<'photo' | 'name' | 'members'> {
-  return canEdit ? ['photo', 'name', 'members'] : ['members'];
+export function groupInfoSections(
+  canEdit: boolean,
+  canLeave: boolean,
+): ReadonlyArray<GroupInfoSection> {
+  return [
+    'hero',
+    'tabs',
+    ...(canEdit ? (['name'] as const) : []),
+    'members',
+    ...(canLeave ? (['leave'] as const) : []),
+  ];
 }
 
-/** The photo option rows: which appear, in order. Remove only when a photo is set. Pure. */
-export function groupPhotoOptions(
-  hasPhoto: boolean,
-): ReadonlyArray<'camera' | 'library' | 'remove'> {
-  return hasPhoto ? ['camera', 'library', 'remove'] : ['camera', 'library'];
+/** The page title, and the back button's label. */
+export const GROUP_INFO_HEADING = 'Group info';
+export const GROUP_PHOTO_TITLE = 'Group photo';
+
+/** The shared photo sheet's props: onFile is the upload path, onRemove the remove path. Pure. */
+export function groupPhotoSheetProps(input: {
+  open: boolean;
+  onClose: () => void;
+  hasPhoto: boolean;
+  upload: (file: File) => void;
+  remove: () => void;
+}): PhotoOptionsSheetProps {
+  return {
+    open: input.open,
+    onClose: input.onClose,
+    title: GROUP_PHOTO_TITLE,
+    hasPhoto: input.hasPhoto,
+    onFile: input.upload,
+    onRemove: input.remove,
+  };
 }
 
-/** A 48px sheet row: a real button, icon then label; `danger` uses the destructive token. */
+/**
+ * The preview tabs, keyed by channel, wired like the DM page: a jump closes
+ * the page first; Escape closes it unless the lightbox (or `escape` null,
+ * another overlay) owns the key.
+ */
+export function groupInfoTabs(input: {
+  tabs: GroupInfoTabsWiring;
+  open: boolean;
+  onClose: () => void;
+  escape: (() => void) | null;
+  frame: (tabs: ReactElement) => ReactElement;
+}): ReactElement {
+  const { tabs, onClose } = input;
+  return (
+    <ChatInfoTabs
+      key={tabs.channelId}
+      {...tabs}
+      mode="preview"
+      open={input.open}
+      onJump={(messageId) => {
+        onClose();
+        tabs.onJump(messageId);
+      }}
+      {...(input.escape !== null ? { onEscape: input.escape } : {})}
+      frame={input.frame}
+    />
+  );
+}
+
+/** A 48px row: a real button, icon then label. */
 function SheetRow(props: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
-  disabled?: boolean;
-  danger?: boolean;
   data?: string;
 }): ReactElement {
   return (
     <button
       type="button"
       data-row={props.data}
-      disabled={props.disabled}
       onClick={props.onClick}
-      className={cn(
-        'flex h-12 w-full select-none items-center gap-3 rounded-lg px-3 text-left text-sm font-medium [-webkit-touch-callout:none]',
-        'hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50',
-        props.danger === true ? 'text-bad' : 'text-fg',
-      )}
+      className="flex h-12 w-full select-none items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-fg [-webkit-touch-callout:none] hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
     >
-      <span
-        className={cn(
-          'flex w-5 shrink-0 justify-center',
-          props.danger === true ? 'text-bad' : 'text-fg-2',
-        )}
-      >
-        {props.icon}
-      </span>
+      <span className="flex w-5 shrink-0 justify-center text-fg-2">{props.icon}</span>
       {props.label}
     </button>
+  );
+}
+
+/** Leave group: a 56px full-width outlined row, destructive text, no filled red. */
+export function LeaveGroupRow(props: { disabled: boolean; onClick: () => void }): ReactElement {
+  return (
+    <button
+      type="button"
+      data-row="leave-group"
+      disabled={props.disabled}
+      onClick={props.onClick}
+      className="flex min-h-[56px] w-full select-none items-center gap-3 rounded-lg border border-border px-4 text-left text-sm font-medium text-bad [-webkit-touch-callout:none] hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+    >
+      <span className="flex w-5 shrink-0 justify-center text-bad">
+        <IconSignOut size={18} />
+      </span>
+      Leave group
+    </button>
+  );
+}
+
+/**
+ * The 112px group photo, name and subtitle. An editor gets the camera badge
+ * (its ring is the page background it sits on); a plain member gets none. The
+ * photo paints from the list read's URL on the first frame. Hook-free.
+ */
+export function GroupHero(props: {
+  name: string;
+  photoUrl: string | null;
+  subtitle: string;
+  canEdit: boolean;
+  busy: boolean;
+  onPhoto: () => void;
+}): ReactElement {
+  const photo = (
+    <Avatar
+      key={props.photoUrl ?? 'none'}
+      name={props.name}
+      size="hero"
+      shape="rounded"
+      {...(props.photoUrl !== null ? { src: props.photoUrl } : {})}
+    />
+  );
+  return (
+    <div className="flex flex-col items-center gap-1 text-center">
+      {props.canEdit ? (
+        <button
+          type="button"
+          data-group-photo=""
+          aria-label="Change group photo"
+          disabled={props.busy}
+          onClick={props.onPhoto}
+          className="relative h-[112px] w-[112px] select-none rounded-[24px] [-webkit-touch-callout:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          {photo}
+          <span
+            data-camera-badge=""
+            aria-hidden="true"
+            className="absolute -bottom-1 -right-1 flex h-10 w-10 items-center justify-center rounded-full bg-accent text-accent-fg ring-4 ring-bg"
+          >
+            <IconCamera size={20} />
+          </span>
+        </button>
+      ) : (
+        photo
+      )}
+      <span className="mt-2 max-w-full truncate text-lg font-semibold text-fg">{props.name}</span>
+      <span data-group-subtitle="" className="max-w-full truncate text-sm text-fg-2">
+        {props.subtitle}
+      </span>
+      {props.busy ? (
+        <span role="status" className="text-xs text-fg-3">
+          Saving
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The page chrome: back bar, then the scrolling body with the sections in
+ * `groupInfoSections` order, bottom padding clear of the home indicator.
+ * Hook-free; `nodes` holds each section's content.
+ */
+export function groupInfoPage(props: {
+  onClose: () => void;
+  error: string | null;
+  sections: ReadonlyArray<GroupInfoSection>;
+  nodes: Readonly<Record<GroupInfoSection, ReactNode>>;
+}): ReactElement {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={GROUP_INFO_HEADING}
+      data-group-page=""
+      className="fixed inset-0 z-50 flex flex-col bg-bg"
+    >
+      <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel px-2 md:px-4">
+        <IconButton label="Close group info" onClick={props.onClose}>
+          <IconChevronLeft size={20} />
+        </IconButton>
+        <h2 className="truncate text-[15px] font-semibold text-fg">{GROUP_INFO_HEADING}</h2>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-2xl flex-col gap-5 px-4 pb-[calc(1.5rem+env(safe-area-inset-bottom))] pt-6">
+          {props.error !== null ? (
+            <div
+              role="alert"
+              className="rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
+            >
+              {props.error}
+            </div>
+          ) : null}
+          {props.sections.map((section) => (
+            <section
+              key={section}
+              data-section={section}
+              {...(section === 'tabs' ? { className: 'flex flex-col gap-4' } : {})}
+            >
+              {props.nodes[section]}
+            </section>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -283,20 +458,15 @@ export function membersAfterRefresh(
 
 /**
  * Group info, reached by tapping the group thread header (same gesture as the
- * DM Contact sheet). Top to bottom: the 112px group photo with its camera badge,
- * the name and "Group · n members · workspace" line, then PHOTO (take, choose,
- * remove), NAME (rename on blur / Done) and MEMBERS (list, add, remove, leave).
- * PHOTO and NAME are hidden unless the viewer is the group's creator or a
- * workspace owner/admin, derived from data the chat already loaded; the procs
- * (group_avatar_set, group_rename) enforce the same rule server-side. Member
- * management stays gated on the viewer being a current group member. Domain
- * failures surface inline and never throw.
+ * DM Contact page). The camera badge and NAME are hidden unless the viewer is
+ * the group's creator or a workspace owner/admin, derived from data the chat
+ * already loaded; the procs (group_avatar_set, group_rename) enforce the same
+ * rule server-side. Member management stays gated on the viewer being a
+ * current group member. Domain failures surface inline and never throw.
  */
 export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
   const newTrace = useNewTrace();
   const workspaceMembers = useWorkspaceMembers(props.workspaceId);
-  const cameraInputRef = useRef<HTMLInputElement>(null);
-  const libraryInputRef = useRef<HTMLInputElement>(null);
 
   const [members, setMembers] = useState<MembersState>({
     options: [],
@@ -304,7 +474,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     error: null,
   });
   const [name, setName] = useState(props.groupName);
-  // The photo shown: the list read's URL, then whatever this sheet last set.
+  // The photo shown: the list read's URL, then whatever this page last set.
   const [photoUrl, setPhotoUrl] = useState<string | null>(props.avatarUrl);
   const [photoOptionsOpen, setPhotoOptionsOpen] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -352,12 +522,14 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     creatorId: props.createdBy,
     role: props.viewerRole,
   });
-  const sections = groupInfoSections(canEditInfo);
   const memberIds = members.options.map((m) => m.userId);
   const canManage = memberIds.includes(props.currentUserId);
+  const sections = groupInfoSections(canEditInfo, canManage);
   const addOptions = excludeMembers(workspaceMembers.options, memberIds);
   const nameChanged = name.trim().length > 0 && name.trim() !== props.groupName;
   const memberCount = members.loading || members.error !== null ? null : members.options.length;
+  // Another overlay (photo sheet, confirm) owns Escape while it is up.
+  const overlayOpen = photoOptionsOpen || leaving || removeTarget !== null;
 
   async function refreshMembers(): Promise<void> {
     const next = await loadMembers();
@@ -494,254 +666,147 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     if (failure !== null) setError(groupActionMessage(failure));
   }
 
-  function onFilePicked(event: ChangeEvent<HTMLInputElement>): void {
-    const file = event.target.files?.[0];
-    // Reset so picking the same file again still fires a change event.
-    event.target.value = '';
-    if (file !== undefined) void uploadPhoto(file);
-  }
-
-  function runPhotoOption(option: 'camera' | 'library' | 'remove'): void {
-    setPhotoOptionsOpen(false);
-    if (option === 'camera') cameraInputRef.current?.click();
-    else if (option === 'library') libraryInputRef.current?.click();
-    else void removePhoto();
-  }
-
-  function photoRows(): ReactElement {
-    return (
-      <div className="flex flex-col">
-        {groupPhotoOptions(photoUrl !== null).map((option) =>
-          option === 'camera' ? (
-            <SheetRow
-              key={option}
-              data="photo-camera"
-              icon={<IconCamera size={20} />}
-              label="Take photo"
-              disabled={busy}
-              onClick={() => runPhotoOption(option)}
-            />
-          ) : option === 'library' ? (
-            <SheetRow
-              key={option}
-              data="photo-library"
-              icon={<IconImage size={20} />}
-              label="Choose from library"
-              disabled={busy}
-              onClick={() => runPhotoOption(option)}
-            />
-          ) : (
-            <SheetRow
-              key={option}
-              data="photo-remove"
-              icon={<IconTrash size={20} />}
-              label="Remove photo"
-              danger
-              disabled={busy}
-              onClick={() => runPhotoOption(option)}
-            />
-          ),
+  const nodes: Record<GroupInfoSection, ReactNode> = {
+    hero: (
+      <GroupHero
+        name={props.groupName}
+        photoUrl={photoUrl}
+        subtitle={groupInfoSubtitle(memberCount, props.workspaceName)}
+        canEdit={canEditInfo}
+        busy={busy}
+        onPhoto={() => setPhotoOptionsOpen(true)}
+      />
+    ),
+    tabs: null,
+    name: (
+      <>
+        <SectionLabel>Name</SectionLabel>
+        <Input
+          id="group-rename"
+          value={name}
+          enterKeyHint="done"
+          onChange={(event) => setName(event.target.value)}
+          onBlur={() => void submitRename()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              event.currentTarget.blur();
+            }
+          }}
+          aria-label="Group name"
+        />
+      </>
+    ),
+    members: (
+      <>
+        <SectionLabel>Members</SectionLabel>
+        {members.loading ? (
+          <p className="px-1 py-2 text-sm text-fg-3">Loading members</p>
+        ) : members.error !== null ? (
+          <div
+            role="alert"
+            className="rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
+          >
+            {members.error}
+          </div>
+        ) : (
+          <ul className="flex flex-col">
+            {members.options.map((member) => (
+              <li key={member.userId} className="flex items-center gap-3 px-1 min-h-[44px]">
+                <Avatar
+                  name={member.displayName}
+                  {...(member.avatarUrl !== null ? { src: member.avatarUrl } : {})}
+                  size="md"
+                />
+                <span className="min-w-0 flex-1 truncate text-sm text-fg">
+                  {member.displayName}
+                  {member.userId === props.currentUserId ? (
+                    <span className="ml-1 text-fg-3">(you)</span>
+                  ) : null}
+                </span>
+                {canManage && member.userId !== props.currentUserId ? (
+                  <IconButton
+                    label={`Remove ${member.displayName}`}
+                    disabled={busy}
+                    onClick={() => setRemoveTarget(member)}
+                  >
+                    <IconX size={18} />
+                  </IconButton>
+                ) : null}
+              </li>
+            ))}
+          </ul>
         )}
-      </div>
-    );
-  }
-
-  const photo = (
-    <Avatar
-      key={photoUrl ?? 'none'}
-      name={props.groupName}
-      size="hero"
-      shape="rounded"
-      {...(photoUrl !== null ? { src: photoUrl } : {})}
-    />
-  );
+        {refreshFailed && !members.loading && members.error === null ? (
+          <MembersRefreshNotice onRetry={() => void refreshMembers()} />
+        ) : null}
+        {canManage ? (
+          <SheetRow
+            data="member-add"
+            icon={<IconPlus size={20} />}
+            label="Add member"
+            onClick={() => setAdding((prev) => !prev)}
+          />
+        ) : null}
+        {canManage && adding ? (
+          <div className="mt-1">
+            <MemberPicker
+              options={addOptions}
+              selectedIds={addId !== null ? [addId] : []}
+              onToggle={(id) => setAddId((prev) => (prev === id ? null : id))}
+              loading={workspaceMembers.loading}
+              error={
+                workspaceMembers.error !== null
+                  ? groupActionMessage({ code: '', message: workspaceMembers.error })
+                  : null
+              }
+              emptyLabel="Everyone in this workspace is already a member."
+            />
+            <Button
+              size="lg"
+              variant="primary"
+              className="mt-2"
+              disabled={addId === null || busy}
+              onClick={() => void submitAdd()}
+            >
+              {busy ? 'Adding' : 'Add to group'}
+            </Button>
+          </div>
+        ) : null}
+      </>
+    ),
+    leave: <LeaveGroupRow disabled={busy} onClick={() => setLeaving(true)} />,
+  };
 
   return (
     <>
-      <Sheet open={props.open} onClose={props.onClose} title="Group info">
-        {error !== null ? (
-          <div
-            role="alert"
-            className="mb-3 rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
-          >
-            {error}
-          </div>
-        ) : null}
-
-        <div className="flex flex-col gap-5">
-          <div className="flex flex-col items-center gap-1 text-center">
-            {canEditInfo ? (
-              <button
-                type="button"
-                data-group-photo=""
-                aria-label="Change group photo"
-                disabled={busy}
-                onClick={() => setPhotoOptionsOpen(true)}
-                className="relative h-[112px] w-[112px] select-none rounded-[24px] [-webkit-touch-callout:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              >
-                {photo}
-                <span
-                  data-camera-badge=""
-                  aria-hidden="true"
-                  className="absolute -bottom-1 -right-1 flex h-10 w-10 items-center justify-center rounded-full bg-accent text-accent-fg ring-4 ring-panel"
-                >
-                  <IconCamera size={20} />
-                </span>
-              </button>
-            ) : (
-              photo
-            )}
-            <span className="mt-2 max-w-full truncate text-lg font-semibold text-fg">
-              {props.groupName}
-            </span>
-            <span data-group-subtitle="" className="max-w-full truncate text-sm text-fg-2">
-              {groupInfoSubtitle(memberCount, props.workspaceName)}
-            </span>
-            {busy ? (
-              <span role="status" className="text-xs text-fg-3">
-                Saving
-              </span>
-            ) : null}
-          </div>
-
-          {sections.includes('photo') ? (
-            <section data-section="photo">
-              <SectionLabel>Photo</SectionLabel>
-              {photoRows()}
-              <input
-                ref={cameraInputRef}
-                type="file"
-                accept="image/*"
-                capture="environment"
-                className="hidden"
-                onChange={onFilePicked}
-              />
-              <input
-                ref={libraryInputRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={onFilePicked}
-              />
-            </section>
-          ) : null}
-
-          {sections.includes('name') ? (
-            <section data-section="name">
-              <SectionLabel>Name</SectionLabel>
-              <Input
-                id="group-rename"
-                value={name}
-                enterKeyHint="done"
-                onChange={(event) => setName(event.target.value)}
-                onBlur={() => void submitRename()}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    event.currentTarget.blur();
-                  }
-                }}
-                aria-label="Group name"
-              />
-            </section>
-          ) : null}
-
-          <section data-section="members">
-            <SectionLabel>Members</SectionLabel>
-            {members.loading ? (
-              <p className="px-1 py-2 text-sm text-fg-3">Loading members</p>
-            ) : members.error !== null ? (
-              <div
-                role="alert"
-                className="rounded-xl border border-bad bg-bad-soft px-4 py-3 text-sm text-bad"
-              >
-                {members.error}
-              </div>
-            ) : (
-              <ul className="flex flex-col">
-                {members.options.map((member) => (
-                  <li key={member.userId} className="flex items-center gap-3 px-1 min-h-[44px]">
-                    <Avatar
-                      name={member.displayName}
-                      {...(member.avatarUrl !== null ? { src: member.avatarUrl } : {})}
-                      size="md"
-                    />
-                    <span className="min-w-0 flex-1 truncate text-sm text-fg">
-                      {member.displayName}
-                      {member.userId === props.currentUserId ? (
-                        <span className="ml-1 text-fg-3">(you)</span>
-                      ) : null}
-                    </span>
-                    {canManage && member.userId !== props.currentUserId ? (
-                      <IconButton
-                        label={`Remove ${member.displayName}`}
-                        disabled={busy}
-                        onClick={() => setRemoveTarget(member)}
-                      >
-                        <IconX size={18} />
-                      </IconButton>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {refreshFailed && !members.loading && members.error === null ? (
-              <MembersRefreshNotice onRetry={() => void refreshMembers()} />
-            ) : null}
-            {canManage ? (
-              <SheetRow
-                data="member-add"
-                icon={<IconPlus size={20} />}
-                label="Add member"
-                onClick={() => setAdding((prev) => !prev)}
-              />
-            ) : null}
-            {canManage && adding ? (
-              <div className="mt-1">
-                <MemberPicker
-                  options={addOptions}
-                  selectedIds={addId !== null ? [addId] : []}
-                  onToggle={(id) => setAddId((prev) => (prev === id ? null : id))}
-                  loading={workspaceMembers.loading}
-                  error={
-                    workspaceMembers.error !== null
-                      ? groupActionMessage({ code: '', message: workspaceMembers.error })
-                      : null
-                  }
-                  emptyLabel="Everyone in this workspace is already a member."
-                />
-                <Button
-                  size="lg"
-                  variant="primary"
-                  className="mt-2"
-                  disabled={addId === null || busy}
-                  onClick={() => void submitAdd()}
-                >
-                  {busy ? 'Adding' : 'Add to group'}
-                </Button>
-              </div>
-            ) : null}
-          </section>
-
-          {canManage ? (
-            <section>
-              <Button size="lg" variant="danger" disabled={busy} onClick={() => setLeaving(true)}>
-                <IconSignOut size={18} />
-                Leave group
-              </Button>
-            </section>
-          ) : null}
-        </div>
-      </Sheet>
+      {createPortal(
+        groupInfoTabs({
+          tabs: props.tabs,
+          open: props.open,
+          onClose: props.onClose,
+          escape: overlayOpen ? null : props.onClose,
+          frame: (tabs) =>
+            groupInfoPage({
+              onClose: props.onClose,
+              error,
+              sections,
+              nodes: { ...nodes, tabs },
+            }),
+        }),
+        document.body,
+      )}
 
       {canEditInfo ? (
-        <Sheet
-          open={photoOptionsOpen}
-          onClose={() => setPhotoOptionsOpen(false)}
-          title="Group photo"
-        >
-          {photoRows()}
-        </Sheet>
+        <PhotoOptionsSheet
+          {...groupPhotoSheetProps({
+            open: photoOptionsOpen,
+            onClose: () => setPhotoOptionsOpen(false),
+            hasPhoto: photoUrl !== null,
+            upload: (file) => void uploadPhoto(file),
+            remove: () => void removePhoto(),
+          })}
+        />
       ) : null}
 
       {removeTarget !== null ? (

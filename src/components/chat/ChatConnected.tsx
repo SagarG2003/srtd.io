@@ -31,7 +31,7 @@ import { IconChat } from '@/components/ui/icons';
 import { ChannelList } from '@/components/chat/ChannelList';
 import { MessageThread } from '@/components/chat/MessageThread';
 import { NewChatSheet } from '@/components/chat/NewChatSheet';
-import { GroupInfoSheet } from '@/components/chat/GroupInfoSheet';
+import { GroupInfoSheet, type GroupInfoTabsWiring } from '@/components/chat/GroupInfoSheet';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import { startDmChannel } from '@/components/chat/chat-actions';
 import { mentionGone, useChannelMembersState } from '@/components/chat/use-channel-members';
@@ -817,6 +817,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const showThread = isDesktop || selected !== null;
 
   const isGroup = selected?.channelType === 'group';
+  const infoGroupId = isGroup ? (selected?.groupId ?? null) : null;
 
   return (
     <div className="flex h-full min-h-0">
@@ -884,6 +885,29 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               {...(selected.peerUserId != null ? { presence } : {})}
               {...(isDesktop ? {} : { onBack })}
               {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
+              {...(infoGroupId !== null
+                ? {
+                    renderGroupInfo: (tabs: GroupInfoTabsWiring) => (
+                      <GroupInfoSheet
+                        open={groupInfoOpen}
+                        onClose={() => setGroupInfoOpen(false)}
+                        workspaceId={workspaceId}
+                        workspaceName={workspace?.name}
+                        groupId={infoGroupId}
+                        groupName={selected.title}
+                        avatarUrl={selected.avatarUrl}
+                        createdBy={selected.createdBy ?? null}
+                        viewerRole={
+                          mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null
+                        }
+                        currentUserId={currentUserId}
+                        onChanged={onGroupChanged}
+                        onLeft={onGroupLeft}
+                        tabs={tabs}
+                      />
+                    ),
+                  }
+                : {})}
             />
           ) : (
             <div className="flex h-full flex-col justify-center bg-bg">
@@ -901,23 +925,6 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
         onDmReady={onDmReady}
         onGroupCreated={onGroupCreated}
       />
-
-      {isGroup && selected?.groupId != null ? (
-        <GroupInfoSheet
-          open={groupInfoOpen}
-          onClose={() => setGroupInfoOpen(false)}
-          workspaceId={workspaceId}
-          workspaceName={workspace?.name}
-          groupId={selected.groupId}
-          groupName={selected.title}
-          avatarUrl={selected.avatarUrl}
-          createdBy={selected.createdBy ?? null}
-          viewerRole={mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null}
-          currentUserId={currentUserId}
-          onChanged={onGroupChanged}
-          onLeft={onGroupLeft}
-        />
-      ) : null}
     </div>
   );
 }

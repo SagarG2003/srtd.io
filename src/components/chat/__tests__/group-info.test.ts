@@ -1,8 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 vi.mock('@/lib/supabase', () => ({ supabase: {} }));
 
+import { ChatInfoTabs } from '@/components/chat/ChatInfoTabs';
 import {
   canEditFromReads,
   canEditGroupInfo,
@@ -10,13 +13,21 @@ import {
   GROUP_INFO_ADMIN_ONLY,
   GroupInfoNotice,
   groupActionMessage,
+  groupInfoPage,
+  groupInfoSections,
+  groupInfoTabs,
+  groupPhotoSheetProps,
+  LeaveGroupRow,
   MEMBERS_REFRESH_FAILED,
   MembersRefreshNotice,
   membersAfterRefresh,
   requestRename,
   withGroupBusy,
+  type GroupInfoSection,
+  type GroupInfoTabsWiring,
   type MembersState,
 } from '@/components/chat/GroupInfoSheet';
+import { PresignCache } from '@/lib/asset-presign';
 
 describe('group info permission (mirrors group_rename)', () => {
   const me = 'user-1';
@@ -184,5 +195,139 @@ describe('G4: a failed member refresh after an add or remove', () => {
     expect(String(el.props.className)).toContain('min-h-[44px]');
     (el.props.onClick as () => void)();
     expect(onRetry).toHaveBeenCalledOnce();
+  });
+});
+
+describe('group info full page', () => {
+  const nodes: Record<GroupInfoSection, string> = {
+    hero: 'HERO',
+    tabs: 'TABS',
+    name: 'NAME',
+    members: 'MEMBERS',
+    leave: 'LEAVE',
+  };
+  const page = (canEdit: boolean): string =>
+    renderToStaticMarkup(
+      groupInfoPage({
+        onClose: vi.fn(),
+        error: null,
+        sections: groupInfoSections(canEdit, true),
+        nodes,
+      }),
+    );
+  const order = (html: string): string[] =>
+    [...html.matchAll(/data-section="([a-z]+)"/g)].map((match) => match[1] ?? '');
+
+  it('admin: hero, tabs, name, members, leave; plain member: no name', () => {
+    expect(order(page(true))).toEqual(['hero', 'tabs', 'name', 'members', 'leave']);
+    expect(order(page(false))).toEqual(['hero', 'tabs', 'members', 'leave']);
+    expect(groupInfoSections(true, false)).toEqual(['hero', 'tabs', 'name', 'members']);
+  });
+
+  it('is a full-screen page with a back button and safe-area bottom padding, no vh', () => {
+    const html = page(true);
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('fixed inset-0 z-50');
+    expect(html).toContain('bg-bg');
+    expect(html).toContain('aria-label="Close group info"');
+    expect(html).toContain('>Group info</h2>');
+    expect(html).toContain('env(safe-area-inset-bottom)');
+    expect(html).not.toMatch(/\d+vh|h-screen/);
+  });
+
+  it('has no inline PHOTO section, no second photo Sheet and no hidden file inputs', () => {
+    const html = page(true);
+    expect(html).not.toContain('data-section="photo"');
+    expect(html).not.toContain('Take photo');
+    const source = readFileSync(
+      fileURLToPath(new URL('../GroupInfoSheet.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(source).not.toContain("from '@/components/ui/Sheet'");
+    expect(source).not.toContain('type="file"');
+    expect(source).toContain('<PhotoOptionsSheet');
+  });
+
+  it('the photo sheet is titled "Group photo"; onFile uploads, onRemove removes', () => {
+    const upload = vi.fn();
+    const remove = vi.fn();
+    const onClose = vi.fn();
+    for (const hasPhoto of [true, false]) {
+      const sheet = groupPhotoSheetProps({ open: true, onClose, hasPhoto, upload, remove });
+      expect(sheet.title).toBe('Group photo');
+      expect(sheet.hasPhoto).toBe(hasPhoto);
+    }
+    const sheet = groupPhotoSheetProps({ open: true, onClose, hasPhoto: true, upload, remove });
+    const file = new File(['x'], 'g.png', { type: 'image/png' });
+    sheet.onFile(file);
+    expect(upload).toHaveBeenCalledWith(file);
+    sheet.onRemove();
+    expect(remove).toHaveBeenCalledOnce();
+  });
+
+  const wiring = (onJump: (id: string) => void): GroupInfoTabsWiring => ({
+    channelId: 'ch-1',
+    profiles: new Map(),
+    currentUserId: 'me',
+    timeZone: 'UTC',
+    cache: new PresignCache({
+      endpoint: null,
+      getAccessToken: () => Promise.resolve(null),
+      fetcher: () => Promise.reject(new Error('unused')),
+    }),
+    presignEnabled: false,
+    marks: null,
+    onJump,
+  });
+
+  it('mounts ChatInfoTabs in preview mode keyed by channel; a jump closes first', () => {
+    const calls: string[] = [];
+    const onClose = () => calls.push('close');
+    const el = groupInfoTabs({
+      tabs: wiring((id) => calls.push(`jump:${id}`)),
+      open: true,
+      onClose,
+      escape: onClose,
+      frame: (tabs) => tabs,
+    });
+    expect(el.type).toBe(ChatInfoTabs);
+    expect(el.key).toBe('ch-1');
+    const tabProps = el.props as {
+      mode: string;
+      open: boolean;
+      onJump: (id: string) => void;
+      onEscape?: () => void;
+    };
+    expect(tabProps.mode).toBe('preview');
+    expect(tabProps.open).toBe(true);
+    expect(tabProps.onEscape).toBe(onClose);
+    tabProps.onJump('m9');
+    expect(calls).toEqual(['close', 'jump:m9']);
+  });
+
+  it('Escape is left to another overlay while one is up', () => {
+    const el = groupInfoTabs({
+      tabs: wiring(vi.fn()),
+      open: true,
+      onClose: vi.fn(),
+      escape: null,
+      frame: (tabs) => tabs,
+    });
+    expect('onEscape' in (el.props as object)).toBe(false);
+  });
+
+  it('Leave group is a 56px outlined row with destructive text, no filled red', () => {
+    const row = LeaveGroupRow({ disabled: false, onClick: vi.fn() });
+    const className = String(row.props.className);
+    expect(className).toContain('min-h-[56px]');
+    expect(className).toContain('w-full');
+    expect(className).toContain('text-bad');
+    expect(className).toContain('border-border');
+    expect(className).not.toContain('bg-bad');
+    expect({
+      admin: groupInfoSections(true, true),
+      member: groupInfoSections(false, true),
+      leaveRow: className,
+    }).toMatchSnapshot();
   });
 });

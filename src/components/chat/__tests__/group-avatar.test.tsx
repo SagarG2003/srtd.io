@@ -10,11 +10,7 @@ vi.mock('@/lib/supabase', () => ({ supabase: {} }));
 import type { Database } from '@srtdio/schemas';
 import { shapeChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
 import { channelRowBody, GROUP_TILE_PHOTO, PERSON_TILE_PHOTO } from '@/components/chat/ChannelList';
-import {
-  groupInfoSections,
-  groupInfoSubtitle,
-  groupPhotoOptions,
-} from '@/components/chat/GroupInfoSheet';
+import { GroupHero, groupInfoSections, groupInfoSubtitle } from '@/components/chat/GroupInfoSheet';
 import { centerSquare, GROUP_AVATAR_EXPORT_PX } from '@/lib/chat/group-avatar';
 
 type ChannelRow = Database['public']['Tables']['chat_channels']['Row'];
@@ -110,15 +106,34 @@ describe('chat home tile avatar resolution (one batched list read, no per-row fe
   });
 });
 
-describe('group info sheet pure helpers', () => {
-  it('hides PHOTO and NAME for a plain member; shows them for an editor', () => {
-    expect(groupInfoSections(false)).toEqual(['members']);
-    expect(groupInfoSections(true)).toEqual(['photo', 'name', 'members']);
+describe('group info page pure helpers', () => {
+  it('hides NAME for a plain member; never has an inline PHOTO section', () => {
+    expect(groupInfoSections(false, true)).toEqual(['hero', 'tabs', 'members', 'leave']);
+    expect(groupInfoSections(true, true)).toEqual(['hero', 'tabs', 'name', 'members', 'leave']);
+    expect(groupInfoSections(true, false)).not.toContain('photo');
   });
 
-  it('offers Remove photo only when a photo is set', () => {
-    expect(groupPhotoOptions(false)).toEqual(['camera', 'library']);
-    expect(groupPhotoOptions(true)).toEqual(['camera', 'library', 'remove']);
+  it('paints the group photo on first render (no initials flash) with the badge for editors', () => {
+    const hero = (canEdit: boolean) =>
+      renderToStaticMarkup(
+        <GroupHero
+          name="Launch"
+          photoUrl={PHOTO}
+          subtitle="Group"
+          canEdit={canEdit}
+          busy={false}
+          onPhoto={() => undefined}
+        />,
+      );
+    const editor = hero(true);
+    expect(editor).toContain(`src="${PHOTO}"`);
+    expect(editor).toContain('data-camera-badge');
+    // The badge ring matches the page background it sits on.
+    expect(editor).toContain('ring-bg');
+    const member = hero(false);
+    expect(member).toContain(`src="${PHOTO}"`);
+    expect(member).not.toContain('data-camera-badge');
+    expect(member).not.toContain('Change group photo');
   });
 
   it('reads "Group · n members · workspace"', () => {
