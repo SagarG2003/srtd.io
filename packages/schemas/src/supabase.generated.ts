@@ -229,6 +229,7 @@ export type Database = {
           folder_id: string | null
           folder_path: string
           id: string
+          origin: string
           tags: string[]
           uploaded_at: string
           uploaded_by: string | null
@@ -242,6 +243,7 @@ export type Database = {
           folder_id?: string | null
           folder_path?: string
           id?: string
+          origin?: string
           tags?: string[]
           uploaded_at?: string
           uploaded_by?: string | null
@@ -255,6 +257,7 @@ export type Database = {
           folder_id?: string | null
           folder_path?: string
           id?: string
+          origin?: string
           tags?: string[]
           uploaded_at?: string
           uploaded_by?: string | null
@@ -7796,6 +7799,10 @@ export type Database = {
       brief_create: {
         Args: { p_payload: Json; p_trace_id: string; p_workspace_id: string }
         Returns: string
+      }
+      chat_attachment_readable: {
+        Args: { p_asset_version_id: string; p_user_id: string }
+        Returns: boolean
       }
       chat_channel_clear: {
         Args: { p_channel_id: string; p_trace_id: string }
