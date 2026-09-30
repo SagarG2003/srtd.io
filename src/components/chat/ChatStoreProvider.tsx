@@ -80,6 +80,7 @@ import {
   mapLiveTextMessage,
   parseLiveEvent,
   sendText,
+  serverOffsetFrom,
   targetFromSummary,
   type ChannelTarget,
   type ChatMessageRow,
@@ -413,6 +414,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   const onMessagesDeletedRef = useRef<(messageIds: readonly string[]) => void>(() => {});
   // Which record attempts may sample the server clock (session-wide).
   const clockSamplerRef = useRef<store.ClockSampler>(store.createClockSampler());
+  // Server clock minus device clock from the latest recorded send this
+  // session (0 before the first): pending bubbles are placed and labelled by
+  // device time + this.
+  const serverOffsetRef = useRef(0);
   // The current sender's file store (IndexedDB); null where there is none.
   const filesRef = useRef<OutboxFileAdapter | null>(null);
   // Uploads and transcription for sends restored after a reload (their
@@ -436,6 +441,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       },
       retry: (channelId, id) => senderRef.current?.retry(channelId, id),
       settle: (channelId, id) => senderRef.current?.settle(channelId, id),
+      serverOffsetMs: () => serverOffsetRef.current,
       subscribe: (listener) => {
         const listeners = outboxListenersRef.current;
         listeners.add(listener);
@@ -605,7 +611,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     // With a file store, sends whose files never finished uploading wait for
     // their bytes (clock) instead of reading "Photos not sent".
     const read = store.readPersistedOutbox(storage, scopeKey);
-    const persisted = files !== null ? store.awaitRestoredFiles(read) : read;
+    // Sends persisted without a tap time get one now, once, and keep it.
+    const stamped = store.stampMissingCreatedMs(read, Date.now() + serverOffsetRef.current);
+    if (stamped !== read) store.writePersistedOutbox(storage, scopeKey, stamped);
+    const persisted = files !== null ? store.awaitRestoredFiles(stamped) : stamped;
     const clockSampler = clockSamplerRef.current;
     // Entry ids the outbox holds, to drop their files once they leave it.
     let heldIds = new Set(Object.values(persisted).flatMap((list) => list.map((e) => e.id)));
@@ -630,6 +639,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
                 const sentAt = clockSampler.begin(input.id);
                 return sendMessageRecord({ client: supabase, ...input }).then((result) => {
                   clockSampler.settled(input.id);
+                  if (result.ok) {
+                    const offset = serverOffsetFrom(result.row.created_at, Date.now());
+                    if (offset !== null) serverOffsetRef.current = offset;
+                  }
                   if (result.ok && sentAt !== null) {
                     const createdAt = result.row.created_at;
                     setState((prev) => store.applyServerClock(prev, createdAt, sentAt));
@@ -702,6 +715,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           if (gone.length > 0) void deleteOutboxFiles(files, gone);
         },
         onAttemptFailed: (context) => logger.warn('chat: message record attempt failed', context),
+        // A Retry tap re-stamps its entry with the estimated server time now.
+        now: () => Date.now() + serverOffsetRef.current,
         upload: (file, onProgress) => {
           const upload = uploadRef.current;
           return upload !== null

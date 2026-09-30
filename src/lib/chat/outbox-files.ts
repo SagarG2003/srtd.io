@@ -86,35 +86,60 @@ export async function saveOutboxFiles(
   }
 }
 
+/** Reading a restored entry's files back gives up after this long (filesMissing). */
+export const RESTORE_TIMEOUT_MS = 5_000;
+
 /**
  * A restored entry's attachments with their files read back: each attachment
  * without a version id gets its File (and a preview when `previewFor` makes
- * one). Null when the store is unavailable or any file is missing or
- * unreadable, which is the filesMissing fallback.
+ * one). Null when the store is unavailable, any file is missing or
+ * unreadable, or the read takes longer than `timeoutMs`: the filesMissing
+ * fallback, so a restoring entry never holds its chat's queue for longer.
+ * Previews are made only once every file is back in time.
  */
 export async function restoreOutboxFiles(
   adapter: OutboxFileAdapter | null,
   entry: Pick<OutboxEntry, 'id' | 'local'>,
   previewFor: (file: File) => string | null = () => null,
+  timeoutMs: number = RESTORE_TIMEOUT_MS,
 ): Promise<MessageAttachment[] | null> {
   if (adapter === null) return null;
-  try {
-    const restored: MessageAttachment[] = [];
+  const read = async (): Promise<(StoredOutboxFile | null)[] | null> => {
     const attachments = entry.local.attachments;
+    const stored: (StoredOutboxFile | null)[] = [];
     for (let index = 0; index < attachments.length; index += 1) {
       const attachment = attachments[index];
       if (attachment === undefined) return null;
       if (!needsFile(attachment)) {
-        restored.push(attachment);
+        stored.push(null);
         continue;
       }
-      const stored = await adapter.get(outboxFileKey(entry.id, index));
-      if (stored === undefined || !(stored.blob instanceof Blob)) return null;
-      const file = new File([stored.blob], stored.name, {
-        type: stored.type,
-        lastModified: stored.lastModified,
+      const found = await adapter.get(outboxFileKey(entry.id, index));
+      if (found === undefined || !(found.blob instanceof Blob)) return null;
+      stored.push(found);
+    }
+    return stored;
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+  });
+  let stored: (StoredOutboxFile | null)[] | null;
+  try {
+    stored = await Promise.race([read().catch(() => null), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  if (stored === null) return null;
+  try {
+    return entry.local.attachments.map((attachment, index) => {
+      const found = stored[index] ?? null;
+      if (found === null) return attachment;
+      const file = new File([found.blob], found.name, {
+        type: found.type,
+        lastModified: found.lastModified,
       });
-      restored.push({
+      return {
         ...attachment,
         local: {
           key: `restored-${outboxFileKey(entry.id, index)}`,
@@ -122,9 +147,8 @@ export async function restoreOutboxFiles(
           previewUrl: previewFor(file),
           progress: 0,
         },
-      });
-    }
-    return restored;
+      };
+    });
   } catch {
     return null;
   }

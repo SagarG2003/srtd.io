@@ -1,6 +1,8 @@
-// A pending own bubble's time: the device clock at the Send tap, never another
-// message's time and never epoch; its day pill shows at send; it sorts after
-// every recorded row; the recorded row replaces it in place with the same id.
+// A pending own bubble's time: the estimated server time of the Send tap
+// (device clock + the server offset), never another message's time and never
+// epoch; its day pill shows at send; it is placed among recorded rows by that
+// time, so neither a failed bubble, a Retry nor the record moves it past a
+// neighbour; the recorded row replaces it in place with the same id.
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -10,8 +12,9 @@ vi.mock('agora-chat', () => ({
   default: { connection: vi.fn(), message: { create: vi.fn() } },
 }));
 import {
-  compareMessages,
+  MAX_SERVER_OFFSET_MS,
   rowToThreadMessage,
+  serverOffsetFrom,
   upsertMessage,
   withOutboxBubbles,
   type ChatMessageRow,
@@ -21,6 +24,14 @@ import {
 import { withDaySeparators } from '@/components/chat/day-separators';
 import { bubbleMeta, messageTimeSource } from '@/components/chat/MessageThread';
 import { formatClockTime } from '@/lib/chat/time-format';
+import {
+  outboxRecorded,
+  readPersistedOutbox,
+  stampMissingCreatedMs,
+  writePersistedOutbox,
+  type OutboxEntry,
+  type OutboxStorage,
+} from '@/lib/chat/chat-store';
 
 const ME = '11111111-1111-4111-8111-111111111111';
 const PEER = '22222222-2222-4222-8222-222222222222';
@@ -61,10 +72,19 @@ function send(id: string, createdMs: number): UnrecordedSend {
 const YESTERDAY_ROW = rowToThreadMessage(row({ id: 'y1' }), ME);
 const TAP = Date.parse('2026-09-30T09:15:00Z');
 
+function recordedAt(id: string, ms: number, sender = ME): ThreadMessage {
+  return rowToThreadMessage(
+    row({ id, sender_user_id: sender, created_at: new Date(ms).toISOString() }),
+    ME,
+  );
+}
+
+const ids = (list: readonly ThreadMessage[]): string[] => list.map((m) => m.id);
+
 describe('pending bubble time', () => {
-  it('the optimistic time is the enqueue clock, not the previous message time + 1ms', () => {
+  it('the optimistic time is the estimated tap time, not the previous message time + 1ms', () => {
     const [, pending] = withOutboxBubbles([YESTERDAY_ROW], [send('p1', TAP)], ME);
-    expect(pending?.localSentMs).toBe(TAP);
+    expect(pending?.estimatedMs).toBe(TAP);
     expect(pending?.time).toBe(TAP);
     expect(messageTimeSource(pending as ThreadMessage)).toBe(TAP);
     expect(bubbleMeta(pending as ThreadMessage, TZ, { showTicks: true }).time).toBe(
@@ -78,15 +98,9 @@ describe('pending bubble time', () => {
   it('an empty chat never shows epoch', () => {
     const [pending] = withOutboxBubbles([], [send('p1', TAP)], ME);
     expect(pending?.time).toBe(TAP);
-    expect(messageTimeSource(pending as ThreadMessage)).toBe(TAP);
     expect(bubbleMeta(pending as ThreadMessage, TZ, { showTicks: false }).time).toBe(
       formatClockTime(TAP, TZ),
     );
-    // A send persisted before its tap time was kept reads the given now, not 0.
-    const legacy: UnrecordedSend = { ...send('p0', TAP) };
-    delete legacy.createdMs;
-    const [restored] = withOutboxBubbles([], [legacy], ME, TAP + 5);
-    expect(restored?.time).toBe(TAP + 5);
   });
 
   it('a first-of-day send shows the "Today" pill before its row lands', () => {
@@ -100,31 +114,135 @@ describe('pending bubble time', () => {
     ]);
   });
 
-  it('pending sorts after every recorded row, even one timed after the tap', () => {
-    const [pending] = withOutboxBubbles([], [send('p1', TAP)], ME);
-    // A peer's row lands (live) with a later server time while p1 is pending.
-    const later = rowToThreadMessage(
-      row({ id: 'r2', created_at: new Date(TAP + 30_000).toISOString() }),
-      ME,
-    );
-    const list = upsertMessage([YESTERDAY_ROW, pending as ThreadMessage], later);
-    expect(list.map((m) => m.id)).toEqual(['y1', 'r2', 'p1']);
-    expect(compareMessages(pending as ThreadMessage, later)).toBeGreaterThan(0);
-  });
-
   it('the recorded row replaces the bubble in place with the same id', () => {
     const list = withOutboxBubbles([YESTERDAY_ROW], [send('p1', TAP), send('p2', TAP + 1)], ME);
-    const recorded = rowToThreadMessage(
-      row({ id: 'p1', sender_user_id: ME, created_at: new Date(TAP + 400).toISOString() }),
+    // p2 was tapped before p1's row landed (TAP + 400): the sender re-stamps
+    // what was queued behind p1 to just after it, and the thread lays it back.
+    const outbox = outboxRecorded(
+      { c1: [send('p1', TAP), send('p2', TAP + 1)] },
+      'c1',
+      'p1',
+      TAP + 400,
+    );
+    expect(outbox.c1?.map((e) => [e.id, e.createdMs])).toEqual([['p2', TAP + 401]]);
+    const next = withOutboxBubbles(
+      upsertMessage(list, recordedAt('p1', TAP + 400)),
+      outbox.c1 ?? [],
       ME,
     );
-    const next = upsertMessage(list, recorded);
-    expect(next.map((m) => m.id)).toEqual(['y1', 'p1', 'p2']);
+    expect(ids(next)).toEqual(['y1', 'p1', 'p2']);
     expect(next[1]?.state).toBe('sent');
-    expect(next[1]?.createdAt).toBe(new Date(TAP + 400).toISOString());
-    // Same minute: the label does not change.
     expect(bubbleMeta(next[1] as ThreadMessage, TZ, { showTicks: true }).time).toBe(
       bubbleMeta(list[1] as ThreadMessage, TZ, { showTicks: true }).time,
     );
+  });
+});
+
+describe('F3 positions never jump', () => {
+  const failed = (id: string, createdMs: number): UnrecordedSend => ({
+    ...send(id, createdMs),
+    state: 'failed',
+  });
+
+  it('a failed m1 stays above m2 and m3 as they record', () => {
+    let list = withOutboxBubbles(
+      [YESTERDAY_ROW],
+      [failed('m1', TAP), send('m2', TAP + 1_000), send('m3', TAP + 2_000)],
+      ME,
+    );
+    expect(ids(list)).toEqual(['y1', 'm1', 'm2', 'm3']);
+    list = upsertMessage(list, recordedAt('m2', TAP + 1_150));
+    list = upsertMessage(list, recordedAt('m3', TAP + 2_150));
+    expect(ids(list)).toEqual(['y1', 'm1', 'm2', 'm3']);
+    expect(list[1]?.state).toBe('failed');
+    // A later fold (catch-up) lays the outbox over the same list: still in place.
+    list = withOutboxBubbles(list, [failed('m1', TAP)], ME, TAP + 99_000);
+    expect(ids(list)).toEqual(['y1', 'm1', 'm2', 'm3']);
+  });
+
+  it('Retry moves it to the bottom at the tap; its record does not move it', () => {
+    let list = withOutboxBubbles([YESTERDAY_ROW], [failed('m1', TAP)], ME);
+    list = upsertMessage(list, recordedAt('m2', TAP + 1_150));
+    list = upsertMessage(list, recordedAt('m3', TAP + 2_150));
+    // The Retry tap re-stamps m1 with the estimated time now.
+    const retryAt = TAP + 60_000;
+    list = withOutboxBubbles(list, [send('m1', retryAt)], ME);
+    expect(ids(list)).toEqual(['y1', 'm2', 'm3', 'm1']);
+    list = upsertMessage(list, recordedAt('m1', retryAt + 350));
+    expect(ids(list)).toEqual(['y1', 'm2', 'm3', 'm1']);
+    expect(list[3]?.state).toBe('sent');
+  });
+
+  it('a peer row recorded after my tap stays below my bubble when my server time is earlier', () => {
+    let list = withOutboxBubbles([YESTERDAY_ROW], [send('mine', TAP)], ME);
+    list = upsertMessage(list, recordedAt('peer', TAP + 30_000, PEER));
+    expect(ids(list)).toEqual(['y1', 'mine', 'peer']);
+    list = upsertMessage(list, recordedAt('mine', TAP + 400));
+    expect(ids(list)).toEqual(['y1', 'mine', 'peer']);
+  });
+});
+
+describe('F4 clock skew', () => {
+  it('device clock 7 min fast: once the offset is known the label is within a minute of the record', () => {
+    const SKEW = 7 * 60_000;
+    // A first send records: its answer arrives at device time server + 7min + 200ms.
+    const firstServer = Date.parse('2026-09-30T09:00:00.000Z');
+    const offset = serverOffsetFrom(new Date(firstServer).toISOString(), firstServer + SKEW + 200);
+    expect(offset).toBe(-(SKEW + 200));
+    // The next tap at device time D is stamped D + offset.
+    const deviceTap = firstServer + SKEW + 90_000;
+    const [pending] = withOutboxBubbles([], [send('p1', deviceTap + (offset ?? 0))], ME);
+    const serverCreated = firstServer + 90_000 + 300;
+    const [recorded] = upsertMessage([pending as ThreadMessage], recordedAt('p1', serverCreated));
+    expect(Math.abs(serverCreated - (pending?.time ?? 0))).toBeLessThan(60_000);
+    expect(
+      Math.abs(
+        Date.parse(recorded?.createdAt ?? '') - Number(messageTimeSource(pending as ThreadMessage)),
+      ),
+    ).toBeLessThan(60_000);
+    // Without the offset the label would read 7 minutes off.
+    expect(Math.abs(serverCreated - deviceTap)).toBeGreaterThan(6 * 60_000);
+  });
+
+  it('absurd offsets are 0; an unreadable created_at is null (keep the last)', () => {
+    const now = Date.parse('2026-09-30T09:00:00Z');
+    expect(serverOffsetFrom(new Date(now + MAX_SERVER_OFFSET_MS + 1).toISOString(), now)).toBe(0);
+    expect(serverOffsetFrom(new Date(now - MAX_SERVER_OFFSET_MS - 1).toISOString(), now)).toBe(0);
+    expect(serverOffsetFrom('not a date', now)).toBeNull();
+  });
+});
+
+describe('F7c legacy entries get a time once', () => {
+  it('a restored entry without createdMs is stamped at restore, persisted, and stable across folds', () => {
+    const data = new Map<string, string>();
+    const storage: OutboxStorage = {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => {
+        data.set(key, value);
+      },
+      removeItem: (key) => {
+        data.delete(key);
+      },
+    };
+    const scope = { workspaceId: 'ws', userId: ME };
+    const legacy: OutboxEntry = {
+      id: 'old',
+      text: 'queued before tap times',
+      local: { attachments: [], sharedPostIds: [], reply: null },
+      state: 'sending',
+    };
+    writePersistedOutbox(storage, scope, { c1: [legacy] });
+    const read = readPersistedOutbox(storage, scope);
+    expect(read.c1?.[0]?.createdMs).toBeUndefined();
+    const stamped = stampMissingCreatedMs(read, TAP);
+    expect(stamped.c1?.[0]?.createdMs).toBe(TAP);
+    expect(stampMissingCreatedMs(stamped, TAP + 5)).toBe(stamped);
+    writePersistedOutbox(storage, scope, stamped);
+    const entries = readPersistedOutbox(storage, scope).c1 ?? [];
+    const first = withOutboxBubbles([YESTERDAY_ROW], entries, ME, TAP + 60_000);
+    const second = withOutboxBubbles(first, entries, ME, TAP + 120_000);
+    expect(first[1]?.time).toBe(TAP);
+    expect(second[1]?.time).toBe(TAP);
+    expect(messageTimeSource(second[1] as ThreadMessage)).toBe(TAP);
   });
 });

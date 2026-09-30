@@ -11,19 +11,24 @@
 // time (FIFO per channel: a later message never records before an earlier
 // pending one). A transient failure (network, timeout, 408 / 429 / 5xx, an
 // upload error or stall) never shows: the bubble keeps its clock and the
-// attempt repeats with backoff (2s, 4s, 8s, 16s, then every 30s, with no end)
-// using the SAME message id and a fresh trace id per attempt; kick()
-// (reconnect, tab visible, online) retries at once. Only a permanent failure
-// (the server refused this message) turns the bubble 'failed' ("Not sent" +
-// Retry); the queue then moves on to the next message, and Retry puts the
-// refused one back in line.
+// attempt repeats with backoff (2s, 4s, 8s, 16s, then every 30s, with no end;
+// a backoff attempt is skipped while the device is offline) using the SAME
+// message id and a fresh trace id per attempt; kick() (reconnect, tab
+// visible, online) retries at once. Only a permanent failure (the server
+// refused this message) turns the bubble 'failed' ("Not sent" + Retry); the
+// queue then moves on to the next message, and Retry re-stamps the refused
+// one (it moves to the bottom) and puts it back in line. A recorded send
+// re-stamps the sends queued behind it to just after its server time, so
+// they never show above it.
 //
 // Instant attachment sends: an entry may carry picked files or a recorded voice
 // note (attachment.local) whose asset id is still ''. Each attempt first
 // uploads those, in order and one at a time, reporting progress as 'progress'
 // events, and stores every returned version id on the entry; only then does it
 // record once with all the ids. A voice note is transcribed alongside its
-// upload, best-effort (TRANSCRIBE_TIMEOUT_MS, then it sends without one). A
+// upload, best-effort: once the file is up the transcript gets
+// TRANSCRIPT_GRACE_MS more (TRANSCRIBE_TIMEOUT_MS overall), then the note
+// records without one. A
 // retry uploads only the files that still have no version id. An entry
 // restored while its files are read back (restoring) holds its place without
 // running; one whose files are gone (filesMissing) never runs and does not
@@ -40,6 +45,7 @@ import type { SendRecordResult } from '@/lib/chat/record';
 import {
   outboxDropChannel,
   outboxPut,
+  outboxRecorded,
   outboxRemove,
   outboxSetAttachments,
   outboxSetState,
@@ -67,6 +73,7 @@ import type { Result } from '@srtdio/rpc';
 import {
   classifyRecordFailure,
   classifyUploadFailure,
+  uploadFailureStatus,
   type SendErrorClass,
 } from '@/lib/chat/send-errors';
 import { TRANSCRIBE_TIMEOUT_MS, type TranscribeResult } from '@/lib/chat/transcribe';
@@ -268,6 +275,8 @@ export function retryDelayMs(failures: number): number {
 
 /** A chat upload with no progress event for this long is aborted (a transient failure). */
 export const UPLOAD_STALL_MS = 30_000;
+/** Once every byte is sent, the Worker's answer is awaited this long, then aborted (transient). */
+export const UPLOAD_RESPONSE_WAIT_MS = 120_000;
 
 /** The slice of an XMLHttpRequest the stall watch needs. */
 export interface StallWatchable {
@@ -283,54 +292,129 @@ export interface StallWatch {
 }
 
 /**
- * Abort `request` when it goes UPLOAD_STALL_MS without any sign of life (an
- * upload progress or start event, a response progress or state change). The
- * abort surfaces as the XHR transport failure the upload already maps to a
- * transient error, so the outbox retries and the queue behind it moves on.
- * Stops by itself on loadend; the caller also stops it when the upload settles.
+ * Abort `request` when its upload goes UPLOAD_STALL_MS without progress (an
+ * upload start or progress event, a response progress or state change), or
+ * when, after its last byte (the upload 'load' event), the Worker has not
+ * answered within UPLOAD_RESPONSE_WAIT_MS. The abort surfaces as the XHR
+ * transport failure the upload already maps to a transient error, so the
+ * outbox retries and the queue behind it moves on. Stops by itself on
+ * loadend; the caller also stops it when the upload settles.
  */
 export function watchUploadStall(
   request: StallWatchable,
   opts: {
     stallMs?: number;
+    responseWaitMs?: number;
     setTimer?: (fn: () => void, delayMs: number) => unknown;
     clearTimer?: (handle: unknown) => void;
   } = {},
 ): StallWatch {
   const stallMs = opts.stallMs ?? UPLOAD_STALL_MS;
+  const responseWaitMs = opts.responseWaitMs ?? UPLOAD_RESPONSE_WAIT_MS;
   const setTimer =
     opts.setTimer ?? ((fn: () => void, delayMs: number): unknown => setTimeout(fn, delayMs));
   const clearTimer = opts.clearTimer ?? ((handle: unknown): void => clearTimeout(handle as number));
   let timer: unknown = null;
   let stopped = false;
+  // Every byte is out: one response wait runs and nothing re-arms it.
+  let sent = false;
   const disarm = (): void => {
     if (timer !== null) clearTimer(timer);
     timer = null;
   };
-  const arm = (): void => {
-    if (stopped) return;
+  const armFor = (delayMs: number): void => {
     disarm();
     timer = setTimer(() => {
       timer = null;
       stop();
       request.abort();
-    }, stallMs);
+    }, delayMs);
   };
-  const UPLOAD_EVENTS = ['loadstart', 'progress', 'load'] as const;
+  const arm = (): void => {
+    if (stopped || sent) return;
+    armFor(stallMs);
+  };
+  const lastByte = (): void => {
+    if (stopped || sent) return;
+    sent = true;
+    armFor(responseWaitMs);
+  };
+  const UPLOAD_EVENTS = ['loadstart', 'progress'] as const;
   const REQUEST_EVENTS = ['progress', 'readystatechange'] as const;
   function stop(): void {
     if (stopped) return;
     stopped = true;
     disarm();
     for (const type of UPLOAD_EVENTS) request.upload.removeEventListener(type, arm);
+    request.upload.removeEventListener('load', lastByte);
     for (const type of REQUEST_EVENTS) request.removeEventListener(type, arm);
     request.removeEventListener('loadend', stop);
   }
   for (const type of UPLOAD_EVENTS) request.upload.addEventListener(type, arm);
+  request.upload.addEventListener('load', lastByte);
   for (const type of REQUEST_EVENTS) request.addEventListener(type, arm);
   request.addEventListener('loadend', stop);
   arm();
   return { stop };
+}
+
+/** A voice note's upload is done: its transcript is awaited at most this much longer. */
+export const TRANSCRIPT_GRACE_MS = 3_000;
+
+/** navigator.onLine where there is one; true elsewhere (and when it is unknown). */
+function deviceOnline(): boolean {
+  return typeof navigator === 'undefined' || navigator.onLine !== false;
+}
+
+/** One chat upload attempt: its Result and the HTTP status its XHR ended with (null: none). */
+export interface UploadAttemptResult {
+  result: ChatAttachmentUpload;
+  status: number | null;
+}
+
+/** How a session refresh went: a new token, a refusal, or no answer (offline). */
+export type SessionRefresh = 'refreshed' | 'rejected' | 'unreachable';
+
+/**
+ * Run one chat upload; on a 401 refresh the session once and retry once. A
+ * failure comes back carrying the status its classification reads
+ * (uploadFailureStatus): a second 401, or a refresh the server refused, is
+ * 401 (permanent); a refresh that could not reach the server is 0
+ * (transient). Never throws.
+ */
+export async function uploadWithSessionRetry(
+  attempt: () => Promise<UploadAttemptResult>,
+  refreshSession: () => Promise<SessionRefresh>,
+): Promise<ChatAttachmentUpload> {
+  const withStatus = (
+    outcome: UploadAttemptResult,
+    status: number | null,
+  ): ChatAttachmentUpload => {
+    if (outcome.result.ok || status === null) return outcome.result;
+    const failed: ChatAttachmentUpload & { status: number } = { ...outcome.result, status };
+    return failed;
+  };
+  let first: UploadAttemptResult;
+  try {
+    first = await attempt();
+  } catch (error) {
+    return { ok: false, message: String(error) };
+  }
+  if (first.result.ok || first.status !== 401) return withStatus(first, first.status);
+  let refreshed: SessionRefresh;
+  try {
+    refreshed = await refreshSession();
+  } catch {
+    refreshed = 'unreachable';
+  }
+  if (refreshed === 'unreachable') return withStatus(first, 0);
+  if (refreshed === 'rejected') return withStatus(first, 401);
+  try {
+    const second = await attempt();
+    return withStatus(second, second.status);
+  } catch (error) {
+    return { ok: false, message: String(error) };
+  }
 }
 
 export interface OutboxSenderDeps {
@@ -357,6 +441,12 @@ export interface OutboxSenderDeps {
   transcribe?: (blob: Blob) => Promise<TranscribeResult>;
   /** Override for tests; defaults to TRANSCRIBE_TIMEOUT_MS. */
   transcribeTimeoutMs?: number;
+  /** Override for tests; defaults to TRANSCRIPT_GRACE_MS. */
+  transcriptGraceMs?: number;
+  /** Whether the device is online; a backoff attempt is skipped while it is not. */
+  isOnline?: () => boolean;
+  /** Device clock (the Retry tap re-stamps an entry); defaults to Date.now. */
+  now?: () => number;
   setTimer?: (fn: () => void, delayMs: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }
@@ -434,8 +524,26 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
   // Voice notes already sent to transcription this session (by local key): a
   // retry after a failed upload never transcribes again.
   const transcribed = new Set<string>();
-  // Transcription timeouts still armed, cleared on dispose.
+  // Transcription timeouts and transcript grace waits still armed, cleared on dispose.
   const transcribeTimers = new Set<unknown>();
+  const isOnline = deps.isOnline ?? deviceOnline;
+  const now = deps.now ?? ((): number => Date.now());
+
+  /** `promise`'s value, or undefined once `ms` pass first. Never rejects. */
+  const settleWithin = <T>(promise: Promise<T | undefined>, ms: number): Promise<T | undefined> =>
+    new Promise<T | undefined>((resolve) => {
+      let done = false;
+      const finish = (value: T | undefined): void => {
+        if (done) return;
+        done = true;
+        clearTimer(timer);
+        transcribeTimers.delete(timer);
+        resolve(value);
+      };
+      const timer = setTimer(() => finish(undefined), ms);
+      transcribeTimers.add(timer);
+      promise.then(finish, () => finish(undefined));
+    });
 
   const commit = (next: Outbox): void => {
     if (next === outbox) return;
@@ -566,7 +674,9 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       } catch (error) {
         result = { ok: false, message: String(error) };
       }
-      const text = await transcript;
+      // The transcript started with the upload; once the file is up it gets
+      // TRANSCRIPT_GRACE_MS more, then the note records without one.
+      const text = await settleWithin(transcript, deps.transcriptGraceMs ?? TRANSCRIPT_GRACE_MS);
       const withTranscript = text !== undefined ? { transcript: text } : {};
       if (!result.ok) {
         // Keep a transcript that did arrive, so the retry does not need one.
@@ -577,7 +687,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
         return {
           ok: false,
           error: result.message,
-          errorClass: classifyUploadFailure(result.message),
+          errorClass: classifyUploadFailure(result.message, uploadFailureStatus(result)),
         };
       }
       publish(
@@ -597,7 +707,8 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     lane.failures = 0;
     if (!isLive(channelId, lane)) return;
     const held = selectOutbox(outbox, channelId).some((e) => e.id === message.id);
-    commit(outboxRemove(outbox, channelId, message.id));
+    // Sends queued behind it never read earlier than its server time.
+    commit(outboxRecorded(outbox, channelId, message.id, message.time));
     if (held) deps.onEvent({ type: 'recorded', channelId, message });
     pump(channelId);
   };
@@ -637,6 +748,8 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     lane.failures += 1;
     lane.timer = setTimer(() => {
       lane.timer = null;
+      // Offline: skip the attempt; the 'online' (or visible, connected) kick resumes.
+      if (!isOnline()) return;
       pump(channelId);
     }, retryDelayMs(lane.failures));
   };
@@ -709,6 +822,8 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       if (disposed) return;
       const entry = selectOutbox(outbox, channelId).find((e) => e.id === id);
       if (entry === undefined || entry.state !== 'failed' || entry.filesMissing === true) return;
+      // The tap re-stamps it: it moves to the bottom now and keeps that place.
+      commit(outboxPut(outbox, channelId, { ...entry, createdMs: now() }));
       setState(channelId, id, 'sending');
       // Back in line at once: a backoff wait for the head restarts now.
       const lane = laneFor(channelId);

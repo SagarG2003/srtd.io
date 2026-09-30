@@ -720,7 +720,12 @@ export function useChatThread(params: {
         }
         if (event.type === 'recorded') {
           const message = event.message;
-          setMessages((prev) => upsertMessage(prev, message));
+          // The row replaces its bubble; the sends queued behind it are laid
+          // back on (the sender keeps them after it).
+          const behind = outbox.entries(event.channelId);
+          setMessages((prev) =>
+            withOutboxBubbles(upsertMessage(prev, message), behind, currentUserId),
+          );
           return;
         }
         if (event.type === 'progress') {
@@ -741,7 +746,7 @@ export function useChatThread(params: {
             : setMessageState(prev, event.id, event.state),
         );
       }),
-    [outbox],
+    [outbox, currentUserId],
   );
 
   // Recorded bubbles keep their local previews for the session; when the
@@ -777,8 +782,9 @@ export function useChatThread(params: {
           reply,
         },
         state: 'sending',
-        // The bubble's time and day pill: the device clock at the tap.
-        createdMs: Date.now(),
+        // The bubble's place, day pill and time: the estimated server time of
+        // the tap (device clock + the offset the last recorded send showed).
+        createdMs: Date.now() + (outboxRef.current.serverOffsetMs?.() ?? 0),
       };
       setMessages((prev) => withOutboxBubbles(prev, [entry], currentUserId));
       outboxRef.current.enqueue(forChannel, entry);
@@ -867,18 +873,27 @@ export function useChatThread(params: {
     [db, currentUserId, inFlight],
   );
 
-  const retry = useCallback((messageId: string): void => {
-    const forChannel = channelRef.current;
-    if (forChannel === null) return;
-    const entry = outboxRef.current.entries(forChannel).find((e) => e.id === messageId);
-    if (entry?.filesMissing === true) {
-      outboxRef.current.settle(forChannel, messageId);
-      revokeLocalPreviews(entry.local.attachments);
-      setMessages((prev) => removeMessages(prev, [messageId]));
-      return;
-    }
-    outboxRef.current.retry(forChannel, messageId);
-  }, []);
+  const retry = useCallback(
+    (messageId: string): void => {
+      const forChannel = channelRef.current;
+      if (forChannel === null) return;
+      const entry = outboxRef.current.entries(forChannel).find((e) => e.id === messageId);
+      if (entry?.filesMissing === true) {
+        outboxRef.current.settle(forChannel, messageId);
+        revokeLocalPreviews(entry.local.attachments);
+        setMessages((prev) => removeMessages(prev, [messageId]));
+        return;
+      }
+      outboxRef.current.retry(forChannel, messageId);
+      // The tap re-stamped it: the bubble moves to its new time (the bottom) now,
+      // and its record lands there.
+      const retried = outboxRef.current.entries(forChannel).find((e) => e.id === messageId);
+      if (retried !== undefined && retried.createdMs !== entry?.createdMs) {
+        setMessages((prev) => withOutboxBubbles(prev, [retried], currentUserId));
+      }
+    },
+    [currentUserId],
+  );
 
   const toggleReaction = useCallback(
     (messageId: string, emoji: string, currentlyMine: boolean): void => {

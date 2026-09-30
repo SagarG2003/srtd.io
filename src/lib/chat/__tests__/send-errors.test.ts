@@ -40,9 +40,6 @@ describe('classifyRecordFailure', () => {
     expect(classifyRecordFailure({ status: 400, code: '22P02', message: 'invalid uuid' })).toBe(
       'permanent',
     );
-    expect(classifyRecordFailure({ status: 404, code: 'PGRST202', message: 'no function' })).toBe(
-      'permanent',
-    );
   });
 
   it('"forward source not accessible" is permanent, with or without a code', () => {

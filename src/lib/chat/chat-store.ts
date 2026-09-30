@@ -555,7 +555,11 @@ export interface OutboxEntry {
    */
   local: LocalMessageContent;
   state: 'sending' | 'failed';
-  /** Device clock (epoch ms) at the Send tap: the pending bubble's time and day. */
+  /**
+   * Estimated server time (epoch ms) of the Send tap, or of the last Retry
+   * tap: device clock + the server clock offset known then. The pending
+   * bubble's place, day and time label; stamped once, so it never moves.
+   */
   createdMs?: number;
   /**
    * Restored from storage with files that never finished uploading: the File
@@ -610,6 +614,39 @@ export function outboxSetAttachments(
   };
 }
 
+/**
+ * One entry recorded at server time `recordedMs`: drop it, and re-stamp every
+ * entry that was queued behind it with a tap time not after `recordedMs` to
+ * just after it (in queue order), so a quick later send never shows above the
+ * message it was sent after. The recorded entry's queue position decides who
+ * is behind it. Pure.
+ */
+export function outboxRecorded(
+  outbox: Outbox,
+  channelId: string,
+  id: string,
+  recordedMs: number,
+): Outbox {
+  const list = outbox[channelId];
+  const index = list?.findIndex((e) => e.id === id) ?? -1;
+  if (list === undefined || index === -1) return outbox;
+  let bump = 0;
+  const next = list
+    .map((entry, i) => {
+      if (i <= index || entry.createdMs === undefined || !Number.isFinite(recordedMs)) {
+        return entry;
+      }
+      if (entry.createdMs > recordedMs) return entry;
+      bump += 1;
+      return { ...entry, createdMs: recordedMs + bump };
+    })
+    .filter((e) => e.id !== id);
+  const copy = { ...outbox };
+  if (next.length === 0) delete copy[channelId];
+  else copy[channelId] = next;
+  return copy;
+}
+
 /** Drop one entry once its row is recorded; an emptied channel is removed. */
 export function outboxRemove(outbox: Outbox, channelId: string, id: string): Outbox {
   const list = outbox[channelId];
@@ -661,6 +698,11 @@ export interface ChannelOutbox {
    */
   settle: (channelId: string, id: string) => void;
   subscribe: (listener: (event: OutboxEvent) => void) => () => void;
+  /**
+   * Server clock minus device clock (ms) from the latest recorded send this
+   * session; 0 before the first. A new send stamps Date.now() + this.
+   */
+  serverOffsetMs?: () => number;
   /**
    * Messages became tombstones (by us, or live by their sender): the store
    * strips their text from draft replies and queued sends that quote them, and
@@ -772,6 +814,24 @@ function parseEntry(value: unknown): OutboxEntry | null {
       : {}),
     ...(filesMissing ? { filesMissing: true as const } : {}),
   };
+}
+
+/**
+ * Restored entries persisted without a tap time get one, once (`nowMs`, the
+ * estimated server time at restore), so their bubble's time and place never
+ * change on later loads. The same outbox when none match. Pure.
+ */
+export function stampMissingCreatedMs(outbox: Outbox, nowMs: number): Outbox {
+  let changed = false;
+  const next: Record<string, readonly OutboxEntry[]> = {};
+  for (const [channelId, list] of Object.entries(outbox)) {
+    next[channelId] = list.map((entry) => {
+      if (entry.createdMs !== undefined) return entry;
+      changed = true;
+      return { ...entry, createdMs: nowMs };
+    });
+  }
+  return changed ? next : outbox;
 }
 
 /**

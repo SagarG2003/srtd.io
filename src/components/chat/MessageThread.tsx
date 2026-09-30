@@ -748,14 +748,14 @@ function senderAvatarProps(
 
 /**
  * The one timestamp a message's time label and aria-label both read: the server
- * createdAt; while createdAt is absent, the Send-tap clock of an unrecorded own
- * send, else the Agora time (provisional).
+ * createdAt; while createdAt is absent, the estimated server time of an
+ * unrecorded own send's tap, else the Agora time (provisional).
  */
 export function messageTimeSource(
-  message: Pick<ThreadMessage, 'createdAt' | 'time' | 'localSentMs'>,
+  message: Pick<ThreadMessage, 'createdAt' | 'time' | 'estimatedMs'>,
 ): string | number {
   if (message.createdAt !== '') return message.createdAt;
-  return message.localSentMs ?? message.time;
+  return message.estimatedMs ?? message.time;
 }
 
 /**
