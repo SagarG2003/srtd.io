@@ -119,6 +119,12 @@
        in both light and dark. */
     background-color: var(--bg);
   }
+  /* No grey flash over tapped controls on touch screens (iOS / Android draw
+     one on anything with a click handler); pressed and focus styles are the
+     app's own. Inherited, so this one rule covers every element. */
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
   /* color-scheme follows the same .dark class initTheme drives, so form
      controls, scrollbars and the overscroll gloss track the active theme. */
   :root {
