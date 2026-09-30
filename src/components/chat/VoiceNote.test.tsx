@@ -18,6 +18,9 @@ import {
   transcribeLinkState,
   waveTouchPhase,
   WAVE_SEEK_LOCK_PX,
+  voiceBars,
+  WAVEFORM_BARS,
+  VOICE_BAR_COUNT,
   type VoiceAudio,
 } from '@/components/chat/VoiceNote';
 import { voiceStore } from '@/lib/chat/transcript-store';
@@ -387,5 +390,49 @@ describe('touch on the wave', () => {
   });
   it('a vertical move past the long-press tolerance is neither', () => {
     expect(waveTouchPhase(start, { x: 102, y: 112, t: 100 })).toBe('none');
+  });
+});
+
+describe('T4: bars from the real waveform', () => {
+  /** The inline heights of the drawn bars, in order. */
+  function barHeights(html: string): number[] {
+    const wave = html.slice(html.indexOf('data-voice-bars'));
+    return [...wave.matchAll(/style="height:(\d+(?:\.\d+)?)%"/g)].map((m) => Number(m[1]));
+  }
+  const base = { url: 'blob:a', name: 'voice-note.webm', durationMs: 5_000 };
+
+  it('renders the bars from the note peaks, resampled to the bar count', () => {
+    const peaks = Array.from({ length: 48 }, (_, i) => (i < 24 ? 20 : 100));
+    const html = renderToStaticMarkup(<VoiceNote {...base} peaks={peaks} />);
+    expect(html).toContain('data-voice-bars="peaks"');
+    const heights = barHeights(html);
+    expect(heights).toHaveLength(VOICE_BAR_COUNT);
+    expect(heights[0]).toBe(20);
+    expect(heights.at(-1)).toBe(100);
+    expect(heights).toEqual(voiceBars(peaks));
+    expect(heights).not.toEqual([...WAVEFORM_BARS]);
+  });
+
+  it('a quiet stretch still draws a mark (minimum bar height)', () => {
+    const bars = voiceBars(new Array<number>(48).fill(0).map((v, i) => (i === 0 ? 100 : v)));
+    expect(Math.min(...bars)).toBeGreaterThan(0);
+  });
+
+  it('falls back to WAVEFORM_BARS without peaks (older notes, older clients)', () => {
+    const html = renderToStaticMarkup(<VoiceNote {...base} />);
+    expect(html).toContain('data-voice-bars="fallback"');
+    expect(barHeights(html)).toEqual([...WAVEFORM_BARS]);
+    expect(voiceBars(undefined)).toBe(WAVEFORM_BARS);
+    expect(voiceBars([])).toBe(WAVEFORM_BARS);
+  });
+
+  it('played and unplayed colouring is unchanged with peaks', () => {
+    const html = renderToStaticMarkup(<VoiceNote {...base} peaks={[50, 60]} />);
+    const wave = html.slice(html.indexOf('data-voice-bars'));
+    // Nothing played yet: every bar is the unplayed ink.
+    expect((wave.match(new RegExp('flex-1 rounded-sm bg-fg-3', 'g')) ?? []).length).toBe(
+      VOICE_BAR_COUNT,
+    );
+    expect(wave).not.toContain('data-played');
   });
 });

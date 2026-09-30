@@ -3,6 +3,8 @@ import {
   createOutboxSender,
   LIVE_PUBLISH_TIMEOUT_MS,
   runSend,
+  UPLOAD_CANCELLED,
+  uploadWithSessionRetry,
   type SendFlowDeps,
   type SendInput,
   type SendOutcome,
@@ -16,6 +18,7 @@ import {
   type OutboxStorage,
 } from '@/lib/chat/chat-store';
 import { rowToThreadMessage, type ChatMessageRow } from '@/lib/chat/thread';
+import { uploadRing } from '@/lib/chat/attachments';
 
 const ME = '11111111-1111-4111-8111-111111111111';
 const CHANNEL = 'group__ws__g1';
@@ -291,7 +294,14 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
   type Script = ('ok' | 'fail' | 'pending')[];
 
   /** A sender whose record attempts follow `script` (then succeed). */
-  function harness(opts: { script?: Script; initial?: Outbox; storage?: OutboxStorage } = {}) {
+  function harness(
+    opts: {
+      script?: Script;
+      initial?: Outbox;
+      storage?: OutboxStorage;
+      onCancelled?: (channelId: string, entry: OutboxEntry) => void;
+    } = {},
+  ) {
     const script = [...(opts.script ?? [])];
     const calls: { channelId: string; id: string; traceId: string; entry: OutboxEntry }[] = [];
     const events: OutboxEvent[] = [];
@@ -311,6 +321,7 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
         onEvent: (event) => events.push(event),
         onChange: (next) => writePersistedOutbox(opts.storage ?? null, SCOPE, next),
         onAttemptFailed: () => {},
+        ...(opts.onCancelled !== undefined ? { onCancelled: opts.onCancelled } : {}),
       },
       opts.initial,
     );
@@ -542,8 +553,21 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
           e.type === 'progress' ? e.attachments.map((a) => a.local?.progress) : [],
         ),
       ).toEqual([
+        // a.png starts (the ring turns determinate), ticks, lands; then b.png starts.
+        [0, 0],
         [0.5, 0],
         [1, 0],
+        [1, 0],
+      ]);
+      expect(
+        progress.map((e) =>
+          e.type === 'progress' ? e.attachments.map((a) => a.local?.uploading === true) : [],
+        ),
+      ).toEqual([
+        [true, false],
+        [true, false],
+        [false, false],
+        [false, true],
       ]);
       const held = sender.entries(CHANNEL)[0]?.local.attachments ?? [];
       expect(held.map((a) => a.assetId)).toEqual(['ver-a.png-1', '']);
@@ -594,20 +618,161 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
       ]);
     });
 
-    it('a settle while uploading records nothing and frees the queue', async () => {
-      let finish: (() => void) | undefined;
+    /** An uploader that hangs until aborted; records every signal it was handed. */
+    function abortableUploader() {
+      const signals: AbortSignal[] = [];
+      const aborted: string[] = [];
+      const files: string[] = [];
+      const finishers: (() => void)[] = [];
+      const upload = vi.fn(
+        (file: File, onProgress?: (f: number) => void, signal?: AbortSignal) =>
+          new Promise<
+            { ok: true; reused: boolean; versionId: string } | { ok: false; message: string }
+          >((resolve) => {
+            files.push(file.name);
+            if (signal !== undefined) signals.push(signal);
+            onProgress?.(0.3);
+            signal?.addEventListener('abort', () => {
+              aborted.push(file.name);
+              // The XHR abort surfaces as a transport failure.
+              resolve({ ok: false, message: 'Upload failed. Try again' });
+            });
+            finishers.push(() => resolve({ ok: true, reused: false, versionId: `v-${file.name}` }));
+          }),
+      );
+      return { upload, signals, aborted, files, finishers };
+    }
+
+    it('T7: cancel mid-upload aborts the request, drops the entry and frees the lane at once', async () => {
+      const { upload, aborted, files } = abortableUploader();
+      const cancelled: OutboxEntry[] = [];
+      const { sender, calls, events } = harness({ onCancelled: (_c, e) => cancelled.push(e) });
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png', 'b.png'], upload));
+      sender.enqueue(CHANNEL, entry('m2'));
+      await vi.waitFor(() => expect(files).toEqual(['a.png']));
+      expect(sender.cancel(CHANNEL, 'm1')).toBe(true);
+      // Aborted, gone, and the next send ran without waiting for the upload.
+      expect(aborted).toEqual(['a.png']);
+      expect(sender.entries(CHANNEL).map((e) => e.id)).not.toContain('m1');
+      expect(cancelled.map((e) => e.id)).toEqual(['m1']);
+      expect(events).toContainEqual({ type: 'cancelled', channelId: CHANNEL, id: 'm1' });
+      await vi.waitFor(() => expect(calls.map((c) => c.id)).toEqual(['m2']));
+      // The remaining upload of m1 (b.png) never ran; m1 never recorded.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(files).toEqual(['a.png']);
+      expect(calls.map((c) => c.id)).not.toContain('m1');
+    });
+
+    it('T7: the next queued upload starts immediately after a cancel', async () => {
+      const first = abortableUploader();
+      const second = abortableUploader();
+      const { sender } = harness();
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png'], first.upload));
+      sender.enqueue(CHANNEL, withFiles('m2', ['b.png'], second.upload));
+      await vi.waitFor(() => expect(first.files).toEqual(['a.png']));
+      expect(second.files).toEqual([]);
+      sender.cancel(CHANNEL, 'm1');
+      await vi.waitFor(() => expect(second.files).toEqual(['b.png']));
+    });
+
+    it('T8: an abort is not a failure: no Not sent, no retry, no backoff, no failure log', async () => {
+      vi.useFakeTimers();
+      const { upload, files } = abortableUploader();
+      const failures: Record<string, unknown>[] = [];
+      const events: OutboxEvent[] = [];
+      const sender = createOutboxSender({
+        deliver: async () => ({ ok: false, reason: 'error', error: 'x' }),
+        newTraceId: () => 't',
+        onEvent: (event) => events.push(event),
+        onChange: () => {},
+        onAttemptFailed: (context) => failures.push(context),
+      });
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png'], upload));
+      await vi.advanceTimersByTimeAsync(0);
+      sender.cancel(CHANNEL, 'm1');
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(failures).toEqual([]);
+      expect(events.some((e) => e.type === 'state' && e.state === 'failed')).toBe(false);
+      // Never uploaded again (no retry after a backoff).
+      expect(files).toEqual(['a.png']);
+      expect(sender.entries(CHANNEL)).toEqual([]);
+    });
+
+    it('T8: the lane stays free when the aborted upload answers late', async () => {
+      let late: (() => void) | undefined;
       const upload = vi.fn(
         () =>
           new Promise<{ ok: true; reused: boolean; versionId: string }>((resolve) => {
-            finish = () => resolve({ ok: true, reused: false, versionId: 'v' });
+            late = () => resolve({ ok: true, reused: false, versionId: 'v' });
+          }),
+      );
+      const second = abortableUploader();
+      const { sender, calls } = harness();
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png'], upload));
+      sender.enqueue(CHANNEL, withFiles('m2', ['b.png'], second.upload));
+      await vi.waitFor(() => expect(upload).toHaveBeenCalled());
+      sender.cancel(CHANNEL, 'm1');
+      await vi.waitFor(() => expect(second.files).toEqual(['b.png']));
+      // m1's upload answers after the cancel: ignored, m2 keeps its run.
+      late?.();
+      second.finishers[0]?.();
+      await vi.waitFor(() => expect(calls.map((c) => c.id)).toEqual(['m2']));
+    });
+
+    it('T8: cancelling a send waiting in backoff clears its timer and runs the next', async () => {
+      vi.useFakeTimers();
+      const { upload } = uploader(['fail']);
+      const { sender, calls } = harness();
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png'], upload));
+      sender.enqueue(CHANNEL, entry('m2'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls).toHaveLength(0);
+      expect(sender.cancel(CHANNEL, 'm1')).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls.map((c) => c.id)).toEqual(['m2']);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(upload).toHaveBeenCalledTimes(1);
+    });
+
+    it('T9: once every upload resolved and the record call fired, a cancel is ignored', async () => {
+      const { upload } = uploader();
+      const { sender, calls } = harness({ script: ['pending'] });
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png'], upload));
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      expect(sender.cancel(CHANNEL, 'm1')).toBe(false);
+      expect(sender.entries(CHANNEL).map((e) => e.id)).toEqual(['m1']);
+    });
+
+    it('T9: the X hides the moment the last upload resolves (no attachment awaits upload)', async () => {
+      const { upload } = uploader();
+      const { sender, events } = harness({ script: ['pending'] });
+      sender.enqueue(CHANNEL, withFiles('m1', ['a.png', 'b.png'], upload));
+      await vi.waitFor(() =>
+        expect(
+          events.some((e) => e.type === 'progress' && e.attachments.every((a) => a.assetId !== '')),
+        ).toBe(true),
+      );
+      const last = [...events].reverse().find((e) => e.type === 'progress');
+      expect(last?.type === 'progress' && uploadRing(last.attachments)).toBe(null);
+    });
+
+    it('T9: deliver re-checks the cancel synchronously right before the record call', async () => {
+      // An upload that resolves ok while the cancel lands in the same tick.
+      const holder: { resolve?: () => void } = {};
+      const upload = vi.fn(
+        (_file: File, _p?: (f: number) => void, signal?: AbortSignal) =>
+          new Promise<{ ok: true; reused: boolean; versionId: string }>((resolve) => {
+            holder.resolve = () => resolve({ ok: true, reused: false, versionId: 'v' });
+            void signal;
           }),
       );
       const { sender, calls } = harness();
       sender.enqueue(CHANNEL, withFiles('m1', ['a.png'], upload));
-      sender.enqueue(CHANNEL, entry('m2'));
-      sender.settle(CHANNEL, 'm1');
-      finish?.();
-      await vi.waitFor(() => expect(calls.map((c) => c.id)).toEqual(['m2']));
+      await vi.waitFor(() => expect(upload).toHaveBeenCalled());
+      holder.resolve?.();
+      sender.cancel(CHANNEL, 'm1');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(calls).toEqual([]);
     });
 
     it('a restored entry whose files were lost stays failed, never runs, and does not hold up the queue', async () => {
@@ -814,5 +979,65 @@ describe('H2 a refused mention never fails the send', () => {
     expect(d.recordMessage).toHaveBeenCalledWith(
       expect.objectContaining({ mentions: [ANA, 'all'] }),
     );
+  });
+});
+
+describe('T10: the 401 retry path after a cancel', () => {
+  const unauthorized = {
+    result: { ok: false as const, message: 'Upload failed. Try again' },
+    status: 401,
+  };
+
+  it('a cancel during the first attempt never refreshes or re-uploads', async () => {
+    const controller = new AbortController();
+    const attempt = vi.fn(async () => {
+      controller.abort();
+      return unauthorized;
+    });
+    const refresh = vi.fn(async () => 'refreshed' as const);
+    const result = await uploadWithSessionRetry(attempt, refresh, controller.signal);
+    expect(result).toEqual({ ok: false, message: UPLOAD_CANCELLED });
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('a cancel while the session refreshes skips the second upload', async () => {
+    const controller = new AbortController();
+    const attempt = vi.fn(async () => unauthorized);
+    const refresh = vi.fn(async () => {
+      controller.abort();
+      return 'refreshed' as const;
+    });
+    const result = await uploadWithSessionRetry(attempt, refresh, controller.signal);
+    expect(result).toEqual({ ok: false, message: UPLOAD_CANCELLED });
+    expect(attempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('an already-cancelled send never uploads', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const attempt = vi.fn(async () => unauthorized);
+    await uploadWithSessionRetry(attempt, async () => 'refreshed', controller.signal);
+    expect(attempt).not.toHaveBeenCalled();
+  });
+
+  it('without a cancel the 401 still refreshes and retries once', async () => {
+    const controller = new AbortController();
+    const attempt = vi
+      .fn<
+        () => Promise<
+          | typeof unauthorized
+          | { result: { ok: true; reused: boolean; versionId: string }; status: number }
+        >
+      >()
+      .mockResolvedValueOnce(unauthorized)
+      .mockResolvedValueOnce({ result: { ok: true, reused: false, versionId: 'v' }, status: 201 });
+    const result = await uploadWithSessionRetry(
+      attempt,
+      async () => 'refreshed',
+      controller.signal,
+    );
+    expect(result).toEqual({ ok: true, reused: false, versionId: 'v' });
+    expect(attempt).toHaveBeenCalledTimes(2);
   });
 });

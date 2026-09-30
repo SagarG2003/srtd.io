@@ -676,15 +676,21 @@ export function draftAttachments(
 
 /**
  * A recorded voice note as an instant-send attachment: the local file (no
- * version id yet, no preview) plus its recorded length, so the outbox uploads
- * it and records it like any picked file. Pure.
+ * version id yet, no preview) plus its recorded length and, when the recorder
+ * captured them, its waveform peaks, so the outbox uploads it and records it
+ * like any picked file. Pure.
  */
 export function voiceNoteAttachment(
   file: File,
   durationMs: number,
   upload: AttachmentUploader | undefined,
+  peaks?: readonly number[],
 ): MessageAttachment {
-  return { ...toLocalAttachment(file, null, upload), durationMs };
+  return {
+    ...toLocalAttachment(file, null, upload),
+    durationMs,
+    ...(peaks !== undefined && peaks.length > 0 ? { peaks: [...peaks] } : {}),
+  };
 }
 
 /** Whether Send is enabled: text, a picked file, or a shared post or brief. Never waits on an upload. */
@@ -1024,7 +1030,7 @@ export function Composer(props: ComposerProps): ReactElement {
     const file = new File([rec.blob], recordingFileName(rec.mime), { type: rec.mime });
     const taken = dispatchSend(props.onSend, {
       text: '',
-      attachments: [voiceNoteAttachment(file, durationMs, props.uploadFile)],
+      attachments: [voiceNoteAttachment(file, durationMs, props.uploadFile, rec.peaks)],
       sharedPostIds: [],
       reply: props.reply?.quote ?? null,
       sharedBriefIds: [],

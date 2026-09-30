@@ -31,6 +31,7 @@ import {
   type MessageAttachment,
   type ReplyQuote,
 } from '@/lib/chat/attachments';
+import { parsePeaks } from '@/lib/chat/waveform-peaks';
 
 /** Sender label written before the preview when the current user sent it. */
 export const OWN_PREFIX = 'You';
@@ -855,7 +856,9 @@ export type OutboxEvent =
       channelId: string;
       id: string;
       attachments: readonly MessageAttachment[];
-    };
+    }
+  /** The sender cancelled an uploading send (the X): its bubble goes, peers never see it. */
+  | { type: 'cancelled'; channelId: string; id: string };
 
 /**
  * The outbox surface the thread drives; the store provider implements it over
@@ -876,6 +879,12 @@ export interface ChannelOutbox {
    * Remove on an entry whose files were lost to a reload (it drops the entry).
    */
   settle: (channelId: string, id: string) => void;
+  /**
+   * The X on an uploading send: abort its upload, drop the entry, its stored
+   * files, previews and timers, and free the queue at once. False (ignored)
+   * once its record call has fired, or when nothing of it is uploading.
+   */
+  cancel: (channelId: string, id: string) => boolean;
   subscribe: (listener: (event: OutboxEvent) => void) => () => void;
   /**
    * Messages became tombstones (by us, or live by their sender): the store
@@ -935,6 +944,8 @@ function parseAttachment(value: unknown): MessageAttachment | null {
   if (typeof assetId !== 'string' || typeof name !== 'string' || typeof mime !== 'string') {
     return null;
   }
+  // A voice note's waveform survives a reload; invalid peaks are dropped.
+  const peaks = parsePeaks(value.peaks);
   return {
     assetId,
     name,
@@ -942,6 +953,7 @@ function parseAttachment(value: unknown): MessageAttachment | null {
     ...(typeof transcript === 'string' ? { transcript } : {}),
     ...(typeof size === 'number' ? { size } : {}),
     ...(typeof durationMs === 'number' ? { durationMs } : {}),
+    ...(peaks !== undefined ? { peaks } : {}),
   };
 }
 

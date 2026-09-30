@@ -79,7 +79,12 @@ describe('chatUnavailableView', () => {
     const view = chatUnavailableView({ onRetry });
     // The shared EmptyState carries the copy and the Retry as its action.
     expect(view.type).toBe(EmptyState);
-    expect((view.props as { title: string }).title).toBe('Chat unavailable');
+    expect((view.props as { title: string }).title).toBe("Couldn't load chats");
+    // T11: no connection / network / offline wording anywhere in the panel.
+    const copy = JSON.stringify(view.props, (_k, v: unknown) =>
+      typeof v === 'function' ? undefined : v,
+    );
+    expect(copy).not.toMatch(/connect|network|offline/i);
     const action = (view.props as { action: ReactElement }).action;
     const buttons = find(
       action,

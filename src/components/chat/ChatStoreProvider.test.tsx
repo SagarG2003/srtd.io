@@ -13,6 +13,7 @@ import {
   handleMessagesDeleted,
   loadChatList,
   previewMentionText,
+  releaseCancelled,
   resolvePreviewMentions,
   routeGlobalCmd,
   type ChatListReaders,
@@ -497,5 +498,69 @@ describe('chat list mentions', () => {
     expect(previewMentionText(`ok @[${ANA}]`, 'w1')).toBe('ok @Ana');
     expect(draftLine(`draft @[${ANA}] @[${GONE}]`, 'w1')).toBe('draft @Ana @Unknown member');
     resetMentionNames();
+  });
+});
+
+describe('T7: a cancelled send releases its stored files and object URLs', () => {
+  function adapter(keys: string[]) {
+    const deleted: string[][] = [];
+    return {
+      deleted,
+      files: {
+        put: vi.fn(async () => {}),
+        get: vi.fn(async () => undefined),
+        keys: vi.fn(async () => [...keys]),
+        delete: vi.fn(async (drop: readonly string[]) => {
+          deleted.push([...drop]);
+        }),
+        clear: vi.fn(async () => {}),
+        close: vi.fn(),
+      },
+    };
+  }
+  const file = new File(['abc'], 'a.png', { type: 'image/png' });
+  const entry = {
+    id: 'm1',
+    local: {
+      attachments: [
+        {
+          assetId: '',
+          name: 'a.png',
+          mime: 'image/png',
+          local: { key: 'k1', file, previewUrl: 'blob:preview-1', progress: 0.3 },
+        },
+      ],
+      sharedPostIds: [],
+      reply: null,
+    },
+  };
+
+  it('deletes its IndexedDB files and revokes its previews', async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const { files, deleted } = adapter(['m1:0', 'm1:1', 'm2:0']);
+    await releaseCancelled(files, entry);
+    expect(deleted).toEqual([['m1:0', 'm1:1']]);
+    expect(revoke).toHaveBeenCalledWith('blob:preview-1');
+    revoke.mockRestore();
+  });
+
+  it('waits for a save still in flight, so no blob is left behind', async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const { files, deleted } = adapter(['m1:0']);
+    let landed: (() => void) | undefined;
+    const saving = new Promise<void>((resolve) => {
+      landed = resolve;
+    });
+    const done = releaseCancelled(files, entry, saving);
+    await Promise.resolve();
+    expect(deleted).toEqual([]);
+    landed?.();
+    await done;
+    expect(deleted).toEqual([['m1:0']]);
+    revoke.mockRestore();
+  });
+
+  it('no file store: nothing throws', async () => {
+    await expect(releaseCancelled(null, entry)).resolves.toBeUndefined();
   });
 });

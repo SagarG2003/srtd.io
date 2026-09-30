@@ -755,3 +755,60 @@ describe('D3: server clock offset', () => {
     expect(beginLoad(withOffset, 's').serverClockOffsetMs).toBe(5000);
   });
 });
+
+describe('T3: voice note peaks survive an outbox reload', () => {
+  const scope = { workspaceId: 'wa', userId: 'u1' };
+  function storage(): OutboxStorage {
+    const data = new Map<string, string>();
+    return {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => {
+        data.set(key, value);
+      },
+      removeItem: (key) => {
+        data.delete(key);
+      },
+    };
+  }
+  const voice = (peaks: unknown) =>
+    ({
+      id: 'v1',
+      text: '',
+      local: {
+        attachments: [
+          {
+            assetId: 'ver-1',
+            name: 'voice-note.webm',
+            mime: 'audio/webm',
+            durationMs: 3000,
+            peaks,
+          },
+        ],
+        sharedPostIds: [],
+        reply: null,
+      },
+      state: 'sending',
+    }) as unknown as OutboxEntry;
+
+  it('keeps valid peaks through write and read', () => {
+    const store = storage();
+    const peaks = Array.from({ length: 48 }, (_, i) => i);
+    writePersistedOutbox(store, scope, { c1: [voice(peaks)] });
+    const read = readPersistedOutbox(store, scope).c1?.[0]?.local.attachments[0];
+    expect(read?.peaks).toEqual(peaks);
+    expect(read?.durationMs).toBe(3000);
+  });
+
+  it.each([
+    ['not an array', 'loud'],
+    ['too many', new Array<number>(49).fill(1)],
+    ['a non-number', [1, 'x']],
+    ['empty', []],
+  ])('invalid peaks (%s) read as absent, the note itself survives', (_label, peaks) => {
+    const store = storage();
+    writePersistedOutbox(store, scope, { c1: [voice(peaks)] });
+    const read = readPersistedOutbox(store, scope).c1?.[0]?.local.attachments[0];
+    expect(read).toBeDefined();
+    expect(read).not.toHaveProperty('peaks');
+  });
+});

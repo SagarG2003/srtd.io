@@ -20,6 +20,14 @@
 // "Transcribe", "Transcribing…", "Hide transcript" / "Show transcript", or
 // "Transcript not available" + "Try again"; the transcript drops down under the
 // link row. Own notes carry no link (the menu's Transcribe stays).
+//
+// The bars are drawn from the note's own peaks (the recorder's waveform,
+// resampled to the bar count) when it carries them; older notes and older
+// clients fall back to the fixed WAVEFORM_BARS. While an own note uploads, the
+// play spot holds the UploadRing (tap X cancels the send) and the wave is a
+// plain flat line of the same length; when the upload finishes, X becomes play
+// and the line becomes the waveform in a 150ms opacity crossfade (nothing
+// moves or resizes).
 
 import { useEffect, useRef, useState } from 'react';
 import type {
@@ -30,6 +38,7 @@ import type {
   ReactNode,
 } from 'react';
 import { Avatar } from '@/components/ui/Avatar';
+import { UploadRing } from '@/components/chat/UploadRing';
 import { IconMic, IconPause, IconPlay } from '@/components/ui/icons';
 import {
   cancelPendingLongPressesWithin,
@@ -38,6 +47,7 @@ import {
 } from '@/components/ui/useLongPress';
 import { cn } from '@/lib/cn';
 import { logger } from '@/lib/logger';
+import { resamplePeaks } from '@/lib/chat/waveform-peaks';
 import {
   transcriptView,
   useVoiceRecord,
@@ -45,10 +55,28 @@ import {
   type TranscriptView,
 } from '@/lib/chat/transcript-store';
 
-/** Fixed decorative bar heights (percent of the track) for the waveform. */
-const WAVEFORM_BARS = [
+/**
+ * Fixed decorative bar heights (percent of the track): the fallback for a
+ * note without peaks (older notes, older clients).
+ */
+export const WAVEFORM_BARS: readonly number[] = [
   35, 60, 45, 80, 55, 70, 40, 90, 50, 65, 30, 75, 48, 85, 42, 68, 38, 72, 52, 58,
 ];
+
+/** How many bars the wave draws. */
+export const VOICE_BAR_COUNT = 20;
+
+/** The lowest bar drawn from peaks (percent), so a quiet stretch still shows a mark. */
+const MIN_BAR = 8;
+
+/**
+ * The bar heights (percent) to draw: the note's peaks resampled to the bar
+ * count when it has them, else the fixed fallback. Pure.
+ */
+export function voiceBars(peaks: readonly number[] | undefined): readonly number[] {
+  if (peaks === undefined || peaks.length === 0) return WAVEFORM_BARS;
+  return resamplePeaks(peaks, VOICE_BAR_COUNT).map((height) => Math.max(MIN_BAR, height));
+}
 
 /** The label when no length is known yet. */
 export const UNKNOWN_DURATION = '--:--';
@@ -175,8 +203,8 @@ export function createPlaybackRegistry(): {
 export const voicePlayback = createPlaybackRegistry();
 
 /** Whether a waveform bar sits inside the played-so-far share (progress 0-100). */
-export function barPlayed(index: number, progress: number): boolean {
-  return progress > 0 && ((index + 0.5) / WAVEFORM_BARS.length) * 100 <= progress;
+export function barPlayed(index: number, progress: number, count = VOICE_BAR_COUNT): boolean {
+  return progress > 0 && ((index + 0.5) / count) * 100 <= progress;
 }
 
 /** Playback speeds the pill cycles through, in order. */
@@ -417,10 +445,21 @@ function OwnTranscriptStatus({ view }: { view: TranscriptView }): ReactElement |
   return null;
 }
 
+/** An own note's upload: the ring (active) or, once done, play in its place. */
+export interface VoiceUpload {
+  /** True while the file still uploads: the X shows, the wave is a flat line. */
+  active: boolean;
+  /** Upload progress 0..1; null while unknown (the ring spins). */
+  progress: number | null;
+  onCancel?: (() => void) | undefined;
+}
+
 export function VoiceNote({
   url,
   name,
   durationMs,
+  peaks,
+  upload,
   spacer,
   messageId,
   mine = false,
@@ -433,6 +472,10 @@ export function VoiceNote({
   name: string;
   /** The stored length from the attachment meta; absent on older notes. */
   durationMs: number | undefined;
+  /** The recorded waveform (0..100 levels); absent on older notes. */
+  peaks?: readonly number[] | undefined;
+  /** An own note sent this session: its upload state (absent: a plain note). */
+  upload?: VoiceUpload | undefined;
   /** The bubble's inline time spacer, placed at the end of the last line. */
   spacer?: ReactNode;
   /** The recorded message's id: keys the played state and the transcript. */
@@ -539,7 +582,9 @@ export function VoiceNote({
     }
   };
 
-  const disabled = url === null;
+  const uploading = upload?.active === true;
+  const disabled = url === null || uploading;
+  const bars = voiceBars(peaks);
   const total = voiceTotalSeconds(durationMs, mediaSeconds);
   const shownSeconds = drag !== null && total !== null ? drag * total : current;
   const progress = voiceProgress(durationMs, mediaSeconds, shownSeconds);
@@ -668,15 +713,22 @@ export function VoiceNote({
     ) : null;
 
   // 44x44 hit area around the 36px square play control (primary button look).
-  const playButton = (
+  const playControl = (
     <button
       type="button"
       onClick={toggle}
       disabled={disabled}
       aria-label={playing ? 'Pause voice note' : 'Play voice note'}
+      {...(uploading ? { 'aria-hidden': true, tabIndex: -1 } : {})}
       className={cn(
-        'group/play flex h-11 w-11 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-40',
-        received && '-ml-1',
+        'group/play flex h-11 w-11 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+        upload === undefined && received && '-ml-1',
+        upload === undefined
+          ? 'disabled:opacity-40'
+          : cn(
+              'transition-[opacity,visibility] duration-150 motion-reduce:transition-none',
+              uploading ? 'invisible opacity-0' : url === null ? 'opacity-40' : 'opacity-100',
+            ),
       )}
     >
       <span className="flex h-9 w-9 items-center justify-center rounded-md bg-accent text-accent-fg group-hover/play:bg-accent-hover">
@@ -684,6 +736,25 @@ export function VoiceNote({
       </span>
     </button>
   );
+  // An own note sent this session: the play spot holds the ring while it
+  // uploads (centred, 48px over the 44px spot, so nothing moves), then play.
+  const playButton =
+    upload === undefined ? (
+      playControl
+    ) : (
+      <div
+        data-voice-play-slot={uploading ? 'upload' : 'play'}
+        className={cn('relative h-11 w-11 shrink-0', received && '-ml-1')}
+      >
+        {playControl}
+        <UploadRing
+          progress={upload.progress}
+          onCancel={upload.onCancel}
+          hidden={!uploading}
+          className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2"
+        />
+      </div>
+    );
 
   // The 44px photo slot: the sender photo (40px) with the mic badge, or while
   // playing the speed pill.
@@ -764,25 +835,49 @@ export function VoiceNote({
             {...wave}
             className="relative flex h-11 cursor-pointer touch-none select-none items-center [-webkit-touch-callout:none] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
-            <div className="flex h-6 w-full items-center gap-0.5" aria-hidden="true">
-              {WAVEFORM_BARS.map((height, index) => (
+            <div
+              data-voice-bars={peaks !== undefined && peaks.length > 0 ? 'peaks' : 'fallback'}
+              className={cn(
+                'flex h-6 w-full items-center gap-0.5',
+                upload !== undefined &&
+                  'transition-[opacity,visibility] duration-150 motion-reduce:transition-none',
+                uploading && 'invisible opacity-0',
+              )}
+              aria-hidden="true"
+            >
+              {bars.map((height, index) => (
                 <span
                   key={index}
-                  data-played={barPlayed(index, progress) ? '' : undefined}
+                  data-played={barPlayed(index, progress, bars.length) ? '' : undefined}
                   className={cn(
                     'flex-1 rounded-sm',
-                    barPlayed(index, progress) ? 'bg-accent' : 'bg-fg-3',
+                    barPlayed(index, progress, bars.length) ? 'bg-accent' : 'bg-fg-3',
                   )}
                   style={{ height: `${height}%` }}
                 />
               ))}
             </div>
+            {upload !== undefined ? (
+              // While uploading: a plain flat line, the wave's full length.
+              <span
+                aria-hidden="true"
+                data-voice-flat={uploading ? 'shown' : 'hidden'}
+                className={cn(
+                  'pointer-events-none absolute inset-x-0 top-1/2 -mt-px h-0.5 rounded-full bg-fg-3',
+                  'transition-opacity duration-150 motion-reduce:transition-none',
+                  uploading ? 'opacity-100' : 'opacity-0',
+                )}
+              />
+            ) : null}
             <span
               aria-hidden="true"
               data-voice-dot=""
               className={cn(
                 'pointer-events-none absolute top-1/2 -ml-1.5 -mt-1.5 h-3 w-3 rounded-full',
                 mine ? 'bg-accent-fg' : 'bg-accent',
+                upload !== undefined &&
+                  'transition-opacity duration-150 motion-reduce:transition-none',
+                uploading && 'opacity-0',
               )}
               style={{ left: `${progress}%` }}
             />

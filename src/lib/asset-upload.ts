@@ -94,6 +94,8 @@ export interface XhrTransport {
   traceId: string;
   /** Upload progress as a fraction 0..1; only called when the size is computable. */
   onProgress?: (fraction: number) => void;
+  /** Aborting it aborts the request at once (the POST then rejects like a transport failure). */
+  signal?: AbortSignal;
   createRequest?: () => XMLHttpRequest;
 }
 
@@ -133,7 +135,16 @@ export function xhrPost(
   transport: XhrTransport,
 ): Promise<UploadResponse> {
   return new Promise((resolve, reject) => {
+    const signal = transport.signal;
+    // Cancelled before it started: no request at all.
+    if (signal?.aborted === true) {
+      reject(new Error('upload aborted'));
+      return;
+    }
     const request = transport.createRequest?.() ?? new XMLHttpRequest();
+    const onAbort = (): void => request.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const release = (): void => signal?.removeEventListener('abort', onAbort);
     request.open('POST', endpoint);
     for (const [name, value] of Object.entries(headers)) request.setRequestHeader(name, value);
     request.setRequestHeader(TRACE_ID_HEADER, transport.traceId);
@@ -145,12 +156,17 @@ export function xhrPost(
         }
       };
     }
-    request.onload = () =>
+    request.onload = () => {
+      release();
       resolve({
         ok: request.status >= 200 && request.status < 300,
         body: parseXhrBody(request.responseText),
       });
-    const fail = (): void => reject(new Error('upload transport failed'));
+    };
+    const fail = (): void => {
+      release();
+      reject(new Error('upload transport failed'));
+    };
     request.onerror = fail;
     request.onabort = fail;
     request.ontimeout = fail;

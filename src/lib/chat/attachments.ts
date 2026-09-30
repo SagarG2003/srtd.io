@@ -20,6 +20,7 @@ import {
   type Precheck,
   type UploadTransport,
 } from '@/lib/asset-upload';
+import { parsePeaks } from '@/lib/chat/waveform-peaks';
 
 /**
  * One Sorted asset version referenced by a chat message: the asset VERSION id to
@@ -41,6 +42,11 @@ export interface MessageAttachment {
   /** Recorded length of a voice note in ms; absent for non-audio attachments. */
   durationMs?: number;
   /**
+   * A recorded voice note's waveform: up to 48 levels 0..100 from the real
+   * audio (waveform-peaks.ts). Absent on older notes and non-audio files.
+   */
+  peaks?: number[];
+  /**
    * Sender-side only: the picked file behind an instant send. Present from the
    * Send tap; `assetId` stays '' until the background upload returns the version
    * id. Never on the wire, in attachment_meta, or in localStorage.
@@ -48,10 +54,14 @@ export interface MessageAttachment {
   local?: LocalAttachmentFile;
 }
 
-/** Upload one file with progress (0..1); never throws (asset-upload Result contract). */
+/**
+ * Upload one file with progress (0..1); never throws (asset-upload Result
+ * contract). An aborted `signal` stops the request at once (a cancelled send).
+ */
 export type AttachmentUploader = (
   file: File,
   onProgress?: (fraction: number) => void,
+  signal?: AbortSignal,
 ) => Promise<ChatAttachmentUpload>;
 
 /** The local half of an attachment sent before its upload finished. */
@@ -64,6 +74,11 @@ export interface LocalAttachmentFile {
   previewUrl: string | null;
   /** Upload progress 0..1; 1 once the version id is known. */
   progress: number;
+  /**
+   * True while this file's request is running (progress is real); absent or
+   * false while it waits its turn, backs off or the device is offline.
+   */
+  uploading?: boolean;
   /** Uploads the file; carried in memory with the send (never persisted). */
   upload?: AttachmentUploader;
 }
@@ -104,6 +119,31 @@ export function awaitsUpload(attachment: MessageAttachment): boolean {
 export function uploadProgress(attachment: MessageAttachment): number | null {
   if (attachment.local === undefined || attachment.assetId !== '') return null;
   return Math.min(Math.max(attachment.local.progress, 0), 1);
+}
+
+/**
+ * The upload ring of a set of attachments (one message, or one tile): null when
+ * none awaits upload (no ring). Otherwise the share of bytes sent across all of
+ * them (an uploaded one counts in full; sizes unknown weigh one each), or null
+ * while no request is running (queued, waiting, backoff, offline: the ring
+ * spins). Pure.
+ */
+export function uploadRing(
+  attachments: readonly MessageAttachment[],
+): { progress: number | null } | null {
+  if (!attachments.some(awaitsUpload)) return null;
+  if (!attachments.some((a) => awaitsUpload(a) && a.local?.uploading === true)) {
+    return { progress: null };
+  }
+  const known = attachments.every((a) => (a.size ?? 0) > 0);
+  let total = 0;
+  let sent = 0;
+  for (const a of attachments) {
+    const weight = known ? (a.size ?? 0) : 1;
+    total += weight;
+    sent += weight * (awaitsUpload(a) ? Math.min(Math.max(a.local?.progress ?? 0, 0), 1) : 1);
+  }
+  return { progress: total > 0 ? Math.min(Math.max(sent / total, 0), 1) : 0 };
 }
 
 /** The attachment without its local half: what is persisted and recorded. */
@@ -190,6 +230,7 @@ export function buildAttachmentExt(attachments: readonly MessageAttachment[]): A
       mime: a.mime,
       ...(a.size !== undefined ? { size: a.size } : {}),
       ...(a.durationMs !== undefined ? { durationMs: a.durationMs } : {}),
+      ...(a.peaks !== undefined ? { peaks: [...a.peaks] } : {}),
     })),
   };
 }
@@ -201,6 +242,8 @@ export type AttachmentMetaEntry = {
   size: number;
   duration_ms?: number;
   transcript?: string;
+  /** A voice note's waveform (waveform-peaks.ts); absent on older notes. */
+  peaks?: number[];
 };
 
 /** chat_messages.attachment_meta: render metadata keyed by asset (version) id. */
@@ -219,6 +262,7 @@ export function buildAttachmentMeta(attachments: readonly MessageAttachment[]): 
       name: a.name,
       size: a.size ?? 0,
       ...(a.durationMs !== undefined ? { duration_ms: a.durationMs } : {}),
+      ...(a.peaks !== undefined ? { peaks: [...a.peaks] } : {}),
     };
   }
   return meta;
@@ -243,6 +287,7 @@ export function parseAttachmentMeta(
     const entry = raw as Record<string, unknown>;
     const name = typeof entry.name === 'string' ? entry.name : '';
     const mime = typeof entry.mime === 'string' ? entry.mime : '';
+    const peaks = parsePeaks(entry.peaks);
     return {
       assetId,
       name,
@@ -250,6 +295,7 @@ export function parseAttachmentMeta(
       ...(typeof entry.transcript === 'string' ? { transcript: entry.transcript } : {}),
       ...(typeof entry.size === 'number' ? { size: entry.size } : {}),
       ...(typeof entry.duration_ms === 'number' ? { durationMs: entry.duration_ms } : {}),
+      ...(peaks !== undefined ? { peaks } : {}),
     };
   });
 }
@@ -374,7 +420,19 @@ export function parseAttachments(ext: unknown): MessageAttachment[] {
   const record = ext as Record<string, unknown>;
   const meta = record.attachment_meta;
   if (Array.isArray(meta)) {
-    const parsed = meta.filter(isMessageAttachment);
+    // Only known keys are kept; `peaks` that do not validate are dropped.
+    const parsed = meta.filter(isMessageAttachment).map((a): MessageAttachment => {
+      const peaks = parsePeaks((a as { peaks?: unknown }).peaks);
+      return {
+        assetId: a.assetId,
+        name: a.name,
+        mime: a.mime,
+        ...(a.transcript !== undefined ? { transcript: a.transcript } : {}),
+        ...(a.size !== undefined ? { size: a.size } : {}),
+        ...(a.durationMs !== undefined ? { durationMs: a.durationMs } : {}),
+        ...(peaks !== undefined ? { peaks } : {}),
+      };
+    });
     if (parsed.length > 0) return parsed;
   }
   const ids = record.attachment_asset_ids;

@@ -6,9 +6,12 @@
 //
 // An own instant send renders from its local preview (the picked file's object
 // URL) for the whole session, before and after it records, so the tile never
-// swaps to the presigned URL. While its upload runs the image is dimmed with a
-// thin progress bar along the bottom; the bar's width is the only thing that
-// animates, and the tile keeps its size when the upload completes.
+// swaps to the presigned URL. While its upload runs the image is dimmed and an
+// UploadRing (X in a circle, ring = progress; tap cancels the send) sits
+// centred on it: one ring over a whole album (progress across every
+// attachment's bytes), one in a file chip's icon spot, one in a voice note's
+// play spot. When the upload finishes the X is gone; only opacity and the
+// ring's stroke animate, and nothing changes size.
 //
 // Chat groups a message's images into one album (AlbumGrid): the grid is sized
 // from the image COUNT alone, so first paint is final and a presigned image
@@ -19,6 +22,7 @@ import { useEffect, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { IconFile, IconImage } from '@/components/ui/icons';
 import { VoiceNote } from '@/components/chat/VoiceNote';
+import { UploadRing } from '@/components/chat/UploadRing';
 import { fileExtension } from '@/lib/assets';
 import { cn } from '@/lib/cn';
 import type { PresignCache } from '@/lib/asset-presign';
@@ -28,6 +32,7 @@ import {
   localAudioUrl,
   splitAlbum,
   uploadProgress,
+  uploadRing,
   type MessageAttachment,
 } from '@/lib/chat/attachments';
 
@@ -74,45 +79,56 @@ export function useAttachmentUrl(
   return { url, failed };
 }
 
+/** Centres an UploadRing over its (relative) container without taking layout space. */
+const RING_CENTRE = 'absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2';
+
 /**
- * The upload bar along a tile's bottom edge: a track and a fill whose width is
- * the progress (the only animated property). White with opacity sits on the
- * image or on the own bubble's fill (white is accent-fg in both themes), so it
- * reads the same in light and dark.
+ * The ring for these attachments while the send can still be cancelled: null
+ * when nothing is uploading or the bubble offers no cancel (sent, failed, a
+ * peer's message, comments). Pure.
  */
-function UploadBar({ progress }: { progress: number }): ReactElement {
-  return (
-    <span
-      role="progressbar"
-      aria-label="Uploading"
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={Math.round(progress * 100)}
-      className="absolute inset-x-0 bottom-0 h-[3px] bg-white/35"
-    >
-      <span
-        className="block h-full bg-white transition-[width]"
-        style={{ width: `${progress * 100}%` }}
-      />
-    </span>
-  );
+export function ringFor(
+  attachments: readonly MessageAttachment[],
+  onCancelUpload: (() => void) | undefined,
+): { progress: number | null } | null {
+  return onCancelUpload !== undefined ? uploadRing(attachments) : null;
 }
 
 function FileChip({
   name,
   url,
-  progress,
+  ring,
+  onCancelUpload,
 }: {
   name: string;
   url: string | null;
-  progress?: number | undefined;
+  /** The upload ring in the icon's spot while the file uploads; null: the icon. */
+  ring?: { progress: number | null } | null | undefined;
+  onCancelUpload?: (() => void) | undefined;
 }): ReactElement {
   const ext = fileExtension(name);
   const label = name.trim() !== '' ? name : 'Attachment';
+  const uploading = ring != null;
   return (
     <div className="relative flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-panel px-2.5 py-2">
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-panel-3 text-fg-3">
-        <IconFile size={18} />
+      {/* The 36px icon spot keeps its size; the 48px ring is centred over it. */}
+      <span className="relative flex h-9 w-9 shrink-0 items-center justify-center">
+        <span
+          className={cn(
+            'flex h-9 w-9 items-center justify-center rounded-md bg-panel-3 text-fg-3',
+            'transition-opacity duration-150 motion-reduce:transition-none',
+            uploading && 'opacity-0',
+          )}
+        >
+          <IconFile size={18} />
+        </span>
+        {uploading ? (
+          <UploadRing
+            progress={ring.progress}
+            onCancel={onCancelUpload}
+            className={cn(RING_CENTRE, 'z-10')}
+          />
+        ) : null}
       </span>
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-xs font-medium text-fg" title={label}>
@@ -132,7 +148,6 @@ function FileChip({
           <span className={OPEN_BUTTON}>Open</span>
         </a>
       ) : null}
-      {progress !== undefined ? <UploadBar progress={progress} /> : null}
     </div>
   );
 }
@@ -219,6 +234,7 @@ function AttachmentItem({
   onImageClick,
   voiceSpacer,
   voice,
+  onCancelUpload,
 }: {
   attachment: MessageAttachment;
   cache: PresignCache;
@@ -226,7 +242,10 @@ function AttachmentItem({
   onImageClick?: (() => void) | undefined;
   voiceSpacer?: ReactNode;
   voice?: VoiceContext | undefined;
+  /** An own send that can still be cancelled: the X cancels it. */
+  onCancelUpload?: (() => void) | undefined;
 }): ReactElement {
+  const ring = ringFor([attachment], onCancelUpload);
   // The render layer presigns the attachment's VERSION id (assetId carries the
   // asset_versions.id) through the shared cache, which dedupes in-flight ids.
   // A local preview (or an own voice note's recorded file) is the source for
@@ -277,28 +296,45 @@ function AttachmentItem({
               view.progress !== null && 'brightness-75',
             )}
           />
-          {view.progress !== null ? <UploadBar progress={view.progress} /> : null}
+          {ring !== null ? (
+            <UploadRing
+              progress={ring.progress}
+              onCancel={onCancelUpload}
+              className={RING_CENTRE}
+            />
+          ) : null}
         </div>
       );
     case 'image-pending':
       return <div className="h-32 w-44 animate-pulse rounded-lg border border-border bg-panel-2" />;
     case 'audio':
-      // One wrapper in both states; the upload bar is absolute, so the bubble
-      // keeps its size when the upload completes.
+      // One wrapper in both states; the ring sits in the play spot, so the
+      // bubble keeps its size when the upload completes (X becomes play).
       return (
-        <div data-voice-upload={view.progress !== null ? '' : undefined} className="relative">
+        <div data-voice-upload={ring !== null ? '' : undefined} className="relative">
           <VoiceNote
             url={view.url}
             name={view.name}
             durationMs={view.durationMs}
+            peaks={attachment.peaks}
+            {...(onCancelUpload !== undefined && attachment.local !== undefined
+              ? {
+                  upload: {
+                    active: ring !== null,
+                    progress: ring?.progress ?? null,
+                    onCancel: onCancelUpload,
+                  },
+                }
+              : {})}
             {...(voiceSpacer !== undefined ? { spacer: voiceSpacer } : {})}
             {...(voice !== undefined ? voice : {})}
           />
-          {view.progress !== null ? <UploadBar progress={view.progress} /> : null}
         </div>
       );
     case 'file':
-      return <FileChip name={view.name} url={view.url} progress={view.progress} />;
+      return (
+        <FileChip name={view.name} url={view.url} ring={ring} onCancelUpload={onCancelUpload} />
+      );
   }
 }
 
@@ -351,7 +387,8 @@ export function albumTileLabel(index: number, count: number): string {
  * The image inside one album tile. It fills the tile absolutely (object-cover),
  * so the tile's size comes from the grid, never from the image. Until the
  * presigned image arrives the tile's own bg-panel-3 shows; an own instant send
- * shows its local preview, dimmed with the upload bar while it uploads. A failed
+ * shows its local preview, dimmed while it uploads (the album's one ring sits
+ * over the grid). A failed
  * or disabled presign keeps the tile with a centred image glyph (the lightbox
  * owns the retry).
  */
@@ -395,7 +432,6 @@ function AlbumTileImage({
           <IconImage size={22} />
         </span>
       ) : null}
-      {progress !== null ? <UploadBar progress={progress} /> : null}
     </>
   );
 }
@@ -412,11 +448,16 @@ export function AlbumGrid({
   cache,
   presignEnabled,
   onOpen,
+  ring = null,
+  onCancelUpload,
 }: {
   images: readonly MessageAttachment[];
   cache: PresignCache;
   presignEnabled: boolean;
   onOpen: (index: number) => void;
+  /** The one upload ring over the grid (progress across the whole message); null: none. */
+  ring?: { progress: number | null } | null;
+  onCancelUpload?: (() => void) | undefined;
 }): ReactElement {
   const count = images.length;
   return (
@@ -424,7 +465,7 @@ export function AlbumGrid({
       data-album={count}
       className={cn(
         albumGridClass(count),
-        'w-[320px] max-w-full gap-[2px] overflow-hidden rounded-[15px]',
+        'relative w-[320px] max-w-full gap-[2px] overflow-hidden rounded-[15px]',
       )}
     >
       {albumTiles(count).map((tile) => {
@@ -453,6 +494,13 @@ export function AlbumGrid({
           </button>
         );
       })}
+      {ring !== null ? (
+        <UploadRing
+          progress={ring.progress}
+          onCancel={onCancelUpload}
+          className={cn(RING_CENTRE, 'z-10')}
+        />
+      ) : null}
     </div>
   );
 }
@@ -466,6 +514,7 @@ export function MessageAttachments({
   voice,
   album,
   caption,
+  onCancelUpload,
 }: {
   attachments: readonly MessageAttachment[];
   cache: PresignCache;
@@ -489,6 +538,11 @@ export function MessageAttachments({
   voiceSpacer?: ReactNode;
   /** Chat voice-only bubbles: the recorded message the note belongs to. */
   voice?: VoiceContext | undefined;
+  /**
+   * An own send whose upload can still be cancelled: each uploading photo,
+   * album, file or voice note shows the UploadRing, whose X calls this.
+   */
+  onCancelUpload?: (() => void) | undefined;
 }): ReactElement | null {
   if (attachments.length === 0) return null;
   if (album === true) {
@@ -505,6 +559,8 @@ export function MessageAttachments({
               const attachment = images[index];
               if (attachment !== undefined) onImageClick?.(attachment, index);
             }}
+            ring={ringFor(attachments, onCancelUpload)}
+            onCancelUpload={onCancelUpload}
           />
           {hasBelow ? (
             <div className="flex flex-col items-start gap-1.5 px-[9px] pb-[5px] pt-1.5">
@@ -515,6 +571,7 @@ export function MessageAttachments({
                   attachment={attachment}
                   cache={cache}
                   presignEnabled={presignEnabled}
+                  onCancelUpload={onCancelUpload}
                 />
               ))}
             </div>
@@ -541,6 +598,7 @@ export function MessageAttachments({
           }
           {...(voiceSpacer !== undefined ? { voiceSpacer } : {})}
           voice={voice}
+          onCancelUpload={onCancelUpload}
         />
       ))}
     </div>
