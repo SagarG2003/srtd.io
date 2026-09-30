@@ -46,8 +46,11 @@ export interface ChatAttachments {
    * XHR status, and a 401 refreshes the session and retries once.
    */
   uploadFile: AttachmentUploader;
-  /** Transcribe a voice note's audio on tap; never throws (Result contract). */
-  transcribe: (blob: Blob) => Promise<TranscribeResult>;
+  /**
+   * Transcribe a voice note on tap from its presigned URL (the Worker fetches
+   * the audio); never throws (Result contract).
+   */
+  transcribe: (url: string) => Promise<TranscribeResult>;
   /** Whether tap-to-transcribe is configured (transcribe endpoint set). */
   canTranscribe: boolean;
 }
@@ -130,7 +133,7 @@ export function useChatAttachments(): ChatAttachments {
   );
 
   const transcribe = useCallback(
-    async (blob: Blob): Promise<TranscribeResult> => {
+    async (url: string): Promise<TranscribeResult> => {
       if (transcribeEndpoint === undefined || transcribeEndpoint === '') {
         return { ok: false, message: 'Transcription is unavailable.' };
       }
@@ -139,7 +142,7 @@ export function useChatAttachments(): ChatAttachments {
         return { ok: false, message: 'Your session expired. Sign in again.' };
       }
       return transcribeAudio({
-        blob,
+        url,
         endpoint: transcribeEndpoint,
         token,
         fetcher: (input, init) => fetchWithTrace(input, init, newTrace()),

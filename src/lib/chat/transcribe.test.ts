@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchAudioBlob, TRANSCRIBE_TIMEOUT_MS, transcribeAudio } from '@/lib/chat/transcribe';
+import { TRANSCRIBE_TIMEOUT_MS, transcribeAudio } from '@/lib/chat/transcribe';
 
 // The fetcher is injected, so no network is touched: each test supplies a stub
 // that records the request and returns a canned Response. The contract under
@@ -13,14 +13,14 @@ function jsonResponse(body: unknown, ok = true): Response {
   } as unknown as Response;
 }
 
-const blob = new Blob(['audio-bytes'], { type: 'audio/webm' });
+const url = 'https://acct.r2.cloudflarestorage.com/assets-ws/voice.webm?X-Amz-Signature=sig';
 
 describe('transcribeAudio', () => {
-  it('returns the transcript and carries the Bearer token + blob body on a 200', async () => {
+  it('returns the transcript and sends the Bearer token + { url } JSON on a 200', async () => {
     let seenInput = '';
     let seenInit: RequestInit | null = null;
     const result = await transcribeAudio({
-      blob,
+      url,
       endpoint: 'https://transcribe.example.dev',
       token: 'tok-123',
       fetcher: async (input, init) => {
@@ -33,14 +33,14 @@ describe('transcribeAudio', () => {
     expect(seenInput).toBe('https://transcribe.example.dev');
     const init = seenInit as unknown as RequestInit;
     expect((init.headers as Record<string, string>).authorization).toBe('Bearer tok-123');
-    expect((init.headers as Record<string, string>)['content-type']).toBe('audio/webm');
-    expect(init.body).toBe(blob);
+    expect((init.headers as Record<string, string>)['content-type']).toBe('application/json');
+    expect(JSON.parse(init.body as string)).toEqual({ url });
     expect(init.method).toBe('POST');
   });
 
   it('returns ok:false on a non-ok response', async () => {
     const result = await transcribeAudio({
-      blob,
+      url,
       endpoint: 'https://transcribe.example.dev',
       token: 'tok',
       fetcher: async () => jsonResponse({ ok: true, transcript: 'x' }, false),
@@ -50,7 +50,7 @@ describe('transcribeAudio', () => {
 
   it('returns ok:false (never throws) when the fetcher throws', async () => {
     const result = await transcribeAudio({
-      blob,
+      url,
       endpoint: 'https://transcribe.example.dev',
       token: 'tok',
       fetcher: async () => {
@@ -62,7 +62,7 @@ describe('transcribeAudio', () => {
 
   it('returns ok:false on malformed JSON / missing transcript', async () => {
     const missing = await transcribeAudio({
-      blob,
+      url,
       endpoint: 'https://transcribe.example.dev',
       token: 'tok',
       fetcher: async () => jsonResponse({ ok: true }),
@@ -70,7 +70,7 @@ describe('transcribeAudio', () => {
     expect(missing.ok).toBe(false);
 
     const malformed = await transcribeAudio({
-      blob,
+      url,
       endpoint: 'https://transcribe.example.dev',
       token: 'tok',
       fetcher: async () =>
@@ -94,7 +94,7 @@ describe('tap-to-transcribe timeouts and audio fetch', () => {
     vi.useFakeTimers();
     expect(TRANSCRIBE_TIMEOUT_MS).toBe(20_000);
     const pending = transcribeAudio({
-      blob,
+      url,
       endpoint: 'https://transcribe.example.dev',
       token: 'tok',
       fetcher: (_input, init) =>
@@ -104,42 +104,5 @@ describe('tap-to-transcribe timeouts and audio fetch', () => {
     });
     await vi.advanceTimersByTimeAsync(TRANSCRIBE_TIMEOUT_MS);
     expect((await pending).ok).toBe(false);
-  });
-
-  it('reads the presigned audio and re-types it with the attachment mime', async () => {
-    let seenUrl = '';
-    const out = await fetchAudioBlob({
-      url: 'https://r2.example/presigned',
-      mime: 'audio/webm',
-      fetcher: async (input) => {
-        seenUrl = input;
-        return { ok: true, blob: async () => new Blob(['abc']) } as unknown as Response;
-      },
-    });
-    expect(seenUrl).toBe('https://r2.example/presigned');
-    expect(out.type).toBe('audio/webm');
-    expect(out.size).toBe(3);
-  });
-
-  it('throws on a non-ok audio response or after the 20s timeout', async () => {
-    await expect(
-      fetchAudioBlob({
-        url: 'u',
-        mime: 'audio/webm',
-        fetcher: async () => ({ ok: false, status: 403 }) as unknown as Response,
-      }),
-    ).rejects.toThrow();
-    vi.useFakeTimers();
-    const pending = fetchAudioBlob({
-      url: 'u',
-      mime: 'audio/webm',
-      fetcher: (_input, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
-        }),
-    });
-    const settled = expect(pending).rejects.toThrow('aborted');
-    await vi.advanceTimersByTimeAsync(TRANSCRIBE_TIMEOUT_MS);
-    await settled;
   });
 });

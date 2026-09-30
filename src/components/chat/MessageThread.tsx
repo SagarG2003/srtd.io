@@ -81,8 +81,6 @@ import {
 } from '@/lib/chat/thread';
 import { classifyAttachment, splitAlbum, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
-import { fetchWithTrace } from '@/lib/fetch';
-import { fetchAudioBlob } from '@/lib/chat/transcribe';
 import {
   canOfferTranscribe,
   transcribeVoiceNote,
@@ -3464,20 +3462,15 @@ export function resetSelectionHistory(): void {
 export function MessageThread(props: MessageThreadProps): ReactElement {
   const { canAttach, presignEnabled, presignCache, uploadFile, transcribe, canTranscribe } =
     useChatAttachments();
-  // Transcribe on tap: this device only. The bytes come from the same
-  // presigned URL the player uses; the result lives in the transcript store.
+  // Transcribe on tap: this device only. The Worker fetches the audio from the
+  // same presigned URL the player uses; the result lives in the transcript store.
   const onTranscribe = useCallback(
     (message: ThreadMessage): void => {
       const only = message.attachments[0];
       if (only === undefined) return;
       void transcribeVoiceNote({
         messageId: message.id,
-        fetchAudio: async () =>
-          fetchAudioBlob({
-            url: (await presignCache.resolve(only.assetId)).url,
-            mime: only.mime,
-            fetcher: (input, init) => fetchWithTrace(input, init),
-          }),
+        fetchAudio: async () => (await presignCache.resolve(only.assetId)).url,
         transcribe,
       });
     },
