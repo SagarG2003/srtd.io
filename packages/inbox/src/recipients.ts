@@ -116,6 +116,8 @@ export async function computeRecipients(
     }
 
     case 'assets': {
+      // A chat file stays in its chat: it never announces itself in the inbox.
+      if (event.row.origin === 'chat') return [];
       const agency = await reader.membersByRole(event.row.workspace_id, AGENCY_ROLES);
       return build(agency, 'asset_uploaded', 'active');
     }

@@ -12,6 +12,7 @@ import type { Database, Json } from '@srtdio/schemas';
 import {
   err,
   ok,
+  type AssetOrigin,
   type AssetRow,
   type AssetVersionRow,
   type CreateFolderInput,
@@ -90,6 +91,8 @@ export interface NewAsset {
   folderId?: string | null;
   /** Friendly shown name; null (default) means the asset shows its filename. */
   displayName?: string | null;
+  /** assets.origin; absent (link assets) means 'library'. */
+  origin?: AssetOrigin;
   folderPath?: string;
   tags?: string[];
 }
@@ -184,14 +187,26 @@ export interface AuditEntry {
   payload?: Record<string, unknown>;
 }
 
+/**
+ * The dedup lookup key. Matches only versions whose asset has the same origin;
+ * for 'chat' the asset must also be uploaded by `uploadedBy` (soft-deleted chat
+ * assets still match, since chat playback ignores deleted_at).
+ */
+export interface ShaLookup {
+  workspaceId: string;
+  sha256: string;
+  origin: AssetOrigin;
+  uploadedBy: string;
+}
+
 export interface AssetRepository {
   /** The workspace's permanent, stored R2 bucket name (workspaces.asset_bucket). */
   getAssetBucket(workspaceId: string): Promise<string>;
   getAsset(workspaceId: string, assetId: string): Promise<AssetRow | null>;
   /** A version by id, scoped to a workspace (cross-tenant reads return null). */
   getVersionById(workspaceId: string, versionId: string): Promise<VersionRef | null>;
-  /** Existing version anywhere in the workspace with this content hash (dedup). */
-  findVersionBySha(workspaceId: string, sha256: string): Promise<VersionRef | null>;
+  /** Existing same-origin version in the workspace with this content hash (dedup). */
+  findVersionBySha(lookup: ShaLookup): Promise<VersionRef | null>;
   /** Existing version of a specific asset with this content hash. */
   findVersionByShaForAsset(assetId: string, sha256: string): Promise<VersionRef | null>;
   maxVersionNumber(assetId: string): Promise<number>;
@@ -429,12 +444,20 @@ export function createSupabaseAssetRepository(env: SupabaseAssetEnv): AssetRepos
       return data ? toVersionRef(data as unknown as AssetVersionRow) : null;
     },
 
-    async findVersionBySha(workspaceId, sha256) {
-      const { data, error } = await client
+    async findVersionBySha({ workspaceId, sha256, origin, uploadedBy }) {
+      // The FK hint is required: assets.current_version_id also links the two
+      // tables. The inner join filters on the parent asset's origin (and, for
+      // chat, its uploader) so dedup never crosses origin or chat uploader.
+      let query = client
         .from('asset_versions')
-        .select(VERSION_COLS)
+        .select(`${VERSION_COLS},assets!asset_versions_asset_id_fkey!inner(origin,uploaded_by)`)
         .eq('workspace_id', workspaceId)
         .eq('sha256', sha256)
+        .eq('assets.origin', origin);
+      if (origin === 'chat') {
+        query = query.eq('assets.uploaded_by', uploadedBy);
+      }
+      const { data, error } = await query
         .order('version_number', { ascending: true })
         .limit(1)
         .maybeSingle();
@@ -482,6 +505,7 @@ export function createSupabaseAssetRepository(env: SupabaseAssetEnv): AssetRepos
         uploaded_by: asset.uploadedBy,
         folder_path: asset.folderPath ?? '/',
         tags: asset.tags ?? [],
+        origin: asset.origin ?? 'library',
       });
       if (error) {
         throw error;
@@ -711,6 +735,8 @@ export function createSupabaseAssetRepository(env: SupabaseAssetEnv): AssetRepos
         .update({ folder_id: input.targetFolderId })
         .in('id', input.assetIds)
         .eq('workspace_id', input.workspaceId)
+        // A chat file never goes into a folder: only library assets move.
+        .eq('origin', 'library')
         .is('deleted_at', null)
         .select('id');
       if (error) {
@@ -787,9 +813,19 @@ export class InMemoryAssetRepository implements AssetRepository {
     return Promise.resolve(match ? toVersionRef(match) : null);
   }
 
-  findVersionBySha(workspaceId: string, sha256: string): Promise<VersionRef | null> {
+  findVersionBySha({
+    workspaceId,
+    sha256,
+    origin,
+    uploadedBy,
+  }: ShaLookup): Promise<VersionRef | null> {
     const match = this.versions
-      .filter((v) => v.workspace_id === workspaceId && v.sha256 === sha256)
+      .filter((v) => {
+        if (v.workspace_id !== workspaceId || v.sha256 !== sha256) return false;
+        const asset = this.assets.get(v.asset_id);
+        if (!asset || asset.origin !== origin) return false;
+        return origin !== 'chat' || asset.uploaded_by === uploadedBy;
+      })
       .sort((a, b) => a.version_number - b.version_number)[0];
     return Promise.resolve(match ? toVersionRef(match) : null);
   }
@@ -825,7 +861,7 @@ export class InMemoryAssetRepository implements AssetRepository {
       uploaded_by: asset.uploadedBy,
       uploaded_at: now,
       deleted_at: null,
-      origin: 'library',
+      origin: asset.origin ?? 'library',
     });
     return Promise.resolve();
   }
@@ -1013,7 +1049,12 @@ export class InMemoryAssetRepository implements AssetRepository {
     let moved = 0;
     for (const id of input.assetIds) {
       const asset = this.assets.get(id);
-      if (asset && asset.workspace_id === input.workspaceId && asset.deleted_at === null) {
+      if (
+        asset &&
+        asset.workspace_id === input.workspaceId &&
+        asset.origin === 'library' &&
+        asset.deleted_at === null
+      ) {
         this.assets.set(id, { ...asset, folder_id: input.targetFolderId });
         moved += 1;
       }

@@ -7,7 +7,9 @@
 //   return summary.
 //
 // Dedup: identical content (same sha256) within a workspace never stores twice.
-// With no assetId, a matching hash returns the existing asset/version untouched.
+// With no assetId, a matching hash returns the existing asset/version untouched,
+// but only within the same origin: a chat upload reuses only the caller's own
+// chat version, and a library upload never reuses a chat version.
 // With an assetId, a matching hash returns that asset's existing version; a new
 // hash appends version N+1 and advances current_version_id.
 //
@@ -149,7 +151,9 @@ export async function runUploadPipeline(
   let existingAssetId: string | null = null;
   if (input.assetId !== undefined) {
     const asset = await repository.getAsset(input.workspaceId, input.assetId);
-    if (!asset) {
+    // A chat asset is never a version target: it reads as not found here so a
+    // library upload cannot append to (or probe for) a chat file.
+    if (!asset || asset.origin !== 'library') {
       return err({ code: 'not_found', message: 'Asset not found in this workspace.' });
     }
     existingAssetId = asset.id;
@@ -280,7 +284,12 @@ export async function runUploadPipeline(
   }
 
   // --- New-upload path: dedup by content, else create asset + version 1. ---
-  const dedup = await repository.findVersionBySha(input.workspaceId, sha256);
+  const dedup = await repository.findVersionBySha({
+    workspaceId: input.workspaceId,
+    sha256,
+    origin: input.origin,
+    uploadedBy: input.uploadedBy,
+  });
   if (dedup) {
     if (!isFileVersionRef(dedup)) {
       throw new Error(
@@ -342,6 +351,7 @@ export async function runUploadPipeline(
     uploadedBy: input.uploadedBy,
     folderId: input.folderId ?? null,
     displayName,
+    origin: input.origin,
   });
   await repository.insertVersion({
     id: versionId,
@@ -364,7 +374,7 @@ export async function runUploadPipeline(
     action: 'asset.create',
     entityId: assetId,
     actorUserId: input.uploadedBy,
-    payload: { version_id: versionId, version_number: versionNumber, sha256 },
+    payload: { version_id: versionId, version_number: versionNumber, sha256, origin: input.origin },
   });
 
   return ok(
@@ -460,7 +470,8 @@ export async function renameAsset(
   },
 ): Promise<Result<AssetMetaSummary, UploadError>> {
   const asset = await repository.getAsset(input.workspaceId, input.assetId);
-  if (!asset) {
+  // A chat file is not a library asset: it reads as not found here.
+  if (!asset || asset.origin !== 'library') {
     return err({ code: 'not_found', message: 'Asset not found in this workspace.' });
   }
 
@@ -493,7 +504,8 @@ export async function getAssetSummary(
   input: { workspaceId: string; assetId: string },
 ): Promise<Result<AssetSummary, UploadError>> {
   const asset = await repository.getAsset(input.workspaceId, input.assetId);
-  if (!asset || asset.current_version_id === null) {
+  // A chat file is not a library asset: it reads as not found (no existence leak).
+  if (!asset || asset.origin !== 'library' || asset.current_version_id === null) {
     return err({ code: 'not_found', message: 'Asset not found in this workspace.' });
   }
   const current = await repository.getVersionById(input.workspaceId, asset.current_version_id);

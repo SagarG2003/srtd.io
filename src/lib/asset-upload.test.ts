@@ -45,6 +45,7 @@ const baseConfig = (fetcher: UploadFetcher, filename = 'file.png'): UploadConfig
   endpoint: 'https://upload.example.workers.dev',
   token: 'tok',
   workspaceId: 'ws-1',
+  origin: 'library',
   filename,
   fetcher,
 });
@@ -104,6 +105,34 @@ describe('uploadErrorMessage maps worker codes to plain English', () => {
 });
 
 describe('uploadAssetFile', () => {
+  it.each(['library', 'chat'] as const)('sends the %s origin as a form field', async (origin) => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(201, { asset: { assetId: 'a-1', reused: false } }));
+    await uploadAssetFile(fakeFile('logo.png', 'image/png', 10), {
+      ...baseConfig(fetcher, 'logo.png'),
+      origin,
+    });
+    const [, init] = fetcher.mock.calls[0] as [string, RequestInit];
+    expect((init.body as FormData).get('origin')).toBe(origin);
+  });
+
+  it('requires origin at the type level', () => {
+    const fetcher = vi.fn();
+    // @ts-expect-error origin is required: no caller may forget it.
+    const missing: UploadConfig = {
+      endpoint: 'https://upload.example.workers.dev',
+      token: 'tok',
+      workspaceId: 'ws-1',
+      filename: 'logo.png',
+      fetcher,
+    };
+    // @ts-expect-error only 'library' | 'chat' are valid origins.
+    const invalid: UploadConfig = { ...baseConfig(fetcher), origin: 'assets' };
+    expect(missing).toBeDefined();
+    expect(invalid).toBeDefined();
+  });
+
   it('posts multipart {file, workspace_id} under the original filename and returns the asset', async () => {
     const fetcher = vi
       .fn()
@@ -677,6 +706,7 @@ function xhrConfig(request: ReturnType<typeof fakeXhr>, onProgress?: (f: number)
     endpoint: 'https://upload.example.workers.dev',
     token: 'tok',
     workspaceId: 'ws-1',
+    origin: 'library' as const,
     filename: 'logo.png',
     xhr: {
       traceId: 'trace-1',

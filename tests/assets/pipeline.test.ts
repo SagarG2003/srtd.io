@@ -20,6 +20,9 @@ import { GPS_SENTINEL, makeJpeg, svgBytes } from './fixtures';
 const WORKSPACE_A = '11111111-1111-7111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-7222-8222-222222222222';
 const USER = '33333333-3333-7333-8333-333333333333';
+const OTHER_USER = '55555555-5555-7555-8555-555555555555';
+/** Scan data that gives a different sha256 than the default fixture. */
+const OTHER_SCAN = new Uint8Array([0x50, 0x60, 0x70, 0x80]);
 const FOLDER = '88888888-8888-7888-8888-888888888888';
 const TRACE = '0192f8a0-7d3e-7c4b-9a1f-2b3c4d5e6f70';
 
@@ -62,6 +65,7 @@ function input(overrides: Partial<UploadInput> = {}): UploadInput {
     contentType: 'image/jpeg',
     bytes: makeJpeg(),
     traceId: TRACE,
+    origin: 'library',
     ...overrides,
   };
 }
@@ -271,6 +275,144 @@ describe('runUploadPipeline', () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.error.code).toBe('not_found');
+  });
+
+  it('records origin on the asset row and in the asset.create audit payload', async () => {
+    const lib = await runUploadPipeline(d, input());
+    const chat = await runUploadPipeline(
+      d,
+      input({ origin: 'chat', bytes: makeJpeg({ scan: OTHER_SCAN }) }),
+    );
+    expect(lib.ok && chat.ok).toBe(true);
+    if (!lib.ok || !chat.ok) return;
+    expect(d.repository.assets.get(lib.value.assetId)?.origin).toBe('library');
+    expect(d.repository.assets.get(chat.value.assetId)?.origin).toBe('chat');
+    expect(d.repository.audits.map((a) => a.payload?.origin)).toEqual(['library', 'chat']);
+  });
+
+  it('never appends a library version to a chat asset (reads as not_found)', async () => {
+    const chat = await runUploadPipeline(d, input({ origin: 'chat' }));
+    expect(chat.ok).toBe(true);
+    if (!chat.ok) return;
+    const res = await runUploadPipeline(
+      d,
+      input({ assetId: chat.value.assetId, bytes: makeJpeg({ scan: OTHER_SCAN }) }),
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error.code).toBe('not_found');
+    expect(d.repository.versions).toHaveLength(1);
+  });
+});
+
+describe('library-only asset routes never touch a chat file', () => {
+  let d: ReturnType<typeof deps>;
+  let chatAssetId: string;
+  beforeEach(async () => {
+    d = deps();
+    const chat = await runUploadPipeline(d, input({ origin: 'chat' }));
+    if (!chat.ok) throw new Error('chat upload failed');
+    chatAssetId = chat.value.assetId;
+  });
+
+  it('getAssetSummary reads a chat asset as not_found', async () => {
+    const res = await getAssetSummary(d.repository, {
+      workspaceId: WORKSPACE_A,
+      assetId: chatAssetId,
+    });
+    expect(res).toEqual({ ok: false, error: expect.objectContaining({ code: 'not_found' }) });
+  });
+
+  it('renameAsset refuses a chat asset as not_found and changes nothing', async () => {
+    const res = await renameAsset(d.repository, {
+      workspaceId: WORKSPACE_A,
+      assetId: chatAssetId,
+      name: 'Renamed',
+      actorUserId: USER,
+      traceId: TRACE,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error.code).toBe('not_found');
+    expect(d.repository.assets.get(chatAssetId)?.display_name).toBeNull();
+  });
+
+  it('moveAssetsToFolder never files a chat asset into a folder', async () => {
+    const lib = await runUploadPipeline(d, input({ bytes: makeJpeg({ scan: OTHER_SCAN }) }));
+    expect(lib.ok).toBe(true);
+    if (!lib.ok) return;
+    seedFolder(d.repository, 'Campaigns');
+    const moved = await d.repository.moveAssetsToFolder({
+      workspaceId: WORKSPACE_A,
+      assetIds: [chatAssetId, lib.value.assetId],
+      targetFolderId: FOLDER,
+      actorUserId: USER,
+      traceId: TRACE,
+    });
+    expect(moved).toBe(1);
+    expect(d.repository.assets.get(chatAssetId)?.folder_id).toBeNull();
+    expect(d.repository.assets.get(lib.value.assetId)?.folder_id).toBe(FOLDER);
+  });
+});
+
+describe('dedup never crosses origin or chat uploader', () => {
+  let d: ReturnType<typeof deps>;
+  beforeEach(() => {
+    d = deps();
+  });
+
+  it('a chat upload never reuses a library version', async () => {
+    const lib = await runUploadPipeline(d, input());
+    const chat = await runUploadPipeline(d, input({ origin: 'chat' }));
+    expect(lib.ok && chat.ok).toBe(true);
+    if (!lib.ok || !chat.ok) return;
+    expect(chat.value.reused).toBe(false);
+    expect(chat.value.assetId).not.toBe(lib.value.assetId);
+    expect(d.repository.assets.get(chat.value.assetId)?.origin).toBe('chat');
+  });
+
+  it('a library upload never reuses a chat version', async () => {
+    const chat = await runUploadPipeline(d, input({ origin: 'chat' }));
+    const lib = await runUploadPipeline(d, input());
+    expect(lib.ok && chat.ok).toBe(true);
+    if (!lib.ok || !chat.ok) return;
+    expect(lib.value.reused).toBe(false);
+    expect(lib.value.assetId).not.toBe(chat.value.assetId);
+    expect(d.repository.assets.get(lib.value.assetId)?.origin).toBe('library');
+  });
+
+  it("a chat upload reuses the same uploader's chat version", async () => {
+    const first = await runUploadPipeline(d, input({ origin: 'chat' }));
+    const again = await runUploadPipeline(d, input({ origin: 'chat' }));
+    expect(first.ok && again.ok).toBe(true);
+    if (!first.ok || !again.ok) return;
+    expect(again.value.reused).toBe(true);
+    expect(again.value.versionId).toBe(first.value.versionId);
+    expect(d.repository.assets.size).toBe(1);
+  });
+
+  it('the uploader still reuses their own soft-deleted chat version', async () => {
+    const first = await runUploadPipeline(d, input({ origin: 'chat' }));
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const row = d.repository.assets.get(first.value.assetId);
+    if (row) row.deleted_at = new Date().toISOString();
+    const again = await runUploadPipeline(d, input({ origin: 'chat' }));
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.value.reused).toBe(true);
+    expect(again.value.versionId).toBe(first.value.versionId);
+  });
+
+  it("another user's identical chat bytes create a new asset", async () => {
+    const mine = await runUploadPipeline(d, input({ origin: 'chat' }));
+    const theirs = await runUploadPipeline(d, input({ origin: 'chat', uploadedBy: OTHER_USER }));
+    expect(mine.ok && theirs.ok).toBe(true);
+    if (!mine.ok || !theirs.ok) return;
+    expect(theirs.value.reused).toBe(false);
+    expect(theirs.value.assetId).not.toBe(mine.value.assetId);
+    expect(theirs.value.r2Key).not.toBe(mine.value.r2Key);
+    expect(d.repository.assets.get(theirs.value.assetId)?.uploaded_by).toBe(OTHER_USER);
   });
 });
 

@@ -64,10 +64,19 @@ export type UploadOutcome =
 
 export type UploadConfig = UploadConfigBase & UploadTransport;
 
+/**
+ * Where an upload comes from, sent as the `origin` form field and stored as
+ * assets.origin. Only the chat composer (and its outbox) sends 'chat'; a chat
+ * file stays in its chat and never shows in Assets.
+ */
+export type AssetOrigin = 'library' | 'chat';
+
 interface UploadConfigBase {
   endpoint: string;
   token: string;
   workspaceId: string;
+  /** Required so no caller can forget it; the worker would default to 'library'. */
+  origin: AssetOrigin;
   /**
    * The ORIGINAL device filename, sent as the multipart part name and stored by
    * the worker as assets.filename. It keeps its extension so the type-icon /
@@ -197,6 +206,7 @@ export async function uploadAssetFile(file: File, config: UploadConfig): Promise
   const form = new FormData();
   form.append('file', file, config.filename);
   form.append('workspace_id', config.workspaceId);
+  form.append('origin', config.origin);
   if (config.displayName != null && config.displayName.trim() !== '') {
     form.append('display_name', config.displayName);
   }

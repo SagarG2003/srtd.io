@@ -3,6 +3,11 @@
 // It mirrors AssetsPage's wiring (one PresignCache for the surface, an upload
 // command that mints a fresh trace) so the composer and renderer stay free of
 // the env / supabase / fetch import chain and remain unit-testable in isolation.
+//
+// Two entry points share one implementation and differ only in the upload
+// origin: useChatAttachments (chat composer + outbox) uploads 'chat' files that
+// stay in their chat; useCommentAttachments (post/brief comments) uploads
+// 'library' files readable by the workspace.
 
 import { useCallback, useMemo } from 'react';
 import { isAuthRetryableFetchError } from '@supabase/supabase-js';
@@ -12,6 +17,7 @@ import { env } from '@/lib/env';
 import { useNewTrace } from '@/lib/trace-context';
 import { useWorkspace } from '@/lib/workspace-context';
 import { PresignCache } from '@/lib/asset-presign';
+import type { AssetOrigin } from '@/lib/asset-upload';
 import {
   CHAT_UPLOAD_FAILED,
   uploadChatAttachment,
@@ -63,7 +69,17 @@ async function refreshChatSession(): Promise<SessionRefresh> {
   return data.session !== null ? 'refreshed' : 'rejected';
 }
 
+/** Chat composer and outbox: uploads are chat-private (origin 'chat'). */
 export function useChatAttachments(): ChatAttachments {
+  return useAttachments('chat');
+}
+
+/** Comment composers: uploads are workspace library files (origin 'library'). */
+export function useCommentAttachments(): ChatAttachments {
+  return useAttachments('library');
+}
+
+function useAttachments(origin: AssetOrigin): ChatAttachments {
   const { workspaceId } = useWorkspace();
   const newTrace = useNewTrace();
   const uploadEndpoint = env.VITE_ASSET_UPLOAD_URL;
@@ -114,6 +130,7 @@ export function useChatAttachments(): ChatAttachments {
           const result = await uploadChatAttachment({
             file,
             workspaceId: workspace,
+            origin,
             token,
             endpoint,
             xhr: {
@@ -135,7 +152,7 @@ export function useChatAttachments(): ChatAttachments {
       };
       return uploadWithSessionRetry(attempt, refreshChatSession, signal);
     },
-    [uploadEndpoint, workspaceId, newTrace],
+    [uploadEndpoint, workspaceId, newTrace, origin],
   );
 
   const transcribe = useCallback(

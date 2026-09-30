@@ -14,6 +14,11 @@
 // workspace_members (membership is not in the JWT), not an RLS side effect, so
 // the lookup uses the service role and the worker gates access itself.
 //
+// A chat-origin version is gated by chat membership instead: one extra
+// service-role RPC (chat_attachment_readable) per presign, on chat files only.
+// A caller it rejects gets the exact non-member 403, so a chat file's existence
+// is never revealed. Library versions keep the workspace-member check.
+//
 // This is a read/query endpoint: no idempotency key, no state mutation, no
 // audit row. Expected failures (missing/invalid token, unknown version,
 // non-member) are returned as typed Results and mapped to 4xx; system faults
@@ -24,7 +29,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Database } from '@srtdio/schemas';
 import { R2StorageClient } from '@srtdio/storage';
 import { tracedFetch } from '@/server/traced-fetch';
-import { err, ok, type Result } from '@/server/assets/types';
+import { err, ok, type AssetOrigin, type Result } from '@/server/assets/types';
 import { extractTraceId } from '@/server/trace';
 import { logger } from '@/server/logger';
 import { TRACE_ID_HEADER } from '@/lib/trace';
@@ -84,6 +89,8 @@ const STATUS_BY_CODE: Record<ReadErrorCode, number> = {
 export interface AssetVersionLocator {
   workspaceId: string;
   bucket: string | null;
+  /** The parent asset's origin; 'chat' switches the gate to chat membership. */
+  origin: AssetOrigin;
   kind: string;
   r2Key: string | null;
   /** Version mime type; drives the download filename's extension. Optional. */
@@ -103,7 +110,16 @@ export interface AssetReadStore {
   findVersion(assetVersionId: string): Promise<AssetVersionLocator | null>;
   /** True iff the user has an active membership in the workspace. */
   isActiveMember(input: { userId: string; workspaceId: string }): Promise<boolean>;
+  /**
+   * True iff the user may read this chat attachment (its uploader, or a member of
+   * a chat holding a live message with it, after their clear point). Throws on
+   * an RPC error so the worker answers 5xx and never signs.
+   */
+  isChatAttachmentReadable(input: { userId: string; assetVersionId: string }): Promise<boolean>;
 }
+
+/** The single forbidden error for every denied read, chat or library alike. */
+const FORBIDDEN: ReadError = { code: 'forbidden', message: 'Not a member of this workspace.' };
 
 /** Mints a presigned GET URL for an object. Implemented by R2StorageClient. */
 export interface PresignedUrlSigner {
@@ -202,12 +218,18 @@ export async function authorizeAndSign(
     throw new Error(`asset_version ${input.assetVersionId} is missing workspace_id`);
   }
 
-  const member = await deps.store.isActiveMember({
-    userId: input.userId,
-    workspaceId: version.workspaceId,
-  });
-  if (!member) {
-    return err({ code: 'forbidden', message: 'Not a member of this workspace.' });
+  const allowed =
+    version.origin === 'chat'
+      ? await deps.store.isChatAttachmentReadable({
+          userId: input.userId,
+          assetVersionId: input.assetVersionId,
+        })
+      : await deps.store.isActiveMember({
+          userId: input.userId,
+          workspaceId: version.workspaceId,
+        });
+  if (!allowed) {
+    return err(FORBIDDEN);
   }
 
   if (version.kind === 'link' || version.r2Key === null) {
@@ -373,16 +395,23 @@ async function readRequestBody(request: Request): Promise<Result<ReadRequest, Re
  * Service-role-backed store. The service role bypasses RLS; the worker is the
  * only caller and never exposes this key. supabase-js is a stateless HTTP
  * client (no pooled connection to close); it is built per request and discarded
- * when this function returns.
+ * when this function returns. When a traceId is given every call carries it as
+ * X-Trace-Id.
  */
-export function createSupabaseAssetReadStore(env: {
-  SUPABASE_URL: string;
-  SUPABASE_SECRET_KEY: string;
-}): AssetReadStore {
+export function createSupabaseAssetReadStore(
+  env: {
+    SUPABASE_URL: string;
+    SUPABASE_SECRET_KEY: string;
+  },
+  traceId?: string,
+): AssetReadStore {
   const client: SupabaseClient<Database> = createClient<Database>(
     env.SUPABASE_URL,
     env.SUPABASE_SECRET_KEY,
-    { auth: { persistSession: false, autoRefreshToken: false } },
+    {
+      auth: { persistSession: false, autoRefreshToken: false },
+      ...(traceId !== undefined ? { global: { headers: { [TRACE_ID_HEADER]: traceId } } } : {}),
+    },
   );
 
   return {
@@ -390,7 +419,7 @@ export function createSupabaseAssetReadStore(env: {
       const { data, error } = await client
         .from('asset_versions')
         .select(
-          'workspace_id,kind,r2_key,mime_type,workspaces(asset_bucket),assets!asset_id(filename,display_name)',
+          'workspace_id,kind,r2_key,mime_type,workspaces(asset_bucket),assets!asset_id(filename,display_name,origin)',
         )
         .eq('id', assetVersionId)
         .maybeSingle();
@@ -403,10 +432,17 @@ export function createSupabaseAssetReadStore(env: {
       // The embedded workspace carries the bucket and the embedded asset carries
       // the human name; supabase-js types both as to-one objects via their FKs.
       const workspace = data.workspaces as { asset_bucket: string | null } | null;
-      const asset = data.assets as { filename: string | null; display_name: string | null } | null;
+      const asset = data.assets as {
+        filename: string | null;
+        display_name: string | null;
+        origin: string;
+      } | null;
+      // Fail closed: anything but an explicit 'library' parent is gated as chat.
+      const origin: AssetOrigin = asset?.origin === 'library' ? 'library' : 'chat';
       return {
         workspaceId: data.workspace_id,
         bucket: workspace?.asset_bucket ?? null,
+        origin,
         kind: data.kind,
         r2Key: data.r2_key,
         mimeType: data.mime_type,
@@ -429,6 +465,20 @@ export function createSupabaseAssetReadStore(env: {
       }
       return data !== null;
     },
+
+    async isChatAttachmentReadable({ userId, assetVersionId }) {
+      // chat_attachment_readable takes no _trace_id (service_role-only read); the
+      // trace rides this client's X-Trace-Id header instead.
+      // eslint-disable-next-line no-restricted-syntax
+      const { data, error } = await client.rpc('chat_attachment_readable', {
+        p_asset_version_id: assetVersionId,
+        p_user_id: userId,
+      });
+      if (error) {
+        throw error;
+      }
+      return data === true;
+    },
   };
 }
 
@@ -450,7 +500,7 @@ async function handlePost(
 
   const result = await authorizeAndSign(
     {
-      store: createSupabaseAssetReadStore(env),
+      store: createSupabaseAssetReadStore(env, traceId),
       signer: new R2StorageClient(
         {
           CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
@@ -468,7 +518,7 @@ async function handlePost(
   );
   if (!result.ok) {
     if (result.error.code === 'forbidden') {
-      logger.warn('asset read denied: caller not a workspace member', {
+      logger.warn('asset read denied', {
         asset_version_id: parsed.value.assetVersionId,
       });
     }

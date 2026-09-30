@@ -223,6 +223,7 @@ export function AttachmentsField({
       return uploadChatAttachment({
         file,
         workspaceId,
+        origin: 'library',
         token,
         endpoint: uploadEndpoint,
         fetcher: (input, init) => fetchWithTrace(input, init, newTrace()),
