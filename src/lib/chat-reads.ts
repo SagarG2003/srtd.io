@@ -250,9 +250,15 @@ export async function listChannelSummaries(
   client: Client,
   params: { workspaceId: string; currentUserId: string },
   signal?: AbortSignal,
+  /**
+   * Each round-trip's deadline (default 5s). The first load, whose late
+   * answer still wins (withLateRead), passes its grace instead, so a slow
+   * trip is not cancelled before it can land.
+   */
+  tripTimeoutMs: number = READ_TIMEOUT_MS,
 ): Promise<Result<ChannelSummary[]>> {
   const trip = <T>(run: (tripSignal: AbortSignal) => Promise<Result<T>>): Promise<Result<T>> =>
-    withReadTimeout((tripSignal) => run(anySignal(tripSignal, signal)));
+    withReadTimeout((tripSignal) => withLinkedSignal(tripSignal, signal, run), tripTimeoutMs);
   const channelsRes = await trip(async (tripSignal) => {
     const res = await abortable(
       client
@@ -510,19 +516,28 @@ export async function readChannelClears(
   };
 }
 
-/** One signal that fires when either does (a trip's deadline, or the caller's cancel). */
-export function anySignal(a: AbortSignal, b: AbortSignal | undefined): AbortSignal {
-  if (b === undefined) return a;
-  if (a.aborted || b.aborted) {
-    const done = new AbortController();
-    done.abort();
-    return done.signal;
-  }
+/**
+ * Run with one signal that fires when either does (a trip's deadline, or the
+ * caller's cancel). The listeners it adds are removed when `run` settles, so a
+ * long-lived cancel signal (a thread's card cache) never piles them up.
+ */
+export async function withLinkedSignal<T>(
+  a: AbortSignal,
+  b: AbortSignal | undefined,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  if (b === undefined) return run(a);
   const both = new AbortController();
   const fire = (): void => both.abort();
-  a.addEventListener('abort', fire, { once: true });
-  b.addEventListener('abort', fire, { once: true });
-  return both.signal;
+  if (a.aborted || b.aborted) both.abort();
+  a.addEventListener('abort', fire);
+  b.addEventListener('abort', fire);
+  try {
+    return await run(both.signal);
+  } finally {
+    a.removeEventListener('abort', fire);
+    b.removeEventListener('abort', fire);
+  }
 }
 
 async function readGroups(

@@ -43,7 +43,7 @@ import { useChatMarks } from '@/lib/chat/use-chat-marks';
 import { useChatTyping } from '@/lib/chat/use-chat-typing';
 import { visibleTypingIds } from '@/lib/chat/typing';
 import { useChatPresence } from '@/lib/chat/use-chat-presence';
-import { useChatStore } from '@/components/chat/ChatStoreProvider';
+import { ROSTER_READ_BUDGET_MS, useChatStore } from '@/components/chat/ChatStoreProvider';
 import type { ChatConnection, ChatStatus } from '@/lib/chat/types';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { IconChat } from '@/components/ui/icons';
@@ -294,13 +294,15 @@ export function pendingJumpAfter(
 /**
  * A deep link whose chat is not in my list re-reads the list once before
  * saying it is unavailable (a chat made moments ago may not be in the snapshot
- * yet). A failed re-read, or one still unanswered after the 5s read timeout,
- * counts as absent. Pure over the injected reload.
+ * yet). A failed re-read, or one still unanswered after `timeoutMs` (the
+ * reload's own budget in the app), counts as absent. Pure over the injected
+ * reload.
  */
 export async function deepLinkAfterRefresh(
   params: URLSearchParams,
   roster: readonly ChannelSummary[],
   reload: () => Promise<readonly ChannelSummary[] | null>,
+  timeoutMs: number = READ_TIMEOUT_MS,
 ): Promise<ReturnType<typeof deepLinkStep>> {
   const step = deepLinkStep(params, roster);
   if (step.open !== null) return step;
@@ -309,7 +311,7 @@ export async function deepLinkAfterRefresh(
     return list !== null
       ? { ok: true, data: list }
       : { ok: false, error: { code: 'unknown', message: 'roster reload failed' } };
-  });
+  }, timeoutMs);
   return deepLinkStep(params, next.ok ? next.data : []);
 }
 
@@ -543,22 +545,24 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     // Not in the snapshot: re-read the list once; toast only if still absent.
     // The answer applies only on the same mounted page, workspace and link.
     const started: DeepLinkRefreshContext = { mounted: true, workspaceId, channel };
-    void deepLinkAfterRefresh(linkParams, roster, reloadRoster).then((again) => {
-      if (selectedFromParam.current !== channel) return;
-      const outcome = deepLinkRefreshOutcome(again, started, {
-        mounted: mountedRef.current,
-        workspaceId: workspaceIdRef.current,
-        channel: channelParamRef.current,
-      });
-      if (outcome === 'discard') return;
-      if (outcome === 'open' && again.open !== null) {
-        setPendingJump(again.jump);
-        setSelected(again.open);
-        return;
-      }
-      writeChannelParam(null);
-      toastRef.current.show({ title: CHAT_UNAVAILABLE_TOAST });
-    });
+    void deepLinkAfterRefresh(linkParams, roster, reloadRoster, ROSTER_READ_BUDGET_MS).then(
+      (again) => {
+        if (selectedFromParam.current !== channel) return;
+        const outcome = deepLinkRefreshOutcome(again, started, {
+          mounted: mountedRef.current,
+          workspaceId: workspaceIdRef.current,
+          channel: channelParamRef.current,
+        });
+        if (outcome === 'discard') return;
+        if (outcome === 'open' && again.open !== null) {
+          setPendingJump(again.jump);
+          setSelected(again.open);
+          return;
+        }
+        writeChannelParam(null);
+        toastRef.current.show({ title: CHAT_UNAVAILABLE_TOAST });
+      },
+    );
   }, [
     loadStatus,
     roster,
@@ -568,6 +572,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     reloadRoster,
     workspaceId,
   ]);
+
+  // A workspace switch forgets which link was handled: a link whose re-read
+  // was discarded by the switch is resolved again in the new workspace (open
+  // it, or toast and strip it), never left on the opening skeleton.
+  useEffect(() => {
+    selectedFromParam.current = null;
+  }, [workspaceId]);
 
   // A ?channel= that disappears by any route other than closeChannel (browser
   // back, external navigation) closes the thread below md so the chrome returns.

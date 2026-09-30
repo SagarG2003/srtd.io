@@ -155,7 +155,12 @@ export function SharedCardsProvider(props: {
         : null,
     [workspaceId, channelId],
   );
-  useEffect(() => () => cache?.dispose(), [cache]);
+  // StrictMode runs this cleanup and the effect again with the same cache:
+  // resume makes that remount a live cache, not a disposed one.
+  useEffect(() => {
+    cache?.resume();
+    return () => cache?.dispose();
+  }, [cache]);
   const postKey = props.postIds.join(',');
   const briefKey = props.briefIds.join(',');
   const idsRef = useRef({ postIds: props.postIds, briefIds: props.briefIds });
@@ -167,11 +172,13 @@ export function SharedCardsProvider(props: {
   // again, or chat (re)connects.
   useEffect(() => {
     if (cache === null) return;
-    return watchCardRetries({ window, document }, () => cache.retryFailed());
+    return watchCardRetries({ window, document }, (reason) =>
+      cache.retryFailed(undefined, { revive: reason === 'online' }),
+    );
   }, [cache]);
   const status = props.status;
   useEffect(() => {
-    if (status === 'connected') cache?.retryFailed();
+    if (status === 'connected') cache?.retryFailed(undefined, { revive: true });
   }, [cache, status]);
   return <SharedCardsContext.Provider value={cache}>{props.children}</SharedCardsContext.Provider>;
 }
@@ -182,16 +189,23 @@ export interface CardRetryTargets {
   document: Pick<Document, 'addEventListener' | 'removeEventListener' | 'visibilityState'>;
 }
 
-/** Call `retry` on tab visible and on online; returns the unsubscribe. */
-export function watchCardRetries(targets: CardRetryTargets, retry: () => void): () => void {
+/**
+ * Call `retry` on tab visible and on online (online is a recovery signal:
+ * cards that gave up are tried again too); returns the unsubscribe.
+ */
+export function watchCardRetries(
+  targets: CardRetryTargets,
+  retry: (reason: 'visible' | 'online') => void,
+): () => void {
   const onVisible = (): void => {
-    if (targets.document.visibilityState === 'visible') retry();
+    if (targets.document.visibilityState === 'visible') retry('visible');
   };
+  const onOnline = (): void => retry('online');
   targets.document.addEventListener('visibilitychange', onVisible);
-  targets.window.addEventListener('online', retry);
+  targets.window.addEventListener('online', onOnline);
   return () => {
     targets.document.removeEventListener('visibilitychange', onVisible);
-    targets.window.removeEventListener('online', retry);
+    targets.window.removeEventListener('online', onOnline);
   };
 }
 
@@ -265,7 +279,10 @@ export function useThreadCardCache(): ThreadCardCache | null {
         : null,
     [shared, workspaceId],
   );
-  useEffect(() => () => local?.dispose(), [local]);
+  useEffect(() => {
+    local?.resume();
+    return () => local?.dispose();
+  }, [local]);
   const cache = shared ?? local;
   // Re-render on every applied read.
   useSyncExternalStore(cache?.subscribe ?? NO_SUBSCRIBE, cache?.version ?? NO_VERSION);

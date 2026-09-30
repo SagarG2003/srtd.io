@@ -224,7 +224,7 @@ interface MessageThreadProps {
   marks?: Map<string, ChatMark>;
   /** The channel's marks read has settled; the open-loops strip holds its first paint until then. */
   marksLoaded: boolean;
-  /** The marks have never been read (failed or timed out): the strip is hidden, never "Nothing open". */
+  /** The marks have never been read (failed or timed out): the strip shows no content, never "Nothing open". */
   marksFailed?: boolean;
   /** Marked messages read from the record, for sheet rows beyond loaded history. */
   markedMessages?: Map<string, ThreadMessage>;
@@ -3795,7 +3795,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     : null;
   const stripSlot = threadStripSlot({
     filtering: filterPostId !== null,
-    hasMarks: props.marks !== undefined && props.marksFailed !== true,
+    hasMarks: props.marks !== undefined,
     selecting,
   });
   return (
@@ -3855,7 +3855,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           loops={stripLoops({
             openPosts,
             side: viewerSide,
-            marksLoaded: props.marksLoaded,
+            // Never read (failed or timed out): the strip keeps its 44px slot
+            // with an empty body (no layout jump, never "Nothing open") until a
+            // re-read lands.
+            marksLoaded: props.marksLoaded && props.marksFailed !== true,
           })}
           onOpen={() => setMarksOpen(true)}
         />

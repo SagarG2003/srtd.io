@@ -45,6 +45,7 @@ import {
   readChannelClears,
   readChannelMemberIds,
   readMentionProfiles,
+  LATE_READ_GRACE_MS,
   READ_TIMEOUT_MS,
   withLateRead,
   withReadTimeout,
@@ -830,6 +831,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     refreshPreviews();
     refreshUnreadCounts();
   };
+  // A workspace switch, sign-out or unmount drops the live verifies still
+  // waiting to retry: their messages belong to the scope that is gone.
+  useEffect(() => () => liveVerifierFor(supabase).cancelRetries?.(), [scope]);
+
   // Only a message this workspace's store saw live counts: a give-up for one
   // from before a switch refreshes nothing.
   useEffect(
@@ -889,7 +894,15 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     setState((prev) => store.beginLoad(prev, scope));
     void loadChatList(
       {
-        roster: (signal) => listChannelSummaries(supabase, { workspaceId, currentUserId }, signal),
+        // Trips run up to the late grace (the load's own abort still cancels
+        // them): a roster that answers after its 10s deadline still wins.
+        roster: (signal) =>
+          listChannelSummaries(
+            supabase,
+            { workspaceId, currentUserId },
+            signal,
+            LATE_READ_GRACE_MS,
+          ),
         clears: (signal) => readChannelClears(supabase, { workspaceId }, signal),
         previews: (signal) => readConversationPreviews(supabase, workspaceId, signal),
         counts: (signal) => readUnreadCounts(supabase, workspaceId, signal),

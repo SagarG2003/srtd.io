@@ -21,6 +21,11 @@ export const VERIFIED_IDS_LIMIT = 500;
 export interface LiveVerifier {
   /** Resolve a live message id to its row, or { found: false } (discard it). */
   verify: (messageId: string) => Promise<MessageLookup>;
+  /**
+   * Drop every retry still waiting (unmount, workspace switch): those
+   * messages resolve as not verified, with no second read and no give-up.
+   */
+  cancelRetries?: () => void;
 }
 
 export interface LiveVerifierDeps {
@@ -34,14 +39,20 @@ export interface LiveVerifierDeps {
   delay?: (ms: number) => Promise<void>;
 }
 
-const wait = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
 /** Build a verifier over an injected lookup (unit-tested with a fake). */
 export function createLiveVerifier(deps: LiveVerifierDeps): LiveVerifier {
   const results = new Map<string, Promise<MessageLookup>>();
+  // Retries waiting to run: a cancel clears their timers and settles them.
+  const waiting = new Map<ReturnType<typeof setTimeout>, () => void>();
+  let generation = 0;
+  const wait = (ms: number): Promise<void> =>
+    new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        waiting.delete(timer);
+        resolve();
+      }, ms);
+      waiting.set(timer, resolve);
+    });
   const verify = (messageId: string): Promise<MessageLookup> => {
     const known = results.get(messageId);
     if (known !== undefined) return known;
@@ -52,7 +63,10 @@ export function createLiveVerifier(deps: LiveVerifierDeps): LiveVerifier {
         ? first
         : first.then(async (outcome) => {
             if (!('error' in outcome)) return outcome;
+            const started = generation;
             await (deps.delay ?? wait)(retryDelayMs);
+            // Cancelled while waiting: no second read, no give-up.
+            if (generation !== started) return outcome;
             const again = await deps.lookup(messageId);
             if ('error' in again) deps.onGiveUp?.(messageId);
             return again;
@@ -79,7 +93,15 @@ export function createLiveVerifier(deps: LiveVerifierDeps): LiveVerifier {
     }
     return pending;
   };
-  return { verify };
+  const cancelRetries = (): void => {
+    generation += 1;
+    for (const [timer, settle] of waiting) {
+      clearTimeout(timer);
+      settle();
+    }
+    waiting.clear();
+  };
+  return { verify, cancelRetries };
 }
 
 const verifiers = new WeakMap<Client, LiveVerifier>();

@@ -25,7 +25,7 @@
 
 import type { Client, Result } from '@srtdio/rpc';
 import type { Database } from '@srtdio/schemas';
-import { abortable, anySignal, withReadTimeout } from '@/lib/chat-reads';
+import { abortable, withLinkedSignal, withReadTimeout } from '@/lib/chat-reads';
 import {
   classifyAttachment,
   parseAttachmentMeta,
@@ -125,7 +125,7 @@ export function loadOlderMessages(
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
       .limit(HISTORY_PAGE_SIZE);
-    const res = await abortable(query, anySignal(deadline, signal));
+    const res = await withLinkedSignal(deadline, signal, async (s) => abortable(query, s));
     if (res.error) return fail(`loadOlderMessages: ${res.error.message}`);
     return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
   });
@@ -236,7 +236,7 @@ export async function loadReactions(
       .from('chat_reactions')
       .select('message_id, emoji, user_id')
       .in('message_id', [...messageIds]);
-    const res = await abortable(query, anySignal(deadline, signal));
+    const res = await withLinkedSignal(deadline, signal, async (s) => abortable(query, s));
     if (res.error) return fail(`loadReactions: ${res.error.message}`);
     const rows = (res.data ?? []) as Pick<ChatReactionRow, 'message_id' | 'emoji' | 'user_id'>[];
     return { ok: true, data: aggregateReactions(rows, currentUserId) };

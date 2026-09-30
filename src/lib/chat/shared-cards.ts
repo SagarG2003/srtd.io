@@ -18,7 +18,12 @@
 // batching is unit-tested without React or a database.
 
 import type { Result } from '@srtdio/rpc';
-import { READ_TIMEOUT_MS, anySignal, withReadTimeout, type ChatProfile } from '@/lib/chat-reads';
+import {
+  READ_TIMEOUT_MS,
+  withLinkedSignal,
+  withReadTimeout,
+  type ChatProfile,
+} from '@/lib/chat-reads';
 
 /** Ids per IN read (PostgREST URL length stays small). */
 export const CARD_READ_CHUNK = 100;
@@ -84,7 +89,16 @@ export interface SharedCardCache<P, B> {
    * view): re-read the ids whose reads failed and still have tries left (all
    * of them when `ids` is absent).
    */
-  retryFailed: (ids?: { postIds?: readonly string[]; briefIds?: readonly string[] }) => void;
+  retryFailed: (
+    ids?: { postIds?: readonly string[]; briefIds?: readonly string[] },
+    opts?: {
+      /**
+       * A recovery signal (online again, chat connected): ids that already
+       * gave up get a fresh set of tries too, as a tap would.
+       */
+      revive?: boolean;
+    },
+  ) => void;
   /** The "Couldn't load" tap: these ids get a fresh set of tries, starting now. */
   retry: (ids: { postIds?: readonly string[]; briefIds?: readonly string[] }) => void;
   posts: (ids: readonly string[]) => PostCardsSnapshot<P>;
@@ -97,6 +111,11 @@ export interface SharedCardCache<P, B> {
   version: () => number;
   /** Channel or workspace switch, unmount: drop listeners, ignore every read in flight. */
   dispose: () => void;
+  /**
+   * Undo a dispose for the same owner (React StrictMode mounts, cleans up and
+   * mounts an effect again with the same cache): reads work again.
+   */
+  resume: () => void;
 }
 
 function chunks(ids: readonly string[]): string[][] {
@@ -118,7 +137,7 @@ async function readChunked<T>(
     chunks(ids).map(async (chunk) => ({
       ids: chunk,
       result: await withReadTimeout(
-        (deadline) => read(chunk, anySignal(deadline, cancel)),
+        (deadline) => withLinkedSignal(deadline, cancel, (signal) => read(chunk, signal)),
         timeoutMs,
       ),
     })),
@@ -183,10 +202,12 @@ export function createSharedCardCache<P, B>(
   const postReadAt = new Map<string, number>();
   const names = new Map<string, string>();
   const namesAsked = new Set<string>();
+  /** Name reads in flight, per approver id (another batch waits on them). */
+  const namesInFlight = new Map<string, Promise<void>>();
   let scheduled = false;
   let disposed = false;
   // Dispose aborts every read in flight; the retry timers go with it.
-  const abort = new AbortController();
+  let abort = new AbortController();
   const retryTimers = new Set<ReturnType<typeof setTimeout>>();
   const retryDelayMs = options.retryDelayMs ?? CARD_RETRY_DELAY_MS;
   /** Retry this kind's failed ids on their own after a delay. */
@@ -276,20 +297,34 @@ export function createSharedCardCache<P, B>(
       found.push(...rows);
     }
     // One profile read for every approver not asked before (chunked, bounded).
-    const approvers = [...new Set(readers.approverIds(found))].filter((id) => !namesAsked.has(id));
+    // An approver another batch is still reading is waited for, so no card
+    // paints "Approved · <time>" and then flips to "Approved by X".
+    const wanted = [...new Set(readers.approverIds(found))];
+    const approvers = wanted.filter((id) => !namesAsked.has(id));
+    const pending = [
+      ...new Set(wanted.map((id) => namesInFlight.get(id)).filter((p) => p !== undefined)),
+    ];
+    let own: Promise<void> | null = null;
     if (approvers.length > 0) {
       for (const id of approvers) namesAsked.add(id);
-      const named = await readChunked(approvers, readers.readNames, timeoutMs, abort.signal);
-      if (disposed) return;
-      for (const { ids: chunk, result } of named) {
-        if (!result.ok) {
-          // The footer reads "Approved · <time>" without a name; a later read may ask again.
-          for (const id of chunk) namesAsked.delete(id);
-          continue;
+      own = readChunked(approvers, readers.readNames, timeoutMs, abort.signal).then((named) => {
+        for (const { ids: chunk, result } of named) {
+          if (!result.ok) {
+            // The footer reads "Approved · <time>" without a name; a later read may ask again.
+            for (const id of chunk) namesAsked.delete(id);
+            continue;
+          }
+          for (const p of result.data) names.set(p.userId, p.displayName);
         }
-        for (const p of result.data) names.set(p.userId, p.displayName);
-      }
+      });
+      const mine = own;
+      for (const id of approvers) namesInFlight.set(id, mine);
+      void mine.finally(() => {
+        for (const id of approvers) if (namesInFlight.get(id) === mine) namesInFlight.delete(id);
+      });
     }
+    await Promise.all([...pending, ...(own !== null ? [own] : [])]);
+    if (disposed) return;
     for (const { ids: chunk } of results) requeueAgain(posts, chunk);
   }
 
@@ -340,6 +375,17 @@ export function createSharedCardCache<P, B>(
     return added;
   }
 
+  /** Give ids that gave up a fresh set of tries; true when any did. */
+  function revive<T>(t: Track<T>, ids: Iterable<string>): boolean {
+    let revived = false;
+    for (const id of ids) {
+      if (!gaveUp(t, id)) continue;
+      t.tries.set(id, 0);
+      revived = true;
+    }
+    return revived;
+  }
+
   function retry(ids: { postIds?: readonly string[]; briefIds?: readonly string[] }): void {
     const a = queueWhere(posts, ids.postIds ?? [], (id) => retriable(posts, id));
     const b = queueWhere(briefs, ids.briefIds ?? [], (id) => retriable(briefs, id));
@@ -355,7 +401,12 @@ export function createSharedCardCache<P, B>(
     refreshPosts(ids) {
       if (queueWhere(posts, ids, () => true)) kick();
     },
-    retryFailed(ids) {
+    retryFailed(ids, opts) {
+      if (opts?.revive === true) {
+        const a = revive(posts, ids?.postIds ?? [...posts.tries.keys()]);
+        const b = revive(briefs, ids?.briefIds ?? [...briefs.tries.keys()]);
+        if (a || b) notify();
+      }
       const a = queueWhere(posts, ids?.postIds ?? [...posts.tries.keys()], (id) =>
         retriable(posts, id),
       );
@@ -392,6 +443,13 @@ export function createSharedCardCache<P, B>(
       };
     },
     version: () => version,
+    resume() {
+      if (!disposed) return;
+      disposed = false;
+      abort = new AbortController();
+      // Asks made while disposed (children's effects run before the owner's) go out now.
+      if (posts.queued.size > 0 || briefs.queued.size > 0) kick();
+    },
     dispose() {
       disposed = true;
       abort.abort();
