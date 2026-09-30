@@ -196,6 +196,7 @@ function renderBubble(
     onRetry?: (id: string) => void;
     layout?: ChatLayout;
     viewerUserId?: string;
+    onTranscribe?: () => void;
   },
 ): ReactElement {
   return MessageBubble({
@@ -213,6 +214,7 @@ function renderBubble(
     ...(opts?.viewerUserId !== undefined ? { viewerUserId: opts.viewerUserId } : {}),
     onBadgeClick: () => {},
     ...(opts?.onRetry !== undefined ? { onRetry: opts.onRetry } : {}),
+    ...(opts?.onTranscribe !== undefined ? { onTranscribe: opts.onTranscribe } : {}),
   });
 }
 
@@ -285,6 +287,11 @@ function metaOf(root: ReactElement): Parameters<typeof BubbleMetaView>[0] | null
   let meta: Parameters<typeof BubbleMetaView>[0] | null = null;
   walk(root, (el) => {
     if (el.type === BubbleMetaView) meta = el.props as Parameters<typeof BubbleMetaView>[0];
+    // A voice note draws the time inside its own last row.
+    const voiceMeta = (el.props as { voice?: { meta?: ReactNode } }).voice?.meta;
+    if (isValidElement(voiceMeta) && voiceMeta.type === BubbleMetaView) {
+      meta = voiceMeta.props as Parameters<typeof BubbleMetaView>[0];
+    }
   });
   return meta;
 }
@@ -1001,6 +1008,36 @@ describe('voice-only bubble', () => {
       if (props.voice !== undefined) voiceProp = props.voice;
     });
     expect(voiceProp).toMatchObject({ messageId: 'm1', mine: false, nextVoiceId: null });
+  });
+
+  const voiceContext = (root: ReactElement): Record<string, unknown> => {
+    let found: Record<string, unknown> = {};
+    walk(root, (el) => {
+      const props = el.props as Record<string, unknown>;
+      if (props.voice !== undefined) found = props.voice as Record<string, unknown>;
+    });
+    return found;
+  };
+
+  it('draws the time inside the note, never as a trailing row after it', () => {
+    const root = renderBubble(voice);
+    let trailing = 0;
+    walk(root, (el) => {
+      if (el.type === BubbleMetaView) trailing += 1;
+    });
+    expect(trailing).toBe(0);
+    expect(isValidElement(voiceContext(root).meta)).toBe(true);
+  });
+
+  it('hands the Transcribe flow to received recorded notes only', () => {
+    const onTranscribe = vi.fn();
+    const received = voiceContext(renderBubble(voice, { onTranscribe }));
+    expect(received.onTranscribe).toBe(onTranscribe);
+    const own = voiceContext(renderBubble({ ...voice, mine: true }, { onTranscribe }));
+    expect(own.onTranscribe).toBeUndefined();
+    const sending = voiceContext(renderBubble({ ...voice, state: 'sending' }, { onTranscribe }));
+    expect(sending.onTranscribe).toBeUndefined();
+    expect(voiceContext(renderBubble(voice)).onTranscribe).toBeUndefined();
   });
 });
 
