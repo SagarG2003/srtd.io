@@ -11,11 +11,20 @@
 // (a refetch during a read queues exactly one follow-up so it sees fresh data).
 // The store is keyed by the auth user id: a snapshot for another user is never
 // returned, so one user's profile cannot paint for the next user on this device.
+//
+// Reads happen only on the first load for a user, an explicit refetch(), and
+// Retry: mounting another consumer while a snapshot is loaded (or a read is in
+// flight) for that user reads nothing. Each read carries an increasing sequence
+// number and only the newest read's result is applied, so an older read that
+// lands late (A to B to A) never overwrites a newer one. The store resets from
+// the Supabase auth state change (the same source session-context uses), not
+// from the sorted:signout request, so tapping Sign out never swaps the app for
+// "Loading" and a failed sign-out cannot leave it stuck.
 
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { supabase } from '@/lib/supabase';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useSession } from '@/lib/session-context';
-import { SIGNOUT_EVENT } from '@/lib/events';
 import { logger } from '@/lib/logger';
 
 export interface CurrentProfile {
@@ -46,6 +55,8 @@ const EMPTY: ProfileSnapshot = { userId: null, profile: null, loading: true, err
 let snapshot: ProfileSnapshot = EMPTY;
 let inflight: Promise<void> | null = null;
 let queued = false;
+/** Sequence number of the newest read; only its result is applied. */
+let latestSeq = 0;
 const listeners = new Set<() => void>();
 
 function publish(next: ProfileSnapshot): void {
@@ -76,9 +87,12 @@ function readProfile(userId: string): Promise<{ data: CurrentProfile | null; fai
 }
 
 function startRead(userId: string): Promise<void> {
+  latestSeq += 1;
+  const seq = latestSeq;
   const run = readProfile(userId).then(({ data, failed }) => {
-    // The user changed (or signed out) mid-read: drop the stale result.
-    if (snapshot.userId !== userId) return;
+    // A newer read started, or the user changed (or signed out) mid-read: drop
+    // the stale result.
+    if (seq !== latestSeq || snapshot.userId !== userId) return;
     if (failed) {
       // Keep the last good row; flag the failure the same way as before.
       publish({ userId, profile: snapshot.profile, loading: false, error: true });
@@ -102,13 +116,16 @@ function startRead(userId: string): Promise<void> {
 export function resetProfileStore(userId: string | null = null): void {
   inflight = null;
   queued = false;
+  latestSeq += 1;
   publish(userId === null ? EMPTY : { ...EMPTY, userId });
 }
 
 /**
  * Make sure a read for `userId` is running or has run. A different user resets
- * the store first. `force` (refetch) queues one follow-up read when one is
- * already in flight, so a read started before a write never wins.
+ * the store first. Without `force` (a mount) nothing is read when the snapshot
+ * for this user has already settled or a read is in flight. `force` (refetch,
+ * Retry) queues one follow-up read when one is already in flight, so a read
+ * started before a write never wins.
  */
 export function loadProfile(userId: string, force = false): Promise<void> {
   if (snapshot.userId !== userId) resetProfileStore(userId);
@@ -116,6 +133,7 @@ export function loadProfile(userId: string, force = false): Promise<void> {
     if (force) queued = true;
     return inflight;
   }
+  if (!force && !snapshot.loading) return Promise.resolve();
   inflight = startRead(userId);
   return inflight;
 }
@@ -124,19 +142,45 @@ export function getProfileSnapshot(): ProfileSnapshot {
   return snapshot;
 }
 
-function onSignout(): void {
-  resetProfileStore(null);
+/**
+ * Whether an auth event ends the held snapshot: an explicit sign-out, or a
+ * session for a different user. A transient null session (refresh hiccup) keeps
+ * it, matching resolveSession in session-context. Pure.
+ */
+export function authEndsSnapshot(
+  event: AuthChangeEvent,
+  session: Session | null,
+  heldUserId: string | null,
+): boolean {
+  if (heldUserId === null) return false;
+  if (event === 'SIGNED_OUT') return true;
+  return session !== null && session.user.id !== heldUserId;
 }
 
+function onAuthChange(event: AuthChangeEvent, session: Session | null): void {
+  if (!authEndsSnapshot(event, session, snapshot.userId)) return;
+  // Reset without notifying. Every consumer re-renders from this same auth event
+  // through useSession, and profileViewFor already hides a snapshot held for
+  // another user, so a notify here would only add a render with the old session
+  // and an empty store: a "Loading" frame on sign-out.
+  inflight = null;
+  queued = false;
+  latestSeq += 1;
+  snapshot = EMPTY;
+}
+
+let authSubscription: { unsubscribe: () => void } | null = null;
+
 export function subscribeProfile(listener: () => void): () => void {
-  if (listeners.size === 0 && typeof window !== 'undefined') {
-    window.addEventListener(SIGNOUT_EVENT, onSignout);
+  if (listeners.size === 0 && authSubscription === null) {
+    authSubscription = supabase.auth.onAuthStateChange(onAuthChange).data.subscription;
   }
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
-    if (listeners.size === 0 && typeof window !== 'undefined') {
-      window.removeEventListener(SIGNOUT_EVENT, onSignout);
+    if (listeners.size === 0 && authSubscription !== null) {
+      authSubscription.unsubscribe();
+      authSubscription = null;
     }
   };
 }

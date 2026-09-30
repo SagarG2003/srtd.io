@@ -6,10 +6,13 @@
 // preference is passed through unchanged because there is no toggle on this screen.
 //
 // The photo carries a camera badge that opens the shared PhotoOptionsSheet ("Your
-// photo"). A picked file is staged in the AvatarCropper and saved through the same
-// pipeline as before (crop, uploadAvatarFile, user_profile_update). Remove photo
-// sends '' for the photo, which the proc treats as clear; only Remove sends ''.
-// Every change refetches the shared profile store, so the header avatar follows.
+// photo"). The photo saves on its own, like WhatsApp: a picked file opens the
+// AvatarCropper with "Use photo" and "Cancel"; Use photo crops, uploads
+// (uploadAvatarFile) and saves (user_profile_update) at once with the SAVED name,
+// designation and email preference, never unsaved form input. Save profile saves
+// only the text fields and always sends NULL for the photo. Remove photo sends ''
+// for the photo, which the proc treats as clear; only Remove sends ''. Every
+// change refetches the shared profile store, so the header avatar follows.
 //
 // Network goes through the same tested helpers as onboarding (uploadAvatarFile +
 // the @srtdio/rpc userProfileUpdate wrapper); colors are tokens only so light/dark
@@ -31,7 +34,8 @@ import { logger } from '@/lib/logger';
 import { supabase } from '@/lib/supabase';
 import { useNewTrace } from '@/lib/trace-context';
 import { uploadAvatarFile } from '@/lib/avatar-upload';
-import { useCurrentProfile } from '@/lib/use-current-profile';
+import { useSession } from '@/lib/session-context';
+import { useCurrentProfile, type CurrentProfile } from '@/lib/use-current-profile';
 
 /** What a save does to the photo: leave it, replace it, or clear it. */
 export type PhotoChange = { kind: 'keep' } | { kind: 'set'; url: string } | { kind: 'clear' };
@@ -103,15 +107,79 @@ export async function submitProfileChange(deps: {
   return { ok: true, data: undefined };
 }
 
+/** The saved fields a photo-only change writes back unchanged. */
+export type SavedFields = Pick<CurrentProfile, 'display_name' | 'designation' | 'email_opt_in'>;
+
+/**
+ * Use photo: crop, upload, then save with the SAVED fields (never unsaved form
+ * input). `onExported` hands the cropped file over for the optimistic preview
+ * before the upload starts. Never throws. Dependencies are injected so it runs
+ * without a DOM.
+ */
+export async function submitUsePhoto(deps: {
+  client: Client;
+  save: typeof userProfileUpdate;
+  newTrace: () => string;
+  saved: SavedFields;
+  exportPng: () => Promise<File | null>;
+  upload: (file: File) => Promise<Result<{ avatarUrl: string }>>;
+  onExported: (file: File) => void;
+}): Promise<Result<{ avatarUrl: string }>> {
+  const file = await deps.exportPng();
+  if (file === null) {
+    return {
+      ok: false,
+      error: { code: 'unknown', message: 'Could not read the photo. Choose it again' },
+    };
+  }
+  deps.onExported(file);
+  let avatarUrl = '';
+  const result = await submitProfileChange({
+    client: deps.client,
+    save: deps.save,
+    newTrace: deps.newTrace,
+    displayName: deps.saved.display_name,
+    designation: deps.saved.designation ?? '',
+    emailOptIn: deps.saved.email_opt_in,
+    photo: {
+      kind: 'upload',
+      upload: async () => {
+        const up = await deps.upload(file);
+        if (up.ok) avatarUrl = up.data.avatarUrl;
+        return up;
+      },
+    },
+  });
+  if (!result.ok) return result;
+  return { ok: true, data: { avatarUrl } };
+}
+
+/** Save profile: the text fields only; the photo is always NULL (keep). */
+export function submitTextFields(deps: {
+  client: Client;
+  save: typeof userProfileUpdate;
+  newTrace: () => string;
+  displayName: string;
+  designation: string;
+  emailOptIn: boolean;
+}): Promise<Result<void>> {
+  return submitProfileChange({ ...deps, photo: { kind: 'keep' } });
+}
+
 /** The panel's local photo override on top of the loaded avatar_url. */
 export interface PhotoView {
-  /** Object URL of a staged (not yet saved) photo. */
+  /** Object URL of the cropped PNG being (or just) saved. */
   previewUrl: string | null;
   /** The photo was removed here; show initials until the refetch lands. */
   removed: boolean;
+  /**
+   * The avatar_url the store should hold once the saved change is read back
+   * ('' for a removal). While set, the override waits for that refetch.
+   */
+  expect: string | null;
 }
 
-export const PHOTO_VIEW_INITIAL: PhotoView = { previewUrl: null, removed: false };
+export const PHOTO_VIEW_INITIAL: PhotoView = { previewUrl: null, removed: false, expect: null };
 
 const SAVE_FALLBACK = 'Could not save your profile. Try again';
 
@@ -127,13 +195,24 @@ export function profileErrorMessage(message: string): string {
  * failure reverts to `previous` (the photo shown before the change) and yields
  * the one-line message. Pure.
  */
-export function settlePhotoChange(
-  result: Result<void>,
+export function settlePhotoChange<T>(
+  result: Result<T>,
   previous: PhotoView,
   next: PhotoView,
 ): { photo: PhotoView; error: string | null } {
   if (result.ok) return { photo: next, error: null };
   return { photo: previous, error: profileErrorMessage(result.error.message) };
+}
+
+/**
+ * Drop the override once the store holds the saved change, so the panel shows
+ * the store's profile again and later photo changes (from anywhere) show. An
+ * override with nothing expected (a change still in flight) is kept. Pure.
+ */
+export function reconcilePhotoView(view: PhotoView, avatarUrl: string | null): PhotoView {
+  if (view.expect === null) return view;
+  if ((avatarUrl ?? '') !== view.expect) return view;
+  return PHOTO_VIEW_INITIAL;
 }
 
 /** The src the photo shows for a loaded avatar_url and the local view. Pure. */
@@ -143,43 +222,122 @@ export function shownPhoto(avatarUrl: string | null, view: PhotoView): string | 
   return avatarUrl !== null && avatarUrl !== '' ? avatarUrl : null;
 }
 
+/**
+ * Whether Remove photo is offered: only for a SAVED photo. A pick staged in the
+ * cropper never feeds the view, so it never counts. Pure.
+ */
+export function canRemovePhoto(avatarUrl: string | null, view: PhotoView): boolean {
+  return shownPhoto(avatarUrl, view) !== null;
+}
+
+/** The text fields and which of them the user has typed into. */
+export interface TextFields {
+  name: string;
+  designation: string;
+  nameEdited: boolean;
+  designationEdited: boolean;
+  /** The user these fields were prefilled for; null before the first load. */
+  prefilledFor: string | null;
+}
+
+export const TEXT_FIELDS_INITIAL: TextFields = {
+  name: '',
+  designation: '',
+  nameEdited: false,
+  designationEdited: false,
+  prefilledFor: null,
+};
+
+/**
+ * Prefill name and designation only on the first load for this user, never over
+ * a field the user has edited. A later refetch (after Remove or Use photo) keeps
+ * whatever is typed. Pure.
+ */
+export function prefillFields(
+  fields: TextFields,
+  userId: string | null,
+  profile: CurrentProfile | null,
+): TextFields {
+  if (userId === null || profile === null || fields.prefilledFor === userId) return fields;
+  return {
+    name: fields.nameEdited ? fields.name : profile.display_name,
+    designation: fields.designationEdited ? fields.designation : (profile.designation ?? ''),
+    nameEdited: fields.nameEdited,
+    designationEdited: fields.designationEdited,
+    prefilledFor: userId,
+  };
+}
+
+/**
+ * What the panel renders. A kept profile always renders the panel, even when a
+ * later read failed; the full error view is only for no profile at all. Pure.
+ */
+export function panelMode(
+  loading: boolean,
+  profile: CurrentProfile | null,
+): 'loading' | 'error' | 'ready' {
+  if (profile !== null) return 'ready';
+  return loading ? 'loading' : 'error';
+}
+
+function revokeIfOwned(url: string | null): void {
+  if (url !== null && url.startsWith('blob:')) URL.revokeObjectURL(url);
+}
+
 export function ProfileSettingsPanel(): React.ReactElement {
   const newTrace = useNewTrace();
-  const { profile, loading, error, refetch } = useCurrentProfile();
+  const { session } = useSession();
+  const userId = session?.user.id ?? null;
+  const { profile, loading, refetch } = useCurrentProfile();
   const cropperRef = useRef<AvatarCropperHandle>(null);
 
-  const [name, setName] = useState('');
-  const [designation, setDesignation] = useState('');
-  const [photoView, setPhotoView] = useState<PhotoView>(PHOTO_VIEW_INITIAL);
-  // A new photo sits in the cropper waiting for Save (drives upload + cropper UI).
+  const [fields, setFields] = useState<TextFields>(TEXT_FIELDS_INITIAL);
+  const [photoView, setPhotoViewState] = useState<PhotoView>(PHOTO_VIEW_INITIAL);
+  // The view's object URL, mirrored in a ref so replacement and unmount revoke it.
+  const viewUrlRef = useRef<string | null>(null);
+  // A pick sits in the cropper waiting for Use photo or Cancel.
   const [staged, setStaged] = useState(false);
+  // Bumped by Cancel (and a saved photo) to remount the cropper empty.
+  const [cropperKey, setCropperKey] = useState(0);
   const [photoSheetOpen, setPhotoSheetOpen] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const photoBusyRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  // Prefill once the profile loads (and whenever a refetch lands a new row).
+  useEffect(
+    () => () => {
+      revokeIfOwned(viewUrlRef.current);
+      viewUrlRef.current = null;
+    },
+    [],
+  );
+
+  // First load for this user fills the fields; later refetches keep the typing.
   useEffect(() => {
-    if (profile === null) return;
-    setName(profile.display_name);
-    setDesignation(profile.designation ?? '');
-  }, [profile]);
+    setFields((current) => prefillFields(current, userId, profile));
+  }, [userId, profile]);
 
-  const trimmedName = name.trim();
-  const canSave = !loading && profile !== null && !submitting && trimmedName.length >= 1;
+  // Once the store holds the saved photo change, drop the local override.
+  const avatarUrl = profile?.avatar_url ?? null;
+  useEffect(() => {
+    const next = reconcilePhotoView(photoView, avatarUrl);
+    if (next === photoView) return;
+    revokeIfOwned(viewUrlRef.current);
+    viewUrlRef.current = next.previewUrl;
+    setPhotoViewState(next);
+  }, [photoView, avatarUrl]);
 
-  function uploadStaged(): Promise<Result<{ avatarUrl: string }>> {
+  const trimmedName = fields.name.trim();
+  const busy = submitting || photoBusy;
+  const canSave = profile !== null && !busy && trimmedName.length >= 1;
+
+  function uploadFile(file: File): Promise<Result<{ avatarUrl: string }>> {
     return (async () => {
       const endpoint = env.VITE_AVATAR_UPLOAD_URL;
       if (endpoint === undefined) {
         return { ok: false, error: { code: 'unknown', message: 'Photo upload is not configured' } };
-      }
-      const file = await cropperRef.current?.exportPng();
-      if (file === null || file === undefined) {
-        return {
-          ok: false,
-          error: { code: 'unknown', message: 'Could not read the photo. Choose it again' },
-        };
       }
       const token = (await supabase.auth.getSession()).data.session?.access_token ?? null;
       return uploadAvatarFile(file, {
@@ -190,49 +348,58 @@ export function ProfileSettingsPanel(): React.ReactElement {
     })();
   }
 
-  async function runChange(input: {
-    displayName: string;
-    designation: string;
-    photo: PhotoIntent;
-    next: PhotoView;
-  }): Promise<boolean> {
-    if (profile === null) return false;
-    const previous = photoView;
-    setSubmitting(true);
+  async function handleUsePhoto(): Promise<void> {
+    if (profile === null || photoBusyRef.current) return;
+    photoBusyRef.current = true;
+    setPhotoBusy(true);
     setFormError(null);
-    setSaved(false);
-    // Removal paints the initials right away; a failure reverts below.
-    if (input.photo.kind === 'clear') setPhotoView(input.next);
+    const previous = photoView;
+    let optimisticUrl: string | null = null;
     try {
-      const result = await submitProfileChange({
+      const result = await submitUsePhoto({
         client: supabase,
         save: userProfileUpdate,
         newTrace,
-        displayName: input.displayName,
-        designation: input.designation,
-        emailOptIn: profile.email_opt_in,
-        photo: input.photo,
+        saved: profile,
+        exportPng: async () => (await cropperRef.current?.exportPng()) ?? null,
+        upload: uploadFile,
+        onExported: (file) => {
+          // Show the CROPPED png at once, never the raw original. The previous
+          // URL is kept alive (not revoked) until the change settles.
+          optimisticUrl = URL.createObjectURL(file);
+          viewUrlRef.current = optimisticUrl;
+          setPhotoViewState({ previewUrl: optimisticUrl, removed: false, expect: null });
+        },
       });
       if (!result.ok) {
-        logger.error('settings profile save failed', { error: result.error.message });
+        logger.error('settings photo save failed', { error: result.error.message });
       }
-      const settled = settlePhotoChange(
-        result,
-        input.photo.kind === 'upload' ? { ...previous, previewUrl: null } : previous,
-        input.next,
-      );
-      setPhotoView(settled.photo);
+      const settled = settlePhotoChange(result, previous, {
+        previewUrl: optimisticUrl,
+        removed: false,
+        expect: result.ok ? result.data.avatarUrl : null,
+      });
+      if (settled.photo.previewUrl !== optimisticUrl) revokeIfOwned(optimisticUrl);
+      else if (previous.previewUrl !== optimisticUrl) revokeIfOwned(previous.previewUrl);
+      viewUrlRef.current = settled.photo.previewUrl;
+      setPhotoViewState(settled.photo);
       setFormError(settled.error);
-      // A save settles the staged photo (saved, or reverted); a failed Remove
-      // leaves whatever was staged before it untouched.
-      if (input.photo.kind !== 'clear' || result.ok) setStaged(false);
-      if (!result.ok) return false;
-      // Propagate the new name/photo to the rest of the app (header, comments).
+      if (!result.ok) return;
+      setStaged(false);
+      setCropperKey((key) => key + 1);
       refetch();
-      return true;
     } finally {
-      setSubmitting(false);
+      photoBusyRef.current = false;
+      setPhotoBusy(false);
     }
+  }
+
+  function handleCancelPhoto(): void {
+    if (photoBusyRef.current) return;
+    // Discard the pick: remount the cropper empty; nothing is uploaded.
+    setStaged(false);
+    setCropperKey((key) => key + 1);
+    setFormError(null);
   }
 
   async function handleSave(): Promise<void> {
@@ -241,38 +408,80 @@ export function ProfileSettingsPanel(): React.ReactElement {
       setFormError('Display name is required');
       return;
     }
-    // Only upload when the user actually staged a new photo here.
-    const upload = staged && cropperRef.current?.hasPhoto() === true;
-    const ok = await runChange({
-      displayName: trimmedName,
-      designation: designation.trim(),
-      photo: upload ? { kind: 'upload', upload: uploadStaged } : { kind: 'keep' },
-      next: upload ? { previewUrl: photoView.previewUrl, removed: false } : photoView,
-    });
-    if (ok) setSaved(true);
+    setSubmitting(true);
+    setFormError(null);
+    setSaved(false);
+    try {
+      const result = await submitTextFields({
+        client: supabase,
+        save: userProfileUpdate,
+        newTrace,
+        displayName: trimmedName,
+        designation: fields.designation.trim(),
+        emailOptIn: profile.email_opt_in,
+      });
+      if (!result.ok) {
+        logger.error('settings profile save failed', { error: result.error.message });
+        setFormError(profileErrorMessage(result.error.message));
+        return;
+      }
+      setSaved(true);
+      // Propagate the new name to the rest of the app (header, comments).
+      refetch();
+    } finally {
+      setSubmitting(false);
+    }
   }
 
-  function handleRemove(): void {
-    if (profile === null) return;
-    // Clear with the saved fields so unsaved edits are not written by Remove.
-    void runChange({
-      displayName: profile.display_name,
-      designation: profile.designation ?? '',
-      photo: { kind: 'clear' },
-      next: { previewUrl: null, removed: true },
-    });
+  async function handleRemove(): Promise<void> {
+    if (profile === null || photoBusyRef.current) return;
+    photoBusyRef.current = true;
+    setPhotoBusy(true);
+    setFormError(null);
+    const previous = photoView;
+    // Removal paints the initials right away; a failure reverts below.
+    const next: PhotoView = { previewUrl: null, removed: true, expect: '' };
+    viewUrlRef.current = null;
+    setPhotoViewState({ ...next, expect: null });
+    try {
+      // Clear with the saved fields so unsaved edits are not written by Remove.
+      const result = await submitProfileChange({
+        client: supabase,
+        save: userProfileUpdate,
+        newTrace,
+        displayName: profile.display_name,
+        designation: profile.designation ?? '',
+        emailOptIn: profile.email_opt_in,
+        photo: { kind: 'clear' },
+      });
+      if (!result.ok) {
+        logger.error('settings photo remove failed', { error: result.error.message });
+      }
+      const settled = settlePhotoChange(result, previous, next);
+      if (result.ok) revokeIfOwned(previous.previewUrl);
+      viewUrlRef.current = settled.photo.previewUrl;
+      setPhotoViewState(settled.photo);
+      setFormError(settled.error);
+      if (result.ok) refetch();
+    } finally {
+      photoBusyRef.current = false;
+      setPhotoBusy(false);
+    }
   }
 
-  if (loading) {
+  const mode = panelMode(loading, profile);
+  if (mode === 'loading') {
     return <div className="max-w-[520px] text-sm text-fg-3">Loading</div>;
   }
 
-  if (error || profile === null) {
+  if (mode === 'error' || profile === null) {
     return (
       <div className="max-w-[520px] flex flex-col gap-3">
         <p className="text-sm text-bad">Could not load your profile.</p>
         <div>
-          <Button onClick={refetch}>Retry</Button>
+          <Button size="lg" onClick={refetch}>
+            Retry
+          </Button>
         </div>
       </div>
     );
@@ -290,33 +499,24 @@ export function ProfileSettingsPanel(): React.ReactElement {
             name={trimmedName.length > 0 ? trimmedName : profile.display_name}
             {...(photoSrc !== null ? { src: photoSrc } : {})}
           />
-          <button
-            type="button"
-            aria-label="Change photo"
-            disabled={submitting}
-            onClick={() => setPhotoSheetOpen(true)}
-            className="absolute -bottom-2 -right-2 grid h-11 w-11 place-items-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
-          >
-            <span
-              data-camera-badge=""
-              aria-hidden="true"
-              className="flex h-10 w-10 items-center justify-center rounded-full bg-accent text-accent-fg ring-4 ring-panel"
-            >
-              <IconCamera size={20} />
-            </span>
-          </button>
+          <CameraBadge disabled={busy} onPress={() => setPhotoSheetOpen(true)} />
         </div>
         {/* Always mounted so a picked file can be handed in; shown only while a
-            new photo is staged for positioning. */}
-        <div className={staged ? undefined : 'hidden'}>
+            pick waits for Use photo or Cancel. */}
+        <div className={staged ? 'flex flex-col gap-3' : 'hidden'}>
           <AvatarCropper
+            key={cropperKey}
             ref={cropperRef}
             hidePicker
             onPhotoChange={(info) => {
-              setPhotoView({ previewUrl: info.previewUrl, removed: false });
               setStaged(info.hasPhoto);
               setSaved(false);
             }}
+          />
+          <PhotoPickActions
+            busy={photoBusy}
+            onUse={() => void handleUsePhoto()}
+            onCancel={handleCancelPhoto}
           />
         </div>
       </div>
@@ -325,22 +525,23 @@ export function ProfileSettingsPanel(): React.ReactElement {
         open={photoSheetOpen}
         onClose={() => setPhotoSheetOpen(false)}
         title="Your photo"
-        hasPhoto={photoSrc !== null}
+        hasPhoto={canRemovePhoto(profile.avatar_url, photoView)}
         onFile={(file) => {
           setFormError(null);
           cropperRef.current?.loadFile(file);
         }}
-        onRemove={handleRemove}
+        onRemove={() => void handleRemove()}
       />
 
       <Field label="Display name" htmlFor="settings-display-name">
         <Input
           id="settings-display-name"
-          value={name}
+          value={fields.name}
           maxLength={80}
           placeholder="Your name"
           onChange={(event) => {
-            setName(event.target.value);
+            const value = event.target.value;
+            setFields((current) => ({ ...current, name: value, nameEdited: true }));
             setSaved(false);
           }}
         />
@@ -349,11 +550,12 @@ export function ProfileSettingsPanel(): React.ReactElement {
       <Field label="Designation" htmlFor="settings-designation">
         <Input
           id="settings-designation"
-          value={designation}
+          value={fields.designation}
           maxLength={80}
           placeholder="e.g. Brand Manager"
           onChange={(event) => {
-            setDesignation(event.target.value);
+            const value = event.target.value;
+            setFields((current) => ({ ...current, designation: value, designationEdited: true }));
             setSaved(false);
           }}
         />
@@ -373,6 +575,62 @@ export function ProfileSettingsPanel(): React.ReactElement {
         </Button>
         {saved ? <span className="text-sm text-fg-2">Saved</span> : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The camera badge. Its ring is the Settings page canvas (bg, the token html,
+ * body and #root paint), so the badge reads as cut out of the page in light and
+ * dark alike.
+ */
+export function CameraBadge(props: { disabled: boolean; onPress: () => void }): React.ReactElement {
+  return (
+    <button
+      type="button"
+      aria-label="Change photo"
+      disabled={props.disabled}
+      onClick={props.onPress}
+      className="absolute -bottom-2 -right-2 grid h-11 w-11 place-items-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50"
+    >
+      <span
+        data-camera-badge=""
+        aria-hidden="true"
+        className="flex h-10 w-10 items-center justify-center rounded-full bg-accent text-accent-fg ring-4 ring-bg"
+      >
+        <IconCamera size={20} />
+      </span>
+    </button>
+  );
+}
+
+/** Use photo (primary) and Cancel under the cropper; both disabled mid-upload. */
+export function PhotoPickActions(props: {
+  busy: boolean;
+  onUse: () => void;
+  onCancel: () => void;
+}): React.ReactElement {
+  return (
+    <div className="flex items-center gap-3">
+      <Button
+        type="button"
+        variant="primary"
+        size="lg"
+        data-action="use-photo"
+        disabled={props.busy}
+        onClick={props.onUse}
+      >
+        {props.busy ? 'Saving...' : 'Use photo'}
+      </Button>
+      <Button
+        type="button"
+        size="lg"
+        data-action="cancel-photo"
+        disabled={props.busy}
+        onClick={props.onCancel}
+      >
+        Cancel
+      </Button>
     </div>
   );
 }

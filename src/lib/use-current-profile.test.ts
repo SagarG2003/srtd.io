@@ -8,8 +8,17 @@ interface Deferred {
 }
 const reads: Deferred[] = [];
 
+type AuthCallback = (event: string, session: { user: { id: string } } | null) => void;
+const auth = { callbacks: new Set<AuthCallback>() };
+
 vi.mock('@/lib/supabase', () => ({
   supabase: {
+    auth: {
+      onAuthStateChange: (cb: AuthCallback) => {
+        auth.callbacks.add(cb);
+        return { data: { subscription: { unsubscribe: () => auth.callbacks.delete(cb) } } };
+      },
+    },
     from: () => ({
       select: () => ({
         eq: (_col: string, userId: string) => ({
@@ -24,6 +33,7 @@ vi.mock('@/lib/supabase', () => ({
 }));
 
 import {
+  authEndsSnapshot,
   getProfileSnapshot,
   loadProfile,
   profileViewFor,
@@ -188,5 +198,107 @@ describe('shared profile store', () => {
       loading: false,
       error: true,
     });
+  });
+});
+
+function emitAuth(event: string, userId: string | null): void {
+  for (const cb of auth.callbacks) cb(event, userId === null ? null : { user: { id: userId } });
+}
+
+async function loaded(userId: string, name: string): Promise<void> {
+  void loadProfile(userId);
+  reads[reads.length - 1]?.resolve({ data: row(name), error: null });
+  await flush();
+}
+
+describe('auth-driven reset (F6)', () => {
+  it('sign-out via the auth event resets the store', async () => {
+    const off = subscribeProfile(() => {});
+    await loaded('u-1', 'Asha');
+    emitAuth('SIGNED_OUT', null);
+    expect(getProfileSnapshot()).toEqual({
+      userId: null,
+      profile: null,
+      loading: true,
+      error: false,
+    });
+    off();
+  });
+
+  it('a different user from the auth event resets; a transient null does not', async () => {
+    const off = subscribeProfile(() => {});
+    await loaded('u-1', 'Asha');
+    emitAuth('TOKEN_REFRESHED', null);
+    expect(getProfileSnapshot().profile?.display_name).toBe('Asha');
+    emitAuth('TOKEN_REFRESHED', 'u-1');
+    expect(getProfileSnapshot().profile?.display_name).toBe('Asha');
+    emitAuth('SIGNED_IN', 'u-2');
+    expect(getProfileSnapshot().userId).toBeNull();
+    off();
+  });
+
+  it('a sorted:signout dispatch alone does not reset', async () => {
+    const target = new EventTarget();
+    vi.stubGlobal('window', target);
+    const off = subscribeProfile(() => {});
+    await loaded('u-1', 'Asha');
+    target.dispatchEvent(new Event('sorted:signout'));
+    expect(getProfileSnapshot().profile?.display_name).toBe('Asha');
+    off();
+    vi.unstubAllGlobals();
+  });
+
+  it('subscribes to auth at the first subscriber and unsubscribes at the last', () => {
+    expect(auth.callbacks.size).toBe(0);
+    const offA = subscribeProfile(() => {});
+    const offB = subscribeProfile(() => {});
+    expect(auth.callbacks.size).toBe(1);
+    offA();
+    expect(auth.callbacks.size).toBe(1);
+    offB();
+    expect(auth.callbacks.size).toBe(0);
+  });
+
+  it('authEndsSnapshot is false with nothing held', () => {
+    expect(authEndsSnapshot('SIGNED_OUT', null, null)).toBe(false);
+  });
+});
+
+describe('no extra reads (F7)', () => {
+  it('a mount with a loaded snapshot makes 0 reads', async () => {
+    await loaded('u-1', 'Asha');
+    expect(reads).toHaveLength(1);
+    void loadProfile('u-1');
+    expect(reads).toHaveLength(1);
+  });
+
+  it('a mount after a failed read makes 0 reads; Retry (force) reads', async () => {
+    void loadProfile('u-1');
+    reads[0]?.resolve({ data: null, error: { message: 'network' } });
+    await flush();
+    void loadProfile('u-1');
+    expect(reads).toHaveLength(1);
+    void loadProfile('u-1', true);
+    expect(reads).toHaveLength(2);
+  });
+
+  it('a mount with a read in flight makes 0 new reads', () => {
+    void loadProfile('u-1');
+    void loadProfile('u-1');
+    expect(reads).toHaveLength(1);
+  });
+});
+
+describe('stale results (F8)', () => {
+  it('an older sequence result is dropped (A to B to A)', async () => {
+    void loadProfile('u-a');
+    void loadProfile('u-b');
+    void loadProfile('u-a');
+    expect(reads).toHaveLength(3);
+    reads[2]?.resolve({ data: row('A new'), error: null });
+    await flush();
+    reads[0]?.resolve({ data: row('A old'), error: null });
+    await flush();
+    expect(getProfileSnapshot().profile?.display_name).toBe('A new');
   });
 });
