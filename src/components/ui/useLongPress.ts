@@ -57,6 +57,20 @@ export interface LongPressOptions {
   ignoreMouse?: boolean;
 }
 
+/** Controllers with a hold timer running right now (at most one touch at a time). */
+const pendingHolds = new Set<() => void>();
+
+/**
+ * Cancel every running hold timer, wherever it lives. A gesture that claims the
+ * pointer (a chat swipe-to-reply) calls this so a hold nested inside the swiped
+ * element (a post card's own hold) never fires mid-gesture: pointer capture
+ * sends the moves to the capturing element, so the nested hold would never see
+ * its 10px move cancel. Holds that already fired are untouched.
+ */
+export function cancelPendingLongPresses(): void {
+  [...pendingHolds].forEach((cancelHold) => cancelHold());
+}
+
 /**
  * Framework-free long-press core. Pointer-based, no external dependency. A
  * long-press fires after `thresholdMs` of holding still; moving past
@@ -80,6 +94,7 @@ export function createLongPressController({
       clearTimeout(timer);
       timer = null;
     }
+    pendingHolds.delete(cancel);
   }
 
   function detachScroll(): void {
@@ -101,10 +116,12 @@ export function createLongPressController({
     startY = event.clientY;
     timer = setTimeout(() => {
       timer = null;
+      pendingHolds.delete(cancel);
       suppressClick = true;
       detachScroll();
       onLongPress();
     }, thresholdMs);
+    pendingHolds.add(cancel);
     // Any scroll while holding is a scroll gesture, not a press.
     if (typeof window !== 'undefined') {
       window.addEventListener('scroll', cancel, true);

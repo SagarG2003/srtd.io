@@ -124,6 +124,7 @@ function FileChip({
           href={url}
           target="_blank"
           rel="noopener noreferrer"
+          draggable={false}
           className="flex min-h-[44px] shrink-0 items-center"
         >
           <span className={OPEN_BUTTON}>Open</span>
@@ -218,6 +219,7 @@ function AttachmentItem({
         <img
           src={view.src}
           alt={view.alt}
+          draggable={false}
           className="max-h-48 max-w-[260px] rounded-lg border border-border object-cover"
         />
       );
@@ -242,6 +244,7 @@ function AttachmentItem({
           <img
             src={view.src}
             alt={view.alt}
+            draggable={false}
             className={cn(
               'block max-h-48 max-w-[260px] object-cover',
               view.progress !== null && 'brightness-75',

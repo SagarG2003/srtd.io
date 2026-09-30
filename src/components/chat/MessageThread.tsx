@@ -63,7 +63,11 @@ import {
   IconTrash,
 } from '@/components/ui/icons';
 import { useLongPress } from '@/components/ui';
-import { LONG_PRESS_MS, MOVE_CANCEL_PX } from '@/components/ui/useLongPress';
+import {
+  cancelPendingLongPresses,
+  LONG_PRESS_MS,
+  MOVE_CANCEL_PX,
+} from '@/components/ui/useLongPress';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
@@ -304,8 +308,9 @@ export interface BubblePointerHandlers {
 /**
  * The swipe-to-reply icon: sits behind the bubble's resting left edge and is
  * revealed as the bubble slides right. 32px circle, panel-3 idle, accent when
- * armed (data-armed). Scale and opacity are painted per frame by MessageRow;
- * at rest the classes hold it at scale 0.6, opacity 0. No other motion.
+ * armed (data-armed). Scale and opacity (0 to 1 over 0 to 64px) are painted
+ * per frame by MessageRow; at rest the classes hold it at scale 0, opacity 0.
+ * The release spring is set inline with the bubble's. No other motion.
  */
 export function SwipeReplyIcon(props: {
   iconRef?: Ref<HTMLSpanElement> | undefined;
@@ -315,7 +320,7 @@ export function SwipeReplyIcon(props: {
       ref={props.iconRef}
       aria-hidden="true"
       data-swipe-icon=""
-      className="pointer-events-none absolute inset-y-0 left-0 my-auto flex h-8 w-8 scale-[.6] items-center justify-center rounded-full bg-panel-3 text-fg-2 opacity-0 transition-[transform,opacity] duration-[120ms] motion-reduce:transition-none data-[armed]:bg-accent data-[armed]:text-accent-fg"
+      className="pointer-events-none absolute inset-y-0 left-0 my-auto flex h-8 w-8 scale-0 items-center justify-center rounded-full bg-panel-3 text-fg-2 opacity-0 data-[armed]:bg-accent data-[armed]:text-accent-fg"
     >
       <svg
         width={18}
@@ -1457,7 +1462,8 @@ export function MessageBubble(props: {
   const placement = metaPlacement(message);
   const onMore = selection === undefined ? press?.onMore : undefined;
   const onReact = selection === undefined && message.state === 'sent' ? press?.onReact : undefined;
-  const swipe = selection === undefined ? props.swipe : undefined;
+  // Only a recorded message takes a reply: sending and failed bubbles never swipe.
+  const swipe = selection === undefined && message.state === 'sent' ? props.swipe : undefined;
   const chip = props.postRefs?.chip;
   const cardRefs = cardRefsFor(message.id, selection, props.postRefs);
   const column = cn('flex min-w-0 flex-col gap-1', sized(BUBBLE_MAX, layout), mine && 'items-end');
@@ -1975,8 +1981,12 @@ function MessageRow(props: {
       onReply: () => latest.current.onSwipeReply(latest.current.message),
       onFrame: (frame) => paintSwipe(bubbleRef.current, iconRef.current, frame),
       onStart: (pointerId) => {
-        // A swipe never opens the menu: stop the hold timer (8px < its 10px).
+        // A swipe never opens a menu: stop the bubble's hold timer (8px < its
+        // 10px) and any hold inside it (a post card's), which never sees the
+        // captured moves. Drop any text selection the press started.
         cancel();
+        cancelPendingLongPresses();
+        window.getSelection()?.removeAllRanges();
         if (pointerId === undefined) return;
         try {
           bubbleRef.current?.setPointerCapture(pointerId);
@@ -1984,7 +1994,8 @@ function MessageRow(props: {
           // The pointer is already gone; the gesture ends on its own.
         }
       },
-      enabled: () => latest.current.selection === undefined,
+      enabled: () =>
+        latest.current.selection === undefined && latest.current.message.state === 'sent',
       reducedMotion: () => latest.current.reducedMotion,
     });
   }
@@ -2288,13 +2299,17 @@ function paintSwipe(
   frame: SwipeFrame,
 ): void {
   const moved = frame.offset > 0;
+  const spring = frame.animate ? `${SWIPE_SPRING_MS}ms ease-out` : '';
   if (bubble !== null) {
-    bubble.style.transition = frame.animate ? `transform ${SWIPE_SPRING_MS}ms ease-out` : '';
-    bubble.style.transform = moved ? `translateX(${frame.offset}px)` : '';
+    // translateX only; the compositor hint lives only while the finger drags.
+    bubble.style.willChange = frame.dragging ? 'transform' : '';
+    bubble.style.transition = spring !== '' ? `transform ${spring}` : '';
+    bubble.style.transform = moved ? `translate3d(${frame.offset}px,0,0)` : '';
   }
   if (icon !== null) {
+    icon.style.transition = spring !== '' ? `transform ${spring}, opacity ${spring}` : '';
     icon.style.opacity = moved ? String(frame.progress) : '';
-    icon.style.transform = moved ? `scale(${0.6 + 0.4 * frame.progress})` : '';
+    icon.style.transform = moved ? `scale(${frame.progress})` : '';
     icon.toggleAttribute('data-armed', frame.armed);
   }
 }

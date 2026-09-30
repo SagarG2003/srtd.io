@@ -1388,6 +1388,15 @@ describe('swipe to reply', () => {
     }
   });
 
+  it('sending and failed bubbles are not swipeable (no reply to an unrecorded id)', () => {
+    for (const state of ['sending', 'failed'] as const) {
+      const root = render(makeMessage({ mine: true, state }));
+      const [bubble] = find(root, 'data-bubble');
+      expect(bubble?.props['data-swipe-reply']).toBeUndefined();
+      expect(String(bubble?.props.className)).not.toContain('touch-pan-y');
+    }
+  });
+
   it('is off while selecting', () => {
     const root = render(makeMessage({}), true);
     const [bubble] = find(root, 'data-bubble');
@@ -1406,10 +1415,10 @@ describe('swipe to reply', () => {
     expect(cls).toContain('h-8 w-8');
     expect(cls).toContain('bg-panel-3');
     expect(cls).toContain('data-[armed]:bg-accent data-[armed]:text-accent-fg');
-    expect(cls).toContain('scale-[.6]');
+    expect(cls).toContain('scale-0');
     expect(cls).toContain('opacity-0');
-    expect(cls).toContain('duration-[120ms]');
-    expect(cls).toContain('motion-reduce:transition-none');
+    // Per-frame scale and opacity: no class transition lagging the finger.
+    expect(cls).not.toContain('transition');
     const [svg] = find(icon, 'strokeWidth');
     expect(svg?.props.strokeWidth).toBe(1.7);
     expect(svg?.props.stroke).toBe('currentColor');

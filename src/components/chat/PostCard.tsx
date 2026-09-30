@@ -522,6 +522,7 @@ function CardMedia(props: {
           alt=""
           loading="lazy"
           onError={thumb.onError}
+          draggable={false}
           className="h-full w-full object-cover"
         />
       ) : null}

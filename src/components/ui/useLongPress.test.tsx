@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  cancelPendingLongPresses,
   createLongPressController,
   LONG_PRESS_MS,
   MOVE_CANCEL_PX,
@@ -141,5 +142,27 @@ describe('createLongPressController', () => {
     expect(c.consumeClickSuppression()).toBe(false);
 
     c.dispose();
+  });
+});
+
+describe('cancelPendingLongPresses', () => {
+  it('cancels every running hold timer and leaves fired holds and later presses alone', () => {
+    vi.useFakeTimers();
+    const a = vi.fn();
+    const b = vi.fn();
+    const ca = createLongPressController({ onLongPress: a });
+    const cb = createLongPressController({ onLongPress: b });
+    ca.handlers.onPointerDown({ clientX: 0, clientY: 0, pointerType: 'touch' });
+    cb.handlers.onPointerDown({ clientX: 0, clientY: 0, pointerType: 'touch' });
+    cancelPendingLongPresses();
+    vi.advanceTimersByTime(LONG_PRESS_MS * 2);
+    expect(a).not.toHaveBeenCalled();
+    expect(b).not.toHaveBeenCalled();
+    ca.handlers.onPointerDown({ clientX: 0, clientY: 0, pointerType: 'touch' });
+    vi.advanceTimersByTime(LONG_PRESS_MS);
+    expect(a).toHaveBeenCalledTimes(1);
+    cancelPendingLongPresses();
+    expect(ca.consumeClickSuppression()).toBe(true);
+    vi.useRealTimers();
   });
 });
