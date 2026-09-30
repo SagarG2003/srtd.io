@@ -892,7 +892,11 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       const lane = lanes.get(channelId);
       if (lane !== undefined) stopTimer(lane);
       lanes.delete(channelId);
-      for (const e of selectOutbox(outbox, channelId)) forget(e.id);
+      // A cleared chat stops its uploads too; their answers are ignored.
+      for (const e of selectOutbox(outbox, channelId)) {
+        controllers.get(e.id)?.abort();
+        forget(e.id);
+      }
       commit(outboxDropChannel(outbox, channelId));
     },
     restoreFiles: (channelId, id, attachments) => {
