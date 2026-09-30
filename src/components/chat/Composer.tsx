@@ -21,7 +21,11 @@ import { PostPicker } from '@/components/chat/PostPicker';
 import { MentionPicker, stepActive } from '@/components/chat/MentionPicker';
 import { PendingChip } from '@/components/chat/PendingChip';
 import { PostRefThumb, postRefKey, type PostRefPost } from '@/components/chat/PostRefChip';
-import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
+import {
+  ReplyQuoteBox,
+  type QuoteMedia,
+  type QuoteThumbSource,
+} from '@/components/chat/ReplyQuote';
 import { cn } from '@/lib/cn';
 import { editFailureCopy } from '@/lib/chat/record';
 import { briefStatusLabel, toggleBrief, type BriefCardFields } from '@/lib/chat/briefs';
@@ -103,6 +107,10 @@ interface ComposerProps {
    * present. `deleted` (the quoted message was deleted) reads deletedMessageLabel.
    */
   reply?: { authorName: string; quote: ReplyQuote; deleted?: true } | undefined;
+  /** The replied-to message's media (glyph, label, thumbnail) when it is loaded. */
+  replyMedia?: QuoteMedia | null | undefined;
+  /** Where the reply bar's thumbnail presigns from. */
+  replyThumbSource?: QuoteThumbSource | undefined;
   /** The viewer's user id: a reply to their own deleted message reads "You deleted". */
   viewerUserId?: string | undefined;
   /** Clears the active reply draft (cancel button, and after a successful send). */
@@ -418,12 +426,16 @@ export function ReplyBar(props: {
   reply: { authorName: string; quote: ReplyQuote; deleted?: true };
   viewerUserId: string | undefined;
   onCancel: () => void;
+  media?: QuoteMedia | null | undefined;
+  thumbSource?: QuoteThumbSource | undefined;
 }): ReactElement {
   return (
     <ReplyQuoteBox
       author={props.reply.authorName}
       preview={replyBarPreview(props.reply, props.viewerUserId)}
       deleted={props.reply.deleted === true}
+      media={props.reply.deleted === true ? null : props.media}
+      thumbSource={props.thumbSource}
       className={NO_TOUCH_SELECT}
       trailing={
         <IconButton label="Cancel reply" className="shrink-0" onClick={props.onCancel}>
@@ -1182,6 +1194,8 @@ export function Composer(props: ComposerProps): ReactElement {
           }}
           viewerUserId={props.viewerUserId}
           onCancel={() => props.onCancelReply?.()}
+          media={props.replyMedia}
+          thumbSource={props.replyThumbSource}
         />
       ) : null}
 

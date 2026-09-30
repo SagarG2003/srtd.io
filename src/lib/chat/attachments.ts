@@ -114,11 +114,42 @@ export function withoutLocal(attachment: MessageAttachment): MessageAttachment {
   return rest;
 }
 
+/** Object URLs of own voice notes' recorded files, one per File for the session. */
+const localAudioUrls = new WeakMap<File, string>();
+
+/**
+ * The playable object URL of an own voice note's recorded file, created once
+ * per File (so the upload finishing never swaps the audio src); null when the
+ * attachment carries no local file (a peer's note, or restored after a reload).
+ */
+export function localAudioUrl(attachment: MessageAttachment): string | null {
+  const file = attachment.local?.file ?? null;
+  if (file === null || typeof URL.createObjectURL !== 'function') return null;
+  const known = localAudioUrls.get(file);
+  if (known !== undefined) return known;
+  const url = URL.createObjectURL(file);
+  localAudioUrls.set(file, url);
+  return url;
+}
+
+/** True for a voice note: an audio mime, or a recorded length whatever the mime. */
+export function isVoiceAttachment(
+  attachment: Pick<MessageAttachment, 'mime' | 'durationMs'>,
+): boolean {
+  return classifyAttachment(attachment.mime) === 'audio' || attachment.durationMs !== undefined;
+}
+
 /** Revoke the object URLs of local previews (entry removed, bubble gone). */
 export function revokeLocalPreviews(attachments: readonly MessageAttachment[]): void {
   for (const attachment of attachments) {
     const url = attachment.local?.previewUrl;
     if (url != null) URL.revokeObjectURL(url);
+    const file = attachment.local?.file ?? null;
+    const audio = file !== null ? localAudioUrls.get(file) : undefined;
+    if (file !== null && audio !== undefined) {
+      URL.revokeObjectURL(audio);
+      localAudioUrls.delete(file);
+    }
   }
 }
 

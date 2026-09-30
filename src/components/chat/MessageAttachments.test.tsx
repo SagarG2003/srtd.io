@@ -85,6 +85,8 @@ describe('attachmentView render dispatch', () => {
       kind: 'audio',
       url: 'https://signed/audio',
       name: 'note.webm',
+      durationMs: undefined,
+      progress: null,
     });
   });
 
@@ -102,16 +104,72 @@ describe('attachmentView render dispatch', () => {
   it('keeps the voice note while the presign is still in flight (url null)', () => {
     expect(
       attachmentView({ attachment: AUDIO, presignEnabled: true, url: null, failed: false }),
-    ).toEqual({ kind: 'audio', url: null, name: 'note.webm' });
+    ).toEqual({
+      kind: 'audio',
+      url: null,
+      name: 'note.webm',
+      durationMs: undefined,
+      progress: null,
+    });
   });
 
-  it('falls back to a file chip for audio when presign failed or is disabled', () => {
+  it('never falls back to a file chip for audio: a failed or disabled presign keeps the voice note, unplayable', () => {
     expect(
       attachmentView({ attachment: AUDIO, presignEnabled: true, url: null, failed: true }),
-    ).toEqual({ kind: 'file', name: 'note.webm', url: null });
+    ).toMatchObject({ kind: 'audio', url: null, progress: null });
     expect(
       attachmentView({ attachment: AUDIO, presignEnabled: false, url: null, failed: false }),
-    ).toEqual({ kind: 'file', name: 'note.webm', url: null });
+    ).toMatchObject({ kind: 'audio', url: null, progress: null });
+  });
+
+  it('an uploading own voice note is the voice note with its progress and local file, never a file chip', () => {
+    const uploading: MessageAttachment = {
+      assetId: '',
+      name: 'voice-note.webm',
+      mime: 'audio/webm',
+      durationMs: 7_000,
+      local: { key: 'local-1', file: null, previewUrl: null, progress: 0.4 },
+    };
+    expect(
+      attachmentView({
+        attachment: uploading,
+        presignEnabled: true,
+        url: null,
+        failed: false,
+        localUrl: 'blob:note',
+      }),
+    ).toEqual({
+      kind: 'audio',
+      url: 'blob:note',
+      name: 'voice-note.webm',
+      durationMs: 7_000,
+      progress: 0.4,
+    });
+    // No local file (restored after a reload): still the voice note, play disabled.
+    expect(
+      attachmentView({ attachment: uploading, presignEnabled: true, url: null, failed: false }),
+    ).toMatchObject({ kind: 'audio', url: null, progress: 0.4 });
+    // Sent: same branch, the bar goes away, the local file keeps playing.
+    expect(
+      attachmentView({
+        attachment: { ...uploading, assetId: 'v1' },
+        presignEnabled: true,
+        url: null,
+        failed: false,
+        localUrl: 'blob:note',
+      }),
+    ).toMatchObject({ kind: 'audio', url: 'blob:note', progress: null });
+  });
+
+  it('a voice note with no audio mime (recorded length) is still a voice note', () => {
+    expect(
+      attachmentView({
+        attachment: { assetId: 'v', name: 'voice.webm', mime: 'video/webm', durationMs: 3_000 },
+        presignEnabled: true,
+        url: 'https://signed/v',
+        failed: false,
+      }),
+    ).toMatchObject({ kind: 'audio', url: 'https://signed/v' });
   });
 });
 
@@ -212,6 +270,48 @@ describe('instant send tile (local preview + upload progress)', () => {
     );
     return { html, fetcher };
   }
+
+  it('an uploading own voice note renders the voice bubble with the upload bar, never the file chip', () => {
+    const { cache, fetcher } = spiedCache();
+    const voice: MessageAttachment = {
+      assetId: '',
+      name: 'voice-note.webm',
+      mime: 'audio/webm',
+      durationMs: 7_000,
+      local: { key: 'local-v', file: null, previewUrl: null, progress: 0.25 },
+    };
+    const html = renderToStaticMarkup(
+      <MessageAttachments attachments={[voice]} cache={cache} presignEnabled voiceSpacer="" />,
+    );
+    expect(html).toContain('data-voice-note');
+    expect(html).toContain('data-voice-upload');
+    expect(html).toContain('0:07');
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('width:25%');
+    expect(html).not.toContain('WEBM');
+    expect(html).not.toContain('Open');
+    // Sent: the same wrapper and voice note, only the bar is gone (no jump).
+    const sent = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[
+          { ...voice, assetId: AUDIO_VERSION, local: { ...voice.local!, progress: 1 } },
+        ]}
+        cache={cache}
+        presignEnabled
+        voiceSpacer=""
+      />,
+    );
+    expect(sent).toContain('data-voice-note');
+    expect(sent).not.toContain('data-voice-upload');
+    expect(sent).not.toContain('role="progressbar"');
+    expect(sent.replace(/<audio[^>]*>/, '')).toBe(
+      html
+        .replace(/<audio[^>]*>/, '')
+        .replace(/<span role="progressbar".*?<\/span><\/span>/, '')
+        .replace(' data-voice-upload=""', ''),
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
 
   it('the tile is dimmed with a thin white bar (width = progress) while uploading', () => {
     const { html, fetcher } = render(local(0.4));

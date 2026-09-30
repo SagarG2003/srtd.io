@@ -20,6 +20,7 @@ import { toAgoraUsername, userIdFromAgoraUsername } from '@/lib/chat/agora-ident
 import type { ChannelSummary } from '@/lib/chat-reads';
 import {
   buildMessageExt,
+  classifyAttachment,
   parseAttachmentMeta,
   parseForwardedFrom,
   parseAttachments,
@@ -526,6 +527,108 @@ function asTombstone(message: ThreadMessage): ThreadMessage {
   };
 }
 
+/** The glyph before an attachment's label (quote, reply bar, chat list line). */
+export type AttachmentSummaryIcon = 'mic' | 'camera' | 'video' | 'file';
+
+/**
+ * What a message's attachments read as, WhatsApp style: a voice note is
+ * "Voice message" with its m:ss length, images "Photo" or "N photos" with the
+ * first image as the thumbnail, a video "Video", any other file its name.
+ */
+export interface AttachmentSummary {
+  icon: AttachmentSummaryIcon;
+  label: string;
+  /** A voice note's recorded length as m:ss; absent when unknown. */
+  duration?: string;
+  /** The asset version id to presign for the thumbnail (images). */
+  thumbAssetVersionId?: string;
+  /** An own unsent image's local preview, shown instead of a presign. */
+  thumbLocalUrl?: string;
+}
+
+/** The attachment fields a summary reads. */
+export type SummaryAttachment = Pick<MessageAttachment, 'assetId' | 'name' | 'mime'> &
+  Partial<Pick<MessageAttachment, 'durationMs' | 'transcript' | 'local'>>;
+
+/** Fixed labels the summary uses (the chat list line matches its glyph on them). */
+export const SUMMARY_LABELS = {
+  voice: 'Voice message',
+  photo: 'Photo',
+  video: 'Video',
+  file: 'File',
+} as const;
+
+/** Format a millisecond length as m:ss ("0:07", "12:05"). Pure. */
+export function formatSummaryDuration(ms: number): string {
+  const seconds = Number.isFinite(ms) && ms > 0 ? Math.round(ms / 1000) : 0;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function isVoice(a: SummaryAttachment): boolean {
+  return (
+    a.durationMs !== undefined ||
+    a.transcript !== undefined ||
+    classifyAttachment(a.mime) === 'audio'
+  );
+}
+
+/**
+ * The one summary behind the reply quote, the composer reply bar, the chat
+ * list line and the marks row: images first ("Photo" / "N photos" with the
+ * first as thumbnail), then video, a file (its name), then a voice note.
+ * Null when the message carries no attachment. Pure.
+ */
+export function attachmentSummary(message: {
+  attachments: readonly SummaryAttachment[];
+}): AttachmentSummary | null {
+  const all = message.attachments;
+  if (all.length === 0) return null;
+  const images = all.filter((a) => !isVoice(a) && classifyAttachment(a.mime) === 'image');
+  const [first] = images;
+  if (first !== undefined) {
+    const local = first.local?.previewUrl ?? null;
+    return {
+      icon: 'camera',
+      label: images.length === 1 ? SUMMARY_LABELS.photo : `${images.length} photos`,
+      ...(first.assetId !== '' ? { thumbAssetVersionId: first.assetId } : {}),
+      ...(local !== null ? { thumbLocalUrl: local } : {}),
+    };
+  }
+  if (all.some((a) => !isVoice(a) && a.mime.startsWith('video/'))) {
+    return { icon: 'video', label: SUMMARY_LABELS.video };
+  }
+  const file = all.find((a) => !isVoice(a));
+  if (file !== undefined) {
+    const name = file.name.trim();
+    return { icon: 'file', label: name !== '' ? name : SUMMARY_LABELS.file };
+  }
+  const voice = all[0] as SummaryAttachment;
+  return {
+    icon: 'mic',
+    label: SUMMARY_LABELS.voice,
+    ...(voice.durationMs !== undefined
+      ? { duration: formatSummaryDuration(voice.durationMs) }
+      : {}),
+  };
+}
+
+/** A summary as one line of text ("Voice message (0:07)", "3 photos", "brief.pdf"). Pure. */
+export function attachmentSummaryText(summary: AttachmentSummary): string {
+  return summary.duration !== undefined ? `${summary.label} (${summary.duration})` : summary.label;
+}
+
+/**
+ * The glyph for a stored text line that is a bare summary (the chat list line
+ * carries text only); null for anything else, so a body line never gets one. Pure.
+ */
+export function summaryIconOfLine(line: string): AttachmentSummaryIcon | null {
+  if (line === SUMMARY_LABELS.photo || /^\d+ photos$/.test(line)) return 'camera';
+  if (line === SUMMARY_LABELS.video) return 'video';
+  if (line === SUMMARY_LABELS.voice || /^Voice message \(\d+:\d{2}\)$/.test(line)) return 'mic';
+  if (line === SUMMARY_LABELS.file) return 'file';
+  return null;
+}
+
 /** Longest body snapshot a reply quote carries. */
 export const REPLY_PREVIEW_LIMIT = 120;
 
@@ -537,7 +640,8 @@ export function replyPreview(
   const body = message.body.trim();
   // Never cut through an @[uuid] token: the quote resolves it to "@Name" at render.
   if (body !== '') return truncateBody(body, REPLY_PREVIEW_LIMIT);
-  if (message.attachments.length > 0) return 'Attachment';
+  const summary = attachmentSummary(message);
+  if (summary !== null) return attachmentSummaryText(summary);
   if (message.sharedPostIds.length > 0) return 'Shared post';
   if ((message.sharedBriefIds ?? []).length > 0) return 'Shared brief';
   return 'Message';

@@ -19,6 +19,8 @@ import type { Client, Result } from '@srtdio/rpc';
 import type { Database } from '@srtdio/schemas';
 import type { MarkPriority, MarkType } from '@/lib/chat/record';
 import {
+  attachmentSummary,
+  attachmentSummaryText,
   parseLiveEvent,
   type ChatMessageRow,
   type MessageCursor,
@@ -388,7 +390,8 @@ export function markRowText(
   if (cardTitle !== undefined && cardTitle !== '') return cardTitle;
   if (message.sharedPostIds.length > 0) return 'Shared post';
   if (message.sharedBriefIds.length > 0) return 'Shared brief';
-  if (message.attachments.length > 0) return 'Attachment';
+  const summary = attachmentSummary(message);
+  if (summary !== null) return attachmentSummaryText(summary);
   return 'Message';
 }
 

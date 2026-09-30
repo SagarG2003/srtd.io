@@ -42,6 +42,8 @@ import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { draftText, draftsVersion, subscribeDrafts } from '@/lib/chat/drafts';
 import { mentionNamesIn, resolveMentionPreview, splitAllMentions } from '@/lib/chat/mentions';
 import { leaveSelectionThen } from '@/lib/chat/forward';
+import { summaryIconOfLine } from '@/lib/chat/thread';
+import { SummaryGlyph } from '@/components/chat/ReplyQuote';
 import {
   COARSE_POINTER_QUERY,
   DRAFT_PREFIX_TYPE,
@@ -510,6 +512,8 @@ export function channelRowBody(props: {
   const hasMessage = summary !== undefined && summary.lastMessageTs > 0;
   const unread = summary?.unread ?? 0;
   const preview = hasMessage ? previewLine(summary) : 'No messages yet';
+  // A media line ("Photo", "Voice message") leads with its glyph, as in the quote.
+  const previewIcon = hasMessage ? summaryIconOfLine(summary.lastMessageText) : null;
   const draft = props.draft ?? null;
   const time = hasMessage
     ? formatRelativeTime(summary.lastMessageTs, props.nowMs, props.timeZone)
@@ -534,7 +538,15 @@ export function channelRowBody(props: {
       </span>
     ) : (
       <span className={cn('min-w-0', fit, previewType, hasMessage ? 'text-fg-2' : 'text-fg-3')}>
-        {boldAllMentions(preview)}
+        {previewIcon !== null && hasMessage ? (
+          <>
+            {summary.lastMessagePrefix !== undefined ? `${summary.lastMessagePrefix}: ` : ''}
+            <SummaryGlyph icon={previewIcon} className="mr-1" />
+            {summary.lastMessageText}
+          </>
+        ) : (
+          boldAllMentions(preview)
+        )}
       </span>
     );
   const photo = (
