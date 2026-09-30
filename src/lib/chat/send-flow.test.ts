@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createOutboxSender,
-  FAILED_AFTER_MS,
   LIVE_PUBLISH_TIMEOUT_MS,
   runSend,
   type SendFlowDeps,
@@ -154,7 +153,12 @@ describe('runSend', () => {
         .mockResolvedValue({ ok: false, reason: 'timeout', message: 'aborted' }),
     });
     const outcome = await runSend(failing, input());
-    expect(outcome).toEqual({ ok: false, reason: 'timeout', error: 'aborted' });
+    expect(outcome).toEqual({
+      ok: false,
+      reason: 'timeout',
+      error: 'aborted',
+      errorClass: 'transient',
+    });
     expect(failing.publishLive).not.toHaveBeenCalled();
   });
 
@@ -312,7 +316,6 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
         onEvent: (event) => events.push(event),
         onChange: (next) => writePersistedOutbox(opts.storage ?? null, SCOPE, next),
         onAttemptFailed: () => {},
-        now: () => Date.now(),
       },
       opts.initial,
     );
@@ -373,26 +376,19 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
     expect(calls).toHaveLength(7);
   });
 
-  it(`fails only after ${FAILED_AFTER_MS}ms of continuous failure; Retry resumes with the same id`, async () => {
+  it('transient failures never turn failed: still sending (clock) long past 120s, same id', async () => {
     vi.useFakeTimers();
     const { sender, calls, events } = harness({ script: Array<'fail'>(50).fill('fail') });
     sender.enqueue(CHANNEL, entry('m1'));
-    await vi.advanceTimersByTimeAsync(FAILED_AFTER_MS - 1);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(sender.entries(CHANNEL)[0]?.state).toBe('failed');
-    expect(events).toContainEqual({ type: 'state', channelId: CHANNEL, id: 'm1', state: 'failed' });
+    expect(events.some((e) => e.type === 'state' && e.state === 'failed')).toBe(false);
+    // Still trying every 30s.
     const attempts = calls.length;
-    // Stopped: no more attempts on their own.
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
-    expect(calls).toHaveLength(attempts);
-    sender.retry(CHANNEL, 'm1');
-    expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(calls).toHaveLength(attempts + 1);
-    expect(calls.at(-1)?.id).toBe('m1');
-    // A double tap while the retry is in flight sends nothing more.
-    sender.retry(CHANNEL, 'm1');
-    expect(calls).toHaveLength(attempts + 1);
+    expect(new Set(calls.map((c) => c.id))).toEqual(new Set(['m1']));
+    sender.dispose();
   });
 
   it('keeps FIFO per channel under retries; other channels are independent', async () => {
@@ -579,27 +575,20 @@ describe('createOutboxSender (background send, retries, persistence)', () => {
       ]);
     });
 
-    it(`turns failed after ${FAILED_AFTER_MS}ms of failing uploads; Retry re-uploads only what is missing, same id`, async () => {
+    it('failing uploads never turn failed; a kick re-uploads only what is missing, same id', async () => {
       vi.useFakeTimers();
       const { upload, files } = uploader(['ok', ...Array<Step>(40).fill('fail')]);
       const { sender, calls, events } = harness();
       sender.enqueue(CHANNEL, withFiles('m1', ['a.png', 'b.png'], upload));
-      await vi.advanceTimersByTimeAsync(FAILED_AFTER_MS - 1);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
       expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(sender.entries(CHANNEL)[0]?.state).toBe('failed');
-      expect(events).toContainEqual({
-        type: 'state',
-        channelId: CHANNEL,
-        id: 'm1',
-        state: 'failed',
-      });
+      expect(events.some((e) => e.type === 'state' && e.state === 'failed')).toBe(false);
       expect(files.filter((f) => f === 'a.png')).toHaveLength(1);
       upload.mockImplementation(async (file: File) => {
         files.push(file.name);
         return { ok: true as const, reused: false, versionId: 'ver-b-final' };
       });
-      sender.retry(CHANNEL, 'm1');
+      sender.kick();
       await vi.advanceTimersByTimeAsync(0);
       expect(files.filter((f) => f === 'a.png')).toHaveLength(1);
       expect(calls).toHaveLength(1);

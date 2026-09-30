@@ -80,6 +80,12 @@ export interface ThreadMessage {
   time: number;
   /** True while `createdAt` comes from Agora (or a pending send), not Postgres. */
   provisionalTime: boolean;
+  /**
+   * An unrecorded own send: the estimated server time of its Send tap (device
+   * clock + the server clock offset known then), which its time label shows
+   * until the row lands (createdAt stays '' until then).
+   */
+  estimatedMs?: number;
   /** True when the current user sent it (own bubble). */
   mine: boolean;
   /** Asset attachments; from the row's ids + attachment_meta, or the live `ext`. */
@@ -528,7 +534,10 @@ export function mapLiveTextMessage(
   };
 }
 
-/** Total order on messages: server time, then id (uuid_v7 is time-ordered too). */
+/**
+ * Total order on messages: server time (an unrecorded own send by its
+ * estimated server time), then id (uuid_v7 is time-ordered too).
+ */
 export function compareMessages(a: ThreadMessage, b: ThreadMessage): number {
   if (a.time !== b.time) return a.time - b.time;
   if (a.id < b.id) return -1;
@@ -722,26 +731,27 @@ export function setMessageAttachments(
 }
 
 /**
- * Build the optimistic own bubble appended at tap time. It orders after the
- * newest loaded message (never by the local clock); the server created_at
- * replaces it when chat_message_send returns.
+ * Build the optimistic own bubble. It is placed, grouped under its day pill
+ * and labelled by `estimatedMs`, the estimated server time of its Send tap
+ * (never another message's time, never epoch), among the recorded rows by
+ * time, so the recorded row (same id, server created_at) that replaces it
+ * lands in the same place.
  */
 export function pendingMessage(params: {
   id: string;
   currentUserId: string;
   text: string;
   local: LocalMessageContent;
-  after: ThreadMessage[];
+  estimatedMs: number;
 }): ThreadMessage {
-  const last = params.after[params.after.length - 1];
-  const time = last !== undefined ? last.time + 1 : 0;
   return {
     id: params.id,
     senderUserId: params.currentUserId,
     body: params.text,
     createdAt: '',
-    time,
+    time: params.estimatedMs,
     provisionalTime: true,
+    estimatedMs: params.estimatedMs,
     mine: true,
     attachments: [...params.local.attachments],
     sharedPostIds: [...params.local.sharedPostIds],
@@ -759,24 +769,29 @@ export interface UnrecordedSend {
   text: string;
   local: LocalMessageContent;
   state: 'sending' | 'failed';
+  /** Estimated server time of the Send tap; absent on a send persisted before it was kept. */
+  createdMs?: number;
   filesMissing?: true;
 }
 
 /**
  * Lay a channel's unrecorded sends over its loaded list: each renders as an own
- * bubble in its outbox state ('sending' or 'failed' with Retry), ordered after
- * the newest loaded message. An id the list already holds as recorded is
- * skipped (its row exists, so the send landed).
+ * bubble in its outbox state ('sending' or 'failed' with Retry), placed by
+ * the estimated server time of its tap among the loaded messages (a failed
+ * one keeps its place). An id the list already holds as recorded is skipped
+ * (its row exists, so the send landed). `nowMs` stands in for a send with no
+ * tap time (restore stamps one, so this is a fallback only).
  */
 export function withOutboxBubbles(
   messages: ThreadMessage[],
   entries: readonly UnrecordedSend[],
   currentUserId: string,
+  nowMs: number = Date.now(),
 ): ThreadMessage[] {
   if (entries.length === 0) return messages;
   const recordedIds = new Set(messages.filter((m) => m.state === 'sent').map((m) => m.id));
   const outboxIds = new Set(entries.map((e) => e.id));
-  let list = messages.filter((m) => m.state === 'sent' || !outboxIds.has(m.id));
+  const list = messages.filter((m) => m.state === 'sent' || !outboxIds.has(m.id));
   for (const entry of entries) {
     if (recordedIds.has(entry.id)) continue;
     const bubble = pendingMessage({
@@ -784,18 +799,15 @@ export function withOutboxBubbles(
       currentUserId,
       text: entry.text,
       local: entry.local,
-      after: list,
+      estimatedMs: entry.createdMs ?? nowMs,
     });
-    list = [
-      ...list,
-      {
-        ...bubble,
-        state: entry.state,
-        ...(entry.filesMissing === true ? { filesMissing: true } : {}),
-      },
-    ];
+    list.push({
+      ...bubble,
+      state: entry.state,
+      ...(entry.filesMissing === true ? { filesMissing: true } : {}),
+    });
   }
-  return list;
+  return list.sort(compareMessages);
 }
 
 /** A keyset position: the (created_at, id) pair of one recorded message. */

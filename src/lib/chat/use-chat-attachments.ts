@@ -5,6 +5,7 @@
 // the env / supabase / fetch import chain and remain unit-testable in isolation.
 
 import { useCallback, useMemo } from 'react';
+import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
 import { fetchWithTrace } from '@/lib/fetch';
 import { env } from '@/lib/env';
@@ -16,7 +17,18 @@ import {
   type AttachmentUploader,
   type ChatAttachmentUpload,
 } from '@/lib/chat/attachments';
-import { transcribeAudio, type TranscribeResult } from '@/lib/chat/transcribe';
+import {
+  TRANSCRIBE_TIMEOUT_MS,
+  transcribeAudio,
+  type TranscribeResult,
+} from '@/lib/chat/transcribe';
+import {
+  uploadWithSessionRetry,
+  watchUploadStall,
+  type SessionRefresh,
+  type StallWatch,
+  type UploadAttemptResult,
+} from '@/lib/chat/send-flow';
 
 export interface ChatAttachments {
   /** Whether the composer can upload (endpoint configured + a workspace selected). */
@@ -27,13 +39,23 @@ export interface ChatAttachments {
   presignCache: PresignCache;
   /**
    * Upload one picked file over XHR, reporting progress (0..1) when asked;
-   * never throws (asset-upload Result contract).
+   * never throws (asset-upload Result contract). An upload with no progress
+   * for UPLOAD_STALL_MS (or no answer UPLOAD_RESPONSE_WAIT_MS after its last
+   * byte) is aborted and fails like a network error; a failure carries the
+   * XHR status, and a 401 refreshes the session and retries once.
    */
   uploadFile: AttachmentUploader;
   /** Transcribe a recorded voice note; never throws (Result contract). */
   transcribe: (blob: Blob) => Promise<TranscribeResult>;
   /** Whether transcription is configured (transcribe endpoint set). */
   canTranscribe: boolean;
+}
+
+/** Refresh the session once for an upload refused with 401. */
+async function refreshChatSession(): Promise<SessionRefresh> {
+  const { data, error } = await supabase.auth.refreshSession();
+  if (error !== null) return isAuthRetryableFetchError(error) ? 'unreachable' : 'rejected';
+  return data.session !== null ? 'refreshed' : 'rejected';
 }
 
 export function useChatAttachments(): ChatAttachments {
@@ -63,17 +85,45 @@ export function useChatAttachments(): ChatAttachments {
       if (workspaceId === null) {
         return { ok: false, message: 'No workspace selected.' };
       }
-      const token = (await supabase.auth.getSession()).data.session?.access_token ?? null;
-      if (token === null || token === '') {
-        return { ok: false, message: 'Your session expired. Sign in again.' };
-      }
-      return uploadChatAttachment({
-        file,
-        workspaceId,
-        token,
-        endpoint: uploadEndpoint,
-        xhr: { traceId: newTrace(), ...(onProgress !== undefined ? { onProgress } : {}) },
-      });
+      const endpoint = uploadEndpoint;
+      const workspace = workspaceId;
+      // One attempt: the stall watch and the status read ride on the request
+      // the shared XHR transport opens; the watch stops however it settles.
+      const attempt = async (): Promise<UploadAttemptResult> => {
+        const token = (await supabase.auth.getSession()).data.session?.access_token ?? null;
+        if (token === null || token === '') {
+          return {
+            result: { ok: false, message: 'Your session expired. Sign in again.' },
+            status: null,
+          };
+        }
+        const held: { request: XMLHttpRequest | null; watch: StallWatch | null } = {
+          request: null,
+          watch: null,
+        };
+        try {
+          const result = await uploadChatAttachment({
+            file,
+            workspaceId: workspace,
+            token,
+            endpoint,
+            xhr: {
+              traceId: newTrace(),
+              ...(onProgress !== undefined ? { onProgress } : {}),
+              createRequest: () => {
+                const request = new XMLHttpRequest();
+                held.request = request;
+                held.watch = watchUploadStall(request);
+                return request;
+              },
+            },
+          });
+          return { result, status: held.request?.status ?? null };
+        } finally {
+          held.watch?.stop();
+        }
+      };
+      return uploadWithSessionRetry(attempt, refreshChatSession);
     },
     [uploadEndpoint, workspaceId, newTrace],
   );
@@ -92,6 +142,7 @@ export function useChatAttachments(): ChatAttachments {
         endpoint: transcribeEndpoint,
         token,
         fetcher: (input, init) => fetchWithTrace(input, init, newTrace()),
+        timeoutMs: TRANSCRIBE_TIMEOUT_MS,
       });
     },
     [transcribeEndpoint, newTrace],

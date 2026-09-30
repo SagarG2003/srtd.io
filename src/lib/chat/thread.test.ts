@@ -533,16 +533,22 @@ describe('list transitions', () => {
     ).toEqual(['failed', 'sent']);
   });
 
-  it('pendingMessage orders after the newest loaded message and never reads a clock', () => {
-    const last = mine({ id: 'z', time: 1000 });
+  it('pendingMessage is placed and labelled by the estimated server time of its tap', () => {
     const pending = pendingMessage({
       id: 'p',
       currentUserId: ME,
       text: 'draft',
       local: { attachments: [], sharedPostIds: [], reply: null },
-      after: [last],
+      estimatedMs: 500,
     });
-    expect(pending).toMatchObject({ id: 'p', time: 1001, state: 'sending', provisionalTime: true });
+    expect(pending).toMatchObject({
+      id: 'p',
+      time: 500,
+      estimatedMs: 500,
+      createdAt: '',
+      state: 'sending',
+      provisionalTime: true,
+    });
   });
 });
 

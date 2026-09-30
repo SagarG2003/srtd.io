@@ -20,7 +20,10 @@ import type { AttachmentMetaMap } from '@/lib/chat/attachments';
 
 type Functions = Database['public']['Functions'];
 
-/** The record write is abandoned (and the bubble marked failed) after this long. */
+/**
+ * The record write is abandoned after this long; for a send that is a
+ * transient failure (the outbox retries it), for an edit a failed edit.
+ */
 export const SEND_TIMEOUT_MS = 10_000;
 
 export interface SendRecordParams {
@@ -47,9 +50,20 @@ export interface SendRecordParams {
   timeoutMs?: number;
 }
 
-export type SendRecordResult =
-  | { ok: true; row: ChatMessageRow }
-  | { ok: false; reason: 'timeout' | 'error'; message: string };
+/**
+ * A failed record write. `code` is the PostgREST error code (a SQLSTATE or
+ * PGRSTxxx) and `status` the HTTP status (0: no answer), when the client got
+ * that far; send-errors.ts reads them to tell a refusal from a network problem.
+ */
+export interface RecordFailed {
+  ok: false;
+  reason: 'timeout' | 'error';
+  message: string;
+  code?: string;
+  status?: number;
+}
+
+export type SendRecordResult = { ok: true; row: ChatMessageRow } | RecordFailed;
 
 /**
  * Write the message to the record via chat_message_send with an abort timeout.
@@ -58,7 +72,8 @@ export type SendRecordResult =
  * reply and empty attachment meta, matching the proc's defaults. A shared-posts
  * or shared-briefs only send (no body) is valid: the proc accepts body,
  * attachments, posts or briefs. Never throws: a timeout, transport error or proc exception resolves
- * to { ok: false } so the caller can mark the bubble failed and offer Retry.
+ * to { ok: false } (with the error code and HTTP status when known) so the
+ * caller can classify it: retry a network problem, show Retry on a refusal.
  */
 export async function sendMessageRecord(params: SendRecordParams): Promise<SendRecordResult> {
   const controller = new AbortController();
@@ -93,10 +108,18 @@ export async function sendMessageRecord(params: SendRecordParams): Promise<SendR
   };
   const reason = (): 'timeout' | 'error' => (controller.signal.aborted ? 'timeout' : 'error');
   try {
-    const { data, error } = await params.client
+    const { data, error, status } = await params.client
       .rpc('chat_message_send', args)
       .abortSignal(controller.signal);
-    if (error) return { ok: false, reason: reason(), message: error.message };
+    if (error) {
+      return {
+        ok: false,
+        reason: reason(),
+        message: error.message,
+        ...(typeof error.code === 'string' && error.code !== '' ? { code: error.code } : {}),
+        ...(typeof status === 'number' ? { status } : {}),
+      };
+    }
     if (data === null || data === undefined) {
       return { ok: false, reason: 'error', message: 'chat_message_send returned no row' };
     }

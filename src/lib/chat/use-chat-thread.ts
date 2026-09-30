@@ -9,7 +9,8 @@
 // on the store's outbox and returns at once: the optimistic bubble shows in
 // the same tick, and the background sender records it (chat_message_send
 // FIRST; the returned row with its server created_at is what the thread shows),
-// publishes it live, and retries it with the same id. Unrecorded sends live in
+// publishes it live, and retries it with the same id for as long as it takes
+// (only a server refusal reads "Not sent"). Unrecorded sends live in
 // the per-channel outbox, so switching channels keeps a sending or failed
 // bubble and its Retry payload.
 
@@ -719,7 +720,12 @@ export function useChatThread(params: {
         }
         if (event.type === 'recorded') {
           const message = event.message;
-          setMessages((prev) => upsertMessage(prev, message));
+          // The row replaces its bubble; the sends queued behind it are laid
+          // back on (the sender keeps them after it).
+          const behind = outbox.entries(event.channelId);
+          setMessages((prev) =>
+            withOutboxBubbles(upsertMessage(prev, message), behind, currentUserId),
+          );
           return;
         }
         if (event.type === 'progress') {
@@ -727,9 +733,20 @@ export function useChatThread(params: {
           setMessages((prev) => setMessageAttachments(prev, id, attachments));
           return;
         }
-        setMessages((prev) => setMessageState(prev, event.id, event.state));
+        // A restored send whose files could not be read back reads "Photos
+        // not sent" (Remove only), as when it is laid over a fresh load.
+        const lost =
+          outboxRef.current.entries(event.channelId).find((e) => e.id === event.id)
+            ?.filesMissing === true;
+        setMessages((prev) =>
+          lost
+            ? prev.map((m) =>
+                m.id === event.id ? { ...m, state: event.state, filesMissing: true } : m,
+              )
+            : setMessageState(prev, event.id, event.state),
+        );
       }),
-    [outbox],
+    [outbox, currentUserId],
   );
 
   // Recorded bubbles keep their local previews for the session; when the
@@ -766,8 +783,14 @@ export function useChatThread(params: {
         },
         state: 'sending',
       };
-      setMessages((prev) => withOutboxBubbles(prev, [entry], currentUserId));
+      // The store stamps the tap with its estimated server time (createdMs):
+      // the bubble's place, day pill and time label.
       outboxRef.current.enqueue(forChannel, entry);
+      const queued = outboxRef.current.entries(forChannel).find((e) => e.id === entry.id) ?? {
+        ...entry,
+        createdMs: Date.now(),
+      };
+      setMessages((prev) => withOutboxBubbles(prev, [queued], currentUserId));
     },
     [currentUserId],
   );
@@ -853,18 +876,27 @@ export function useChatThread(params: {
     [db, currentUserId, inFlight],
   );
 
-  const retry = useCallback((messageId: string): void => {
-    const forChannel = channelRef.current;
-    if (forChannel === null) return;
-    const entry = outboxRef.current.entries(forChannel).find((e) => e.id === messageId);
-    if (entry?.filesMissing === true) {
-      outboxRef.current.settle(forChannel, messageId);
-      revokeLocalPreviews(entry.local.attachments);
-      setMessages((prev) => removeMessages(prev, [messageId]));
-      return;
-    }
-    outboxRef.current.retry(forChannel, messageId);
-  }, []);
+  const retry = useCallback(
+    (messageId: string): void => {
+      const forChannel = channelRef.current;
+      if (forChannel === null) return;
+      const entry = outboxRef.current.entries(forChannel).find((e) => e.id === messageId);
+      if (entry?.filesMissing === true) {
+        outboxRef.current.settle(forChannel, messageId);
+        revokeLocalPreviews(entry.local.attachments);
+        setMessages((prev) => removeMessages(prev, [messageId]));
+        return;
+      }
+      outboxRef.current.retry(forChannel, messageId);
+      // The tap re-stamped it: the bubble moves to its new time (the bottom) now,
+      // and its record lands there.
+      const retried = outboxRef.current.entries(forChannel).find((e) => e.id === messageId);
+      if (retried !== undefined && retried.createdMs !== entry?.createdMs) {
+        setMessages((prev) => withOutboxBubbles(prev, [retried], currentUserId));
+      }
+    },
+    [currentUserId],
+  );
 
   const toggleReaction = useCallback(
     (messageId: string, emoji: string, currentlyMine: boolean): void => {
