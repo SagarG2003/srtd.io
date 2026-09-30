@@ -11,6 +11,7 @@ import {
   CONTACT_EMPTY,
   ChatInfoTabsView,
   FeedBody,
+  NOTHING_RECENT,
   PREVIEW_COUNT,
   SEE_ALL_LABEL,
   SENDER_READ_TIMEOUT_MS,
@@ -232,6 +233,36 @@ describe('ChatInfoTabsView preview', () => {
     expect(previewOf([1, 2, 3, 4], false, 3)).toEqual({ shown: [1, 2, 3], seeAll: true });
     expect(previewOf([1], true, 3)).toEqual({ shown: [1], seeAll: true });
     expect(previewOf([1, 2, 3, 4], true, null)).toEqual({ shown: [1, 2, 3, 4], seeAll: false });
+  });
+
+  it('empty preview with an older page: "Nothing recent" then See all, per tab', () => {
+    const cases: Array<Partial<ChatInfoTabsViewProps>> = [
+      { tab: 'media', attachments: feed<ChannelAttachmentItem>([], true) },
+      { tab: 'files', attachments: feed<ChannelAttachmentItem>([], true) },
+      { tab: 'links', links: feed<ChannelLinkItem>([], true) },
+    ];
+    for (const over of cases) {
+      const tree = view(props(over));
+      const [line] = findAll(tree, (el) => 'data-nothing-recent' in el.props);
+      expect(line?.props.children).toBe(NOTHING_RECENT);
+      expect(String(line?.props.className)).toContain('text-fg-3');
+      expect(seeAll(tree)).toHaveLength(1);
+      expect(findAll(tree, (el) => el.type === EmptyState)).toEqual([]);
+    }
+  });
+
+  it('empty preview with no older page: the empty state and no See all', () => {
+    const tree = view(props({ attachments: feed<ChannelAttachmentItem>([], false) }));
+    expect(findAll(tree, (el) => el.type === EmptyState)).toHaveLength(1);
+    expect(findAll(tree, (el) => 'data-nothing-recent' in el.props)).toEqual([]);
+    expect(seeAll(tree)).toEqual([]);
+  });
+
+  it('full mode is unchanged when empty with an older page: Load more, no line', () => {
+    const tree = view(props({ mode: 'full', attachments: feed<ChannelAttachmentItem>([], true) }));
+    expect(findAll(tree, (el) => 'data-nothing-recent' in el.props)).toEqual([]);
+    expect(seeAll(tree)).toEqual([]);
+    expect(loadMore(tree)).toHaveLength(1);
   });
 
   it('See all is a 48px full-width token row', () => {

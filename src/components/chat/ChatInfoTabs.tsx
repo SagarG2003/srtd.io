@@ -65,6 +65,9 @@ export const PREVIEW_COUNT: Readonly<Record<ContactTab, number>> = {
 
 export const SEE_ALL_LABEL = 'See all';
 
+/** A capped preview tab with nothing loaded yet but an older page that may hold some. */
+export const NOTHING_RECENT = 'Nothing recent';
+
 /** The longest a sender-name read may take before the names stay "Unknown". */
 export const SENDER_READ_TIMEOUT_MS = 5000;
 
@@ -377,8 +380,9 @@ export function SeeAllRow(props: { onClick: () => void }): ReactElement {
 /**
  * The first page's loading or error state, or the body once it resolved, plus
  * a 44px "Load more" when the last page came back full. A capped preview tab
- * passes `seeAll` instead: it never pages, and shows See all when `show`.
- * Hook-free.
+ * passes `seeAll` instead: it never pages, and shows See all when `show`; when
+ * it is empty but an older page may exist it reads "Nothing recent" above See
+ * all rather than a blank area. Hook-free.
  */
 export function FeedBody<T>(props: {
   feed: Feed<T> | null;
@@ -425,7 +429,15 @@ export function FeedBody<T>(props: {
     ) : null;
   return (
     <div data-feed="ready" className="flex flex-col gap-3">
-      {props.isEmpty && !feed.hasMore ? props.empty : props.children}
+      {props.isEmpty && !feed.hasMore ? (
+        props.empty
+      ) : props.isEmpty && props.seeAll !== undefined ? (
+        <p data-nothing-recent="" className="py-6 text-center text-sm text-fg-3">
+          {NOTHING_RECENT}
+        </p>
+      ) : (
+        props.children
+      )}
       {more}
     </div>
   );
