@@ -1,60 +1,69 @@
 // Renders the briefs shared into one message as cards, mirroring PostCard: the
-// message's ids resolve in ONE workspace-scoped RLS read, keyed on the ids so a
-// re-render never re-reads. A brief the viewer cannot see renders as an
-// "unavailable" card. Tapping a card opens the brief in the app.
+// ids resolve through the thread's card cache, so every brief shared across the
+// loaded thread comes back in ONE workspace-scoped RLS read (chunks of 100, 5s
+// each), never one read per bubble. A brief the viewer cannot see (RLS)
+// renders as an "unavailable" card; a read that failed or timed out keeps the
+// skeleton and is re-read (tab visible, online, connected, into view, or on
+// its own after 5s), up to 3 tries, then shows "Couldn't load" with a tap to
+// retry. Tapping a card opens the brief in the app.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Tag } from '@/components/ui/Tag';
-import { SHARED_CARD } from '@/components/chat/PostCard';
+import {
+  CouldntLoadCard,
+  SHARED_CARD,
+  useRetryInView,
+  useThreadCardCache,
+  type ThreadCardCache,
+} from '@/components/chat/PostCard';
 import { IconBriefs } from '@/components/ui/icons';
-import { supabase } from '@/lib/supabase';
-import { useWorkspace } from '@/lib/workspace-context';
 import {
   briefRoute,
   briefStatusLabel,
-  readBriefsByIds,
   sharedBriefViews,
-  type BriefCardFields,
   type SharedBriefView,
 } from '@/lib/chat/briefs';
 
-function useSharedBriefs(briefIds: string[]): { views: SharedBriefView[]; loading: boolean } {
-  const { workspaceId } = useWorkspace();
-  const [briefs, setBriefs] = useState<BriefCardFields[]>([]);
-  const [loading, setLoading] = useState(true);
+function useSharedBriefs(briefIds: string[]): {
+  views: SharedBriefView[];
+  loading: boolean;
+  failed: string[];
+  cache: ThreadCardCache | null;
+} {
+  const cache = useThreadCardCache();
   const key = briefIds.join(',');
+  const idsRef = useRef(briefIds);
+  idsRef.current = briefIds;
 
   useEffect(() => {
-    if (workspaceId === null || briefIds.length === 0) {
-      setLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-    void readBriefsByIds(supabase, { workspaceId, ids: briefIds }).then((result) => {
-      if (cancelled) return;
-      setLoading(false);
-      setBriefs(result.ok ? result.data : []);
-    });
-    return () => {
-      cancelled = true;
-    };
-    // `key` stands for the id list; a new array with the same ids never re-reads.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, workspaceId]);
+    if (idsRef.current.length > 0) cache?.request({ briefIds: idsRef.current });
+  }, [cache, key]);
 
-  const views = useMemo(() => sharedBriefViews(briefIds, briefs), [briefIds, briefs]);
-  return { views, loading };
+  const snapshot =
+    cache !== null && briefIds.length > 0
+      ? cache.briefs(briefIds)
+      : { loading: false, briefs: [], failed: [] };
+  const version = cache?.version() ?? 0;
+  const views = useMemo(
+    () => sharedBriefViews(briefIds, snapshot.briefs),
+    // The snapshot is keyed by the ids and the cache version.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key, cache, version],
+  );
+  return { views, loading: snapshot.loading, failed: snapshot.failed, cache };
 }
 
 export function SharedBriefCards({ briefIds }: { briefIds: string[] }): ReactElement {
-  const { views, loading } = useSharedBriefs(briefIds);
+  const { views, loading, failed, cache } = useSharedBriefs(briefIds);
+  const retryInView = useRetryInView(cache, { briefIds }, loading);
   if (briefIds.length === 0) return <></>;
   if (loading) {
+    // A read that failed keeps this skeleton and retries (tab visible, online,
+    // connected, or scrolled into view); "Brief unavailable" is only for RLS.
     return (
-      <div className="mt-1.5 flex flex-col items-start gap-1.5">
+      <div ref={retryInView} className="mt-1.5 flex flex-col items-start gap-1.5">
         {briefIds.map((id) => (
           <div
             key={id}
@@ -66,9 +75,16 @@ export function SharedBriefCards({ briefIds }: { briefIds: string[] }): ReactEle
   }
   return (
     <div className="mt-1.5 flex flex-col items-start gap-1.5">
-      {views.map((view) => (
-        <BriefCardItem key={view.briefId} view={view} />
-      ))}
+      {views.map((view) =>
+        failed.includes(view.briefId) ? (
+          <CouldntLoadCard
+            key={view.briefId}
+            onRetry={() => cache?.retry({ briefIds: [view.briefId] })}
+          />
+        ) : (
+          <BriefCardItem key={view.briefId} view={view} />
+        ),
+      )}
     </div>
   );
 }

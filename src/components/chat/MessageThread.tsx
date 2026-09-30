@@ -53,6 +53,7 @@ import {
   tokenize,
 } from '@/lib/chat/message-links';
 import { Avatar } from '@/components/ui/Avatar';
+import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { IconButton } from '@/components/ui/IconButton';
 import {
@@ -63,7 +64,11 @@ import {
   IconTrash,
 } from '@/components/ui/icons';
 import { useLongPress } from '@/components/ui';
-import { LONG_PRESS_MS, MOVE_CANCEL_PX } from '@/components/ui/useLongPress';
+import {
+  cancelPendingLongPressesWithin,
+  LONG_PRESS_MS,
+  MOVE_CANCEL_PX,
+} from '@/components/ui/useLongPress';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
@@ -199,6 +204,10 @@ interface MessageThreadProps {
   profiles: Map<string, ChatProfile>;
   messages: ThreadMessage[];
   loading: boolean;
+  /** The latest page failed or timed out: "Couldn't load messages" + Retry, never the empty state. */
+  loadFailed?: boolean;
+  /** Re-run the latest-page load (the failed state's Retry). */
+  onRetryLoad?: () => void;
   /** An older page is loading (scroll-to-top); renders a slim row at the top. */
   loadingOlder?: boolean;
   /** Whether scrolling to the top should request an older page. */
@@ -215,6 +224,8 @@ interface MessageThreadProps {
   marks?: Map<string, ChatMark>;
   /** The channel's marks read has settled; the open-loops strip holds its first paint until then. */
   marksLoaded: boolean;
+  /** The marks have never been read (failed or timed out): the strip shows no content, never "Nothing open". */
+  marksFailed?: boolean;
   /** Marked messages read from the record, for sheet rows beyond loaded history. */
   markedMessages?: Map<string, ThreadMessage>;
   /** Mark a message, or change an open pending mark's priority (same type). */
@@ -297,15 +308,17 @@ export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 export interface BubblePointerHandlers {
   onPointerDown: (event: PointerEvent<HTMLElement>) => void;
   onPointerMove: (event: PointerEvent<HTMLElement>) => void;
-  onPointerUp: () => void;
+  /** The release event ends the swipe's flick window at its own timeStamp. */
+  onPointerUp: (event?: PointerEvent<HTMLElement>) => void;
   onPointerCancel: () => void;
 }
 
 /**
  * The swipe-to-reply icon: sits behind the bubble's resting left edge and is
  * revealed as the bubble slides right. 32px circle, panel-3 idle, accent when
- * armed (data-armed). Scale and opacity are painted per frame by MessageRow;
- * at rest the classes hold it at scale 0.6, opacity 0. No other motion.
+ * armed (data-armed). Scale and opacity (0 to 1 over 0 to 64px) are painted
+ * per frame by MessageRow; at rest the classes hold it at scale 0, opacity 0.
+ * The release spring is set inline with the bubble's. No other motion.
  */
 export function SwipeReplyIcon(props: {
   iconRef?: Ref<HTMLSpanElement> | undefined;
@@ -315,7 +328,7 @@ export function SwipeReplyIcon(props: {
       ref={props.iconRef}
       aria-hidden="true"
       data-swipe-icon=""
-      className="pointer-events-none absolute inset-y-0 left-0 my-auto flex h-8 w-8 scale-[.6] items-center justify-center rounded-full bg-panel-3 text-fg-2 opacity-0 transition-[transform,opacity] duration-[120ms] motion-reduce:transition-none data-[armed]:bg-accent data-[armed]:text-accent-fg"
+      className="pointer-events-none absolute inset-y-0 left-0 my-auto flex h-8 w-8 scale-0 items-center justify-center rounded-full bg-panel-3 text-fg-2 opacity-0 data-[armed]:bg-accent data-[armed]:text-accent-fg"
     >
       <svg
         width={18}
@@ -1457,7 +1470,8 @@ export function MessageBubble(props: {
   const placement = metaPlacement(message);
   const onMore = selection === undefined ? press?.onMore : undefined;
   const onReact = selection === undefined && message.state === 'sent' ? press?.onReact : undefined;
-  const swipe = selection === undefined ? props.swipe : undefined;
+  // Only a recorded message takes a reply: sending and failed bubbles never swipe.
+  const swipe = selection === undefined && message.state === 'sent' ? props.swipe : undefined;
   const chip = props.postRefs?.chip;
   const cardRefs = cardRefsFor(message.id, selection, props.postRefs);
   const column = cn('flex min-w-0 flex-col gap-1', sized(BUBBLE_MAX, layout), mine && 'items-end');
@@ -1975,8 +1989,13 @@ function MessageRow(props: {
       onReply: () => latest.current.onSwipeReply(latest.current.message),
       onFrame: (frame) => paintSwipe(bubbleRef.current, iconRef.current, frame),
       onStart: (pointerId) => {
-        // A swipe never opens the menu: stop the hold timer (8px < its 10px).
+        // A swipe never opens a menu: stop the bubble's hold timer (8px < its
+        // 10px) and any hold inside this bubble (a post card's), which never
+        // sees the captured moves; holds anywhere else are left alone. Drop
+        // any text selection the press started.
         cancel();
+        if (bubbleRef.current !== null) cancelPendingLongPressesWithin(bubbleRef.current);
+        window.getSelection()?.removeAllRanges();
         if (pointerId === undefined) return;
         try {
           bubbleRef.current?.setPointerCapture(pointerId);
@@ -1984,7 +2003,8 @@ function MessageRow(props: {
           // The pointer is already gone; the gesture ends on its own.
         }
       },
-      enabled: () => latest.current.selection === undefined,
+      enabled: () =>
+        latest.current.selection === undefined && latest.current.message.state === 'sent',
       reducedMotion: () => latest.current.reducedMotion,
     });
   }
@@ -2030,9 +2050,9 @@ function MessageRow(props: {
       handlers.onPointerMove(e);
       swipe.handlers.onPointerMove(e);
     },
-    onPointerUp: () => {
+    onPointerUp: (e) => {
       handlers.onPointerUp();
-      swipe.handlers.onPointerUp();
+      swipe.handlers.onPointerUp(e);
     },
     onPointerCancel: () => {
       handlers.onPointerCancel();
@@ -2288,13 +2308,19 @@ function paintSwipe(
   frame: SwipeFrame,
 ): void {
   const moved = frame.offset > 0;
+  const spring = frame.animate ? `${SWIPE_SPRING_MS}ms ease-out` : '';
   if (bubble !== null) {
-    bubble.style.transition = frame.animate ? `transform ${SWIPE_SPRING_MS}ms ease-out` : '';
-    bubble.style.transform = moved ? `translateX(${frame.offset}px)` : '';
+    // translateX only; the compositor hint lives only while the finger drags.
+    bubble.style.willChange = frame.dragging ? 'transform' : '';
+    bubble.style.transition = spring !== '' ? `transform ${spring}` : '';
+    bubble.style.transform = moved ? `translate3d(${frame.offset}px,0,0)` : '';
   }
   if (icon !== null) {
+    // The icon follows the frame with no motion of its own (the bubble's
+    // translateX spring is the only animation).
+    icon.style.transition = '';
     icon.style.opacity = moved ? String(frame.progress) : '';
-    icon.style.transform = moved ? `scale(${0.6 + 0.4 * frame.progress})` : '';
+    icon.style.transform = moved ? `scale(${frame.progress})` : '';
     icon.toggleAttribute('data-armed', frame.armed);
   }
 }
@@ -2304,6 +2330,8 @@ function ThreadBody(
     MessageThreadProps,
     | 'messages'
     | 'loading'
+    | 'loadFailed'
+    | 'onRetryLoad'
     | 'loadingOlder'
     | 'hasMore'
     | 'onLoadOlder'
@@ -2695,6 +2723,9 @@ function ThreadBody(
     window.setTimeout(() => flash.classList.remove(...ring), 1200);
   };
   if (props.loading) return threadSkeleton();
+  if (props.loadFailed === true && props.messages.length === 0 && props.filtering !== true) {
+    return threadLoadError(props.onRetryLoad);
+  }
   if (props.messages.length === 0 && props.filtering !== true) {
     return (
       <div className="flex flex-1 flex-col justify-center">
@@ -2762,6 +2793,9 @@ function ThreadBody(
         }}
         className={THREAD_LIST_CLASS}
       >
+        {props.loadFailed === true && props.filtering !== true
+          ? threadLoadErrorRow(props.onRetryLoad)
+          : null}
         {threadListItems(
           threadRows(props.messages, nowMs, props.timeZone, { showTicks: props.showTicks }),
           props.loadingOlder === true,
@@ -2928,6 +2962,93 @@ export function DayPill({ label, layout }: { label: string; layout: ChatLayout }
       </span>
     </li>
   );
+}
+
+/** The latest page failed or timed out: one line and a 44px Retry, in place of the empty state. */
+export function threadLoadError(onRetry: (() => void) | undefined): ReactElement {
+  return (
+    <div data-thread-load-error="" className="flex flex-1 flex-col justify-center">
+      <EmptyState
+        icon={<IconChat size={22} />}
+        title="Couldn't load messages"
+        {...(onRetry !== undefined
+          ? {
+              action: (
+                <Button size="lg" variant="primary" className="min-w-[44px]" onClick={onRetry}>
+                  Retry
+                </Button>
+              ),
+            }
+          : {})}
+      />
+    </div>
+  );
+}
+
+/**
+ * The history failed but the chat has pending or failed sends on screen: the
+ * same line and 44px Retry as a row above them, so the sends stay visible.
+ */
+export function threadLoadErrorRow(onRetry: (() => void) | undefined): ReactElement {
+  return (
+    <li
+      key="load-failed"
+      data-thread-load-error=""
+      className="flex items-center justify-center gap-3 px-4 py-2 text-sm text-fg-2"
+    >
+      <span>Couldn&apos;t load messages</span>
+      {onRetry !== undefined ? (
+        <Button size="lg" variant="default" className="min-w-[44px]" onClick={onRetry}>
+          Retry
+        </Button>
+      ) : null}
+    </li>
+  );
+}
+
+/**
+ * A chat being opened before its row is known (a deep link, an Activity tap,
+ * a reload inside the thread): the thread's own header and message
+ * placeholders from the first frame, never another screen first.
+ */
+export function threadOpeningSkeleton(
+  layout: ChatLayout = 'touch',
+  onBack?: () => void,
+): ReactElement {
+  return (
+    <div data-thread-opening="" aria-busy="true" className="flex h-full min-h-0 flex-col bg-bg">
+      <div
+        className={cn(
+          'flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel',
+          sized(HEADER_PAD, layout),
+        )}
+      >
+        {onBack !== undefined ? (
+          <IconButton label="Back to conversations" onClick={onBack}>
+            <IconChevronLeft size={20} />
+          </IconButton>
+        ) : null}
+        <div className="h-9 w-9 shrink-0 animate-pulse rounded-full bg-panel-2" />
+        <div className="h-3.5 w-32 animate-pulse rounded bg-panel-2" />
+      </div>
+      {threadSkeleton()}
+    </div>
+  );
+}
+
+/** The distinct shared post and brief ids across a thread's messages (deleted ones skipped). Pure. */
+export function threadCardIds(messages: readonly ThreadMessage[]): {
+  postIds: string[];
+  briefIds: string[];
+} {
+  const posts = new Set<string>();
+  const briefs = new Set<string>();
+  for (const m of messages) {
+    if (m.deleted === true) continue;
+    for (const id of m.sharedPostIds) posts.add(id);
+    for (const id of m.sharedBriefIds) briefs.add(id);
+  }
+  return { postIds: [...posts], briefIds: [...briefs] };
 }
 
 /** Placeholder bubble widths for the loading thread, alternating sides. */
@@ -3730,6 +3851,15 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           workspaceKey={workspaceKey}
           onShowAll={() => setFilterPostId(null)}
         />
+      ) : stripSlot === 'loops' && props.marksFailed === true ? (
+        // Marks never read (failed or timed out): the strip's 44px slot stays,
+        // empty and inert (no layout jump, nothing to open, never "Nothing
+        // open"), until a re-read (visible, online, connected) lands.
+        <div
+          data-loops-strip="unread"
+          aria-hidden="true"
+          className="min-h-[44px] w-full shrink-0 border-b border-border bg-panel-2"
+        />
       ) : stripSlot === 'loops' ? (
         <MarkStrip
           marks={marks}
@@ -3794,6 +3924,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         filtering={filterPostId !== null}
         filterRef={filterPost != null ? postRefKey(workspaceKey, filterPost.number) : null}
         loading={bodyLoading}
+        {...(props.loadFailed !== undefined ? { loadFailed: props.loadFailed } : {})}
+        {...(props.onRetryLoad !== undefined ? { onRetryLoad: props.onRetryLoad } : {})}
         profiles={props.profiles}
         cache={presignCache}
         presignEnabled={presignEnabled}

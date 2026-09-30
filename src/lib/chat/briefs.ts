@@ -6,6 +6,7 @@
 // an "unavailable" card, so nothing leaks. Pure helpers are unit-tested with no DOM.
 
 import type { Client, Result } from '@srtdio/rpc';
+import { abortable } from '@/lib/chat-reads';
 
 /** The brief fields a picker row, chip and card render. */
 export interface BriefCardFields {
@@ -156,15 +157,18 @@ export async function listBriefsForPicker(
 /** Briefs by id (one IN read); empty in, empty out. */
 export async function readBriefsByIds(
   client: Client,
-  params: { workspaceId: string; ids: readonly string[] },
+  params: { workspaceId: string; ids: readonly string[]; signal?: AbortSignal },
 ): Promise<Result<BriefCardFields[]>> {
   if (params.ids.length === 0) return { ok: true, data: [] };
-  const res = await client
-    .from('briefs')
-    .select(BRIEF_COLUMNS)
-    .eq('workspace_id', params.workspaceId)
-    .in('id', [...params.ids])
-    .is('deleted_at', null);
+  const res = await abortable(
+    client
+      .from('briefs')
+      .select(BRIEF_COLUMNS)
+      .eq('workspace_id', params.workspaceId)
+      .in('id', [...params.ids])
+      .is('deleted_at', null),
+    params.signal,
+  );
   if (res.error) return fail(`readBriefsByIds: ${res.error.message}`);
   return { ok: true, data: ((res.data ?? []) as BriefCardRow[]).map(toFields) };
 }

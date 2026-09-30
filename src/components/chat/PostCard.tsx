@@ -1,9 +1,11 @@
-// Renders the posts shared into one message as live cards. The whole message's
-// ids resolve in ONE batch per viewer: readPostCards (a posts IN read plus one
-// asset_attachments IN read, so at most two queries) and one readProfiles call
-// for the distinct approvers (the same batched lookup the thread's profile map
-// uses). The viewer's RLS gates visibility: a post they cannot see comes back
-// absent and renders as a neutral "not visible" card, no content leaks. Cards
+// Renders the posts shared into one message as live cards. Every card in a
+// thread reads through the thread's card cache (shared-cards.ts, provided by
+// SharedCardsProvider): all the thread's shared post ids resolve in ONE
+// batched readPostCards (a posts IN read plus one asset_attachments IN read,
+// chunks of 100, 5s each) and one readProfiles call for the distinct approvers,
+// never one read per bubble; the briefs the same way (BriefCard). The
+// viewer's RLS gates visibility: a post they cannot see comes back absent and
+// renders as a neutral "not visible" card, no content leaks. Cards
 // paint only once the batch AND the viewer's side have resolved, so the footer
 // wording never flips after first paint. No realtime: the batch refetches when
 // the tab returns after a minute away, or when a sorted:post-changed event names
@@ -14,7 +16,16 @@
 // ends the hold is swallowed, so the sheet does not open; the KEY on a card
 // shows only that post's conversation (onShowPost).
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import type {
   KeyboardEvent,
   MouseEvent,
@@ -29,8 +40,14 @@ import { IconCheck, IconPlay } from '@/components/ui/icons';
 import { useLongPress } from '@/components/ui';
 import { useThumbnail } from '@/components/media/use-thumbnail';
 import { PresignCache, type PresignDeps } from '@/lib/asset-presign';
-import { readProfiles } from '@/lib/chat-reads';
-import { formatShortDate, workspaceTimeZone } from '@/lib/chat/time-format';
+import { READ_TIMEOUT_MS, readProfiles } from '@/lib/chat-reads';
+import { readBriefsByIds, type BriefCardFields } from '@/lib/chat/briefs';
+import {
+  createSharedCardCache,
+  type SharedCardCache,
+  type SharedCardReaders,
+} from '@/lib/chat/shared-cards';
+import { formatClockTime, formatShortDate, workspaceTimeZone } from '@/lib/chat/time-format';
 import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { cn } from '@/lib/cn';
 import {
@@ -93,66 +110,254 @@ export async function loadPostCardBatch(
   return { posts: result.data, names };
 }
 
+/** One thread's card cache: its shared posts and briefs, batched. */
+export type ThreadCardCache = SharedCardCache<PostCardRow, BriefCardFields>;
+
+/** The existing batched readers, bound to one workspace, for a thread's card cache. */
+export function threadCardReaders(
+  client: Client,
+  workspaceId: string,
+): SharedCardReaders<PostCardRow, BriefCardFields> {
+  return {
+    // readPostCards takes no signal (a shared package): its reads are bounded, not aborted.
+    readPosts: (ids) => readPostCards(client, { workspaceId, ids }),
+    readBriefs: (ids, signal) => readBriefsByIds(client, { workspaceId, ids, signal }),
+    readNames: (userIds, signal) => readProfiles(client, userIds, signal),
+    postId: (post) => post.id,
+    briefId: (brief) => brief.id,
+    approverIds: (posts) => approverIds(posts),
+  };
+}
+
+const SharedCardsContext = createContext<ThreadCardCache | null>(null);
+
 /**
- * Resolve and keep fresh one message's shared posts. While the first read is in
- * flight `loading` is true; a refetch keeps the current cards on screen. Never
- * throws: a failed first read resolves to no posts, so every id falls back to
- * "not visible"; a failed refetch keeps what was shown.
+ * The thread's card cache, one per open chat and workspace (a switch or unmount
+ * disposes it and ignores its reads in flight). It asks for every shared post
+ * and brief id across the loaded messages at once, so the page's cards resolve
+ * in one posts read, one briefs read and one names read; a new message adds only
+ * its missing ids.
  */
-function useSharedPosts(postIds: string[]): { views: SharedPostView[]; loading: boolean } {
+export function SharedCardsProvider(props: {
+  workspaceId: string | null;
+  channelId: string | null;
+  postIds: readonly string[];
+  briefIds: readonly string[];
+  /** The chat connection status: each transition to 'connected' retries failed card reads. */
+  status?: string;
+  children: ReactNode;
+}): ReactElement {
+  const { workspaceId, channelId } = props;
+  const cache = useMemo(
+    () =>
+      workspaceId !== null && channelId !== null
+        ? createSharedCardCache(threadCardReaders(supabase, workspaceId))
+        : null,
+    [workspaceId, channelId],
+  );
+  // StrictMode runs this cleanup and the effect again with the same cache:
+  // resume makes that remount a live cache, not a disposed one.
+  useEffect(() => {
+    cache?.resume();
+    return () => cache?.dispose();
+  }, [cache]);
+  const postKey = props.postIds.join(',');
+  const briefKey = props.briefIds.join(',');
+  const idsRef = useRef({ postIds: props.postIds, briefIds: props.briefIds });
+  idsRef.current = { postIds: props.postIds, briefIds: props.briefIds };
+  useEffect(() => {
+    cache?.request(idsRef.current);
+  }, [cache, postKey, briefKey]);
+  // Failed card reads retry when the tab comes back, the browser is online
+  // again, or chat (re)connects.
+  useEffect(() => {
+    if (cache === null) return;
+    return watchCardRetries({ window, document }, () => cache.retryFailed());
+  }, [cache]);
+  const status = props.status;
+  useEffect(() => {
+    if (status === 'connected') cache?.retryFailed();
+  }, [cache, status]);
+  return <SharedCardsContext.Provider value={cache}>{props.children}</SharedCardsContext.Provider>;
+}
+
+/** The targets the card retry triggers listen on (window and document, or test fakes). */
+export interface CardRetryTargets {
+  window: Pick<Window, 'addEventListener' | 'removeEventListener'>;
+  document: Pick<Document, 'addEventListener' | 'removeEventListener' | 'visibilityState'>;
+}
+
+/** Call `retry` on tab visible and on online; returns the unsubscribe. */
+export function watchCardRetries(
+  targets: CardRetryTargets,
+  retry: (reason: 'visible' | 'online') => void,
+): () => void {
+  const onVisible = (): void => {
+    if (targets.document.visibilityState === 'visible') retry('visible');
+  };
+  const onOnline = (): void => retry('online');
+  targets.document.addEventListener('visibilitychange', onVisible);
+  targets.window.addEventListener('online', onOnline);
+  return () => {
+    targets.document.removeEventListener('visibilitychange', onVisible);
+    targets.window.removeEventListener('online', onOnline);
+  };
+}
+
+/**
+ * A card skeleton scrolled INTO view (off screen, then on) retries its failed
+ * reads (tries left only); where it starts does not count, so a render never
+ * spends a try. Returns a stable ref for the skeleton's box.
+ */
+export function useRetryInView(
+  cache: ThreadCardCache | null,
+  ids: { postIds?: readonly string[]; briefIds?: readonly string[] },
+  active: boolean,
+): (node: HTMLDivElement | null) => void {
+  const idsRef = useRef(ids);
+  idsRef.current = ids;
+  const observerRef = useRef<IntersectionObserver | null>(null);
+  useEffect(() => () => observerRef.current?.disconnect(), []);
+  return useCallback(
+    (node: HTMLDivElement | null) => {
+      observerRef.current?.disconnect();
+      observerRef.current = null;
+      if (node === null || !active || cache === null) return;
+      if (typeof IntersectionObserver === 'undefined') return;
+      let seen: boolean | null = null;
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries.some((entry) => entry.isIntersecting);
+        if (seen === false && visible) cache.retryFailed(idsRef.current);
+        seen = visible;
+      });
+      observer.observe(node);
+      observerRef.current = observer;
+    },
+    [cache, active],
+  );
+}
+
+/** Copy for a card whose reads failed every try (not a permission state). */
+export const CARD_LOAD_FAILED = "Couldn't load";
+
+/** A card whose reads failed every try: neutral, one 44px tap re-reads it. */
+export function CouldntLoadCard(props: { onRetry: () => void }): ReactElement {
+  return (
+    <button
+      type="button"
+      data-card-failed=""
+      onClick={props.onRetry}
+      className={`${SHARED_CARD_BOX} min-w-[44px] bg-panel-2 text-left text-fg-2 hover:bg-panel-3`}
+    >
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="truncate text-sm font-medium">{CARD_LOAD_FAILED}</span>
+        <span className="truncate text-xs">Tap to try again</span>
+      </span>
+    </button>
+  );
+}
+
+const NO_SUBSCRIBE = (): (() => void) => () => {};
+const NO_VERSION = (): number => 0;
+
+/**
+ * The thread's card cache, or (outside a thread) one of this card's own, so a
+ * card rendered anywhere still reads in one batch per message. Pure plumbing.
+ */
+export function useThreadCardCache(): ThreadCardCache | null {
   const { workspaceId } = useWorkspace();
-  const [batch, setBatch] = useState<PostCardBatch>({ posts: [], names: new Map() });
-  const [loading, setLoading] = useState(true);
-  const [tick, setTick] = useState(0);
+  const shared = useContext(SharedCardsContext);
+  const local = useMemo(
+    () =>
+      shared === null && workspaceId !== null
+        ? createSharedCardCache(threadCardReaders(supabase, workspaceId))
+        : null,
+    [shared, workspaceId],
+  );
+  useEffect(() => {
+    local?.resume();
+    return () => local?.dispose();
+  }, [local]);
+  const cache = shared ?? local;
+  // Re-render on every applied read.
+  useSyncExternalStore(cache?.subscribe ?? NO_SUBSCRIBE, cache?.version ?? NO_VERSION);
+  return cache;
+}
+
+/**
+ * Resolve and keep fresh one message's shared posts through the thread's card
+ * cache. While an id has not settled `loading` is true (skeleton); a read that
+ * failed or timed out retries on the next trigger, and after every try the id
+ * is in `failed` ("Couldn't load", tap to retry), never "not visible". A
+ * refetch keeps the current cards on screen.
+ */
+function useSharedPosts(postIds: string[]): {
+  views: SharedPostView[];
+  loading: boolean;
+  failed: string[];
+  cache: ThreadCardCache | null;
+} {
+  const cache = useThreadCardCache();
   const batchKey = postIds.join(',');
-  const loadedKey = useRef<string | null>(null);
-  const fetchedAt = useRef(0);
   const idsRef = useRef(postIds);
   idsRef.current = postIds;
 
   useEffect(() => {
-    if (workspaceId === null || postIds.length === 0) {
-      setLoading(false);
-      return;
-    }
-    const key = `${workspaceId}|${batchKey}`;
-    const first = loadedKey.current !== key;
-    if (first) setLoading(true);
-    let cancelled = false;
-    void loadPostCardBatch(supabase, workspaceId, postIds).then((next) => {
-      if (cancelled) return;
-      fetchedAt.current = Date.now();
-      loadedKey.current = key;
-      setLoading(false);
-      if (next !== null) setBatch(next);
-      else if (first) setBatch({ posts: [], names: new Map() });
-    });
-    return () => {
-      cancelled = true;
-    };
-    // postIds is read through batchKey so a new array with the same ids never re-reads.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [batchKey, workspaceId, tick]);
+    if (idsRef.current.length > 0) cache?.request({ postIds: idsRef.current });
+  }, [cache, batchKey]);
 
-  useEffect(
-    () =>
-      watchBatchFreshness(
-        { window, document },
-        {
-          ids: () => idsRef.current,
-          fetchedAt: () => fetchedAt.current,
-          now: () => Date.now(),
-          refetch: () => setTick((t) => t + 1),
-        },
-      ),
-    [],
-  );
+  useEffect(() => {
+    if (cache === null) return;
+    return watchBatchFreshness(
+      { window, document },
+      {
+        ids: () => idsRef.current,
+        fetchedAt: () => cache.postsFetchedAt(idsRef.current),
+        now: () => Date.now(),
+        refetch: () => cache.refreshPosts(idsRef.current),
+      },
+    );
+  }, [cache]);
 
+  const snapshot =
+    cache !== null && postIds.length > 0
+      ? cache.posts(postIds)
+      : { loading: false, posts: [], failed: [], names: new Map<string, string>() };
+  const version = cache?.version() ?? 0;
   const views = useMemo(
-    () => sharedPostViews(postIds, indexPostsById(batch.posts), batch.names),
-    [postIds, batch],
+    () => sharedPostViews(postIds, indexPostsById(snapshot.posts), snapshot.names),
+    // The snapshot is keyed by the ids and the cache version.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [batchKey, cache, version],
   );
-  return { views, loading };
+  return { views, loading: snapshot.loading, failed: snapshot.failed, cache };
+}
+
+/**
+ * The viewer's side, settled within the read timeout: a side read that never
+ * answers stops holding the cards after 5s. `known` is false until a real
+ * side is read (also when the read failed and settled as 'unknown'), and the
+ * cards paint with no footer meanwhile (never a footer for an unknown side
+ * that flips later). Each workspace, a return to one included, starts the cap
+ * again.
+ */
+function useSettledViewerSide(workspaceId: string | null): {
+  side: ViewerSide;
+  ready: boolean;
+  known: boolean;
+} {
+  const { side, ready } = useViewerSide(workspaceId);
+  const [expired, setExpired] = useState(false);
+  // Every workspace (a return to one included) starts its own 5s cap.
+  useEffect(() => {
+    setExpired(false);
+    if (ready || workspaceId === null) return;
+    const timer = setTimeout(() => setExpired(true), READ_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [ready, workspaceId]);
+  // A side read that failed or timed out reads 'unknown': no footer for it,
+  // so the card never paints an unknown side's wording that flips later.
+  return { side, ready: ready || expired, known: ready && side !== 'unknown' };
 }
 
 // One presign cache for every shared card in the session: it bounds concurrency
@@ -192,13 +397,14 @@ export function SharedPostCards({
   onShowPost?: ((postId: string) => void) | undefined;
 }): ReactElement | null {
   const { workspaceId, workspaceKey, workspaces } = useWorkspace();
-  const { side, ready } = useViewerSide(workspaceId);
-  const { views, loading } = useSharedPosts(postIds);
+  const { side, ready, known } = useSettledViewerSide(workspaceId);
+  const { views, loading, failed, cache } = useSharedPosts(postIds);
   const timeZone = workspaceTimeZone(workspaces.find((w) => w.id === workspaceId)?.timezone);
+  const retryInView = useRetryInView(cache, { postIds }, loading);
   if (postIds.length === 0) return null;
   if (loading || !ready) {
     return (
-      <div className="mt-1.5 flex flex-col items-start gap-1.5">
+      <div ref={retryInView} className="mt-1.5 flex flex-col items-start gap-1.5">
         {postIds.map((id) => (
           <div key={id} className={`${CARD_SKELETON} animate-pulse`} />
         ))}
@@ -208,7 +414,10 @@ export function SharedPostCards({
   return (
     <SharedPostCardList
       views={views}
+      failed={failed}
+      onRetry={(ids) => cache?.retry({ postIds: ids })}
       side={side}
+      sideKnown={known}
       workspaceKey={workspaceKey}
       timeZone={timeZone}
       onTalkAbout={
@@ -221,22 +430,52 @@ export function SharedPostCards({
   );
 }
 
+/**
+ * An approved card whose approver name is not loaded (none on record, or the
+ * name read failed) reads "Approved · <date time>" from approved_at, never a
+ * blank name. Other footers pass through. Pure.
+ */
+export function approvedWithoutName<F extends { state: string }>(
+  footer: F,
+  post: Pick<PostCardRow, 'stage' | 'approved_at'>,
+  approverName: string | null,
+  timeZone: string,
+): F {
+  if (post.stage !== 'approved' || approverName !== null || post.approved_at === null) {
+    return footer;
+  }
+  const date = formatShortDate(post.approved_at, timeZone);
+  if (date === '') return footer;
+  return { ...footer, state: `Approved · ${date} ${formatClockTime(post.approved_at, timeZone)}` };
+}
+
 /** Everything a card needs besides its view; resolved once per message. */
 export interface CardContext {
   side: ViewerSide;
+  /** The side read has answered; false after its 5s cap: no footer is painted. */
+  sideKnown?: boolean;
   workspaceKey: string | null;
   timeZone: string;
 }
 
 /** The resolved cards in postIds order (presentational; no reads). */
 export function SharedPostCardList(
-  props: { views: SharedPostView[] } & CardContext & CardRefActions,
+  props: {
+    views: SharedPostView[];
+    /** Ids whose reads failed every try: "Couldn't load" in their place. */
+    failed?: readonly string[];
+    onRetry?: (postIds: string[]) => void;
+  } & CardContext &
+    CardRefActions,
 ): ReactElement {
-  const { views, onTalkAbout, onShowPost, ...context } = props;
+  const { views, onTalkAbout, onShowPost, failed = [], onRetry, ...context } = props;
+  const failedIds = new Set(failed);
   return (
     <div className="mt-1.5 flex flex-col items-start gap-1.5">
       {views.map((view) =>
-        view.kind === 'not_visible' ? (
+        failedIds.has(view.postId) ? (
+          <CouldntLoadCard key={view.postId} onRetry={() => onRetry?.([view.postId])} />
+        ) : view.kind === 'not_visible' ? (
           <NotVisibleCard key={view.postId} />
         ) : (
           <PostCardItem
@@ -364,7 +603,12 @@ export function PostCardItem(
   const { view, side, workspaceKey, timeZone } = props;
   const { post } = view;
   const ref = entityRef(workspaceKey, post.number);
-  const footer = cardFooter(post, view.approverName, side, timeZone);
+  const footer = approvedWithoutName(
+    cardFooter(post, view.approverName, side, timeZone),
+    post,
+    view.approverName,
+    timeZone,
+  );
   const target = post.target_date !== null ? formatShortDate(post.target_date, timeZone) : '';
   // The sheet mounts on first open and stays mounted so its exit can animate.
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -440,21 +684,23 @@ export function PostCardItem(
             {target !== '' ? <span data-card-target="">{target}</span> : null}
           </span>
         </div>
-        <div
-          data-card-footer=""
-          className="flex h-[44px] items-center justify-between gap-2 border-t border-border px-3 text-xs"
-        >
-          <span
-            className={cn(
-              'flex min-w-0 items-center gap-1',
-              footer.accent ? 'font-medium text-accent' : 'text-fg-2',
-            )}
+        {props.sideKnown !== false ? (
+          <div
+            data-card-footer=""
+            className="flex h-[44px] items-center justify-between gap-2 border-t border-border px-3 text-xs"
           >
-            {footer.check ? <IconCheck size={14} className="shrink-0 text-good" /> : null}
-            <span className="truncate">{footer.state}</span>
-          </span>
-          <span className="shrink-0 font-medium text-accent">{footer.action}</span>
-        </div>
+            <span
+              className={cn(
+                'flex min-w-0 items-center gap-1',
+                footer.accent ? 'font-medium text-accent' : 'text-fg-2',
+              )}
+            >
+              {footer.check ? <IconCheck size={14} className="shrink-0 text-good" /> : null}
+              <span className="truncate">{footer.state}</span>
+            </span>
+            <span className="shrink-0 font-medium text-accent">{footer.action}</span>
+          </div>
+        ) : null}
       </div>
       {sheetMounted ? (
         <SheetBoundary>
@@ -522,6 +768,7 @@ function CardMedia(props: {
           alt=""
           loading="lazy"
           onError={thumb.onError}
+          draggable={false}
           className="h-full w-full object-cover"
         />
       ) : null}

@@ -57,7 +57,7 @@ function fail<T>(message: string): Result<T> {
   return { ok: false, error: { code: 'unknown', message } };
 }
 
-/** A member-list or name read that has not answered by now counts as failed. */
+/** A chat read (list, history, names, cards) that has not answered by now counts as failed. */
 export const READ_TIMEOUT_MS = 5_000;
 
 /**
@@ -87,6 +87,89 @@ export async function withReadTimeout<T>(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/**
+ * Hand a read's abort signal to its query builder, so a timed-out or cancelled
+ * request is cancelled on the wire, not just ignored. The Supabase builders
+ * always take one; a builder without .abortSignal (a test fake) runs as is.
+ */
+export function abortable<Q>(query: Q, signal: AbortSignal | undefined): Q {
+  if (signal === undefined) return query;
+  const attach = (query as { abortSignal?: (signal: AbortSignal) => Q }).abortSignal;
+  return typeof attach === 'function' ? attach.call(query, signal) : query;
+}
+
+/** How long a read that missed its 5s deadline may still land before it is aborted. */
+export const LATE_READ_GRACE_MS = 30_000;
+
+/**
+ * A read whose answer after the deadline still counts: it resolves to a failure
+ * at `timeoutMs` (the caller shows its error state), but the request keeps
+ * running until `graceMs` and a late success is handed to `onLate` (the data
+ * then wins and the error clears). It is aborted at `graceMs`, or at once when
+ * `cancel` fires (unmount, channel or workspace switch, Retry), after which
+ * nothing is delivered. A thrown rejection is a failure. Never throws.
+ */
+export function withLateRead<T>(
+  run: (signal: AbortSignal) => Promise<Result<T>>,
+  opts: {
+    onLate: (data: T) => void;
+    cancel?: AbortSignal;
+    timeoutMs?: number;
+    graceMs?: number;
+  },
+): Promise<Result<T>> {
+  const controller = new AbortController();
+  const timeoutMs = opts.timeoutMs ?? READ_TIMEOUT_MS;
+  const graceMs = opts.graceMs ?? LATE_READ_GRACE_MS;
+  let late = false;
+  let settled = false;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  let grace: ReturnType<typeof setTimeout> | undefined;
+  let resolveFirst: (result: Result<T>) => void = () => {};
+  const stop = (): void => {
+    if (deadline !== undefined) clearTimeout(deadline);
+    if (grace !== undefined) clearTimeout(grace);
+    opts.cancel?.removeEventListener('abort', onCancel);
+  };
+  function onCancel(): void {
+    settled = true;
+    stop();
+    controller.abort();
+    // A cancel before the deadline still settles the caller's await.
+    if (!late) resolveFirst(fail('read cancelled'));
+  }
+  if (opts.cancel?.aborted === true) return Promise.resolve(fail('read cancelled'));
+  opts.cancel?.addEventListener('abort', onCancel);
+  return new Promise<Result<T>>((resolve) => {
+    resolveFirst = resolve;
+    deadline = setTimeout(() => {
+      late = true;
+      resolve(fail('read timed out'));
+      grace = setTimeout(
+        () => {
+          settled = true;
+          stop();
+          controller.abort();
+        },
+        Math.max(0, graceMs - timeoutMs),
+      );
+    }, timeoutMs);
+    void Promise.resolve()
+      .then(() => run(controller.signal))
+      .catch((error: unknown) => fail<T>(String(error)))
+      .then((result) => {
+        if (settled) return;
+        settled = true;
+        stop();
+        if (!late) {
+          resolve(result);
+          return;
+        }
+        if (result.ok) opts.onLate(result.data);
+      });
+  });
 }
 
 /** The DM peer is whichever participant is not the current user. */
@@ -159,18 +242,44 @@ function indexBy<T>(rows: T[], key: (row: T) => string): Map<string, T> {
  * FK to groups, so PostgREST cannot embed it into the first read), one batched
  * users read and one batched workspace_members read for the DM peers' roles. Last-message
  * preview and unread counts are a later enhancement and are not built here.
+ * Two stages, each round-trip with its own 5s (aborted when it fires): the
+ * registry, then the groups, users and roles reads in parallel. `signal`
+ * cancels every stage (a hang is a failed Result, never a wait).
  */
 export async function listChannelSummaries(
   client: Client,
   params: { workspaceId: string; currentUserId: string },
+  signal?: AbortSignal,
+  /**
+   * The registry trip's deadline (default 5s). The first load, whose late
+   * answer still wins (withLateRead), passes its grace here so a slow registry
+   * read is not cancelled before it can land. The second stage (groups, users,
+   * roles) always has 5s per read, so a hung name read settles fast.
+   */
+  registryTimeoutMs: number = READ_TIMEOUT_MS,
 ): Promise<Result<ChannelSummary[]>> {
-  const channelsRes = await client
-    .from('chat_channels')
-    .select('channel_id, channel_type, entity_id, agora_group_id, dm_user_a, dm_user_b, created_at')
-    .eq('workspace_id', params.workspaceId)
-    .order('created_at', { ascending: false });
-  if (channelsRes.error) return fail(`listChannelSummaries channels: ${channelsRes.error.message}`);
-  const channels = (channelsRes.data ?? []) as ChatChannelRow[];
+  const trip = <T>(
+    run: (tripSignal: AbortSignal) => Promise<Result<T>>,
+    timeoutMs: number = READ_TIMEOUT_MS,
+  ): Promise<Result<T>> =>
+    withReadTimeout((tripSignal) => withLinkedSignal(tripSignal, signal, run), timeoutMs);
+  const channelsRes = await trip(async (tripSignal) => {
+    const res = await abortable(
+      client
+        .from('chat_channels')
+        .select(
+          'channel_id, channel_type, entity_id, agora_group_id, dm_user_a, dm_user_b, created_at',
+        )
+        .eq('workspace_id', params.workspaceId)
+        .order('created_at', { ascending: false }),
+      tripSignal,
+    );
+    if (res.error)
+      return fail<ChatChannelRow[]>(`listChannelSummaries channels: ${res.error.message}`);
+    return { ok: true, data: (res.data ?? []) as ChatChannelRow[] };
+  }, registryTimeoutMs);
+  if (!channelsRes.ok) return channelsRes;
+  const channels = channelsRes.data;
 
   const groupIds = unique(
     channels.filter((c) => c.channel_type === 'group').map((c) => c.entity_id),
@@ -179,19 +288,23 @@ export async function listChannelSummaries(
     channels.filter((c) => c.channel_type === 'dm').map((c) => dmPeerId(c, params.currentUserId)),
   );
 
-  const groupsRes = await readGroups(client, groupIds);
+  const [groupsRes, usersRes, rolesRes] = await Promise.all([
+    trip((s) => readGroups(client, groupIds, s)),
+    trip((s) => readUsers(client, peerIds, s)),
+    trip((s) => readMemberRoles(client, params.workspaceId, peerIds, s)),
+  ]);
   if (!groupsRes.ok) return groupsRes;
-  const usersRes = await readUsers(client, peerIds);
-  if (!usersRes.ok) return usersRes;
-  const rolesRes = await readMemberRoles(client, params.workspaceId, peerIds);
   if (!rolesRes.ok) return rolesRes;
+  // The DM peers' names are a name read: its failure never fails the list
+  // (those rows keep their neutral label until the next re-read).
+  const users = usersRes.ok ? usersRes.data : [];
 
   return {
     ok: true,
     data: shapeChannelSummaries(
       channels,
       indexBy(groupsRes.data, (g) => g.id),
-      indexBy(usersRes.data, (u) => u.id),
+      indexBy(users, (u) => u.id),
       params.currentUserId,
       new Map(rolesRes.data.map((m) => [m.user_id, m.role])),
     ),
@@ -288,7 +401,7 @@ export async function listGroupMemberIds(
   params: { groupId: string; signal?: AbortSignal },
 ): Promise<Result<string[]>> {
   const query = client.from('group_members').select('user_id').eq('group_id', params.groupId);
-  const res = await (params.signal !== undefined ? query.abortSignal(params.signal) : query);
+  const res = await abortable(query, params.signal);
   if (res.error) return fail(`listGroupMemberIds: ${res.error.message}`);
   const rows = (res.data ?? []) as Pick<GroupMemberRow, 'user_id'>[];
   return { ok: true, data: rows.map((r) => r.user_id) };
@@ -376,16 +489,29 @@ export interface ChannelClearRecord {
 /**
  * The caller's chat_channel_clears rows for a workspace. RLS scopes the read to
  * the caller's own rows, so no user filter is passed. The list hides a channel
- * whose newest known message is not newer than its clear.
+ * whose newest known message is not newer than its clear. 5s timeout, aborted
+ * when it fires.
  */
-export async function listChannelClears(
+export function listChannelClears(
   client: Client,
   params: { workspaceId: string },
 ): Promise<Result<ChannelClearRecord[]>> {
-  const res = await client
-    .from('chat_channel_clears')
-    .select('channel_id, cleared_at')
-    .eq('workspace_id', params.workspaceId);
+  return withReadTimeout((signal) => readChannelClears(client, params, signal));
+}
+
+/** The clears read itself, unbounded; `signal` cancels it. */
+export async function readChannelClears(
+  client: Client,
+  params: { workspaceId: string },
+  signal?: AbortSignal,
+): Promise<Result<ChannelClearRecord[]>> {
+  const res = await abortable(
+    client
+      .from('chat_channel_clears')
+      .select('channel_id, cleared_at')
+      .eq('workspace_id', params.workspaceId),
+    signal,
+  );
   if (res.error) return fail(`listChannelClears: ${res.error.message}`);
   const rows = (res.data ?? []) as Pick<ChannelClearRow, 'channel_id' | 'cleared_at'>[];
   return {
@@ -394,12 +520,40 @@ export async function listChannelClears(
   };
 }
 
-async function readGroups(client: Client, ids: string[]): Promise<Result<GroupRow[]>> {
+/**
+ * Run with one signal that fires when either does (a trip's deadline, or the
+ * caller's cancel). The listeners it adds are removed when `run` settles, so a
+ * long-lived cancel signal (a thread's card cache) never piles them up.
+ */
+export async function withLinkedSignal<T>(
+  a: AbortSignal,
+  b: AbortSignal | undefined,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  if (b === undefined) return run(a);
+  const both = new AbortController();
+  const fire = (): void => both.abort();
+  if (a.aborted || b.aborted) both.abort();
+  a.addEventListener('abort', fire);
+  b.addEventListener('abort', fire);
+  try {
+    return await run(both.signal);
+  } finally {
+    a.removeEventListener('abort', fire);
+    b.removeEventListener('abort', fire);
+  }
+}
+
+async function readGroups(
+  client: Client,
+  ids: string[],
+  signal?: AbortSignal,
+): Promise<Result<GroupRow[]>> {
   if (ids.length === 0) return { ok: true, data: [] };
-  const res = await client
-    .from('groups')
-    .select('id, name, workspace_id, avatar_url, created_by')
-    .in('id', ids);
+  const res = await abortable(
+    client.from('groups').select('id, name, workspace_id, avatar_url, created_by').in('id', ids),
+    signal,
+  );
   if (res.error) return fail(`listChannelSummaries groups: ${res.error.message}`);
   return { ok: true, data: (res.data ?? []) as GroupRow[] };
 }
@@ -410,8 +564,10 @@ async function readUsers(
   signal?: AbortSignal,
 ): Promise<Result<UserRow[]>> {
   if (ids.length === 0) return { ok: true, data: [] };
-  const query = client.from('users').select('id, display_name, avatar_url').in('id', ids);
-  const res = await (signal !== undefined ? query.abortSignal(signal) : query);
+  const res = await abortable(
+    client.from('users').select('id, display_name, avatar_url').in('id', ids),
+    signal,
+  );
   if (res.error) return fail(`readProfiles users: ${res.error.message}`);
   return { ok: true, data: (res.data ?? []) as UserRow[] };
 }
@@ -434,7 +590,7 @@ async function readMemberRoles(
     .eq('active', true)
     .is('removed_at', null)
     .in('user_id', userIds);
-  const res = await (signal !== undefined ? query.abortSignal(signal) : query);
+  const res = await abortable(query, signal);
   if (res.error) return fail(`listChannelSummaries members: ${res.error.message}`);
   return { ok: true, data: (res.data ?? []) as Pick<WorkspaceMemberRow, 'user_id' | 'role'>[] };
 }

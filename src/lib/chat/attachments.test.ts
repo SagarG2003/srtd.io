@@ -101,7 +101,7 @@ describe('uploadChatAttachment', () => {
 
     expect(outcome).toEqual({
       ok: false,
-      message: 'Upload failed. Check your connection and retry',
+      message: 'Upload failed. Try again',
     });
   });
 
@@ -118,7 +118,7 @@ describe('uploadChatAttachment', () => {
 
     expect(outcome).toEqual({
       ok: false,
-      message: 'Upload failed. Check your connection and retry',
+      message: 'Upload failed. Try again',
     });
   });
 });

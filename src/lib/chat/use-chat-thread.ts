@@ -23,6 +23,7 @@ import { newMessageId } from '@/lib/chat/message-id';
 import { createCmdMessage, createTextMessage } from '@/lib/chat/message-factory';
 import {
   loadLatestMessages,
+  readLatestMessages,
   loadMessageById,
   loadMessagesByIds,
   loadNewerMessages,
@@ -41,7 +42,12 @@ import {
   type CatchUpReason,
 } from '@/lib/chat/catch-up';
 import { liveVerifierFor, type LiveVerifier } from '@/lib/chat/live-verify';
-import type { ChannelOutbox, OutboxEntry } from '@/lib/chat/chat-store';
+import {
+  messagePreviewContent,
+  previewText,
+  type ChannelOutbox,
+  type OutboxEntry,
+} from '@/lib/chat/chat-store';
 import {
   addReactionRecord,
   deleteOutcomeCopy,
@@ -51,13 +57,8 @@ import {
 } from '@/lib/chat/record';
 import { createDebouncer, READ_CURSOR_DEBOUNCE_MS } from '@/lib/chat/read-cursor';
 import { LIVE_PUBLISH_TIMEOUT_MS, publishWithTimeout } from '@/lib/chat/send-flow';
-import {
-  forwardPreviewText,
-  forwardRecordInput,
-  forwardableInOrder,
-  runForward,
-} from '@/lib/chat/forward';
-import type { ChannelSummary } from '@/lib/chat-reads';
+import { forwardRecordInput, forwardableInOrder, runForward } from '@/lib/chat/forward';
+import { withLateRead, type ChannelSummary } from '@/lib/chat-reads';
 import { runDelete, runEdit } from '@/lib/chat/delete-flow';
 import { findInOlderPages, type FindOlderOutcome } from '@/lib/chat/marks';
 import { createInFlightGuard, recordThenSignal } from '@/lib/chat/thread-actions';
@@ -176,6 +177,10 @@ export async function findWithinBudget(params: {
 export interface UseChatThread {
   messages: ThreadMessage[];
   loading: boolean;
+  /** The latest page failed or timed out (5s): the thread shows Retry, never "No messages yet". */
+  loadFailed: boolean;
+  /** Re-run the latest-page load after a failure. */
+  retryLoad: () => void;
   /** An older page is being fetched (scroll-to-top). */
   loadingOlder: boolean;
   /** Whether an older page may exist. */
@@ -321,6 +326,74 @@ export function applyRevalidatedRows(
   return { messages: next, deleted };
 }
 
+/**
+ * The re-read rows that carry an edit the loaded messages do not show yet (a
+ * missed live edit): live rows of this channel whose edited_at is newer. Pure.
+ */
+export function editedRows(
+  messages: readonly ThreadMessage[],
+  rows: readonly ChatMessageRow[],
+  channelId: string,
+): ChatMessageRow[] {
+  const byId = new Map(messages.map((m) => [m.id, m]));
+  return rows.filter((row) => {
+    if (row.channel_id !== channelId || row.deleted_at !== null || row.edited_at === null) {
+      return false;
+    }
+    const loaded = byId.get(row.id);
+    return (
+      loaded === undefined || loaded.editedAt !== row.edited_at || loaded.body !== (row.body ?? '')
+    );
+  });
+}
+
+/**
+ * What an own edit does once recorded: the list line hears it (whatever chat
+ * is open now), and the open thread shows the returned row when it is still
+ * that chat. Pure wiring, so it is tested without a DOM.
+ */
+export function ownEditApplier(deps: {
+  forChannel: string;
+  openChannel: () => string | null;
+  onEdited: (row: ChatMessageRow) => void;
+  update: (fn: (prev: ThreadMessage[]) => ThreadMessage[]) => void;
+}): (row: ChatMessageRow) => void {
+  return (row) => {
+    deps.onEdited(row);
+    if (deps.openChannel() !== deps.forChannel) return;
+    deps.update((prev) =>
+      applyEdit(prev, {
+        messageId: row.id,
+        body: row.body ?? '',
+        editedAt: row.edited_at ?? new Date().toISOString(),
+      }),
+    );
+  };
+}
+
+/** How a latest-page load ended: the page, or a failure (an error or the 5s timeout). */
+export type LatestLoadOutcome =
+  | { kind: 'page'; page: HistoryPage }
+  | { kind: 'failed'; message: string };
+
+/**
+ * Run one latest-page load. The read is bounded (loadLatestMessages times out
+ * at 5s); a rejection is a failure too. Never throws, so the thread always
+ * leaves its skeleton for rows, the empty state or Retry.
+ */
+export async function runLatestLoad(
+  load: () => Promise<Result<HistoryPage>>,
+): Promise<LatestLoadOutcome> {
+  try {
+    const result = await load();
+    return result.ok
+      ? { kind: 'page', page: result.data }
+      : { kind: 'failed', message: result.error.message };
+  } catch (error) {
+    return { kind: 'failed', message: String(error) };
+  }
+}
+
 /** The Foundation client is the real connection; widen it to the messaging surface. */
 function asThreadConnection(client: ChatConnection): ThreadConnection {
   return client as ThreadConnection;
@@ -348,11 +421,13 @@ export function useChatThread(params: {
   /** The DM peer, for the seen ticks; null for groups. */
   peerUserId: string | null;
   /** Called after a forward is recorded so the live store can show 'You: ...'. */
-  onOwnMessage?: (channelId: string, text: string, ts: number) => void;
+  onOwnMessage?: (channelId: string, text: string, ts: number, messageId?: string) => void;
   /** Called after each catch-up so the caller can refresh unread counts and marks. */
   onCaughtUp?: () => void;
   /** Called when messages of the open channel were deleted (by us or live by a peer); they stay as tombstones. */
   onMessagesDeleted?: (channelId: string, messageIds: readonly string[]) => void;
+  /** Called with the recorded row after an edit lands (own, or a verified live edit). */
+  onMessageEdited?: (row: ChatMessageRow) => void;
   /** Per-channel unrecorded sends and their background sender (the chat store's). */
   outbox: ChannelOutbox;
   /** Injected in tests; the app uses the shared Supabase client. */
@@ -370,6 +445,9 @@ export function useChatThread(params: {
 
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const retryLoad = useCallback(() => setLoadAttempt((n) => n + 1), []);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMore, setHasMore] = useState(false);
 
@@ -398,6 +476,8 @@ export function useChatThread(params: {
   onCaughtUpRef.current = onCaughtUp;
   const onMessagesDeletedRef = useRef(params.onMessagesDeleted);
   onMessagesDeletedRef.current = params.onMessagesDeleted;
+  const onMessageEditedRef = useRef(params.onMessageEdited);
+  onMessageEditedRef.current = params.onMessageEdited;
   /** Messages became tombstones: tell the caller and the store (drafts, outbox, list line). */
   const reportDeleted = useCallback((forChannel: string, ids: readonly string[]): void => {
     onMessagesDeletedRef.current?.(forChannel, ids);
@@ -498,11 +578,16 @@ export function useChatThread(params: {
     [currentUserId, attachReactions, resolveReplies, reportDeleted],
   );
 
-  // Load the latest page whenever the channel changes. The channel's unrecorded
-  // sends (outbox) show at once and stay on top of whatever loads.
+  // Load the latest page whenever the channel changes (and on Retry). The
+  // channel's unrecorded sends (outbox) show at once and stay on top of
+  // whatever loads. A failed or timed-out (5s) read is the Retry state; a
+  // timed-out read keeps running (withLateRead) and its late page still wins:
+  // the rows show and the Retry state clears. A switch, unmount or Retry
+  // aborts it.
   useEffect(() => {
     lastCursorRef.current = null;
     setHasMore(false);
+    setLoadFailed(false);
     if (channelId === null) {
       setMessages([]);
       setLoading(false);
@@ -510,28 +595,42 @@ export function useChatThread(params: {
     }
     setMessages(withOutboxBubbles([], outboxRef.current.entries(channelId), currentUserId));
     let cancelled = false;
+    const abort = new AbortController();
     setLoading(true);
+    const applyPage = (page: HistoryPage): void => {
+      const fetched = page.rows.map((row) => rowToThreadMessage(row, currentUserId));
+      foldRows(fetched, channelId);
+      setHasMore(page.hasMore);
+      setLoadFailed(false);
+      setLoading(false);
+      if (peerUserId !== null) void attachPeerCursor(channelId, peerUserId);
+    };
     void (async (): Promise<void> => {
-      const page = await loadLatestMessages(db, channelId);
+      const outcome = await runLatestLoad(() =>
+        withLateRead((signal) => readLatestMessages(db, channelId, signal), {
+          onLate: (page) => {
+            if (!cancelled) applyPage(page);
+          },
+          cancel: abort.signal,
+        }),
+      );
       if (cancelled) return;
-      if (!page.ok) {
+      if (outcome.kind === 'failed') {
         logger.error('chat: history load failed', {
           channel_id: channelId,
-          error: page.error.message,
+          error: outcome.message,
         });
+        setLoadFailed(true);
         setLoading(false);
         return;
       }
-      const fetched = page.data.rows.map((row) => rowToThreadMessage(row, currentUserId));
-      foldRows(fetched, channelId);
-      setHasMore(page.data.hasMore);
-      setLoading(false);
-      if (peerUserId !== null) void attachPeerCursor(channelId, peerUserId);
+      applyPage(outcome.page);
     })();
     return () => {
       cancelled = true;
+      abort.abort();
     };
-  }, [db, channelId, currentUserId, peerUserId, foldRows, attachPeerCursor]);
+  }, [db, channelId, currentUserId, peerUserId, foldRows, attachPeerCursor, loadAttempt]);
 
   // Live traffic for the open channel. A text message renders only from its
   // verified chat_messages row; the verifier logs a missing row once.
@@ -588,6 +687,7 @@ export function useChatThread(params: {
           if (channelRef.current !== channelId || stored.channel_id !== channelId) return;
           if (stored.sender_user_id !== fromUserId) return;
           setMessages((prev) => applyEditFromRow(prev, stored));
+          onMessageEditedRef.current?.(stored);
         });
       },
     });
@@ -670,6 +770,10 @@ export function useChatThread(params: {
             const { deleted } = applyRevalidatedRows(messagesRef.current, rows, forChannel);
             setMessages((prev) => applyRevalidatedRows(prev, rows, forChannel).messages);
             if (deleted.length > 0) reportDeleted(forChannel, deleted);
+            // A missed edit found here moves the list line too (when it is the latest).
+            for (const row of editedRows(messagesRef.current, rows, forChannel)) {
+              onMessageEditedRef.current?.(row);
+            }
           }
           if (!outcome.ok) {
             logger.warn('chat: catch-up load failed', {
@@ -679,8 +783,12 @@ export function useChatThread(params: {
           }
           const fetched = outcome.rows.map((row) => rowToThreadMessage(row, currentUserId));
           if (fetched.length > 0) foldRows(fetched, forChannel);
-          if (outcome.ok && outcome.latestPage !== undefined)
+          if (outcome.ok && outcome.latestPage !== undefined) {
             setHasMore(outcome.latestPage.hasMore);
+            // The latest page landed after all (a first load that failed):
+            // the Retry state goes, the rows are the thread.
+            setLoadFailed(false);
+          }
         } finally {
           catchingUpRef.current = false;
           onCaughtUpRef.current?.();
@@ -884,8 +992,9 @@ export function useChatThread(params: {
                 }
                 onOwnMessageRef.current?.(
                   channel.channelId,
-                  forwardPreviewText(source),
+                  previewText(messagePreviewContent(source)),
                   recorded.time,
+                  recorded.id,
                 );
                 return { ok: true };
               },
@@ -1067,16 +1176,12 @@ export function useChatThread(params: {
       const result = await runEdit(
         {
           client: db,
-          applyLocal: (row) => {
-            if (channelRef.current !== forChannel) return;
-            setMessages((prev) =>
-              applyEdit(prev, {
-                messageId: row.id,
-                body: row.body ?? '',
-                editedAt: row.edited_at ?? new Date().toISOString(),
-              }),
-            );
-          },
+          applyLocal: ownEditApplier({
+            forChannel,
+            openChannel: () => channelRef.current,
+            onEdited: (row) => onMessageEditedRef.current?.(row),
+            update: (fn) => setMessages(fn),
+          }),
           signal:
             connection !== null && liveTarget !== null
               ? (ext) =>
@@ -1161,6 +1266,8 @@ export function useChatThread(params: {
   return {
     messages,
     loading,
+    loadFailed,
+    retryLoad,
     loadingOlder,
     hasMore,
     loadOlder,

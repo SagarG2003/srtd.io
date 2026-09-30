@@ -253,6 +253,9 @@ describe('latestPerChannel', () => {
         senderUserId: ME,
         body: 'latest a',
         hasAttachments: false,
+        attachmentKinds: [],
+        sharedPostCount: 0,
+        sharedBriefCount: 0,
         createdAt: 't3',
       },
       {
@@ -261,6 +264,9 @@ describe('latestPerChannel', () => {
         senderUserId: null,
         body: '',
         hasAttachments: true,
+        attachmentKinds: ['file'],
+        sharedPostCount: 0,
+        sharedBriefCount: 0,
         createdAt: 't2',
       },
     ]);

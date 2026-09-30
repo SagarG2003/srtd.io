@@ -15,6 +15,7 @@ import {
   staleOnVisible,
   type FreshnessTargets,
 } from '@/components/chat/post-card';
+import { withReadTimeout } from '@/lib/chat-reads';
 import { supabase } from '@/lib/supabase';
 import { countOpenPosts, listOpenPosts, type OpenPostRow } from '../../../packages/posts/src/reads';
 
@@ -34,19 +35,22 @@ export interface OpenPostsReads {
 
 const READS: OpenPostsReads = { list: listOpenPosts, count: countOpenPosts };
 
-/** One round: the list and the count, in parallel. Never throws. */
+/**
+ * One round: the list and the count, in parallel, each bounded at 5s (a hang
+ * is that read failing, so the round always settles). Never throws.
+ */
 export async function fetchOpenPosts(
   client: Client,
   workspaceId: string,
   reads: OpenPostsReads = READS,
 ): Promise<OpenPostsData> {
   const [list, count] = await Promise.all([
-    reads.list(client, { workspaceId }).catch(() => null),
-    reads.count(client, { workspaceId }).catch(() => null),
+    withReadTimeout(() => reads.list(client, { workspaceId })),
+    withReadTimeout(() => reads.count(client, { workspaceId })),
   ]);
   return {
-    posts: list !== null && list.ok ? list.data : null,
-    count: count !== null && count.ok ? count.data : null,
+    posts: list.ok ? list.data : null,
+    count: count.ok ? count.data : null,
   };
 }
 

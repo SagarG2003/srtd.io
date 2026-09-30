@@ -23,7 +23,7 @@ import {
   type ThreadMessage,
 } from '@/lib/chat/thread';
 import { createCmdMessage } from '@/lib/chat/message-factory';
-import { loadScope } from '@/lib/chat/chat-store';
+import { loadScope, type ChatLoadStatus } from '@/lib/chat/chat-store';
 import {
   openChannelAfterRoster,
   reloadedFor,
@@ -43,12 +43,18 @@ import { useChatMarks } from '@/lib/chat/use-chat-marks';
 import { useChatTyping } from '@/lib/chat/use-chat-typing';
 import { visibleTypingIds } from '@/lib/chat/typing';
 import { useChatPresence } from '@/lib/chat/use-chat-presence';
-import { useChatStore } from '@/components/chat/ChatStoreProvider';
+import { ROSTER_READ_BUDGET_MS, useChatStore } from '@/components/chat/ChatStoreProvider';
 import type { ChatConnection, ChatStatus } from '@/lib/chat/types';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { IconChat } from '@/components/ui/icons';
 import { ChannelList } from '@/components/chat/ChannelList';
-import { MessageThread } from '@/components/chat/MessageThread';
+import {
+  MessageThread,
+  threadCardIds,
+  threadOpeningSkeleton,
+} from '@/components/chat/MessageThread';
+import { SharedCardsProvider } from '@/components/chat/PostCard';
+import { useChatLayout } from '@/components/chat/chat-type';
 import { NewChatSheet } from '@/components/chat/NewChatSheet';
 import { GroupInfoSheet, type GroupInfoTabsWiring } from '@/components/chat/GroupInfoSheet';
 import { leaveSelectionThen } from '@/lib/chat/forward';
@@ -288,13 +294,15 @@ export function pendingJumpAfter(
 /**
  * A deep link whose chat is not in my list re-reads the list once before
  * saying it is unavailable (a chat made moments ago may not be in the snapshot
- * yet). A failed re-read, or one still unanswered after the 5s read timeout,
- * counts as absent. Pure over the injected reload.
+ * yet). A failed re-read, or one still unanswered after `timeoutMs` (the
+ * reload's own budget in the app), counts as absent. Pure over the injected
+ * reload.
  */
 export async function deepLinkAfterRefresh(
   params: URLSearchParams,
   roster: readonly ChannelSummary[],
   reload: () => Promise<readonly ChannelSummary[] | null>,
+  timeoutMs: number = READ_TIMEOUT_MS,
 ): Promise<ReturnType<typeof deepLinkStep>> {
   const step = deepLinkStep(params, roster);
   if (step.open !== null) return step;
@@ -303,7 +311,7 @@ export async function deepLinkAfterRefresh(
     return list !== null
       ? { ok: true, data: list }
       : { ok: false, error: { code: 'unknown', message: 'roster reload failed' } };
-  });
+  }, timeoutMs);
   return deepLinkStep(params, next.ok ? next.data : []);
 }
 
@@ -327,6 +335,30 @@ export function deepLinkRefreshOutcome(
   if (!now.mounted || now.workspaceId !== started.workspaceId || now.channel !== started.channel)
     return 'discard';
   return step.open !== null ? 'open' : 'toast';
+}
+
+/**
+ * The chat being opened before its row is known: a ?channel= deep link (an
+ * email link, an Activity tap, a reload inside the thread) or a toast's open
+ * request, while nothing is selected yet. Its pane paints the thread skeleton
+ * from the first frame, never the list or "Select a conversation". A failed
+ * list load, or a link that turns out unknown or unreadable (the param is
+ * stripped), opens nothing: chat home shows. Pure.
+ */
+export function openingChannelId(input: {
+  selectedChannelId: string | null;
+  channelParam: string | null;
+  pendingOpen: string | null;
+  loadStatus: ChatLoadStatus;
+}): string | null {
+  if (input.loadStatus === 'error') return null;
+  // A link to another chat while one is open (A open, link to B): B's
+  // skeleton at once, never another frame of A.
+  if (input.channelParam !== null && input.channelParam !== input.selectedChannelId) {
+    return input.channelParam;
+  }
+  if (input.selectedChannelId !== null) return null;
+  return input.pendingOpen;
 }
 
 /** The jump the open chat takes: the pending one only while it is for this chat. Pure. */
@@ -419,12 +451,14 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     setActive,
     markConversationRead,
     updateOwnMessage,
+    updateEditedMessage,
     refreshUnreadCounts,
     refreshPreviews,
     clearPendingOpen,
     outbox,
     clearConversation,
   } = useChatStore();
+  const layout = useChatLayout();
 
   // The open thread lives in ?channel={channelId} (replace, never push), so the
   // shell hides the mobile chrome in the same render the thread opens. Opening
@@ -511,22 +545,24 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     // Not in the snapshot: re-read the list once; toast only if still absent.
     // The answer applies only on the same mounted page, workspace and link.
     const started: DeepLinkRefreshContext = { mounted: true, workspaceId, channel };
-    void deepLinkAfterRefresh(linkParams, roster, reloadRoster).then((again) => {
-      if (selectedFromParam.current !== channel) return;
-      const outcome = deepLinkRefreshOutcome(again, started, {
-        mounted: mountedRef.current,
-        workspaceId: workspaceIdRef.current,
-        channel: channelParamRef.current,
-      });
-      if (outcome === 'discard') return;
-      if (outcome === 'open' && again.open !== null) {
-        setPendingJump(again.jump);
-        setSelected(again.open);
-        return;
-      }
-      writeChannelParam(null);
-      toastRef.current.show({ title: CHAT_UNAVAILABLE_TOAST });
-    });
+    void deepLinkAfterRefresh(linkParams, roster, reloadRoster, ROSTER_READ_BUDGET_MS).then(
+      (again) => {
+        if (selectedFromParam.current !== channel) return;
+        const outcome = deepLinkRefreshOutcome(again, started, {
+          mounted: mountedRef.current,
+          workspaceId: workspaceIdRef.current,
+          channel: channelParamRef.current,
+        });
+        if (outcome === 'discard') return;
+        if (outcome === 'open' && again.open !== null) {
+          setPendingJump(again.jump);
+          setSelected(again.open);
+          return;
+        }
+        writeChannelParam(null);
+        toastRef.current.show({ title: CHAT_UNAVAILABLE_TOAST });
+      },
+    );
   }, [
     loadStatus,
     roster,
@@ -536,6 +572,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     reloadRoster,
     workspaceId,
   ]);
+
+  // A workspace switch forgets which link was handled: a link whose re-read
+  // was discarded by the switch is resolved again in the new workspace (open
+  // it, or toast and strip it), never left on the opening skeleton.
+  useEffect(() => {
+    selectedFromParam.current = null;
+  }, [workspaceId]);
 
   // A ?channel= that disappears by any route other than closeChannel (browser
   // back, external navigation) closes the thread below md so the chrome returns.
@@ -698,7 +741,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
 
   // Keyed on the channel the send was recorded in, which may no longer be open.
   const onOwnMessage = useCallback(
-    (channelId: string, text: string, ts: number) => updateOwnMessage(channelId, text, ts),
+    (channelId: string, text: string, ts: number, messageId?: string) =>
+      updateOwnMessage(channelId, text, ts, messageId),
     [updateOwnMessage],
   );
 
@@ -784,6 +828,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     onOwnMessage,
     onCaughtUp,
     onMessagesDeleted,
+    onMessageEdited: updateEditedMessage,
     outbox,
     resolveTarget: (channel) => resolveLiveTarget(channel, currentUserId, groupMemberCache),
   });
@@ -906,6 +951,9 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     return rows;
   }, [thread.messages, profiles, nameReads, workspaceId]);
   const namesReady = namesSettled === selectedChannelId;
+  // Every shared post and brief across the loaded messages: the thread's cards
+  // read them in one batch per kind and share the results.
+  const cardIds = useMemo(() => threadCardIds(threadMessages), [threadMessages]);
 
   // The @ picker's people: the group's members, or the DM's other person.
   // A failed or timed-out member read settles as failed: the composer's hold
@@ -935,8 +983,19 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
 
   const onBack = closeChannel;
 
-  const showList = isDesktop || selected === null;
-  const showThread = isDesktop || selected !== null;
+  const opening = openingChannelId({
+    selectedChannelId: selected?.channelId ?? null,
+    channelParam,
+    pendingOpen,
+    loadStatus,
+  });
+  const showList = isDesktop || (selected === null && opening === null);
+  const showThread = isDesktop || selected !== null || opening !== null;
+  // Back out of a chat still opening: drop the link and any pending open.
+  const onBackFromOpening = (): void => {
+    clearPendingOpen();
+    closeChannel();
+  };
 
   const isGroup = selected?.channelType === 'group';
   const infoGroupId = isGroup ? (selected?.groupId ?? null) : null;
@@ -960,79 +1019,92 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       ) : null}
       {showThread ? (
         <div className="h-full min-w-0 flex-1">
-          {selected !== null ? (
-            <MessageThread
-              key={selected.channelId}
-              title={(shown ?? selected).title}
+          {opening !== null ? (
+            threadOpeningSkeleton(layout, isDesktop ? undefined : onBackFromOpening)
+          ) : selected !== null ? (
+            <SharedCardsProvider
+              workspaceId={workspaceId}
               channelId={selected.channelId}
-              avatarUrl={(shown ?? selected).avatarUrl}
-              {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
-              {...(!isGroup ? { role: (shown ?? selected).role ?? null } : {})}
-              isGroup={isGroup}
-              profiles={profiles}
-              messages={threadCurrent ? threadMessages : NO_MESSAGES}
-              loading={thread.loading || !threadCurrent || !namesReady}
-              loadingOlder={thread.loadingOlder}
-              hasMore={thread.hasMore}
-              onLoadOlder={thread.loadOlder}
-              onNewestVisible={thread.markNewestVisible}
-              timeZone={timeZone}
-              canSend
-              onSend={thread.send}
-              onRetry={thread.retry}
-              typingUserIds={typingUserIds}
-              onTyping={typing.notifyTyping}
-              onToggleReaction={thread.toggleReaction}
-              marks={marks.marks}
-              marksLoaded={marks.loaded}
-              markedMessages={marks.markedMessages}
-              onSetMark={marks.setMark}
-              onResolveMark={marks.resolve}
-              onReopenMark={marks.reopen}
-              currentUserId={currentUserId}
-              onDeleteMessages={thread.deleteMessages}
-              onEditMessage={thread.editMessage}
-              forwardChannels={roster}
-              onForward={thread.forward}
-              onEnsureLoaded={thread.ensureLoaded}
-              mentionMembers={mentionMembers}
-              mentionGone={mentionGone(membersLoad, currentUserId, workspaceId)}
-              mentions={{
-                peerUserId: selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
-                onOpen: onOpenMention,
-              }}
-              initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
-              onInitialJumpTaken={() => setPendingJump(null)}
-              showTicks={selected.channelType === 'dm'}
-              {...(selected.peerUserId != null ? { presence } : {})}
-              {...(isDesktop ? {} : { onBack })}
-              {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
-              {...(infoGroupId !== null
-                ? {
-                    renderGroupInfo: (tabs: GroupInfoTabsWiring) => (
-                      <GroupInfoSheet
-                        open={groupInfoOpen}
-                        onClose={() => setGroupInfoOpen(false)}
-                        workspaceId={workspaceId}
-                        workspaceName={workspace?.name}
-                        groupId={infoGroupId}
-                        groupName={(shown ?? selected).title}
-                        avatarUrl={(shown ?? selected).avatarUrl}
-                        createdBy={(shown ?? selected).createdBy ?? null}
-                        viewerRole={
-                          mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null
-                        }
-                        currentUserId={currentUserId}
-                        onChanged={onGroupChanged}
-                        signalRoster={(change) => signalRoster(shown ?? selected, change)}
-                        membersVersion={rosterVersion}
-                        onLeft={onGroupLeft}
-                        tabs={tabs}
-                      />
-                    ),
-                  }
-                : {})}
-            />
+              postIds={cardIds.postIds}
+              briefIds={cardIds.briefIds}
+              status={status}
+            >
+              <MessageThread
+                key={selected.channelId}
+                title={(shown ?? selected).title}
+                channelId={selected.channelId}
+                avatarUrl={(shown ?? selected).avatarUrl}
+                {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
+                {...(!isGroup ? { role: (shown ?? selected).role ?? null } : {})}
+                isGroup={isGroup}
+                profiles={profiles}
+                messages={threadCurrent ? threadMessages : NO_MESSAGES}
+                loading={thread.loading || !threadCurrent || !namesReady}
+                loadFailed={threadCurrent && thread.loadFailed}
+                onRetryLoad={thread.retryLoad}
+                loadingOlder={thread.loadingOlder}
+                hasMore={thread.hasMore}
+                onLoadOlder={thread.loadOlder}
+                onNewestVisible={thread.markNewestVisible}
+                timeZone={timeZone}
+                canSend
+                onSend={thread.send}
+                onRetry={thread.retry}
+                typingUserIds={typingUserIds}
+                onTyping={typing.notifyTyping}
+                onToggleReaction={thread.toggleReaction}
+                marks={marks.marks}
+                marksLoaded={marks.loaded}
+                marksFailed={marks.failed}
+                markedMessages={marks.markedMessages}
+                onSetMark={marks.setMark}
+                onResolveMark={marks.resolve}
+                onReopenMark={marks.reopen}
+                currentUserId={currentUserId}
+                onDeleteMessages={thread.deleteMessages}
+                onEditMessage={thread.editMessage}
+                forwardChannels={roster}
+                onForward={thread.forward}
+                onEnsureLoaded={thread.ensureLoaded}
+                mentionMembers={mentionMembers}
+                mentionGone={mentionGone(membersLoad, currentUserId, workspaceId)}
+                mentions={{
+                  peerUserId: selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
+                  onOpen: onOpenMention,
+                }}
+                initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
+                onInitialJumpTaken={() => setPendingJump(null)}
+                showTicks={selected.channelType === 'dm'}
+                {...(selected.peerUserId != null ? { presence } : {})}
+                {...(isDesktop ? {} : { onBack })}
+                {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
+                {...(infoGroupId !== null
+                  ? {
+                      renderGroupInfo: (tabs: GroupInfoTabsWiring) => (
+                        <GroupInfoSheet
+                          open={groupInfoOpen}
+                          onClose={() => setGroupInfoOpen(false)}
+                          workspaceId={workspaceId}
+                          workspaceName={workspace?.name}
+                          groupId={infoGroupId}
+                          groupName={(shown ?? selected).title}
+                          avatarUrl={(shown ?? selected).avatarUrl}
+                          createdBy={(shown ?? selected).createdBy ?? null}
+                          viewerRole={
+                            mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null
+                          }
+                          currentUserId={currentUserId}
+                          onChanged={onGroupChanged}
+                          signalRoster={(change) => signalRoster(shown ?? selected, change)}
+                          membersVersion={rosterVersion}
+                          onLeft={onGroupLeft}
+                          tabs={tabs}
+                        />
+                      ),
+                    }
+                  : {})}
+              />
+            </SharedCardsProvider>
           ) : (
             <div className="flex h-full flex-col justify-center bg-bg">
               <EmptyState icon={<IconChat size={22} />} title="Select a conversation" />

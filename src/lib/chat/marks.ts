@@ -14,6 +14,7 @@
 // the stamp word and is not interactive.
 
 import type { AgoraChat } from 'agora-chat';
+import { abortable } from '@/lib/chat-reads';
 import type { Client, Result } from '@srtdio/rpc';
 import type { Database } from '@srtdio/schemas';
 import type { MarkPriority, MarkType } from '@/lib/chat/record';
@@ -84,11 +85,12 @@ export function indexMarks(marks: readonly ChatMark[]): Map<string, ChatMark> {
 export async function loadChannelMarks(
   client: Client,
   channelId: string,
+  signal?: AbortSignal,
 ): Promise<Result<ChatMark[]>> {
-  const res = await client
-    .from('chat_message_marks')
-    .select(MARK_COLUMNS)
-    .eq('channel_id', channelId);
+  const res = await abortable(
+    client.from('chat_message_marks').select(MARK_COLUMNS).eq('channel_id', channelId),
+    signal,
+  );
   if (res.error) return fail(`loadChannelMarks: ${res.error.message}`);
   const rows = (res.data ?? []) as ChatMarkRow[];
   const marks: ChatMark[] = [];
@@ -105,12 +107,12 @@ export type MarkLookup = { found: true; mark: ChatMark } | { found: false };
 export async function loadMarkByMessageId(
   client: Client,
   messageId: string,
+  signal?: AbortSignal,
 ): Promise<Result<MarkLookup>> {
-  const res = await client
-    .from('chat_message_marks')
-    .select(MARK_COLUMNS)
-    .eq('message_id', messageId)
-    .maybeSingle();
+  const res = await abortable(
+    client.from('chat_message_marks').select(MARK_COLUMNS).eq('message_id', messageId),
+    signal,
+  ).maybeSingle();
   if (res.error) return fail(`loadMarkByMessageId: ${res.error.message}`);
   const row = res.data as ChatMarkRow | null;
   const mark = row === null ? undefined : rowToMark(row);

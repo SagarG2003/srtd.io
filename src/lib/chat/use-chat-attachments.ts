@@ -13,6 +13,7 @@ import { useNewTrace } from '@/lib/trace-context';
 import { useWorkspace } from '@/lib/workspace-context';
 import { PresignCache } from '@/lib/asset-presign';
 import {
+  CHAT_UPLOAD_FAILED,
   uploadChatAttachment,
   type AttachmentUploader,
   type ChatAttachmentUpload,
@@ -80,7 +81,7 @@ export function useChatAttachments(): ChatAttachments {
   const uploadFile = useCallback(
     async (file: File, onProgress?: (fraction: number) => void): Promise<ChatAttachmentUpload> => {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
-        return { ok: false, message: 'Upload failed. Check your connection and retry' };
+        return { ok: false, message: CHAT_UPLOAD_FAILED };
       }
       if (workspaceId === null) {
         return { ok: false, message: 'No workspace selected.' };

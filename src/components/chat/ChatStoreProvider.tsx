@@ -40,16 +40,20 @@ import { useWorkspace } from '@/lib/workspace-context';
 import { useToast } from '@/components/ui/toast';
 import { Avatar } from '@/components/ui/Avatar';
 import {
-  listChannelClears,
   listChannelSummaries,
   listGroupMemberIds,
+  readChannelClears,
   readChannelMemberIds,
   readMentionProfiles,
+  LATE_READ_GRACE_MS,
+  READ_TIMEOUT_MS,
+  withLateRead,
   withReadTimeout,
   type ChannelSummary,
   type MentionProfile,
 } from '@/lib/chat-reads';
 import {
+  isFormerMember,
   knownMentionName,
   mentionIds,
   mentionNamesIn,
@@ -87,7 +91,7 @@ import {
   type ChatMessageRow,
   type ThreadConnection,
 } from '@/lib/chat/thread';
-import { liveVerifierFor } from '@/lib/chat/live-verify';
+import { liveVerifierFor, onLiveVerifyGiveUp } from '@/lib/chat/live-verify';
 import { subscribeGlobalCmds, subscribeGlobalMessages } from '@/lib/chat/controller';
 import {
   createGroupMemberCache,
@@ -104,7 +108,11 @@ import {
   loadConversationPreviews,
   loadMessagesByIds,
   loadUnreadCounts,
+  readConversationPreviews,
+  readUnreadCounts,
+  rowPreviewContent,
   type ConversationPreview,
+  type PreviewContent,
   type UnreadCount,
 } from '@/lib/chat/history';
 import { createDebouncer, UNREAD_REFRESH_DEBOUNCE_MS } from '@/lib/chat/read-cursor';
@@ -143,7 +151,9 @@ export interface ChatStoreContextValue {
   /** Zero a channel's unread locally (the thread records the read cursor). */
   markConversationRead: (channelId: string) => void;
   /** Refresh a channel's last line after a recorded own send ('You: ...'). */
-  updateOwnMessage: (channelId: string, text: string, ts: number) => void;
+  updateOwnMessage: (channelId: string, text: string, ts: number, messageId?: string) => void;
+  /** An edit landed (own or verified live): the line updates when it shows that message. */
+  updateEditedMessage: (row: ChatMessageRow) => void;
   /** Re-read chat_unread_counts now (after a catch-up). */
   refreshUnreadCounts: () => void;
   /** Re-read the last-line previews (after messages were deleted for everyone). */
@@ -292,16 +302,39 @@ export interface GlobalCmdDeps {
   loadByIds: (messageIds: readonly string[]) => Promise<Result<ChatMessageRow[]>>;
   /** The ids whose rows are tombstones on record. */
   onDeleted: (messageIds: readonly string[]) => void;
+  /** A live edit verified against its row (any chat, open or not): the list line may take it. */
+  onEdited?: (row: ChatMessageRow) => void;
+  /**
+   * Whether this message is some chat's list line now. An edit of any other
+   * message moves no line, so it is not re-read (the open thread reads its own).
+   */
+  isShownLine?: (messageId: string) => boolean;
 }
 
 /**
  * A live command for any channel (the global fan-out). The payload alone is
  * never trusted: a delete signal's ids are re-read in one batched read and only
- * rows whose deleted_at is set reach the tombstone handler; ids not found or
- * not deleted are ignored. Every other command is the open thread's business.
+ * rows whose deleted_at is set reach the tombstone handler; an edit signal's
+ * row is re-read and only a live row that carries an edit reaches the list
+ * line (which takes it only when it is that chat's latest). Ids not found are
+ * ignored. Every other command is the open thread's business.
  */
 export async function routeGlobalCmd(ext: unknown, deps: GlobalCmdDeps): Promise<void> {
   const event = parseLiveEvent(ext);
+  if (event.kind === 'edit') {
+    if (deps.onEdited === undefined) return;
+    if (deps.isShownLine !== undefined && !deps.isShownLine(event.messageId)) return;
+    const result = await deps.loadByIds([event.messageId]);
+    if (!result.ok) {
+      logger.warn('chat store: edit signal verification failed, ignored', {
+        error: result.error.message,
+      });
+      return;
+    }
+    const row = result.data.find((r) => r.id === event.messageId);
+    if (row !== undefined && row.deleted_at === null && row.edited_at !== null) deps.onEdited(row);
+    return;
+  }
   if (event.kind !== 'delete' || event.messageIds.length === 0) return;
   const claimed = new Set(event.messageIds);
   const result = await deps.loadByIds([...claimed]);
@@ -317,25 +350,66 @@ export async function routeGlobalCmd(ext: unknown, deps: GlobalCmdDeps): Promise
   if (deleted.length > 0) deps.onDeleted(deleted);
 }
 
+/**
+ * A held message's line once its chat is listed: the sender prefix from the
+ * chat's roster row (a new group gets "<first name>:"), names already read.
+ */
+export function heldWithPrefix(
+  incoming: store.IncomingMessage,
+  row: Pick<ChatMessageRow, 'sender_user_id' | 'workspace_id'>,
+  summary: Pick<ChannelSummary, 'channelType'> | undefined,
+  currentUserId: string | null,
+): store.IncomingMessage {
+  if (currentUserId === null) return incoming;
+  const prefix = store.previewPrefix({
+    senderUserId: row.sender_user_id,
+    currentUserId,
+    isGroup: summary?.channelType === 'group',
+    nameOf: mentionNamesIn(row.workspace_id),
+  });
+  const next: store.IncomingMessage = { ...incoming };
+  delete next.prefix;
+  if (prefix !== undefined) next.prefix = prefix;
+  return next;
+}
+
+/**
+ * A refresh's answer applied to the store: a failed read keeps the current
+ * values, and an answer for a scope the store has moved on from (workspace
+ * switch, sign-out) is dropped. Pure.
+ */
+export function refreshedState<T>(
+  prev: ChatStoreState,
+  scope: string,
+  result: Result<T>,
+  apply: (state: ChatStoreState, data: T) => ChatStoreState,
+): ChatStoreState {
+  if (!result.ok || prev.scope !== scope) return prev;
+  return apply(prev, result.data);
+}
+
 /** A body with @[uuid] tokens as list text: "@Name" (this workspace's registry names). */
 export function previewMentionText(text: string, workspaceId: string | null): string {
   return resolveMentionPreview(text, mentionNamesIn(workspaceId));
 }
 
 /**
- * Make sure every @mention in these bodies has a remembered name: one batched
- * profile read (with membership, same pass) for the ids not known yet (none
- * when all are). An id read without an active membership reads "@Unknown
- * member". A failed read (an error, a rejection or the 5s timeout) is logged;
- * those mentions then read "@Unknown member", never a raw token. Never throws.
+ * Make sure every @mention in these bodies (and every sender in `senderIds`,
+ * for group lines' first names) has a remembered name: one batched profile
+ * read (with membership, same pass) for the ids not known yet (none when all
+ * are). An id read without an active membership reads "@Unknown member". A
+ * failed read (an error, a rejection or the 5s timeout) is logged; those
+ * mentions then read "@Unknown member", never a raw token, and those senders
+ * get no prefix. Never throws.
  */
 export async function rememberBodyNames(
   bodies: readonly string[],
   readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>>,
   workspaceId: string,
+  senderIds: readonly string[] = [],
 ): Promise<void> {
   // Unknown FOR THIS WORKSPACE: a name learned in another one never counts.
-  const ids = [...new Set(bodies.flatMap(mentionIds))].filter(
+  const ids = [...new Set([...bodies.flatMap(mentionIds), ...senderIds])].filter(
     (id) => knownMentionName(workspaceId, id) === undefined,
   );
   if (ids.length === 0) return;
@@ -349,18 +423,23 @@ export async function rememberBodyNames(
 
 /**
  * The previews with their mentions resolved to "@Name", after one batched name
- * read, so the list's first paint is final. A failed preview read passes through.
+ * read that also covers the other senders (group lines' first names), so the
+ * list's first paint is final. A failed preview read passes through.
  */
 export async function resolvePreviewMentions(
   previews: Result<ConversationPreview[]>,
   readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>>,
   workspaceId: string,
+  currentUserId: string | null = null,
 ): Promise<Result<ConversationPreview[]>> {
   if (!previews.ok) return previews;
   await rememberBodyNames(
     previews.data.map((p) => p.body),
     readNames,
     workspaceId,
+    previews.data
+      .map((p) => p.senderUserId)
+      .filter((id): id is string => id !== null && id !== currentUserId),
   );
   return {
     ok: true,
@@ -368,63 +447,196 @@ export async function resolvePreviewMentions(
   };
 }
 
-/** The last-line previews with their mention names resolved. */
-function readPreviews(workspaceId: string): Promise<Result<ConversationPreview[]>> {
-  return loadConversationPreviews(supabase, workspaceId).then((result) =>
-    resolvePreviewMentions(
-      result,
-      (ids, signal) =>
-        readMentionProfiles(supabase, {
-          workspaceId,
-          userIds: ids,
-          ...(signal !== undefined ? { signal } : {}),
-        }),
+/** The one batched name read the list lines use (mentions and senders). */
+function readListNames(
+  workspaceId: string,
+): (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>> {
+  return (ids, signal) =>
+    readMentionProfiles(supabase, {
       workspaceId,
-    ),
-  );
-}
-
-/** The four reads the chat list's first paint waits on. */
-export interface ChatListReaders {
-  roster: () => Promise<Result<ChannelSummary[]>>;
-  clears: () => Promise<Result<ChannelClear[]>>;
-  previews: () => Promise<Result<ConversationPreview[]>>;
-  counts: () => Promise<Result<UnreadCount[]>>;
+      userIds: ids,
+      ...(signal !== undefined ? { signal } : {}),
+    });
 }
 
 /**
+ * The scanned previews with their names resolved: one batched name read with
+ * its own 5s. A failed name read never fails the lines: they keep their text
+ * and the senders it could not name get no prefix. Never throws.
+ */
+export async function namePreviews(
+  previews: ConversationPreview[],
+  readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>>,
+  workspaceId: string,
+  currentUserId: string | null,
+): Promise<ConversationPreview[]> {
+  const named = await resolvePreviewMentions(
+    { ok: true, data: previews },
+    readNames,
+    workspaceId,
+    currentUserId,
+  );
+  return named.ok ? named.data : previews;
+}
+
+/**
+ * The last-line previews for a refresh: the scan (its own 5s) then the name
+ * read (its own 5s, never failing the lines).
+ */
+async function readPreviews(
+  workspaceId: string,
+  currentUserId: string | null,
+): Promise<Result<ConversationPreview[]>> {
+  const scan = await loadConversationPreviews(supabase, workspaceId);
+  if (!scan.ok) return scan;
+  return {
+    ok: true,
+    data: await namePreviews(scan.data, readListNames(workspaceId), workspaceId, currentUserId),
+  };
+}
+
+/**
+ * An edited row's list line: its new mentions are named first (one batched
+ * read, 5s), so a current member never reads "@Unknown member". When the read
+ * failed and a mention is still unnamed (membership unknown), null: the line
+ * keeps what it shows rather than guess. Never throws.
+ */
+export async function editedPreviewLine(
+  row: ChatMessageRow,
+  readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>>,
+): Promise<string | null> {
+  const body = row.body ?? '';
+  await rememberBodyNames([body], readNames, row.workspace_id);
+  const unnamed = mentionIds(body).some(
+    (id) =>
+      knownMentionName(row.workspace_id, id) === undefined && !isFormerMember(row.workspace_id, id),
+  );
+  if (unnamed) return null;
+  return previewLineFor(rowPreviewContent(row), row.workspace_id);
+}
+
+/** A message's list line: mentions as "@Name" in its body, else what it carries. */
+export function previewLineFor(content: PreviewContent, workspaceId: string | null): string {
+  return store.previewText({ ...content, body: previewMentionText(content.body, workspaceId) });
+}
+
+/** The four reads the chat list's first paint waits on; `signal` cancels each. */
+export interface ChatListReaders {
+  roster: (signal: AbortSignal) => Promise<Result<ChannelSummary[]>>;
+  clears: (signal: AbortSignal) => Promise<Result<ChannelClear[]>>;
+  /** The preview scan only; names are resolved by `names` after it. */
+  previews: (signal: AbortSignal) => Promise<Result<ConversationPreview[]>>;
+  counts: (signal: AbortSignal) => Promise<Result<UnreadCount[]>>;
+  /** Resolve the scanned lines' names (own 5s; a failure keeps the lines, no prefix). */
+  names?: (previews: ConversationPreview[]) => Promise<ConversationPreview[]>;
+}
+
+/** A roster re-read's deadline: its two round-trips, 5s each (reload, deep link). */
+export const ROSTER_READ_BUDGET_MS = 2 * READ_TIMEOUT_MS;
+
+/** Store transition for a first load. */
+type LoadTransition = (prev: ChatStoreState) => ChatStoreState;
+
+/**
  * Run the four list reads in parallel and resolve to the one store transition
- * that applies them all ('ready'), or to 'error' when any of them failed.
+ * that applies them all ('ready'), or to 'error' (the list's Retry state) when
+ * any of them failed. Each read has its own 5s, so the load settles within 5s
+ * (plus the name read's own 5s): the skeleton never outlives it. A read that
+ * only timed out keeps running (withLateRead): once every read has data, the
+ * 'ready' transition is handed to `onLate` and the list replaces the error.
+ * `cancel` (Retry, switch, unmount) aborts them all and delivers nothing.
  */
 export async function loadChatList(
   readers: ChatListReaders,
   scope: string,
   currentUserId: string,
-): Promise<(prev: ChatStoreState) => ChatStoreState> {
+  nameOf?: store.PreviewNameOf,
+  opts: { onLate?: (transition: LoadTransition) => void; cancel?: AbortSignal } = {},
+): Promise<LoadTransition> {
+  const names = readers.names ?? ((p: ConversationPreview[]) => Promise.resolve(p));
+  const slots: {
+    roster?: ChannelSummary[];
+    clears?: ChannelClear[];
+    previews?: ConversationPreview[];
+    counts?: UnreadCount[];
+  } = {};
+  let failedFirst = false;
+  let delivered = false;
+  const ready = (): LoadTransition | null => {
+    const { roster, clears, previews, counts } = slots;
+    if (roster === undefined || clears === undefined || previews === undefined) return null;
+    if (counts === undefined) return null;
+    return (prev) =>
+      store.loadReady(prev, {
+        scope,
+        roster,
+        clears,
+        previews,
+        counts,
+        currentUserId,
+        ...(nameOf !== undefined ? { nameOf } : {}),
+      });
+  };
+  const late = (): void => {
+    const transition = ready();
+    if (!failedFirst || delivered || transition === null || opts.cancel?.aborted === true) return;
+    delivered = true;
+    opts.onLate?.(transition);
+  };
+  const lateOpts = <T,>(fill: (data: T) => void) => ({
+    onLate: (data: T) => {
+      fill(data);
+      late();
+    },
+    ...(opts.cancel !== undefined ? { cancel: opts.cancel } : {}),
+  });
   const [roster, clears, previews, counts] = await Promise.all([
-    readers.roster(),
-    readers.clears(),
-    readers.previews(),
-    readers.counts(),
+    // The roster reader has its own 5s like the others; a roster that lands
+    // later (its registry trip runs to the grace) still wins.
+    withLateRead(
+      readers.roster,
+      lateOpts<ChannelSummary[]>((d) => (slots.roster = d)),
+    ),
+    withLateRead(
+      readers.clears,
+      lateOpts<ChannelClear[]>((d) => (slots.clears = d)),
+    ),
+    withLateRead(readers.previews, {
+      onLate: (data: ConversationPreview[]) =>
+        void names(data).then((named) => {
+          slots.previews = named;
+          late();
+        }),
+      ...(opts.cancel !== undefined ? { cancel: opts.cancel } : {}),
+    }).then(
+      async (r): Promise<Result<ConversationPreview[]>> =>
+        r.ok ? { ok: true, data: await names(r.data) } : r,
+    ),
+    withLateRead(
+      readers.counts,
+      lateOpts<UnreadCount[]>((d) => (slots.counts = d)),
+    ),
   ]);
+  if (roster.ok) slots.roster = roster.data;
+  if (clears.ok) slots.clears = clears.data;
+  if (previews.ok) slots.previews = previews.data;
+  if (counts.ok) slots.counts = counts.data;
+  // Every read has data (on time, or already landed late): the list, final.
+  const complete = ready();
+  if (complete !== null) {
+    delivered = true;
+    return complete;
+  }
   if (!roster.ok || !clears.ok || !previews.ok || !counts.ok) {
+    failedFirst = true;
     logger.error('chat store: initial load failed', {
       roster: roster.ok ? 'ok' : roster.error.message,
       clears: clears.ok ? 'ok' : clears.error.message,
       previews: previews.ok ? 'ok' : previews.error.message,
       counts: counts.ok ? 'ok' : counts.error.message,
     });
-    return (prev) => store.loadFailed(prev, scope);
   }
-  return (prev) =>
-    store.loadReady(prev, {
-      scope,
-      roster: roster.data,
-      clears: clears.data,
-      previews: previews.data,
-      counts: counts.data,
-      currentUserId,
-    });
+  return (prev) => store.loadFailed(prev, scope);
 }
 
 export function ChatStoreProvider({ children }: { children: ReactNode }): ReactElement {
@@ -533,12 +745,47 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   }, []);
 
   const updateOwnMessage = useCallback(
-    (channelId: string, text: string, ts: number) => {
+    (channelId: string, text: string, ts: number, messageId?: string) => {
       const line = previewMentionText(text, workspaceId);
-      setState((prev) => store.updateOwnMessage(prev, { channelId, text: line, ts }));
+      setState((prev) =>
+        store.updateOwnMessage(prev, {
+          channelId,
+          text: line,
+          ts,
+          ...(messageId !== undefined ? { messageId } : {}),
+        }),
+      );
     },
     [workspaceId],
   );
+
+  const editSeqRef = useRef(new Map<string, number>());
+  // An edit's new mentions are named first (one batched read, 5s), so a current
+  // member never reads "@Unknown member" on the line. Only the channel's latest
+  // message moves the line.
+  const updateEditedMessage = useCallback(
+    (row: ChatMessageRow) => {
+      if (stateRef.current.conversations[row.channel_id]?.lastMessageId !== row.id) return;
+      const forScope = scope;
+      // Two quick edits of one message: only the newest one's line lands.
+      const seq = (editSeqRef.current.get(row.id) ?? 0) + 1;
+      editSeqRef.current.set(row.id, seq);
+      void editedPreviewLine(row, readListNames(row.workspace_id)).then((text) => {
+        if (editSeqRef.current.get(row.id) !== seq) return;
+        editSeqRef.current.delete(row.id);
+        if (text === null) return;
+        setState((prev) =>
+          prev.scope === forScope
+            ? store.applyEditedPreview(prev, { channelId: row.channel_id, messageId: row.id, text })
+            : prev,
+        );
+      });
+    },
+    [scope],
+  );
+
+  const updateEditedRef = useRef(updateEditedMessage);
+  updateEditedRef.current = updateEditedMessage;
 
   const clearConversation = useCallback((channelId: string, clearedAtMs: number) => {
     senderRef.current?.dropChannel(channelId);
@@ -553,34 +800,55 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     setState((prev) => store.clearPendingOpen(prev));
   }, []);
 
-  // Refreshes after the first load; a response for a workspace the store has
-  // moved on from is dropped.
+  // Refreshes after the first load (each bounded at 5s); a failure keeps the
+  // current values, and a response for a workspace the store has moved on
+  // from is dropped.
   const refreshUnreadCounts = useCallback(() => {
     if (scope === null || workspaceId === null) return;
     void loadUnreadCounts(supabase, workspaceId).then((result) => {
       if (!result.ok) {
         logger.warn('chat store: unread counts load failed', { error: result.error.message });
-        return;
       }
-      setState((prev) =>
-        prev.scope === scope ? store.applyUnreadCounts(prev, result.data) : prev,
-      );
+      setState((prev) => refreshedState(prev, scope, result, store.applyUnreadCounts));
     });
   }, [scope, workspaceId]);
 
   const refreshPreviews = useCallback(() => {
     if (scope === null || workspaceId === null || currentUserId === null) return;
     const forUser = currentUserId;
-    void readPreviews(workspaceId).then((result) => {
+    const nameOf = mentionNamesIn(workspaceId);
+    void readPreviews(workspaceId, forUser).then((result) => {
       if (!result.ok) {
         logger.warn('chat store: previews load failed', { error: result.error.message });
-        return;
       }
       setState((prev) =>
-        prev.scope === scope ? store.applyPreviews(prev, result.data, forUser) : prev,
+        refreshedState(prev, scope, result, (s, data) =>
+          store.applyPreviews(s, data, forUser, nameOf),
+        ),
       );
     });
   }, [scope, workspaceId, currentUserId]);
+
+  // A live message that could not be verified (twice) is not lost: the lines
+  // and unread counts are re-read from the record.
+  const refreshAfterGiveUpRef = useRef(() => {});
+  refreshAfterGiveUpRef.current = () => {
+    refreshPreviews();
+    refreshUnreadCounts();
+  };
+  // A workspace switch, sign-out or unmount drops the live verifies still
+  // waiting to retry: their messages belong to the scope that is gone.
+  useEffect(() => () => liveVerifierFor(supabase).cancelRetries?.(), [scope]);
+
+  // Only a message this workspace's store saw live counts: a give-up for one
+  // from before a switch refreshes nothing.
+  useEffect(
+    () =>
+      onLiveVerifyGiveUp((messageId) => {
+        if (seenRef.current.has(messageId)) refreshAfterGiveUpRef.current();
+      }),
+    [],
+  );
 
   // Messages became tombstones: drafts, the queued outbox and the list lines
   // that showed one. The re-read is one preview scan for every hit channel.
@@ -594,14 +862,15 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         rereadPreviews: (channelIds) => {
           if (scope === null || workspaceId === null || currentUserId === null) return;
           const forUser = currentUserId;
-          void readPreviews(workspaceId).then((result) => {
+          const nameOf = mentionNamesIn(workspaceId);
+          void readPreviews(workspaceId, forUser).then((result) => {
             if (!result.ok) {
               logger.warn('chat store: previews load failed', { error: result.error.message });
               return;
             }
             setState((prev) =>
               prev.scope === scope
-                ? store.applyChannelPreviews(prev, channelIds, result.data, forUser)
+                ? store.applyChannelPreviews(prev, channelIds, result.data, forUser, nameOf)
                 : prev,
             );
           });
@@ -624,22 +893,43 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   useEffect(() => {
     if (scope === null || !workspaceId || currentUserId === null) return;
     let cancelled = false;
+    // Retry, a switch or unmount aborts every read of this load (late ones too).
+    const abort = new AbortController();
     seenRef.current = new Set();
     setState((prev) => store.beginLoad(prev, scope));
     void loadChatList(
       {
-        roster: () => listChannelSummaries(supabase, { workspaceId, currentUserId }),
-        clears: () => listChannelClears(supabase, { workspaceId }),
-        previews: () => readPreviews(workspaceId),
-        counts: () => loadUnreadCounts(supabase, workspaceId),
+        // The registry trip runs up to the late grace (the load's own abort
+        // still cancels it) so a slow roster still lands; names stay at 5s.
+        roster: (signal) =>
+          listChannelSummaries(
+            supabase,
+            { workspaceId, currentUserId },
+            signal,
+            LATE_READ_GRACE_MS,
+          ),
+        clears: (signal) => readChannelClears(supabase, { workspaceId }, signal),
+        previews: (signal) => readConversationPreviews(supabase, workspaceId, signal),
+        counts: (signal) => readUnreadCounts(supabase, workspaceId, signal),
+        names: (previews) =>
+          namePreviews(previews, readListNames(workspaceId), workspaceId, currentUserId),
       },
       scope,
       currentUserId,
+      mentionNamesIn(workspaceId),
+      {
+        // A read that only timed out and lands later: its data wins, the error clears.
+        onLate: (transition) => {
+          if (!cancelled) setState(transition);
+        },
+        cancel: abort.signal,
+      },
     ).then((transition) => {
       if (!cancelled) setState(transition);
     });
     return () => {
       cancelled = true;
+      abort.abort();
     };
   }, [scope, workspaceId, currentUserId, loadAttempt]);
 
@@ -654,8 +944,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     if (scope === null || !workspaceId || currentUserId === null) return null;
     reloadsStartedRef.current += 1;
     const reloadNumber = reloadsStartedRef.current;
-    const result = await withReadTimeout(() =>
-      listChannelSummaries(supabase, { workspaceId, currentUserId }),
+    // Each round-trip has its own 5s and is aborted when it fires.
+    const result = await withReadTimeout(
+      (signal) => listChannelSummaries(supabase, { workspaceId, currentUserId }, signal),
+      ROSTER_READ_BUDGET_MS,
     );
     if (!result.ok) {
       logger.error('chat store: roster reload failed', { error: result.error.message });
@@ -671,7 +963,15 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         ? store.applyRosterWithIncoming(
             prev,
             result.data,
-            ready.map((held) => held.incoming),
+            // A new group's line takes its sender prefix from the re-read roster.
+            ready.map((held) =>
+              heldWithPrefix(
+                held.incoming,
+                held.row,
+                listed.get(held.row.channel_id),
+                currentUserId,
+              ),
+            ),
           )
         : prev,
     );
@@ -816,7 +1116,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
               store.updateOwnMessage(prev, {
                 channelId,
                 messageId: message.id,
-                text: previewMentionText(message.body, scopeKey.workspaceId),
+                text: previewLineFor(store.messagePreviewContent(message), scopeKey.workspaceId),
                 ts: message.time,
               }),
             );
@@ -974,7 +1274,9 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         if (action === 'drop') return;
         // Names first (one batched read for unknown ids, 5s; on timeout the line
         // commits without them), so the line and the toast read "@Name" from
-        // their first paint.
+        // their first paint. A group line's sender joins the same read.
+        const known = summariesRef.current.get(row.channel_id);
+        const isGroup = known?.channelType === 'group';
         await rememberBodyNames(
           [row.body ?? ''],
           (ids, signal) =>
@@ -984,13 +1286,17 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
               ...(signal !== undefined ? { signal } : {}),
             }),
           row.workspace_id,
+          // A chat not listed yet may be a new group: its sender is named too.
+          (isGroup || known === undefined) && row.sender_user_id !== null
+            ? [row.sender_user_id]
+            : [],
         );
-        const text = store.previewText({
-          body: previewMentionText(row.body ?? '', row.workspace_id),
-          hasAttachments:
-            (row.attachment_asset_ids ?? []).length > 0 ||
-            (row.shared_post_ids ?? []).length > 0 ||
-            (row.shared_brief_ids ?? []).length > 0,
+        const text = previewLineFor(rowPreviewContent(row), row.workspace_id);
+        const prefix = store.previewPrefix({
+          senderUserId: row.sender_user_id,
+          currentUserId: forUser,
+          isGroup,
+          nameOf: mentionNamesIn(row.workspace_id),
         });
         const ts = Date.parse(row.created_at);
         const incoming: store.IncomingMessage = {
@@ -998,6 +1304,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           messageId: row.id,
           senderIsSelf: false,
           text,
+          ...(prefix !== undefined ? { prefix } : {}),
           ts: Number.isNaN(ts) ? mapped.message.time : ts,
         };
         if (!summariesRef.current.has(row.channel_id)) {
@@ -1034,6 +1341,9 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         void routeGlobalCmd(message.ext, {
           loadByIds: (ids) => loadMessagesByIds(supabase, ids),
           onDeleted: (ids) => onMessagesDeletedRef.current(ids),
+          onEdited: (row) => updateEditedRef.current(row),
+          isShownLine: (id) =>
+            Object.values(stateRef.current.conversations).some((c) => c.lastMessageId === id),
         });
       }),
     [],
@@ -1054,6 +1364,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       setActive,
       markConversationRead,
       updateOwnMessage,
+      updateEditedMessage,
       refreshUnreadCounts,
       refreshPreviews,
       requestOpen,
@@ -1074,6 +1385,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       setActive,
       markConversationRead,
       updateOwnMessage,
+      updateEditedMessage,
       refreshUnreadCounts,
       refreshPreviews,
       requestOpen,

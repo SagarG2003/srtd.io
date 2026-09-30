@@ -184,12 +184,14 @@ describe('loadChatList', () => {
     const started: string[] = [];
     const base = readers();
     const tracked: ChatListReaders = {
-      roster: () => (started.push('roster'), base.roster()),
-      clears: () => (started.push('clears'), base.clears()),
-      previews: () => (started.push('previews'), base.previews()),
-      counts: () => (started.push('counts'), base.counts()),
+      roster: (signal) => (started.push('roster'), base.roster(signal)),
+      clears: (signal) => (started.push('clears'), base.clears(signal)),
+      previews: (signal) => (started.push('previews'), base.previews(signal)),
+      counts: (signal) => (started.push('counts'), base.counts(signal)),
     };
     const pending = loadChatList(tracked, SCOPE, ME);
+    // Each read starts inside its 5s timeout wrapper, all in the same tick.
+    await Promise.resolve();
     expect(started.sort()).toEqual(['clears', 'counts', 'previews', 'roster']);
     await pending;
   });
@@ -232,7 +234,7 @@ describe('loadChatList', () => {
       expect(rowIds(tree)).toEqual([]);
       const empties = findAll(tree, (el) => el.type === EmptyState);
       expect(empties).toHaveLength(1);
-      expect((empties[0]!.props as { title: string }).title).toBe("Couldn't load conversations");
+      expect((empties[0]!.props as { title: string }).title).toBe("Couldn't load chats");
       const retry = findAll(
         (empties[0]!.props as { action: ReactNode }).action,
         (el) => (el.props as { children?: unknown }).children === 'Retry',
@@ -476,6 +478,7 @@ describe('chat list mentions', () => {
       { ok: true, data: [preview(`hi @[${ANA}]`), preview(`and @[${GONE}] @[${ANA}]`)] },
       readNames,
       'w1',
+      'x',
     );
     expect(readNames).toHaveBeenCalledTimes(1);
     expect(readNames).toHaveBeenCalledWith([ANA, GONE], expect.any(AbortSignal));
@@ -484,7 +487,7 @@ describe('chat list mentions', () => {
       'and @Unknown member @Ana',
     ]);
     // Known names need no second read.
-    await resolvePreviewMentions({ ok: true, data: [preview(`@[${ANA}]`)] }, readNames, 'w1');
+    await resolvePreviewMentions({ ok: true, data: [preview(`@[${ANA}]`)] }, readNames, 'w1', 'x');
     expect(readNames).toHaveBeenCalledTimes(1);
   });
 
