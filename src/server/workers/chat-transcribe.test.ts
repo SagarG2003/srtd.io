@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { SignJWT, exportJWK, generateKeyPair, type JWK, type KeyLike } from 'jose';
 
 // jose's Node build resolves a remote JWKS via node:http, so we mock the
@@ -16,6 +16,7 @@ vi.mock('jose', async (importOriginal) => {
 import worker, {
   DAILY_CAP_BYTES,
   MAX_AUDIO_BYTES,
+  parseAudioUrl,
   usageKey,
   type ChatTranscribeEnv,
   type UsageKv,
@@ -24,6 +25,9 @@ import worker, {
 const USER = '33333333-3333-7333-8333-333333333333';
 const SUPABASE_URL = 'https://test.supabase.co';
 const KID = 'test-es256-key';
+const ACCOUNT = '0123456789abcdef0123456789abcdef';
+const R2_HOST = `${ACCOUNT}.r2.cloudflarestorage.com`;
+const AUDIO_URL = `https://${R2_HOST}/assets-ws/voice/1.webm?X-Amz-Signature=secret-sig`;
 
 /** A mock Workers AI binding whose run() returns the configured transcript. */
 function aiReturning(text: unknown): ChatTranscribeEnv['AI'] {
@@ -31,7 +35,7 @@ function aiReturning(text: unknown): ChatTranscribeEnv['AI'] {
 }
 
 function makeEnv(ai: ChatTranscribeEnv['AI']): ChatTranscribeEnv {
-  return { SUPABASE_URL, AI: ai };
+  return { SUPABASE_URL, CLOUDFLARE_ACCOUNT_ID: ACCOUNT, AI: ai };
 }
 
 let signingKey: KeyLike;
@@ -70,72 +74,245 @@ function memoryKv(initial: Record<string, string> = {}): UsageKv & { data: Map<s
   };
 }
 
-function audioRequest(
+/** A JSON transcribe request carrying `body` (a { url } object by default). */
+function transcribeRequest(
   token: string | null,
-  body: BodyInit | null,
-  contentType = 'audio/webm',
-  extraHeaders: Record<string, string> = {},
+  body: unknown = { url: AUDIO_URL },
+  contentType = 'application/json',
 ): Request {
-  const headers = new Headers({ 'content-type': contentType, ...extraHeaders });
+  const headers = new Headers({ 'content-type': contentType });
   if (token !== null) {
     headers.set('Authorization', `Bearer ${token}`);
   }
-  return new Request('https://worker.test/', { method: 'POST', headers, body });
+  const raw = typeof body === 'string' ? body : JSON.stringify(body);
+  return new Request('https://worker.test/', { method: 'POST', headers, body: raw });
+}
+
+/** Stub the global fetch the worker uses for R2 with a canned audio response. */
+function upstream(
+  bytes: BodyInit | null,
+  init: { status?: number; contentType?: string; headers?: Record<string, string> } = {},
+): MockInstance<typeof fetch> {
+  const response = new Response(bytes, {
+    status: init.status ?? 200,
+    headers: { 'content-type': init.contentType ?? 'audio/webm', ...init.headers },
+  });
+  return vi.spyOn(globalThis, 'fetch').mockResolvedValue(response);
+}
+
+async function expectBadUrl(res: Response): Promise<void> {
+  expect(res.status).toBe(400);
+  expect(await res.json()).toEqual({ ok: false, reason: 'bad_url' });
 }
 
 describe('chat-transcribe worker.fetch', () => {
-  it('returns { ok: true, transcript } from the AI text for a valid request', async () => {
+  it('fetches the presigned URL itself and returns { ok: true, transcript }', async () => {
     const token = await mintToken(USER);
+    const r2 = upstream(new Uint8Array([1, 2, 3, 4]));
     const ai = aiReturning('namaste, this is the note');
-    const res = await worker.fetch(audioRequest(token, new Uint8Array([1, 2, 3, 4])), makeEnv(ai));
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(ai));
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; transcript: string };
-    expect(body.ok).toBe(true);
-    expect(body.transcript).toBe('namaste, this is the note');
+    expect(await res.json()).toEqual({ ok: true, transcript: 'namaste, this is the note' });
     expect(ai.run).toHaveBeenCalledOnce();
+    expect(r2).toHaveBeenCalledOnce();
+    const [input, init] = r2.mock.calls[0] as [string, RequestInit];
+    expect(input).toBe(AUDIO_URL);
+    expect(init.method).toBe('GET');
+    expect(init.redirect).toBe('manual');
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(new Headers(init.headers).get('X-Trace-Id')).not.toBeNull();
   });
 
-  it('returns 401 when the bearer token is absent', async () => {
+  it('returns 401 when the bearer token is absent, before any fetch', async () => {
+    const r2 = upstream(new Uint8Array([1]));
     const ai = aiReturning('should not run');
-    const res = await worker.fetch(audioRequest(null, new Uint8Array([1, 2, 3])), makeEnv(ai));
+    const res = await worker.fetch(transcribeRequest(null), makeEnv(ai));
     expect(res.status).toBe(401);
-    const body = (await res.json()) as { ok: boolean };
-    expect(body.ok).toBe(false);
-    // An unauthenticated caller never reaches the AI binding.
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(false);
+    expect(r2).not.toHaveBeenCalled();
     expect(ai.run).not.toHaveBeenCalled();
   });
 
   it('returns 401 for an invalid token', async () => {
+    const r2 = upstream(new Uint8Array([1]));
     const ai = aiReturning('should not run');
-    const res = await worker.fetch(
-      audioRequest('not-a-real-jwt', new Uint8Array([9])),
-      makeEnv(ai),
-    );
+    const res = await worker.fetch(transcribeRequest('not-a-real-jwt'), makeEnv(ai));
     expect(res.status).toBe(401);
-    const body = (await res.json()) as { ok: boolean };
-    expect(body.ok).toBe(false);
+    expect(r2).not.toHaveBeenCalled();
     expect(ai.run).not.toHaveBeenCalled();
   });
 
-  it('returns 400 for an empty body', async () => {
+  it('returns 415 unless the request is application/json', async () => {
     const token = await mintToken(USER);
+    const r2 = upstream(new Uint8Array([1]));
     const ai = aiReturning('should not run');
-    const res = await worker.fetch(audioRequest(token, null), makeEnv(ai));
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { ok: boolean };
-    expect(body.ok).toBe(false);
+    for (const type of ['audio/webm', 'text/plain', 'application/octet-stream']) {
+      const res = await worker.fetch(transcribeRequest(token, undefined, type), makeEnv(ai));
+      expect(res.status).toBe(415);
+    }
+    const ok = await worker.fetch(
+      transcribeRequest(token, undefined, 'application/json; charset=utf-8'),
+      makeEnv(ai),
+    );
+    expect(ok.status).toBe(200);
+    expect(r2).toHaveBeenCalledOnce();
+  });
+
+  it('returns 400 when the body is not { url: string }', async () => {
+    const token = await mintToken(USER);
+    const r2 = upstream(new Uint8Array([1]));
+    const ai = aiReturning('should not run');
+    for (const body of ['not json', '', 'null', '[]', { url: 42 }, { href: AUDIO_URL }]) {
+      const res = await worker.fetch(transcribeRequest(token, body), makeEnv(ai));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ ok: false, code: 'bad_request' });
+    }
+    expect(r2).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['http', `http://${R2_HOST}/b/k`],
+    ['another host', 'https://example.com/b/k'],
+    ['a host that only ends with the R2 suffix', `https://evil${R2_HOST}/b/k`],
+    ['another account', 'https://ffffffffffffffffffffffffffffffff.r2.cloudflarestorage.com/b/k'],
+    ['a subdomain of the R2 host', `https://bucket.${R2_HOST}/b/k`],
+    ['the R2 host as a subdomain of another', `https://${R2_HOST}.evil.com/b/k`],
+    ['userinfo', `https://user:pass@${R2_HOST}/b/k`],
+    ['userinfo pointing elsewhere', `https://${R2_HOST}@evil.com/b/k`],
+    ['a username only', `https://user@${R2_HOST}/b/k`],
+    ['an explicit port', `https://${R2_HOST}:8443/b/k`],
+    ['an IPv4 literal', 'https://127.0.0.1/b/k'],
+    ['an IPv6 literal', 'https://[::1]/b/k'],
+    ['a non-URL', 'not a url'],
+    ['a relative path', '/b/k'],
+  ])('returns 400 bad_url for %s, without fetching', async (_label, url) => {
+    const token = await mintToken(USER);
+    const r2 = upstream(new Uint8Array([1]));
+    const ai = aiReturning('should not run');
+    await expectBadUrl(await worker.fetch(transcribeRequest(token, { url }), makeEnv(ai)));
+    expect(r2).not.toHaveBeenCalled();
     expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('matches the R2 host case-insensitively (URL parsing lowercases hosts)', () => {
+    expect(parseAudioUrl(`https://${R2_HOST.toUpperCase()}/b/k`, ACCOUNT)).not.toBeNull();
+    expect(parseAudioUrl(`https://${R2_HOST}:443/b/k`, ACCOUNT)).not.toBeNull();
+  });
+
+  it('returns 400 bad_url when the upstream redirects, and never follows it', async () => {
+    const token = await mintToken(USER);
+    const r2 = upstream(null, { status: 302, headers: { location: 'http://169.254.169.254/' } });
+    const ai = aiReturning('should not run');
+    await expectBadUrl(await worker.fetch(transcribeRequest(token), makeEnv(ai)));
+    expect(r2).toHaveBeenCalledOnce();
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when the upstream refuses (an expired signature)', async () => {
+    const token = await mintToken(USER);
+    upstream('denied', { status: 403, contentType: 'application/xml' });
+    const ai = aiReturning('should not run');
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(ai));
+    expect(res.status).toBe(400);
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('returns 415 when the upstream content type is not audio/*', async () => {
+    const token = await mintToken(USER);
+    upstream(new Uint8Array([1, 2, 3]), { contentType: 'text/html' });
+    const ai = aiReturning('should not run');
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(ai));
+    expect(res.status).toBe(415);
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('accepts any audio/* type with parameters (audio/webm;codecs=opus)', async () => {
+    const token = await mintToken(USER);
+    upstream(new Uint8Array([1]), { contentType: 'audio/webm;codecs=opus' });
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(aiReturning('ok')));
+    expect(res.status).toBe(200);
+  });
+
+  it('returns 413 from the upstream Content-Length alone when it declares more than 8 MB', async () => {
+    const token = await mintToken(USER);
+    upstream(new Uint8Array([1, 2, 3]), {
+      headers: { 'content-length': String(MAX_AUDIO_BYTES + 1) },
+    });
+    const ai = aiReturning('should not run');
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(ai));
+    expect(res.status).toBe(413);
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('returns 413 when the upstream body runs past 8 MB (no Content-Length)', async () => {
+    const token = await mintToken(USER);
+    const chunk = new Uint8Array(1024 * 1024);
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        sent += 1;
+        controller.enqueue(chunk);
+        if (sent > 9) controller.close();
+      },
+    });
+    upstream(stream);
+    const ai = aiReturning('should not run');
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(ai));
+    expect(res.status).toBe(413);
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('accepts audio of exactly 8 MB', async () => {
+    const token = await mintToken(USER);
+    upstream(new Uint8Array(MAX_AUDIO_BYTES));
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(aiReturning('long note')));
+    expect(res.status).toBe(200);
+  });
+
+  it('returns 400 for empty upstream audio', async () => {
+    const token = await mintToken(USER);
+    upstream(new Uint8Array(0));
+    const ai = aiReturning('should not run');
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(ai));
+    expect(res.status).toBe(400);
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 when the upstream fetch fails, without logging the signed query', async () => {
+    const token = await mintToken(USER);
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error(`boom ${AUDIO_URL}`));
+    const log = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(aiReturning('x')));
+    expect(res.status).toBe(500);
+    const logged = [...log.mock.calls, ...err.mock.calls, ...logSpy.mock.calls]
+      .flat()
+      .map(String)
+      .join('\n');
+    expect(logged).not.toContain('secret-sig');
+  });
+
+  it('returns 500 when CLOUDFLARE_ACCOUNT_ID is not configured', async () => {
+    const token = await mintToken(USER);
+    const r2 = upstream(new Uint8Array([1]));
+    const res = await worker.fetch(transcribeRequest(token), {
+      ...makeEnv(aiReturning('x')),
+      CLOUDFLARE_ACCOUNT_ID: '',
+    });
+    expect(res.status).toBe(500);
+    expect(r2).not.toHaveBeenCalled();
   });
 
   it('returns 500 when the AI binding throws', async () => {
     const token = await mintToken(USER);
+    upstream(new Uint8Array([1, 2]));
     const ai: ChatTranscribeEnv['AI'] = {
       run: vi.fn(() => Promise.reject(new Error('inference unavailable'))),
     };
-    const res = await worker.fetch(audioRequest(token, new Uint8Array([1, 2])), makeEnv(ai));
+    const res = await worker.fetch(transcribeRequest(token), makeEnv(ai));
     expect(res.status).toBe(500);
-    const body = (await res.json()) as { ok: boolean };
-    expect(body.ok).toBe(false);
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(false);
   });
 
   it('returns 405 for an unsupported verb', async () => {
@@ -148,68 +325,12 @@ describe('chat-transcribe worker.fetch', () => {
     expect(ai.run).not.toHaveBeenCalled();
   });
 
-  it('returns 415 for a non-audio content type, before reading or transcribing', async () => {
+  it('counts the fetched bytes against the UTC day in KV on an ok transcription', async () => {
     const token = await mintToken(USER);
-    const ai = aiReturning('should not run');
-    const res = await worker.fetch(
-      audioRequest(token, new Uint8Array([1, 2, 3]), 'application/octet-stream'),
-      makeEnv(ai),
-    );
-    expect(res.status).toBe(415);
-    expect(((await res.json()) as { ok: boolean }).ok).toBe(false);
-    expect(ai.run).not.toHaveBeenCalled();
-  });
-
-  it('accepts any audio/* type with parameters (audio/webm;codecs=opus)', async () => {
-    const token = await mintToken(USER);
-    const ai = aiReturning('ok');
-    const res = await worker.fetch(
-      audioRequest(token, new Uint8Array([1]), 'audio/webm;codecs=opus'),
-      makeEnv(ai),
-    );
-    expect(res.status).toBe(200);
-  });
-
-  it('returns 413 from Content-Length alone when it declares more than 8 MB', async () => {
-    const token = await mintToken(USER);
-    const ai = aiReturning('should not run');
-    const res = await worker.fetch(
-      audioRequest(token, new Uint8Array([1, 2, 3]), 'audio/webm', {
-        'content-length': String(MAX_AUDIO_BYTES + 1),
-      }),
-      makeEnv(ai),
-    );
-    expect(res.status).toBe(413);
-    expect(ai.run).not.toHaveBeenCalled();
-  });
-
-  it('returns 413 when the body read runs past 8 MB', async () => {
-    const token = await mintToken(USER);
-    const ai = aiReturning('should not run');
-    const res = await worker.fetch(
-      audioRequest(token, new Uint8Array(MAX_AUDIO_BYTES + 1)),
-      makeEnv(ai),
-    );
-    expect(res.status).toBe(413);
-    expect(ai.run).not.toHaveBeenCalled();
-  });
-
-  it('accepts a body of exactly 8 MB', async () => {
-    const token = await mintToken(USER);
-    const ai = aiReturning('long note');
-    const res = await worker.fetch(
-      audioRequest(token, new Uint8Array(MAX_AUDIO_BYTES)),
-      makeEnv(ai),
-    );
-    expect(res.status).toBe(200);
-  });
-
-  it('counts the bytes against the UTC day in KV on an ok transcription', async () => {
-    const token = await mintToken(USER);
+    upstream(new Uint8Array(1_000));
     const kv = memoryKv();
-    const ai = aiReturning('counted');
-    const res = await worker.fetch(audioRequest(token, new Uint8Array(1_000)), {
-      ...makeEnv(ai),
+    const res = await worker.fetch(transcribeRequest(token), {
+      ...makeEnv(aiReturning('counted')),
       TRANSCRIBE_USAGE: kv,
     });
     expect(res.status).toBe(200);
@@ -218,9 +339,10 @@ describe('chat-transcribe worker.fetch', () => {
 
   it('returns 429 { ok: false, reason: daily_cap } once the day is over 240 MB', async () => {
     const token = await mintToken(USER);
+    upstream(new Uint8Array(11));
     const kv = memoryKv({ [usageKey(new Date())]: String(DAILY_CAP_BYTES - 10) });
     const ai = aiReturning('should not run');
-    const res = await worker.fetch(audioRequest(token, new Uint8Array(11)), {
+    const res = await worker.fetch(transcribeRequest(token), {
       ...makeEnv(ai),
       TRANSCRIBE_USAGE: kv,
     });
@@ -228,6 +350,15 @@ describe('chat-transcribe worker.fetch', () => {
     expect(await res.json()).toEqual({ ok: false, reason: 'daily_cap' });
     expect(ai.run).not.toHaveBeenCalled();
     expect(kv.data.get(usageKey(new Date()))).toBe(String(DAILY_CAP_BYTES - 10));
+  });
+
+  it('reflects an allowed origin (CORS allowlist unchanged)', async () => {
+    const token = await mintToken(USER);
+    upstream(new Uint8Array([1]));
+    const req = transcribeRequest(token);
+    req.headers.set('Origin', 'https://v2.srtd.io');
+    const res = await worker.fetch(req, makeEnv(aiReturning('ok')));
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://v2.srtd.io');
   });
 
   it('keys the counter by UTC day', () => {

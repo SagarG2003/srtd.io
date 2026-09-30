@@ -1,5 +1,7 @@
-// Pure, SDK-free voice-note transcription client. POSTs raw audio bytes to the
-// transcribe Worker with a Bearer JWT and reads back a Whisper transcript. The
+// Pure, SDK-free voice-note transcription client. POSTs { url } (the voice
+// note's presigned R2 URL, the one the player already holds) to the transcribe
+// Worker with a Bearer JWT; the Worker fetches the audio itself and returns a
+// Whisper transcript. The browser never downloads the audio for this. The
 // fetcher is injected (the app passes fetchWithTrace, which attaches the trace
 // header); tests pass a mock. Expected failures return a Result, never throw, so
 // a failed or timed-out tap reads "Transcript not available" and nothing else.
@@ -10,7 +12,8 @@ export const TRANSCRIBE_TIMEOUT_MS = 20_000;
 export type TranscribeResult = { ok: true; transcript: string } | { ok: false; message: string };
 
 export interface TranscribeParams {
-  blob: Blob;
+  /** The voice note's presigned R2 GET URL. */
+  url: string;
   endpoint: string;
   token: string;
   fetcher: (input: string, init: RequestInit) => Promise<Response>;
@@ -28,9 +31,9 @@ export async function transcribeAudio(params: TranscribeParams): Promise<Transcr
       method: 'POST',
       headers: {
         authorization: `Bearer ${params.token}`,
-        'content-type': params.blob.type !== '' ? params.blob.type : 'application/octet-stream',
+        'content-type': 'application/json',
       },
-      body: params.blob,
+      body: JSON.stringify({ url: params.url }),
       signal: controller.signal,
     });
     if (!response.ok) return { ok: false, message: FAILURE_MESSAGE };
@@ -46,30 +49,6 @@ export async function transcribeAudio(params: TranscribeParams): Promise<Transcr
     return { ok: false, message: FAILURE_MESSAGE };
   } catch {
     return { ok: false, message: FAILURE_MESSAGE };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * Read a voice note's bytes from its presigned URL (the one the player uses),
- * aborting after `timeoutMs`. The blob carries the attachment's mime so the
- * transcriber sees an audio/* content type whatever the store sent back.
- * Throws on any failure; the caller turns that into "Transcript not available".
- */
-export async function fetchAudioBlob(params: {
-  url: string;
-  mime: string;
-  fetcher: (input: string, init: RequestInit) => Promise<Response>;
-  timeoutMs?: number;
-}): Promise<Blob> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? TRANSCRIBE_TIMEOUT_MS);
-  try {
-    const response = await params.fetcher(params.url, { signal: controller.signal });
-    if (!response.ok) throw new Error(`audio fetch failed: ${response.status}`);
-    const bytes = await response.blob();
-    return new Blob([bytes], { type: params.mime });
   } finally {
     clearTimeout(timer);
   }

@@ -207,14 +207,15 @@ export function useVoiceRecord(
 type TranscribeOutcome = { ok: true; transcript: string } | { ok: false };
 
 /**
- * Transcribe one note on tap: mark it pending, fetch its audio bytes, send them
- * to the transcriber, then store the transcript (expanded) or the failure.
- * Never throws; a second tap while one is in flight is ignored.
+ * Transcribe one note on tap: mark it pending, resolve its audio source (the
+ * app passes the presigned URL), hand it to the transcriber, then store the
+ * transcript (expanded) or the failure. Never throws; a second tap while one
+ * is in flight is ignored.
  */
-export async function transcribeVoiceNote(params: {
+export async function transcribeVoiceNote<A>(params: {
   messageId: string;
-  fetchAudio: () => Promise<Blob>;
-  transcribe: (blob: Blob) => Promise<TranscribeOutcome>;
+  fetchAudio: () => Promise<A>;
+  transcribe: (audio: A) => Promise<TranscribeOutcome>;
   store?: VoiceStore;
   now?: () => number;
 }): Promise<void> {
@@ -225,8 +226,8 @@ export async function transcribeVoiceNote(params: {
   store.setPending(id, true);
   let text: string | null = null;
   try {
-    const blob = await params.fetchAudio();
-    const result = await params.transcribe(blob);
+    const audio = await params.fetchAudio();
+    const result = await params.transcribe(audio);
     if (result.ok && result.transcript.trim() !== '') text = result.transcript.trim();
   } catch {
     text = null;
