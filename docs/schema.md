@@ -234,13 +234,20 @@ Versioned. Attachments bind to a specific asset_version_id.
 
 ### assets
 
-PK id. Fields: workspace_id FK, filename 1 to 500, display_name text nullable (human label, backfilled from post title), current_version_id nullable FK asset_versions.id, folder_id nullable FK folders.id (SET NULL on folder delete), folder_path default '/', tags text[] default {}, uploaded_by FK users.id, uploaded_at, deleted_at nullable. Indexes: FTS filename, gin tags, (workspace_id, folder_path), (workspace_id, folder_id), (workspace_id, uploaded_at desc). All where deleted_at null.
+PK id. Fields: workspace_id FK, filename 1 to 500, display_name text nullable (human label, backfilled from post title), current_version_id nullable FK asset_versions.id, folder_id nullable FK folders.id (SET NULL on folder delete), folder_path default '/', tags text[] default {}, uploaded_by FK users.id, uploaded_at, deleted_at nullable, origin text NOT NULL default 'library' (CHECK assets_origin_check: origin in ('library','chat'); 'chat' marks a file uploaded in chat, backfilled in 20260930160000_assets_origin_chat_private.sql). Indexes: FTS filename, gin tags, (workspace_id, folder_path), (workspace_id, folder_id), (workspace_id, uploaded_at desc). All where deleted_at null.
 
 folder_id and folder_path coexist for now: folder_id is the new structured folder reference, folder_path is the legacy string path. folder_path remains present pending a later reconciliation decision; no migration drops or backfills either column yet.
 
 ### asset_versions
 
 PK id. Fields: asset_id FK, workspace_id FK, version_number, r2_key unique, mime_type, sha256 ^[a-f0-9]{64}$, size_bytes > 0, width/height/duration_ms nullable > 0, uploaded_by FK, uploaded_at. Unique (asset_id, version_number).
+
+RLS (20260930160000_assets_origin_chat_private.sql):
+
+- assets_select_member (SELECT to authenticated): deleted_at IS NULL AND origin = 'library' AND an active workspace_members row for (assets.workspace_id, auth.uid()).
+- asset_versions_select_member (SELECT to authenticated): an active workspace_members row for (asset_versions.workspace_id, auth.uid()) AND the parent asset has origin = 'library'.
+
+Chat-origin assets and their versions are therefore invisible to authenticated reads; chat file reads go through the service role and chat_attachment_readable (section 7).
 
 ### asset_attachments
 
@@ -309,6 +316,8 @@ Tombstone: delete sets deleted_at, wipes every content column (body, mentions, a
 
 Forward: forwarded_from_message_id, same workspace only, source must be readable by the sender. Clear for me: chat_channel_clears(channel_id, user_id, cleared_at); the chat_messages read policy hides rows at or before the caller's cleared_at; other members unaffected.
 
+Chat files are private to their chat: assets.origin='chat', never listed in Assets, readable only by uploader or members of a chat holding the message.
+
 Applied to live 2026-09-22 and recorded in 20260922200000_chat_postgres_record.sql (idempotent). chat_messages is partitioned monthly.
 
 ### chat_channels
@@ -319,11 +328,13 @@ chat_channel_member(p_channel_id text, p_user_id uuid) RETURNS boolean, SQL STAB
 
 ### chat_messages (partitioned by created_at, monthly)
 
-PK (id, created_at). Fields: id text (the client-generated uuid_v7, stored as text), channel_id FK chat_channels ON DELETE CASCADE, workspace_id FK, sender_user_id nullable FK auth.users.id, body nullable (1 to 5000 chars when present), mentions jsonb nullable (JSON array of user uuids, channel members only, max 50, null when none; CHECK chat_messages_mentions_is_array), attachment_asset_ids uuid[] nullable, agora_event_id text NULLABLE (null for every row written by chat_message_send; only legacy mirror rows carry a value), created_at (server-stamped now()), edited_at / deleted_at nullable. Unique (agora_event_id, created_at). Indexes: chat_messages_channel_created_idx (channel_id, created_at desc, id) for history pagination, chat_messages_id_idx (id) for the idempotent lookup, plus the baseline channel / sender / workspace indexes. Partitions: monthly through 2028_12 plus a DEFAULT (section 11).
+PK (id, created_at). Fields: id text (the client-generated uuid_v7, stored as text), channel_id FK chat_channels ON DELETE CASCADE, workspace_id FK, sender_user_id nullable FK auth.users.id, body nullable (1 to 5000 chars when present), mentions jsonb nullable (JSON array of user uuids, channel members only, max 50, null when none; CHECK chat_messages_mentions_is_array), attachment_asset_ids uuid[] nullable, agora_event_id text NULLABLE (null for every row written by chat_message_send; only legacy mirror rows carry a value), created_at (server-stamped now()), edited_at / deleted_at nullable. Unique (agora_event_id, created_at). Indexes: chat_messages_channel_created_idx (channel_id, created_at desc, id) for history pagination, chat_messages_id_idx (id) for the idempotent lookup, chat_messages_attachment_asset_ids_gin GIN (attachment_asset_ids) for the chat_attachment_readable containment lookup (created on the partitioned parent, present on every partition), plus the baseline channel / sender / workspace indexes. Partitions: monthly through 2028_12 plus a DEFAULT (section 11).
 
 RLS: chat_messages_select_channel_member (SELECT to authenticated) USING chat_channel_member(channel_id, auth.uid()) AND created_at > chat_cleared_at(channel_id, auth.uid()). It no longer filters deleted_at: deleted rows stay readable to members as wiped tombstones (20260929120000_chat_delete_tombstone.sql); outsiders still read nothing. The former workspace-wide chat_messages_select_member policy is dropped. No direct INSERT/UPDATE/DELETE policies.
 
-chat_message_send(p_id uuid, p_channel_id text, p_trace_id uuid, p_body text default null, p_mentions jsonb default null, p_attachment_asset_ids uuid[] default null) RETURNS chat_messages, SECURITY DEFINER (search_path='', EXECUTE to authenticated only): the only write path. Requires auth.uid(), p_id and p_trace_id; raises 'message has no body and no attachments' when the trimmed body is empty and there are no attachments, 'body exceeds 5000 characters' past the cap, and 'not a member of this chat' unless chat_channel_member. Takes pg_advisory_xact_lock(hashtext(p_id)) and, when a row with that id already exists, returns it unchanged (idempotent retry); otherwise inserts with sender_user_id = auth.uid(), created_at = now(), agora_event_id null, and returns the new row.
+chat_message_send(p_id uuid, p_channel_id text, p_trace_id uuid, p_body text default null, p_mentions jsonb default null, p_attachment_asset_ids uuid[] default null, p_shared_post_ids uuid[] default null, p_reply_to_message_id text default null, p_attachment_meta jsonb default null, p_shared_brief_ids uuid[] default null, p_forwarded_from_message_id text default null) RETURNS chat_messages, SECURITY DEFINER (search_path='', EXECUTE to authenticated only): the only write path, 11 args. Requires auth.uid(), p_id and p_trace_id; raises 'message has no body, attachments, shared posts or shared briefs' when the trimmed body is empty and all three arrays are empty, 'body exceeds 5000 characters' past the cap, and 'not a member of this chat' unless chat_channel_member. p_reply_to_message_id must be a message in the same channel ('reply target not in this chat'); p_forwarded_from_message_id must be a non-deleted message in the same workspace in a channel the sender is a member of ('forward source not accessible'). p_mentions is resolved to channel members by chat_mentions_resolve, and each mentioned user gets an urgent 'mention' inbox_entries row. p_attachment_asset_ids, p_attachment_meta, p_shared_post_ids and p_shared_brief_ids are stored as given (no existence or workspace check). Takes pg_advisory_xact_lock(hashtext(p_id)) and, when a row with that id already exists, returns it unchanged (idempotent retry); otherwise inserts with sender_user_id = auth.uid(), created_at = now(), agora_event_id null, and returns the new row.
+
+chat_attachment_readable(p_asset_version_id uuid, p_user_id uuid) RETURNS boolean, SQL STABLE SECURITY DEFINER (search_path=''; EXECUTE revoked from PUBLIC, anon, authenticated; granted to service_role only): true when the version's asset has uploaded_by = p_user_id, or a chat_messages row has attachment_asset_ids @> array[p_asset_version_id], deleted_at null, chat_channel_member(channel_id, p_user_id), and created_at > coalesce(chat_cleared_at(channel_id, p_user_id), '-infinity'). Recorded in 20260930160000_assets_origin_chat_private.sql.
 
 ### chat_reactions
 
