@@ -99,16 +99,18 @@ export function useChatTyping(params: {
     });
   }, []);
 
-  // Inbound: subscribe per open channel; each peer signal (re)arms a clear timer
-  // so the row stays while they type and disappears INBOUND_CLEAR_MS after they
-  // stop. Switching channels or unmounting clears every timer and the handler.
+  // Inbound: subscribe per open channel, with or without an Agora target
+  // (commands route by their channel id, so an unsynced or large group still
+  // shows typing); each peer signal (re)arms a clear timer so the row stays
+  // while they type and disappears INBOUND_CLEAR_MS after they stop. Switching
+  // channels or unmounting clears every timer and the handler.
   useEffect(() => {
     setState(EMPTY);
-    if (client === null || target === null || channelId === null) return;
+    if (client === null || channelId === null) return;
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
     const teardown = subscribeTyping({
       connection: asTypingConnection(client),
-      target,
+      target: targetRef.current,
       channelId,
       currentUserId,
       onTypingFrom: (userId) => {
@@ -129,7 +131,7 @@ export function useChatTyping(params: {
       timers.clear();
       teardown();
     };
-  }, [client, target, channelId, currentUserId]);
+  }, [client, channelId, currentUserId]);
 
   return { typingUserIds, notifyTyping };
 }

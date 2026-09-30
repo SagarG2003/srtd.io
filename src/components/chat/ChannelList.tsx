@@ -720,6 +720,19 @@ interface ChannelListContentProps extends ChannelListProps {
 }
 
 /**
+ * A chat's recency key for the list order: its last message time, or, for a
+ * chat with no message yet, when it was created, so a just-created group or
+ * DM sorts at the top of its section. Other chats keep their key (a reload
+ * moves nothing whose key did not change). Pure.
+ */
+export function recencyKey(channel: ChannelSummary, summaryFor: SummaryLookup): number {
+  const last = summaryFor(channel.channelId)?.lastMessageTs ?? 0;
+  if (last > 0) return last;
+  const created = Date.parse(channel.createdAt);
+  return Number.isNaN(created) ? 0 : created;
+}
+
+/**
  * The rows the list shows, most recent first. A hidden chat (deleted for the
  * caller, nothing newer since) is left out of the plain list, but a name
  * search still finds it so it can be reopened.
@@ -730,7 +743,11 @@ export function visibleChannels(
   isHidden: HiddenLookup,
   search: string,
 ): ChannelSummary[] {
-  const ordered = sortChannelsByRecency(channels, summaryFor);
+  const byId = new Map(channels.map((c) => [c.channelId, c]));
+  const ordered = sortChannelsByRecency(channels, (id) => {
+    const channel = byId.get(id);
+    return { lastMessageTs: channel !== undefined ? recencyKey(channel, summaryFor) : 0 };
+  });
   if (search.trim() === '') return ordered.filter((c) => !isHidden(c.channelId));
   return filterChannelsByName(ordered, search);
 }

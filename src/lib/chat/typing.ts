@@ -14,7 +14,7 @@
 
 import type { AgoraChat } from 'agora-chat';
 import type { ChatConnection } from '@/lib/chat/types';
-import type { ChannelTarget, ThreadChatType } from '@/lib/chat/thread';
+import { sendRouted, type ChannelTarget, type ThreadChatType } from '@/lib/chat/thread';
 import { userIdFromAgoraUsername } from '@/lib/chat/agora-identity';
 
 /** Our own SDK event-handler id, distinct from the thread/Foundation handlers. */
@@ -72,12 +72,13 @@ export function typingChannelId(ext: unknown): string | null {
  */
 export function typingForChannel(
   msg: AgoraChat.CmdMsgBody,
-  target: ChannelTarget,
+  target: ChannelTarget | null,
   channelId: string | undefined,
 ): boolean {
   const named = typingChannelId((msg as { ext?: unknown }).ext);
   if (named !== null && channelId !== undefined) return named === channelId;
-  return cmdBelongsToTarget(msg, target);
+  // An older client (no channel id) only matches a known Agora target.
+  return target !== null && cmdBelongsToTarget(msg, target);
 }
 
 /**
@@ -90,14 +91,11 @@ export function sendTyping(params: {
   createCmd: CreateCmdMessage;
   channelId?: string;
 }): Promise<AgoraChat.SendMsgResult> {
-  const message = params.createCmd({
-    chatType: params.target.chatType,
-    type: 'cmd',
-    to: params.target.targetId,
-    action: TYPING_ACTION,
-    ...(params.channelId !== undefined ? { ext: { [TYPING_CHANNEL_KEY]: params.channelId } } : {}),
-  });
-  return params.connection.send(message);
+  const ext =
+    params.channelId !== undefined ? { ext: { [TYPING_CHANNEL_KEY]: params.channelId } } : {};
+  return sendRouted(params.connection, params.target, (to, chatType) =>
+    params.createCmd({ chatType, type: 'cmd', to, action: TYPING_ACTION, ...ext }),
+  );
 }
 
 /**
@@ -124,14 +122,9 @@ export function sendSignal(params: {
   createCmd: CreateCmdMessage;
   ext: Record<string, unknown>;
 }): Promise<AgoraChat.SendMsgResult> {
-  const message = params.createCmd({
-    chatType: params.target.chatType,
-    type: 'cmd',
-    to: params.target.targetId,
-    action: SIGNAL_ACTION,
-    ext: params.ext,
-  });
-  return params.connection.send(message);
+  return sendRouted(params.connection, params.target, (to, chatType) =>
+    params.createCmd({ chatType, type: 'cmd', to, action: SIGNAL_ACTION, ext: params.ext }),
+  );
 }
 
 /**
@@ -142,7 +135,8 @@ export function sendSignal(params: {
  */
 export function subscribeTyping(params: {
   connection: TypingConnection;
-  target: ChannelTarget;
+  /** The open chat's Agora target, for older clients' commands; null routes by channel id only. */
+  target: ChannelTarget | null;
   /** The open Sorted channel; a command naming another channel is dropped. */
   channelId?: string;
   currentUserId: string;

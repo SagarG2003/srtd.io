@@ -21,8 +21,11 @@ interface NewChatSheetProps {
   currentUserId: string;
   /** Called with the ensured DM channel id; the parent refreshes and opens it. */
   onDmReady: (channelId: string) => void;
-  /** Called after a group is created; the parent refreshes the channel list. */
-  onGroupCreated: () => void;
+  /**
+   * Called after a group is created with its id and the members it was created
+   * with; the parent refreshes the channel list and tells those members.
+   */
+  onGroupCreated: (groupId: string, memberUserIds: string[]) => void;
 }
 
 type Mode = 'choose' | 'dm' | 'group';
@@ -104,7 +107,7 @@ export function NewChatSheet(props: NewChatSheetProps): ReactElement {
         memberUserIds: selectedIds,
         traceId: newTrace(),
       },
-      () => props.onGroupCreated(),
+      (groupId) => props.onGroupCreated(groupId, selectedIds),
     );
     setBusy(false);
     if (failure !== null) setError(newChatFailureCopy('group', failure));

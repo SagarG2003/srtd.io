@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
@@ -14,7 +14,26 @@ import {
   type ChatProfile,
   type MentionProfile,
 } from '@/lib/chat-reads';
-import { targetFromSummary, type ChannelTarget, type ThreadMessage } from '@/lib/chat/thread';
+import {
+  fanoutTarget,
+  sameTarget,
+  targetFromSummary,
+  type ChannelTarget,
+  type ThreadConnection,
+  type ThreadMessage,
+} from '@/lib/chat/thread';
+import { createCmdMessage } from '@/lib/chat/message-factory';
+import { loadScope } from '@/lib/chat/chat-store';
+import {
+  openChannelAfterRoster,
+  reloadedFor,
+  resolveLiveTarget,
+  shownChannel,
+  rosterSignalTargets,
+  sendRosterSignal,
+  withRosterSignal,
+  type RosterChange,
+} from '@/lib/chat/roster-signal';
 import { generateTraceId } from '@/lib/trace';
 import { clearChannelRecord } from '@/lib/chat/record';
 import { runClearChannels, type ClearRunResult } from '@/lib/chat/clear-flow';
@@ -341,11 +360,21 @@ export async function openMentionDm(userId: string, deps: MentionDmDeps): Promis
   if (failure !== null) deps.onFailed(traceId, failure.message);
 }
 
-/** Resolve a channel's Agora target defensively; a bad row yields no target. */
-function safeTarget(channel: ChannelSummary | null): ChannelTarget | null {
+/**
+ * Resolve the open chat's Agora target defensively; a bad row yields no target.
+ * A group not synced to Agora yet fans out per member once its member ids are
+ * loaded (none while they are not, or above 50 recipients).
+ */
+function safeTarget(
+  channel: ChannelSummary | null,
+  memberIds: readonly string[] | null,
+  currentUserId: string,
+): ChannelTarget | null {
   if (channel === null) return null;
   try {
-    return targetFromSummary(channel);
+    const direct = targetFromSummary(channel);
+    if (direct !== null || channel.channelType !== 'group' || memberIds === null) return direct;
+    return fanoutTarget(channel.channelId, memberIds, currentUserId);
   } catch (error) {
     logger.error('chat: failed to derive channel target', { error: String(error) });
     return null;
@@ -385,6 +414,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     roster,
     retryLoad,
     reloadRoster,
+    rosterReload,
+    groupMembers: groupMemberCache,
     setActive,
     markConversationRead,
     updateOwnMessage,
@@ -540,10 +571,62 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     [refreshChannels],
   );
 
-  const onGroupCreated = useCallback(() => {
-    setNewChatOpen(false);
-    void refreshChannels(null);
-  }, [refreshChannels]);
+  // Tell the others about a group change after its RPC succeeded: a roster
+  // command to the right people, fire-and-forget (5s per send, failure only
+  // logged). Never awaited by the action or the UI.
+  // Sends started in one workspace are aborted on a switch or unmount: nothing
+  // more goes out and late results are ignored.
+  const clientRef = useRef(client);
+  clientRef.current = client;
+  const signalAbortRef = useRef<AbortController>(new AbortController());
+  useEffect(() => {
+    const controller = new AbortController();
+    signalAbortRef.current = controller;
+    return () => controller.abort();
+  }, [workspaceId]);
+  const signalRoster = useCallback(
+    async (channel: ChannelSummary, change: RosterChange): Promise<void> => {
+      const signal = signalAbortRef.current.signal;
+      const connection = clientRef.current;
+      if (connection === null || signal.aborted) return;
+      const groupTarget =
+        change.kind === 'created'
+          ? null
+          : await resolveLiveTarget(channel, currentUserId, groupMemberCache);
+      if (signal.aborted) return;
+      await sendRosterSignal({
+        connection: connection as ThreadConnection,
+        createCmd: createCmdMessage,
+        targets: rosterSignalTargets(change, groupTarget, currentUserId),
+        channelId: channel.channelId,
+        kind: change.kind,
+        onError: (context) => logger.warn('chat: roster signal failed', context),
+        signal,
+      });
+    },
+    [currentUserId, groupMemberCache],
+  );
+
+  // A new group: the sheet closes and the list re-reads at once; its members
+  // are told once the new chat's id is known from that re-read.
+  const onGroupCreated = useCallback(
+    (groupId: string, memberUserIds: string[]) => {
+      setNewChatOpen(false);
+      withRosterSignal(
+        () => {},
+        async () => {
+          const signal = signalAbortRef.current.signal;
+          const next = await reloadRoster();
+          if (signal.aborted) return;
+          const channel = next?.find((c) => c.groupId === groupId);
+          if (channel === undefined) return;
+          await signalRoster(channel, { kind: 'created', memberUserIds });
+        },
+        (context) => logger.warn('chat: roster signal failed', context),
+      )();
+    },
+    [reloadRoster, signalRoster],
+  );
 
   const onGroupChanged = useCallback(() => {
     void refreshChannels(selected?.channelId ?? null);
@@ -619,41 +702,35 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     [updateOwnMessage],
   );
 
-  const target = useMemo(() => safeTarget(selected), [selected]);
-  const marks = useChatMarks({ client, channelId: selectedChannelId, target, currentUserId });
-  const refetchMarks = marks.refetch;
-  // Every catch-up refreshes the unread counts and re-reads the channel's marks.
-  const onCaughtUp = useCallback(() => {
-    refreshUnreadCounts();
-    refetchMarks();
-  }, [refreshUnreadCounts, refetchMarks]);
-  const onMessagesDeleted = useCallback(() => refreshPreviews(), [refreshPreviews]);
-  const thread = useChatThread({
-    client,
-    status,
-    channelId: selectedChannelId,
-    target,
-    currentUserId,
-    peerUserId: selected?.peerUserId ?? null,
-    onOwnMessage,
-    onCaughtUp,
-    onMessagesDeleted,
-    outbox,
-  });
-  // The thread hook resets its messages in an effect after a switch, so the
-  // first render for a new channel still holds the previous chat's rows. Until
-  // that reset has committed, the thread gets the loading skeleton instead:
-  // never a frame of the old chat. Declared after useChatThread so both land
-  // in the same re-render.
-  const [threadChannelId, setThreadChannelId] = useState(selectedChannelId);
-  useEffect(() => setThreadChannelId(selectedChannelId), [selectedChannelId]);
-  const threadCurrent = threadChannelId === selectedChannelId;
+  // The open chat's row follows every roster re-read: a rename, photo or sync
+  // updates it in place (same object when nothing changed), and a chat that is
+  // gone after a re-read applied for THIS workspace (removed from the group)
+  // closes to chat home before the next paint. A re-read from a previous
+  // workspace never closes a chat.
+  const rosterVersion = rosterReload.version;
+  const seenRosterVersion = useRef(rosterVersion);
+  const scope = loadScope(workspaceId, currentUserId);
+  useLayoutEffect(() => {
+    const reloaded = reloadedFor(seenRosterVersion.current, rosterReload, scope);
+    seenRosterVersion.current = rosterReload.version;
+    if (loadStatus !== 'ready') return;
+    const step = openChannelAfterRoster(selectedRef.current, roster, reloaded);
+    if (step.kind === 'update') setSelected(step.channel);
+    else if (step.kind === 'close') {
+      setGroupInfoOpen(false);
+      closeChannel();
+    }
+  }, [roster, rosterReload, scope, loadStatus, closeChannel]);
 
-  const typing = useChatTyping({ client, target, channelId: selectedChannelId, currentUserId });
-
-  // A group's member ids, so its typing row only names members. Tagged with the
-  // group they belong to; another group's set never applies.
+  // A group's member ids, so its typing row only names members and an unsynced
+  // group's live traffic reaches each of them. Tagged with the group they
+  // belong to; another group's set never applies. Re-read on every roster
+  // re-read (a member added or removed elsewhere).
   const selectedGroupId = selected?.channelType === 'group' ? (selected.groupId ?? null) : null;
+  // What the open chat shows (header, group info, target): its row in the
+  // roster the list renders from, so a rename or photo lands in the header and
+  // the tile in the same commit.
+  const shown = useMemo(() => shownChannel(selected, roster), [selected, roster]);
   const [groupMembers, setGroupMembers] = useState<{
     groupId: string;
     ids: ReadonlySet<string>;
@@ -669,18 +746,63 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
         logger.warn('chat: group member read failed', { error: result.error.message });
         return;
       }
+      groupMemberCache.set(selectedGroupId, result.data);
       setGroupMembers({ groupId: selectedGroupId, ids: new Set(result.data) });
     });
     return () => {
       cancelled = true;
     };
-  }, [selectedGroupId]);
+  }, [selectedGroupId, rosterVersion, groupMemberCache]);
+  const openMemberIds =
+    groupMembers !== null && groupMembers.groupId === selectedGroupId ? groupMembers.ids : null;
+
+  // The same target object while it routes the same way, so a rename or photo
+  // change never re-subscribes the thread, typing or marks.
+  const computedTarget = useMemo(
+    () => safeTarget(shown, openMemberIds === null ? null : [...openMemberIds], currentUserId),
+    [shown, openMemberIds, currentUserId],
+  );
+  const targetRef = useRef(computedTarget);
+  if (!sameTarget(targetRef.current, computedTarget)) targetRef.current = computedTarget;
+  const target = targetRef.current;
+  const marks = useChatMarks({ client, channelId: selectedChannelId, target, currentUserId });
+  const refetchMarks = marks.refetch;
+  // Every catch-up refreshes the unread counts and re-reads the channel's marks.
+  const onCaughtUp = useCallback(() => {
+    refreshUnreadCounts();
+    refetchMarks();
+  }, [refreshUnreadCounts, refetchMarks]);
+  const onMessagesDeleted = useCallback(() => refreshPreviews(), [refreshPreviews]);
+  const thread = useChatThread({
+    client,
+    status,
+    channelId: selectedChannelId,
+    target,
+    currentUserId,
+    peerUserId: selected?.peerUserId ?? null,
+    channelType: selected?.channelType ?? null,
+    onOwnMessage,
+    onCaughtUp,
+    onMessagesDeleted,
+    outbox,
+    resolveTarget: (channel) => resolveLiveTarget(channel, currentUserId, groupMemberCache),
+  });
+  // The thread hook resets its messages in an effect after a switch, so the
+  // first render for a new channel still holds the previous chat's rows. Until
+  // that reset has committed, the thread gets the loading skeleton instead:
+  // never a frame of the old chat. Declared after useChatThread so both land
+  // in the same re-render.
+  const [threadChannelId, setThreadChannelId] = useState(selectedChannelId);
+  useEffect(() => setThreadChannelId(selectedChannelId), [selectedChannelId]);
+  const threadCurrent = threadChannelId === selectedChannelId;
+
+  const typing = useChatTyping({ client, target, channelId: selectedChannelId, currentUserId });
+
   const typingUserIds = visibleTypingIds({
     ids: typing.typingUserIds,
     isGroup: selected?.channelType === 'group',
     peerUserId: selected?.peerUserId ?? null,
-    memberIds:
-      groupMembers !== null && groupMembers.groupId === selectedGroupId ? groupMembers.ids : null,
+    memberIds: openMemberIds,
   });
   const presence = useChatPresence({ client, peerUserId: selected?.peerUserId ?? null });
 
@@ -841,11 +963,11 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
           {selected !== null ? (
             <MessageThread
               key={selected.channelId}
-              title={selected.title}
+              title={(shown ?? selected).title}
               channelId={selected.channelId}
-              avatarUrl={selected.avatarUrl}
+              avatarUrl={(shown ?? selected).avatarUrl}
               {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
-              {...(!isGroup ? { role: selected.role ?? null } : {})}
+              {...(!isGroup ? { role: (shown ?? selected).role ?? null } : {})}
               isGroup={isGroup}
               profiles={profiles}
               messages={threadCurrent ? threadMessages : NO_MESSAGES}
@@ -894,14 +1016,16 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                         workspaceId={workspaceId}
                         workspaceName={workspace?.name}
                         groupId={infoGroupId}
-                        groupName={selected.title}
-                        avatarUrl={selected.avatarUrl}
-                        createdBy={selected.createdBy ?? null}
+                        groupName={(shown ?? selected).title}
+                        avatarUrl={(shown ?? selected).avatarUrl}
+                        createdBy={(shown ?? selected).createdBy ?? null}
                         viewerRole={
                           mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null
                         }
                         currentUserId={currentUserId}
                         onChanged={onGroupChanged}
+                        signalRoster={(change) => signalRoster(shown ?? selected, change)}
+                        membersVersion={rosterVersion}
                         onLeft={onGroupLeft}
                         tabs={tabs}
                       />

@@ -9,7 +9,13 @@
 
 import type { Result } from '@srtdio/rpc';
 import { CATCH_UP_LIMIT, type HistoryPage } from '@/lib/chat/history';
-import type { ChatMessageRow, MessageCursor } from '@/lib/chat/thread';
+import type {
+  ChatMessageRow,
+  MessageCursor,
+  MessageReaction,
+  ThreadMessage,
+} from '@/lib/chat/thread';
+import { READ_TIMEOUT_MS, withReadTimeout } from '@/lib/chat-reads';
 
 /** Periodic catch-up while the tab is visible. */
 export const CATCH_UP_INTERVAL_MS = 60_000;
@@ -126,4 +132,74 @@ export function browserCatchUpTriggers(run: (reason: CatchUpReason) => void): ()
     setInterval: (fn, ms) => window.setInterval(fn, ms),
     clearInterval: (h) => window.clearInterval(h as number),
   });
+}
+
+/** Ids per reactions re-read (one IN read each). */
+export const REACTION_RECHECK_CHUNK = 100;
+/** At most this many reactions chunk reads in flight at once. */
+export const REACTION_RECHECK_CONCURRENCY = 3;
+
+/**
+ * Whether a catch-up re-reads the loaded rows' reactions: on 'connected' and
+ * the foreground triggers (visible, online), never on the 60s interval.
+ */
+export function reactionRecheckWanted(reason: CatchUpReason): boolean {
+  return reason !== 'interval';
+}
+
+/** The loaded rows whose reactions a re-read covers: recorded, not deleted. */
+export function reactionRecheckIds(messages: readonly ThreadMessage[]): string[] {
+  return messages.filter((m) => m.state === 'sent' && m.deleted !== true).map((m) => m.id);
+}
+
+/**
+ * Re-read the reactions of these ids, chunked by REACTION_RECHECK_CHUNK, at
+ * most REACTION_RECHECK_CONCURRENCY chunks in flight, each with the 5s read
+ * timeout. Any failed chunk fails the whole re-read (no further chunk starts),
+ * so the caller keeps what it shows. Never throws.
+ */
+export async function rereadReactions(
+  load: (
+    ids: readonly string[],
+    signal: AbortSignal,
+  ) => Promise<Result<Map<string, MessageReaction[]>>>,
+  ids: readonly string[],
+  timeoutMs: number = READ_TIMEOUT_MS,
+): Promise<Result<Map<string, MessageReaction[]>>> {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += REACTION_RECHECK_CHUNK) {
+    chunks.push(ids.slice(i, i + REACTION_RECHECK_CHUNK));
+  }
+  const merged = new Map<string, MessageReaction[]>();
+  let failure: Result<Map<string, MessageReaction[]>> | null = null;
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (failure === null && next < chunks.length) {
+      const chunk = chunks[next] ?? [];
+      next += 1;
+      const result = await withReadTimeout((signal) => load(chunk, signal), timeoutMs);
+      if (!result.ok) {
+        failure = result;
+        return;
+      }
+      for (const [id, reactions] of result.data) merged.set(id, reactions);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(REACTION_RECHECK_CONCURRENCY, chunks.length) }, worker),
+  );
+  return failure ?? { ok: true, data: merged };
+}
+
+/**
+ * The re-read ids whose reactions may be applied: those not toggled locally
+ * after the re-read started (`touched` maps an id to its last toggle number,
+ * `startedAt` is the toggle number when the re-read began). Pure.
+ */
+export function untouchedSince(
+  ids: readonly string[],
+  touched: ReadonlyMap<string, number>,
+  startedAt: number,
+): string[] {
+  return ids.filter((id) => (touched.get(id) ?? 0) <= startedAt);
 }
