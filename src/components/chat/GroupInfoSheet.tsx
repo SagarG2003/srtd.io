@@ -4,7 +4,7 @@
 // The page opens and closes without motion; colours are tokens only, so light
 // and dark match.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/Button';
@@ -20,6 +20,8 @@ import { supabase } from '@/lib/supabase';
 import { uploadAvatarFile } from '@/lib/avatar-upload';
 import { groupAvatarPng } from '@/lib/chat/group-avatar';
 import { useNewTrace } from '@/lib/trace-context';
+import { logger } from '@/lib/logger';
+import { withRosterSignal, type RosterChange } from '@/lib/chat/roster-signal';
 import { listGroupMemberIds, readProfiles } from '@/lib/chat-reads';
 import {
   addGroupMember,
@@ -193,6 +195,13 @@ interface GroupInfoSheetProps {
   currentUserId: string;
   /** Called after rename / photo / add / remove so the parent refreshes the channel list. */
   onChanged: () => void;
+  /**
+   * Tell the others after a successful rename / photo / add / remove (the live
+   * roster command). Fire-and-forget: it never delays or changes the result.
+   */
+  signalRoster?: (change: RosterChange) => Promise<void>;
+  /** Bumped on every roster re-read; the open page re-reads its members quietly. */
+  membersVersion?: number;
   /** Called after the current user leaves the group. */
   onLeft: () => void;
   /** The thread's chat info tabs wiring (profiles, presign cache, marks, jump). */
@@ -496,10 +505,18 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     return { options: toMemberOptions(profiles.data), loading: false, error: null };
   }, [props.groupId]);
 
+  // A live rename updates the name field in place unless it is being edited.
+  const shownName = useRef(props.groupName);
+  useEffect(() => {
+    const previous = shownName.current;
+    shownName.current = props.groupName;
+    setName((current) => (current === previous ? props.groupName : current));
+  }, [props.groupName]);
+
   useEffect(() => {
     if (!props.open) return;
     let cancelled = false;
-    setName(props.groupName);
+    setName(shownName.current);
     setAddId(null);
     setAdding(false);
     setError(null);
@@ -511,7 +528,31 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [props.open, props.groupName, loadMembers]);
+  }, [props.open, loadMembers]);
+
+  // Someone else changed the members: re-read them in place (no loading state);
+  // a failed re-read keeps the list shown.
+  const seenMembersVersion = useRef(props.membersVersion);
+  useEffect(() => {
+    if (seenMembersVersion.current === props.membersVersion) return;
+    seenMembersVersion.current = props.membersVersion;
+    if (!props.open) return;
+    let cancelled = false;
+    void loadMembers().then((next) => {
+      if (!cancelled) setMembers((prev) => membersAfterRefresh(prev, next).members);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.membersVersion, props.open, loadMembers]);
+
+  /** The action's success callback: refresh the list, then tell the others. */
+  const changed = (change: RosterChange): (() => void) =>
+    withRosterSignal(
+      props.onChanged,
+      () => props.signalRoster?.(change) ?? Promise.resolve(),
+      (context) => logger.warn('chat: roster signal failed', context),
+    );
 
   useEffect(() => {
     if (props.open) setPhotoUrl(props.avatarUrl);
@@ -550,7 +591,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
             renameGroupChannel(
               supabase,
               { groupId: props.groupId, name: name.trim(), traceId: newTrace() },
-              props.onChanged,
+              changed({ kind: 'renamed' }),
             ),
         }),
       onThrow: { kind: 'failed', message: groupActionMessage(THROWN_FAILURE) },
@@ -582,7 +623,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
         const set = await setGroupAvatar(
           supabase,
           { groupId: props.groupId, avatarUrl: up.data.avatarUrl, traceId },
-          props.onChanged,
+          changed({ kind: 'photo' }),
         );
         if (set !== null) return groupActionMessage(set);
         setPhotoUrl(up.data.avatarUrl);
@@ -602,7 +643,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
         setGroupAvatar(
           supabase,
           { groupId: props.groupId, avatarUrl: null, traceId: newTrace() },
-          props.onChanged,
+          changed({ kind: 'photo' }),
         ),
       onThrow: THROWN_FAILURE,
     });
@@ -620,7 +661,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
         addGroupMember(
           supabase,
           { groupId: props.groupId, userId, traceId: newTrace() },
-          props.onChanged,
+          changed({ kind: 'members', added: [userId] }),
         ),
       onThrow: THROWN_FAILURE,
     });
@@ -642,7 +683,7 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
         removeGroupMember(
           supabase,
           { groupId: props.groupId, userId, traceId: newTrace() },
-          props.onChanged,
+          changed({ kind: 'members', removed: [userId] }),
         ),
       onThrow: THROWN_FAILURE,
     });

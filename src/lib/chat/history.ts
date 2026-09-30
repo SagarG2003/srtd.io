@@ -191,12 +191,14 @@ export async function loadReactions(
   client: Client,
   messageIds: readonly string[],
   currentUserId: string,
+  signal?: AbortSignal,
 ): Promise<Result<Map<string, MessageReaction[]>>> {
   if (messageIds.length === 0) return { ok: true, data: new Map() };
-  const res = await client
+  const query = client
     .from('chat_reactions')
     .select('message_id, emoji, user_id')
     .in('message_id', [...messageIds]);
+  const res = await (signal !== undefined ? query.abortSignal(signal) : query);
   if (res.error) return fail(`loadReactions: ${res.error.message}`);
   const rows = (res.data ?? []) as Pick<ChatReactionRow, 'message_id' | 'emoji' | 'user_id'>[];
   return { ok: true, data: aggregateReactions(rows, currentUserId) };

@@ -9,7 +9,13 @@
 
 import type { Result } from '@srtdio/rpc';
 import { CATCH_UP_LIMIT, type HistoryPage } from '@/lib/chat/history';
-import type { ChatMessageRow, MessageCursor } from '@/lib/chat/thread';
+import type {
+  ChatMessageRow,
+  MessageCursor,
+  MessageReaction,
+  ThreadMessage,
+} from '@/lib/chat/thread';
+import { READ_TIMEOUT_MS, withReadTimeout } from '@/lib/chat-reads';
 
 /** Periodic catch-up while the tab is visible. */
 export const CATCH_UP_INTERVAL_MS = 60_000;
@@ -126,4 +132,48 @@ export function browserCatchUpTriggers(run: (reason: CatchUpReason) => void): ()
     setInterval: (fn, ms) => window.setInterval(fn, ms),
     clearInterval: (h) => window.clearInterval(h as number),
   });
+}
+
+/** Ids per reactions re-read (one IN read each). */
+export const REACTION_RECHECK_CHUNK = 100;
+
+/**
+ * Whether a catch-up re-reads the loaded rows' reactions: on 'connected' and
+ * the foreground triggers (visible, online), never on the 60s interval.
+ */
+export function reactionRecheckWanted(reason: CatchUpReason): boolean {
+  return reason !== 'interval';
+}
+
+/** The loaded rows whose reactions a re-read covers: recorded, not deleted. */
+export function reactionRecheckIds(messages: readonly ThreadMessage[]): string[] {
+  return messages.filter((m) => m.state === 'sent' && m.deleted !== true).map((m) => m.id);
+}
+
+/**
+ * Re-read the reactions of these ids, chunked by REACTION_RECHECK_CHUNK (the
+ * chunks run in parallel, each with the 5s read timeout). Any failed chunk
+ * fails the whole re-read, so the caller keeps what it shows. Never throws.
+ */
+export async function rereadReactions(
+  load: (
+    ids: readonly string[],
+    signal: AbortSignal,
+  ) => Promise<Result<Map<string, MessageReaction[]>>>,
+  ids: readonly string[],
+  timeoutMs: number = READ_TIMEOUT_MS,
+): Promise<Result<Map<string, MessageReaction[]>>> {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += REACTION_RECHECK_CHUNK) {
+    chunks.push(ids.slice(i, i + REACTION_RECHECK_CHUNK));
+  }
+  const results = await Promise.all(
+    chunks.map((chunk) => withReadTimeout((signal) => load(chunk, signal), timeoutMs)),
+  );
+  const merged = new Map<string, MessageReaction[]>();
+  for (const result of results) {
+    if (!result.ok) return result;
+    for (const [id, reactions] of result.data) merged.set(id, reactions);
+  }
+  return { ok: true, data: merged };
 }

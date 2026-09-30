@@ -14,7 +14,7 @@
 
 import type { AgoraChat } from 'agora-chat';
 import type { ChatConnection } from '@/lib/chat/types';
-import type { ChannelTarget, ThreadChatType } from '@/lib/chat/thread';
+import { sendRouted, type ChannelTarget, type ThreadChatType } from '@/lib/chat/thread';
 import { userIdFromAgoraUsername } from '@/lib/chat/agora-identity';
 
 /** Our own SDK event-handler id, distinct from the thread/Foundation handlers. */
@@ -90,14 +90,11 @@ export function sendTyping(params: {
   createCmd: CreateCmdMessage;
   channelId?: string;
 }): Promise<AgoraChat.SendMsgResult> {
-  const message = params.createCmd({
-    chatType: params.target.chatType,
-    type: 'cmd',
-    to: params.target.targetId,
-    action: TYPING_ACTION,
-    ...(params.channelId !== undefined ? { ext: { [TYPING_CHANNEL_KEY]: params.channelId } } : {}),
-  });
-  return params.connection.send(message);
+  const ext =
+    params.channelId !== undefined ? { ext: { [TYPING_CHANNEL_KEY]: params.channelId } } : {};
+  return sendRouted(params.connection, params.target, (to, chatType) =>
+    params.createCmd({ chatType, type: 'cmd', to, action: TYPING_ACTION, ...ext }),
+  );
 }
 
 /**
@@ -124,14 +121,9 @@ export function sendSignal(params: {
   createCmd: CreateCmdMessage;
   ext: Record<string, unknown>;
 }): Promise<AgoraChat.SendMsgResult> {
-  const message = params.createCmd({
-    chatType: params.target.chatType,
-    type: 'cmd',
-    to: params.target.targetId,
-    action: SIGNAL_ACTION,
-    ext: params.ext,
-  });
-  return params.connection.send(message);
+  return sendRouted(params.connection, params.target, (to, chatType) =>
+    params.createCmd({ chatType, type: 'cmd', to, action: SIGNAL_ACTION, ext: params.ext }),
+  );
 }
 
 /**

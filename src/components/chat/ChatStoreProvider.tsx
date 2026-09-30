@@ -42,6 +42,7 @@ import { Avatar } from '@/components/ui/Avatar';
 import {
   listChannelClears,
   listChannelSummaries,
+  listGroupMemberIds,
   readChannelMemberIds,
   readMentionProfiles,
   withReadTimeout,
@@ -80,13 +81,20 @@ import {
   mapLiveTextMessage,
   parseLiveEvent,
   sendText,
-  targetFromSummary,
-  type ChannelTarget,
   type ChatMessageRow,
   type ThreadConnection,
 } from '@/lib/chat/thread';
 import { liveVerifierFor } from '@/lib/chat/live-verify';
 import { subscribeGlobalCmds, subscribeGlobalMessages } from '@/lib/chat/controller';
+import {
+  cmdChannelId,
+  createGroupMemberCache,
+  createRosterReloader,
+  parseRosterCmd,
+  resolveLiveTarget,
+  type GroupMemberCache,
+  type RosterReloader,
+} from '@/lib/chat/roster-signal';
 import {
   loadConversationPreviews,
   loadMessagesByIds,
@@ -116,6 +124,10 @@ export interface ChatStoreContextValue {
   retryLoad: () => void;
   /** Re-read the roster after a mutation; resolves to it, or null when the read failed. */
   reloadRoster: () => Promise<readonly ChannelSummary[] | null>;
+  /** Bumped each time a roster re-read is applied (live roster signal, mutation, unknown chat). */
+  rosterVersion: number;
+  /** Group member ids for an unsynced group's live fan-out; cleared on every roster re-read. */
+  groupMembers: GroupMemberCache;
   /** Sum of unread across every channel; the Chat-tab badge reads this. */
   totalUnread: number;
   /** Mark the viewed channel (its incoming messages stay read), or clear it. */
@@ -183,16 +195,6 @@ function restoredPreview(file: File): string | null {
   if (!isImageMime(file.type)) return null;
   try {
     return URL.createObjectURL(file);
-  } catch {
-    return null;
-  }
-}
-
-/** A channel's Agora target for the live publish; a bad row yields none (the record still holds it). */
-function liveTarget(summary: ChannelSummary | undefined): ChannelTarget | null {
-  if (summary === undefined) return null;
-  try {
-    return targetFromSummary(summary);
   } catch {
     return null;
   }
@@ -392,6 +394,16 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
 
   const [state, setState] = useState<ChatStoreState>(store.initialState);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [rosterVersion, setRosterVersion] = useState(0);
+  // One group-member cache per provider; emptied on every scope change and re-read.
+  const groupMembers = useMemo(
+    () =>
+      createGroupMemberCache((groupId, signal) =>
+        listGroupMemberIds(supabase, { groupId, signal }),
+      ),
+    [],
+  );
+  const reloaderRef = useRef<RosterReloader | null>(null);
   const scope =
     workspaceId && currentUserId !== null ? store.loadScope(workspaceId, currentUserId) : null;
 
@@ -584,16 +596,44 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
 
   const retryLoad = useCallback(() => setLoadAttempt((n) => n + 1), []);
 
+  // A failed or timed-out (5s) re-read keeps the current roster. A success also
+  // refreshes the live lookup at once (held messages re-check it right after)
+  // and drops the cached group members, so the next fan-out reads them again.
   const reloadRoster = useCallback(async (): Promise<readonly ChannelSummary[] | null> => {
     if (scope === null || !workspaceId || currentUserId === null) return null;
-    const result = await listChannelSummaries(supabase, { workspaceId, currentUserId });
+    const result = await withReadTimeout(() =>
+      listChannelSummaries(supabase, { workspaceId, currentUserId }),
+    );
     if (!result.ok) {
       logger.error('chat store: roster reload failed', { error: result.error.message });
       return null;
     }
+    if (stateRef.current.scope !== scope) return null;
+    summariesRef.current = indexSummaries(result.data);
+    groupMembers.clear();
     setState((prev) => (prev.scope === scope ? store.applyRoster(prev, result.data) : prev));
+    setRosterVersion((n) => n + 1);
     return result.data;
-  }, [scope, workspaceId, currentUserId]);
+  }, [scope, workspaceId, currentUserId, groupMembers]);
+
+  // One debounced, single-flight live reload per workspace and user. Teardown
+  // (workspace switch, sign-out, unmount) clears its timers and held messages.
+  const reloadRosterRef = useRef(reloadRoster);
+  reloadRosterRef.current = reloadRoster;
+  useEffect(() => {
+    groupMembers.clear();
+    if (scope === null) return;
+    const reloader = createRosterReloader({
+      reload: async () => (await reloadRosterRef.current()) !== null,
+      onError: (context) => logger.warn('chat store: live roster reload failed', context),
+    });
+    reloaderRef.current = reloader;
+    return () => {
+      reloader.dispose();
+      if (reloaderRef.current === reloader) reloaderRef.current = null;
+      groupMembers.clear();
+    };
+  }, [scope, groupMembers]);
 
   // One background sender per workspace and user, seeded from this scope's
   // persisted outbox. Teardown (workspace switch, sign-out, unmount) clears its
@@ -630,7 +670,6 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         deliver: (channelId, entry, traceId, onRecorded) => {
           const connection = clientRef.current;
           const summary = summariesRef.current.get(channelId);
-          const target = liveTarget(summary);
           return runSend(
             {
               // The ack's server created_at against the device time of the
@@ -645,10 +684,18 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
                   (createdAt, sentAt) =>
                     setState((prev) => store.applyServerClock(prev, createdAt, sentAt)),
                 ),
+              // An unsynced group fans out once per member (its ids loaded, else
+              // one 5s read); no target (read failed, over 50) skips the publish.
               publishLive:
-                connection !== null && target !== null
-                  ? (input) =>
-                      sendText({
+                connection !== null && summary !== undefined
+                  ? async (input) => {
+                      const target = await resolveLiveTarget(
+                        summary,
+                        scopeKey.userId,
+                        groupMembers,
+                      );
+                      if (target === null) throw new Error('no live target');
+                      return sendText({
                         connection: connection as ThreadConnection,
                         target,
                         text: input.text,
@@ -660,7 +707,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
                           sorted_message_id: input.id,
                           sorted_channel_id: input.channelId,
                         },
-                      })
+                      });
+                    }
                   : undefined,
               // A refused mention re-reads the chat's members once (5s timeout).
               recheckMentions: (id) => readChannelMemberIds(supabase, { channelId: id }),
@@ -764,7 +812,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       if (filesRef.current === files) filesRef.current = null;
       files?.close();
     };
-  }, [workspaceId, currentUserId]);
+  }, [workspaceId, currentUserId, groupMembers]);
 
   // Every (re)connect re-reads the counts (live messages missed while offline
   // are already in Postgres) and retries any queued send at once.
@@ -785,6 +833,23 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     [],
   );
   useEffect(() => () => debouncedRefresh.cancel(), [debouncedRefresh]);
+
+  // Wait for the next roster re-read when the list is ready; resolves to what
+  // `lookup` finds after it, or undefined when the hold expired or was torn
+  // down (the list not ready yet keeps today's drop).
+  const heldForRoster = <T,>(lookup: () => T | undefined): Promise<T | undefined> =>
+    new Promise((resolve) => {
+      const reloader = reloaderRef.current;
+      if (reloader === null || store.selectLoadStatus(stateRef.current, scope) !== 'ready') {
+        resolve(undefined);
+        return;
+      }
+      reloader.hold(
+        () => resolve(lookup()),
+        () => resolve(undefined),
+      );
+      reloader.request();
+    });
 
   // Latest incoming-message logic, held in a ref so the global subscription
   // below registers exactly once yet always runs the current closure.
@@ -807,7 +872,11 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         if (!lookup.found) return;
         const row = lookup.row;
         if (row.sender_user_id === forUser) return;
-        const summary = summariesRef.current.get(row.channel_id);
+        const found = summariesRef.current.get(row.channel_id);
+        // A chat not in my list yet (new DM or group, just added): hold the
+        // row for one roster re-read (max 5s); still unknown after it = dropped.
+        const summary =
+          found ?? (await heldForRoster(() => summariesRef.current.get(row.channel_id)));
         if (summary === undefined) return;
         // Names first (one batched read for unknown ids), so the line and the
         // toast read "@Name" from their first paint.
@@ -862,12 +931,25 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   };
 
   useEffect(() => subscribeGlobalMessages((message) => onIncomingRef.current(message)), []);
+  // A roster command, or a command naming a chat not in my list, re-reads the
+  // roster once (debounced). The payload only triggers it: names, photos and
+  // membership come from the re-read under RLS.
+  const onRosterCmdRef = useRef<(message: AgoraChat.CmdMsgBody) => void>(() => {});
+  onRosterCmdRef.current = (message) => {
+    if (store.selectLoadStatus(stateRef.current, scope) !== 'ready') return;
+    if (parseRosterCmd(message) === null) {
+      const named = cmdChannelId(message.ext);
+      if (named === null || summariesRef.current.has(named)) return;
+    }
+    reloaderRef.current?.request();
+  };
   // A delete signal for any chat, open or not, strips its drafts, queued quotes
   // and list line once its rows read back deleted (the open thread also turns
   // the rows into tombstones itself).
   useEffect(
     () =>
       subscribeGlobalCmds((message) => {
+        onRosterCmdRef.current(message);
         void routeGlobalCmd(message.ext, {
           loadByIds: (ids) => loadMessagesByIds(supabase, ids),
           onDeleted: (ids) => onMessagesDeletedRef.current(ids),
@@ -885,6 +967,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       roster,
       retryLoad,
       reloadRoster,
+      rosterVersion,
+      groupMembers,
       totalUnread: store.selectTotalUnread(state),
       setActive,
       markConversationRead,
@@ -901,6 +985,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       roster,
       retryLoad,
       reloadRoster,
+      rosterVersion,
+      groupMembers,
       outbox,
       clearConversation,
       state,

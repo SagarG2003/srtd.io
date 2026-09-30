@@ -31,7 +31,14 @@ import {
   loadReactions,
   type HistoryPage,
 } from '@/lib/chat/history';
-import { browserCatchUpTriggers, catchUpRows, type CatchUpReason } from '@/lib/chat/catch-up';
+import {
+  browserCatchUpTriggers,
+  catchUpRows,
+  reactionRecheckIds,
+  reactionRecheckWanted,
+  rereadReactions,
+  type CatchUpReason,
+} from '@/lib/chat/catch-up';
 import { liveVerifierFor, type LiveVerifier } from '@/lib/chat/live-verify';
 import type { ChannelOutbox, OutboxEntry } from '@/lib/chat/chat-store';
 import {
@@ -63,6 +70,7 @@ import {
   markReadUpToMessage,
   mergeFetched,
   mergeReactions,
+  replaceReactions,
   newestCursor,
   oldestCursor,
   reactionEventExt,
@@ -321,6 +329,11 @@ export function useChatThread(params: {
   channelId: string | null;
   /** The Agora target for live publish; null keeps the thread Postgres-only. */
   target: ChannelTarget | null;
+  /**
+   * A forward target's live target, resolved when it is sent (an unsynced
+   * group fans out per member). Absent: the synced group or DM peer only.
+   */
+  resolveTarget?: (channel: ChannelSummary) => Promise<ChannelTarget | null>;
   currentUserId: string;
   /** The DM peer, for the seen ticks; null for groups. */
   peerUserId: string | null;
@@ -357,6 +370,8 @@ export function useChatThread(params: {
   clientRef.current = client;
   const targetRef = useRef(target);
   targetRef.current = target;
+  const resolveTargetRef = useRef(params.resolveTarget);
+  resolveTargetRef.current = params.resolveTarget;
   const channelRef = useRef(channelId);
   channelRef.current = channelId;
   const onOwnMessageRef = useRef(onOwnMessage);
@@ -584,9 +599,21 @@ export function useChatThread(params: {
         Date.now(),
         reason,
       );
+      // Reactions a live signal missed: one batched re-read of every loaded
+      // row (chunks of 100, 5s each), never on the interval.
+      const reactionIds = reactionRecheckWanted(reason)
+        ? reactionRecheckIds(messagesRef.current)
+        : [];
+      const reactionsRead =
+        reactionIds.length > 0
+          ? rereadReactions(
+              (ids, signal) => loadReactions(db, ids, currentUserId, signal),
+              reactionIds,
+            )
+          : Promise.resolve(null);
       void (async (): Promise<void> => {
         try {
-          const [outcome, rechecked] = await Promise.all([
+          const [outcome, rechecked, reread] = await Promise.all([
             catchUpRows(
               {
                 loadLatest: () => loadLatestMessages(db, forChannel),
@@ -595,8 +622,19 @@ export function useChatThread(params: {
               cursor,
             ),
             recheck,
+            reactionsRead,
           ]);
           if (channelRef.current !== forChannel) return;
+          if (reread !== null && !reread.ok) {
+            logger.warn('chat: catch-up reactions re-read failed', {
+              channel_id: forChannel,
+              error: reread.error.message,
+            });
+          }
+          if (reread !== null && reread.ok) {
+            const byId = reread.data;
+            setMessages((prev) => replaceReactions(prev, reactionIds, byId));
+          }
           if (rechecked !== null && !rechecked.ok) {
             logger.warn('chat: catch-up recheck failed', {
               channel_id: forChannel,
@@ -830,7 +868,9 @@ export function useChatThread(params: {
               // The row exists; a slow or failed live publish never fails the forward.
               signal: async () => {
                 const connection = clientRef.current;
-                const liveTarget = liveTargetFor(channel);
+                const resolve = resolveTargetRef.current;
+                const liveTarget =
+                  resolve !== undefined ? await resolve(channel) : liveTargetFor(channel);
                 if (connection === null || liveTarget === null) return;
                 const published = await publishWithTimeout(
                   sendText({

@@ -53,6 +53,74 @@ export type MessageStatus = 'sent' | 'read';
 export interface ChannelTarget {
   targetId: string;
   chatType: ThreadChatType;
+  /**
+   * A group whose Agora group is not synced yet: the Agora usernames of its
+   * members (sender excluded) each get the message once as singleChat,
+   * carrying the same ext. `targetId` is then the Sorted channel id and is
+   * never sent to. Absent for a synced group or a DM.
+   */
+  fanout?: readonly string[];
+}
+
+/** An unsynced group's live fan-out is skipped above this many recipients. */
+export const MAX_FANOUT = 50;
+
+/**
+ * The fan-out target for a group whose Agora group is not synced yet: one
+ * singleChat per member (deduped, the sender excluded). Null when there is no
+ * one to reach or more than MAX_FANOUT recipients (the live publish is then
+ * skipped; receivers catch up from Postgres). Pure.
+ */
+export function fanoutTarget(
+  channelId: string,
+  memberUserIds: readonly string[],
+  currentUserId: string,
+): ChannelTarget | null {
+  const recipients = [...new Set(memberUserIds)].filter((id) => id !== currentUserId).sort();
+  if (recipients.length === 0 || recipients.length > MAX_FANOUT) return null;
+  return { targetId: channelId, chatType: 'singleChat', fanout: recipients.map(toAgoraUsername) };
+}
+
+/** Whether two targets route the same way (same recipient(s), same chat type). Pure. */
+export function sameTarget(a: ChannelTarget | null, b: ChannelTarget | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.targetId !== b.targetId || a.chatType !== b.chatType) return false;
+  if (a.fanout === undefined || b.fanout === undefined) return a.fanout === b.fanout;
+  return a.fanout.length === b.fanout.length && a.fanout.every((to, i) => to === b.fanout?.[i]);
+}
+
+/** The `send` member every live publish goes through. */
+export interface LiveSendConnection {
+  send(message: AgoraChat.MessageBody): Promise<AgoraChat.SendMsgResult>;
+}
+
+/**
+ * Send one live message to a target: once to the group or peer, or, for a
+ * fan-out target, once per member as singleChat (the builder gets each
+ * recipient). A fan-out resolves with the first delivery and rejects only when
+ * every delivery failed.
+ */
+export async function sendRouted(
+  connection: LiveSendConnection,
+  target: ChannelTarget,
+  build: (to: string, chatType: ThreadChatType) => AgoraChat.MessageBody,
+): Promise<AgoraChat.SendMsgResult> {
+  if (target.fanout === undefined) {
+    return connection.send(build(target.targetId, target.chatType));
+  }
+  const results = await Promise.allSettled(
+    target.fanout.map((to) =>
+      Promise.resolve().then(() => connection.send(build(to, 'singleChat'))),
+    ),
+  );
+  const delivered = results.find(
+    (r): r is PromiseFulfilledResult<AgoraChat.SendMsgResult> => r.status === 'fulfilled',
+  );
+  if (delivered !== undefined) return delivered.value;
+  const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+  throw failed !== undefined && failed.reason instanceof Error
+    ? failed.reason
+    : new Error('live fan-out failed');
 }
 
 /** One emoji reaction on a message, aggregated across users. */
@@ -884,6 +952,36 @@ export function mergeReactions(
 }
 
 /**
+ * Replace the reactions of the re-read ids with what the record holds (an id
+ * the read returned nothing for has none left). Rows keep their order, and a
+ * row whose reactions did not change keeps its object. Pure.
+ */
+export function replaceReactions(
+  messages: ThreadMessage[],
+  checked: readonly string[],
+  byId: Map<string, MessageReaction[]>,
+): ThreadMessage[] {
+  const ids = new Set(checked);
+  let changed = false;
+  const next = messages.map((m) => {
+    if (!ids.has(m.id)) return m;
+    const reactions = byId.get(m.id) ?? [];
+    if (sameReactions(m.reactions, reactions)) return m;
+    changed = true;
+    return { ...m, reactions };
+  });
+  return changed ? next : messages;
+}
+
+function sameReactions(a: readonly MessageReaction[], b: readonly MessageReaction[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((r) => {
+    const other = b.find((o) => o.emoji === r.emoji);
+    return other !== undefined && other.count === r.count && other.mine === r.mine;
+  });
+}
+
+/**
  * Mark every own message sent at or before the peer's read position as 'read'.
  * Pure and monotonic: only mine messages ranked below 'read' advance; non-mine
  * and later messages are unchanged.
@@ -1009,26 +1107,22 @@ export function sendText(params: {
     params.reply !== null ||
     forwardedFrom !== null;
   const hasExt = hasContentExt || params.liveIds !== undefined;
-  const message = params.createMessage({
-    chatType: params.target.chatType,
-    type: 'txt',
-    to: params.target.targetId,
-    msg: params.text,
-    ...(hasExt
-      ? {
-          ext: {
-            ...buildMessageExt({
-              attachments: params.attachments,
-              sharedPostIds: params.sharedPostIds,
-              reply: params.reply,
-              forwardedFrom,
-            }),
-            ...(params.liveIds !== undefined ? params.liveIds : {}),
-          },
-        }
-      : {}),
-  });
-  return params.connection.send(message);
+  const ext = hasExt
+    ? {
+        ext: {
+          ...buildMessageExt({
+            attachments: params.attachments,
+            sharedPostIds: params.sharedPostIds,
+            reply: params.reply,
+            forwardedFrom,
+          }),
+          ...(params.liveIds !== undefined ? params.liveIds : {}),
+        },
+      }
+    : {};
+  return sendRouted(params.connection, params.target, (to, chatType) =>
+    params.createMessage({ chatType, type: 'txt', to, msg: params.text, ...ext }),
+  );
 }
 
 /** A gap this long (or longer) between neighbours starts a new run and shows a time label. */
