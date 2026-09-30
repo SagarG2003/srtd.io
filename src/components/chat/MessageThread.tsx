@@ -1462,6 +1462,8 @@ export function MessageBubble(props: {
   postRefs?: BubblePostRefs | undefined;
   /** A voice-only bubble: the voice note right below from the same sender. */
   nextVoiceId?: string | null | undefined;
+  /** A received voice-only bubble: run tap-to-transcribe (the Transcribe link). */
+  onTranscribe?: (() => void) | undefined;
   /** The quoted message when it is loaded in the thread (the quote reads its media). */
   quoted?: ThreadMessage | undefined;
   bubbleRef?: Ref<HTMLDivElement>;
@@ -1697,6 +1699,11 @@ export function MessageBubble(props: {
                   mine,
                   sender: { name, ...senderAvatarProps(message, profiles) },
                   nextVoiceId: props.nextVoiceId ?? null,
+                  // The time sits in the note's last row (Transcribe row / length row).
+                  meta: <BubbleMetaView meta={meta} mine={mine} placement={placement} />,
+                  ...(!mine && props.onTranscribe !== undefined && isTranscribable(message)
+                    ? { onTranscribe: props.onTranscribe }
+                    : {}),
                 }}
               />
             ) : album ? (
@@ -1729,12 +1736,14 @@ export function MessageBubble(props: {
               </>
             )}
           </div>
-          <BubbleMetaView
-            meta={meta}
-            mine={mine}
-            placement={placement}
-            className={placement === 'row' && album ? 'px-1.5 pb-0.5' : undefined}
-          />
+          {voiceOnly ? null : (
+            <BubbleMetaView
+              meta={meta}
+              mine={mine}
+              placement={placement}
+              className={placement === 'row' && album ? 'px-1.5 pb-0.5' : undefined}
+            />
+          )}
           {failed && mine && message.filesMissing !== true ? (
             <button
               type="button"
@@ -2011,6 +2020,8 @@ function MessageRow(props: {
   postRefs?: BubblePostRefs | undefined;
   /** A voice-only row: the voice note right below from the same sender. */
   nextVoiceId?: string | null | undefined;
+  /** Tap-to-transcribe on a received voice note; absent hides the link. */
+  onTranscribe?: ((message: ThreadMessage) => void) | undefined;
   quoted?: ThreadMessage | undefined;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
@@ -2130,6 +2141,9 @@ function MessageRow(props: {
       workspaceId={props.workspaceId}
       meta={props.meta}
       nextVoiceId={props.nextVoiceId}
+      {...(props.onTranscribe !== undefined
+        ? { onTranscribe: () => props.onTranscribe?.(props.message) }
+        : {})}
       quoted={props.quoted}
       bubbleRef={bubbleRef}
       rowRef={rowRef}
@@ -2899,6 +2913,7 @@ function ThreadBody(
               onSwipeReply={props.onReply}
               onJumpToMessage={scrollToMessage}
               nextVoiceId={voiceNext.get(row.message.id) ?? null}
+              onTranscribe={props.onTranscribe}
               quoted={
                 row.message.reply !== null ? messagesById.get(row.message.reply.id) : undefined
               }

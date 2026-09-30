@@ -162,14 +162,17 @@ export type AttachmentView =
 
 /**
  * A chat voice note's message context: its id (played state and transcript
- * key), side, sender photo, and the voice note right below it from the same
- * sender (auto-play next), if any.
+ * key), side, sender photo, the voice note right below it from the same
+ * sender (auto-play next), if any, the bubble's time (drawn inside the note's
+ * last row) and, on a received recorded note, the tap-to-transcribe flow.
  */
 export interface VoiceContext {
   messageId: string;
   mine: boolean;
   sender: { name: string; src?: string | undefined };
   nextVoiceId: string | null;
+  meta?: ReactNode;
+  onTranscribe?: (() => void) | undefined;
 }
 
 export function attachmentView(args: {

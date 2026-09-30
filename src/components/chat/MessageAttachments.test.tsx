@@ -313,6 +313,33 @@ describe('instant send tile (local preview + upload progress)', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it('hands the voice context (time slot, transcribe flow) through to the note', () => {
+    const { cache } = spiedCache();
+    const voice: MessageAttachment = {
+      assetId: AUDIO_VERSION,
+      name: 'voice-note.webm',
+      mime: 'audio/webm',
+      durationMs: 7_000,
+    };
+    const html = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[voice]}
+        cache={cache}
+        presignEnabled
+        voice={{
+          messageId: 'ma-voice-ctx',
+          mine: false,
+          sender: { name: 'Asha Rao' },
+          nextVoiceId: null,
+          meta: <span data-meta="row">10:42</span>,
+          onTranscribe: () => {},
+        }}
+      />,
+    );
+    expect(html).toContain('data-voice-link="transcribe"');
+    expect(html.indexOf('data-meta="row"')).toBeGreaterThan(html.indexOf('data-voice-link'));
+  });
+
   it('the tile is dimmed with a thin white bar (width = progress) while uploading', () => {
     const { html, fetcher } = render(local(0.4));
     expect(html).toContain('src="blob:preview"');

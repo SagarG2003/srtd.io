@@ -15,6 +15,9 @@ import {
   voiceLabel,
   voiceProgress,
   voiceTotalSeconds,
+  transcribeLinkState,
+  waveTouchPhase,
+  WAVE_SEEK_LOCK_PX,
   type VoiceAudio,
 } from '@/components/chat/VoiceNote';
 import { voiceStore } from '@/lib/chat/transcript-store';
@@ -202,7 +205,9 @@ describe('first paint', () => {
     expect(html).toContain('[-webkit-touch-callout:none]');
     expect(html).toMatch(/data-voice-dot=""[^>]*class="[^"]*h-3 w-3[^"]*bg-accent\b/);
     expect(html).toContain('font-mono text-xs');
-    expect(html).not.toContain('data-voice-transcript');
+    // The drop-down is mounted closed, ready to reveal.
+    expect(html).toContain('data-voice-transcript="closed"');
+    expect(html).not.toContain('data-voice-transcript="open"');
   });
 
   it('draws the dot white on an own bubble', () => {
@@ -217,31 +222,170 @@ describe('first paint', () => {
     expect(html).toMatch(/rounded-full bg-panel-2 text-accent/);
   });
 
-  it('renders a stored transcript expanded, selectable, with a collapse chevron', () => {
-    voiceStore.update('fp-shown', { transcript: 'नमस्ते, see you at 5' });
-    const html = render('fp-shown');
-    expect(html).toContain('data-voice-transcript="shown"');
-    expect(html).toContain('नमस्ते, see you at 5');
-    expect(html).toMatch(/select-text[^"]*text-\[15px\] leading-5 text-fg/);
-    expect(html).toContain('aria-label="Collapse transcript"');
-    expect(html).toContain('h-7 w-11');
+  const withLink = (id: string, mine = false): string => {
+    ids.push(id);
+    return renderToStaticMarkup(
+      <VoiceNote
+        {...base}
+        messageId={id}
+        mine={mine}
+        onTranscribe={() => {}}
+        meta={<span data-meta="row">10:42</span>}
+      />,
+    );
+  };
+  const order = (html: string, ...needles: string[]): number[] =>
+    needles.map((needle) => html.indexOf(needle));
+
+  it('received: play, wave, photo in row 1; length; Transcribe left and time right in row 3', () => {
+    const html = withLink('fp-received');
+    const [play, wave, mic, duration, foot, link, meta] = order(
+      html,
+      'aria-label="Play voice note"',
+      'data-voice-wave',
+      'data-voice-mic',
+      'data-voice-duration',
+      'data-voice-foot',
+      'data-voice-link="transcribe"',
+      'data-meta="row"',
+    );
+    expect(play).toBeGreaterThan(-1);
+    expect(play).toBeLessThan(wave as number);
+    expect(wave).toBeLessThan(mic as number);
+    expect(duration).toBeLessThan(foot as number);
+    expect(foot).toBeLessThan(link as number);
+    expect(link).toBeLessThan(meta as number);
+    // Row 3 is a fixed 44px row; the time is pushed right.
+    expect(html).toMatch(/data-voice-foot=""[^>]*class="flex h-11 items-center/);
+    expect(html).toMatch(/data-voice-meta=""[^>]*class="ml-auto flex shrink-0/);
   });
 
-  it('renders a collapsed transcript as its 44px "Transcript" row on first paint', () => {
-    voiceStore.update('fp-collapsed', { transcript: 'hidden text', collapsed: true });
-    const html = render('fp-collapsed');
-    expect(html).toContain('data-voice-transcript="collapsed"');
-    expect(html).toMatch(/h-11 w-full/);
-    expect(html).not.toContain('hidden text');
+  it('own: photo, play, wave in row 1; length left and time right in row 2; no link', () => {
+    const html = withLink('fp-own-layout', true);
+    const [mic, play, wave, duration, meta] = order(
+      html,
+      'data-voice-mic',
+      'aria-label="Play voice note"',
+      'data-voice-wave',
+      'data-voice-duration',
+      'data-meta="row"',
+    );
+    expect(mic).toBeGreaterThan(-1);
+    expect(mic).toBeLessThan(play as number);
+    expect(play).toBeLessThan(wave as number);
+    expect(duration).toBeLessThan(meta as number);
+    expect(html).not.toContain('data-voice-link');
+    expect(html).not.toContain('data-voice-foot');
+    expect(html).not.toContain('Transcribe');
   });
 
-  it('renders "Transcript not available" after a failure and "Transcribing…" while pending', () => {
-    voiceStore.update('fp-failed', { failedAt: 1 });
-    expect(render('fp-failed')).toMatch(/text-\[13px\] text-fg-3">Transcript not available/);
+  it('the link is plain accent text, 15px/500, 44px tall, never selecting or calling out', () => {
+    const html = withLink('fp-link');
+    expect(html).toMatch(
+      /<button type="button" data-voice-link="transcribe" class="flex h-11 select-none items-center text-\[15px\] font-medium leading-5 \[-webkit-touch-callout:none\] shrink-0 rounded-sm text-accent /,
+    );
+    expect(html).toContain('>Transcribe</button>');
+    expect(html).not.toMatch(/data-voice-link="transcribe"[^>]*(bg-|rounded-full|border)/);
+  });
+
+  it('no link without the transcribe flow; Show/Hide still toggles a stored transcript', () => {
+    ids.push('fp-nolink');
+    const bare = renderToStaticMarkup(<VoiceNote {...base} messageId="fp-nolink" />);
+    expect(bare).not.toContain('data-voice-link');
+    voiceStore.update('fp-nolink-shown', { transcript: 'hi' });
+    ids.push('fp-nolink-shown');
+    const shown = renderToStaticMarkup(<VoiceNote {...base} messageId="fp-nolink-shown" />);
+    expect(shown).toContain('data-voice-link="hide"');
+  });
+
+  it('pending: "Transcribing…" in fg-2, not a button', () => {
     voiceStore.setPending('fp-pending', true);
-    const html = render('fp-pending');
-    expect(html).toContain('Transcribing…');
-    expect(html).toContain('text-[13px] text-fg-2');
+    const html = withLink('fp-pending');
     voiceStore.setPending('fp-pending', false);
+    expect(html).toMatch(
+      /<span data-voice-link="pending" role="status" class="[^"]*text-fg-2">Transcribing…<\/span>/,
+    );
+    expect(html).not.toContain('>Transcribe</button>');
+  });
+
+  it('open: "Hide transcript" and the transcript open on first paint, selectable, under a hairline', () => {
+    voiceStore.update('fp-shown', { transcript: 'नमस्ते, see you at 5' });
+    const html = withLink('fp-shown');
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('>Hide transcript</button>');
+    expect(html).toMatch(
+      /data-voice-transcript="open" class="grid [^"]*visible grid-rows-\[1fr\] opacity-100/,
+    );
+    expect(html).toContain('border-t border-border');
+    expect(html).toMatch(/select-text[^"]*text-\[15px\] leading-5 text-fg/);
+    expect(html).toContain('नमस्ते, see you at 5');
+    // Below row 3.
+    expect(html.indexOf('data-voice-transcript')).toBeGreaterThan(html.indexOf('data-voice-foot'));
+  });
+
+  it('closed: "Show transcript" with the drop-down closed and hidden from AT', () => {
+    voiceStore.update('fp-collapsed', { transcript: 'hidden text', collapsed: true });
+    const html = withLink('fp-collapsed');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('>Show transcript</button>');
+    expect(html).toMatch(
+      /data-voice-transcript="closed" aria-hidden="true" class="grid [^"]*invisible grid-rows-\[0fr\] opacity-0/,
+    );
+  });
+
+  it('failed: "Transcript not available" in fg-3, then "Try again" in accent', () => {
+    voiceStore.update('fp-failed', { failedAt: 1 });
+    const html = withLink('fp-failed');
+    expect(html).toMatch(
+      /data-voice-link="failed" class="[^"]*text-fg-3"><span class="truncate">Transcript not available/,
+    );
+    expect(html).toMatch(
+      /data-voice-link="retry" class="[^"]*text-accent[^"]*">Try again<\/button>/,
+    );
+  });
+
+  it('reveals on height and opacity only, 180ms ease-out, none under reduced motion', () => {
+    const html = withLink('fp-motion');
+    expect(html).toContain(
+      'transition-[grid-template-rows,opacity,visibility] duration-[180ms] ease-out motion-reduce:transition-none',
+    );
+    expect(html).not.toMatch(/data-voice-transcript[^>]*(translate|scale|rotate)/);
+  });
+
+  it('own notes show a stored transcript open (no link to reopen it)', () => {
+    voiceStore.update('fp-own-shown', { transcript: 'mine', collapsed: true });
+    const html = withLink('fp-own-shown', true);
+    expect(html).toContain('data-voice-transcript="open"');
+    expect(html).toContain('mine');
+  });
+});
+
+describe('transcribe link state', () => {
+  it('maps every transcript view to its label state', () => {
+    expect(transcribeLinkState({ kind: 'none' })).toBe('transcribe');
+    expect(transcribeLinkState({ kind: 'pending' })).toBe('pending');
+    expect(transcribeLinkState({ kind: 'failed' })).toBe('failed');
+    expect(transcribeLinkState({ kind: 'shown', text: 't', collapsed: false })).toBe('hide');
+    expect(transcribeLinkState({ kind: 'shown', text: 't', collapsed: true })).toBe('show');
+  });
+});
+
+describe('touch on the wave', () => {
+  const start = { x: 100, y: 100, t: 0 };
+  it('a horizontal move of 8px within 450ms seeks, either way', () => {
+    expect(WAVE_SEEK_LOCK_PX).toBe(8);
+    expect(waveTouchPhase(start, { x: 108, y: 100, t: 100 })).toBe('seek');
+    expect(waveTouchPhase(start, { x: 92, y: 102, t: 449 })).toBe('seek');
+  });
+  it('under 8px it stays pending, so the bubble long-press can fire', () => {
+    expect(waveTouchPhase(start, { x: 107, y: 103, t: 300 })).toBe('pending');
+    expect(waveTouchPhase(start, { x: 100, y: 100, t: 10 })).toBe('pending');
+  });
+  it('at 450ms the gesture is the bubble long-press, even if it then moves', () => {
+    expect(waveTouchPhase(start, { x: 100, y: 100, t: 450 })).toBe('hold');
+    expect(waveTouchPhase(start, { x: 140, y: 100, t: 600 })).toBe('hold');
+  });
+  it('a vertical move past the long-press tolerance is neither', () => {
+    expect(waveTouchPhase(start, { x: 102, y: 112, t: 100 })).toBe('none');
   });
 });

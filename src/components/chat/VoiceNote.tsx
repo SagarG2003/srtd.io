@@ -1,23 +1,25 @@
 // The voice-note body that sits inside the normal message bubble shell (same
 // radius, border and own/peer tint as a text bubble, owned by MessageBubble),
-// WhatsApp style: a hidden <audio> element driven by a ref, a square accent
-// play/pause control (44x44 hit area), a 20-bar decorative waveform the reader
-// drags along X to seek (a 12px dot rides the progress edge), the mono m:ss
-// time under it, and a 44px slot at the end: the sender photo with a mic badge
-// (fg-3 until the note has played to the end once on this device, then
-// accent), or while playing a speed pill cycling 1x / 1.5x / 2x (remembered for
-// the session across notes). When a note ends and the message right below is
-// an unplayed voice note from the same sender, that one starts 350ms later.
+// WhatsApp style. Received, three rows: [play 44x44] [waveform with dot]
+// [sender photo 40px + mic badge]; the mono m:ss length under the wave's start;
+// the always-visible Transcribe link left and the bubble's time right in a
+// fixed 44px row. Own, two rows: [own photo + mic badge] [play] [waveform];
+// the length left and the time and ticks right. The mic badge is fg-3 until
+// the note has played to the end once on this device, then accent; while
+// playing the photo slot shows a speed pill cycling 1x / 1.5x / 2x (remembered
+// for the session across notes). When a note ends and the message right below
+// is an unplayed voice note from the same sender, that one starts 350ms later.
 // The length shows before play from the stored durationMs (the recorder's
 // value); a finite media duration (loadedmetadata or durationchange) refines
 // it, and a non-finite one (MediaRecorder webm reports Infinity) never replaces
 // it. One note plays at a time across the app. No recording, no presign logic
 // (the url is handed in, null while the presign is still in flight).
 //
-// Under the wave row sits the tap-to-transcribe block, read synchronously from
-// the per-device transcript store so first paint is final: "Transcribing..."
-// while in flight, "Transcript not available" after a failure, else the text
-// (selectable) with a collapse chevron, or the folded one-line "Transcript" row.
+// The transcript state is read synchronously from the per-device transcript
+// store so first paint is final. On a received note the link reads
+// "Transcribe", "Transcribing…", "Hide transcript" / "Show transcript", or
+// "Transcript not available" + "Try again"; the transcript drops down under the
+// link row. Own notes carry no link (the menu's Transcribe stays).
 
 import { useEffect, useRef, useState } from 'react';
 import type {
@@ -28,7 +30,12 @@ import type {
   ReactNode,
 } from 'react';
 import { Avatar } from '@/components/ui/Avatar';
-import { IconChevronDown, IconMic, IconPause, IconPlay } from '@/components/ui/icons';
+import { IconMic, IconPause, IconPlay } from '@/components/ui/icons';
+import {
+  cancelPendingLongPressesWithin,
+  LONG_PRESS_MS,
+  MOVE_CANCEL_PX,
+} from '@/components/ui/useLongPress';
 import { cn } from '@/lib/cn';
 import { logger } from '@/lib/logger';
 import {
@@ -227,93 +234,187 @@ function logPlayFailure(error: unknown): void {
   });
 }
 
-/** Chevron-up glyph, drawn like the icon set (24 box, stroke 1.7). */
-function ChevronUpGlyph(): ReactElement {
-  return (
-    <svg
-      aria-hidden="true"
-      width={18}
-      height={18}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.7}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M6 15l6-6 6 6" />
-    </svg>
-  );
+/** A touch on the wave seeks once it moves this far (px) along X before the hold time. */
+export const WAVE_SEEK_LOCK_PX = 8;
+
+/**
+ * A touch on the wave: 'pending' until it decides; 'seek' (a horizontal drag);
+ * 'hold' (the bubble's long-press owns it); 'none' (moved, but neither).
+ */
+export type WaveTouchPhase = 'pending' | 'seek' | 'hold' | 'none';
+
+/**
+ * Where a pending touch on the wave stands, WhatsApp style: a horizontal move
+ * of WAVE_SEEK_LOCK_PX within LONG_PRESS_MS starts seeking; still pending at
+ * LONG_PRESS_MS it is the bubble's long-press; any other move past the
+ * long-press tolerance is neither. Pure.
+ */
+export function waveTouchPhase(
+  start: { x: number; y: number; t: number },
+  at: { x: number; y: number; t: number },
+): WaveTouchPhase {
+  if (at.t - start.t >= LONG_PRESS_MS) return 'hold';
+  const dx = at.x - start.x;
+  const dy = at.y - start.y;
+  if (Math.abs(dx) >= WAVE_SEEK_LOCK_PX) return 'seek';
+  if (dx * dx + dy * dy > MOVE_CANCEL_PX * MOVE_CANCEL_PX) return 'none';
+  return 'pending';
 }
 
-/** The transcript block under the wave row; nothing when there is no transcript state. */
-function TranscriptBlock(props: {
-  view: TranscriptView;
-  onCollapse: (collapsed: boolean) => void;
-}): ReactElement | null {
-  const { view } = props;
-  const rule = 'mt-1 border-t border-border';
+/** The Transcribe link's label state on a received note. */
+export type TranscribeLinkState = 'transcribe' | 'pending' | 'hide' | 'show' | 'failed';
+
+/** The link state for a transcript view. Pure. */
+export function transcribeLinkState(view: TranscriptView): TranscribeLinkState {
   switch (view.kind) {
     case 'none':
-      return null;
+      return 'transcribe';
+    case 'pending':
+      return 'pending';
+    case 'failed':
+      return 'failed';
+    case 'shown':
+      return view.collapsed ? 'show' : 'hide';
+  }
+}
+
+/** Swallow a pointer event here: a tap on the link never reaches swipe or long-press. */
+function stopPointer(e: { stopPropagation: () => void }): void {
+  e.stopPropagation();
+}
+
+const STOP_POINTER = {
+  onPointerDown: stopPointer,
+  onPointerMove: stopPointer,
+  onPointerUp: stopPointer,
+  onPointerCancel: stopPointer,
+};
+
+/** The link's type and 44px hit row; never selects text or opens the callout. */
+const LINK_TEXT =
+  'flex h-11 select-none items-center text-[15px] font-medium leading-5 [-webkit-touch-callout:none]';
+const LINK_BUTTON = cn(
+  LINK_TEXT,
+  'shrink-0 rounded-sm text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+);
+
+/** The always-visible Transcribe link on a received note; null when there is nothing to offer. */
+function TranscribeLink(props: {
+  state: TranscribeLinkState;
+  onTranscribe: (() => void) | undefined;
+  onCollapse: (collapsed: boolean) => void;
+}): ReactElement | null {
+  const { state, onTranscribe } = props;
+  switch (state) {
+    case 'transcribe':
+      return onTranscribe === undefined ? null : (
+        <button
+          type="button"
+          data-voice-link="transcribe"
+          onClick={onTranscribe}
+          className={LINK_BUTTON}
+        >
+          Transcribe
+        </button>
+      );
     case 'pending':
       return (
-        <div
-          data-voice-transcript="pending"
+        <span
+          data-voice-link="pending"
           role="status"
-          className={cn(rule, 'flex h-11 items-center gap-2 text-[13px] text-fg-2')}
+          className={cn(LINK_TEXT, 'shrink-0 text-fg-2')}
         >
-          <span
-            aria-hidden="true"
-            className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent"
-          />
           Transcribing…
-        </div>
+        </span>
+      );
+    case 'hide':
+    case 'show':
+      return (
+        <button
+          type="button"
+          data-voice-link={state}
+          aria-expanded={state === 'hide'}
+          onClick={() => props.onCollapse(state === 'hide')}
+          className={LINK_BUTTON}
+        >
+          {state === 'hide' ? 'Hide transcript' : 'Show transcript'}
+        </button>
       );
     case 'failed':
       return (
-        <p
-          data-voice-transcript="failed"
-          className={cn(rule, 'flex h-11 items-center text-[13px] text-fg-3')}
-        >
-          Transcript not available
-        </p>
+        <>
+          <span data-voice-link="failed" className={cn(LINK_TEXT, 'min-w-0 text-fg-3')}>
+            <span className="truncate">Transcript not available</span>
+          </span>
+          {onTranscribe !== undefined ? (
+            <button
+              type="button"
+              data-voice-link="retry"
+              onClick={onTranscribe}
+              className={LINK_BUTTON}
+            >
+              Try again
+            </button>
+          ) : null}
+        </>
       );
-    case 'shown':
-      return view.collapsed ? (
-        <button
-          type="button"
-          data-voice-transcript="collapsed"
-          aria-expanded={false}
-          onClick={() => props.onCollapse(false)}
-          className={cn(
-            rule,
-            'flex h-11 w-full items-center justify-between text-[15px] leading-5 text-fg-2',
-          )}
-        >
-          Transcript
-          <IconChevronDown size={18} />
-        </button>
-      ) : (
-        <div data-voice-transcript="shown" className={cn(rule, 'flex flex-col pt-2')}>
+  }
+}
+
+/**
+ * The transcript drop-down: a hairline rule, then the selectable text. It
+ * reveals on height (grid rows 0fr to 1fr) and opacity, 180ms ease-out, Y only;
+ * reduced motion shows it at once. It mounts in its current state, so a stored
+ * transcript paints open on first paint with no transition.
+ */
+function TranscriptDrop({ text, open }: { text: string; open: boolean }): ReactElement {
+  return (
+    <div
+      data-voice-transcript={open ? 'open' : 'closed'}
+      aria-hidden={open ? undefined : true}
+      className={cn(
+        'grid transition-[grid-template-rows,opacity,visibility] duration-[180ms] ease-out motion-reduce:transition-none',
+        open ? 'visible grid-rows-[1fr] opacity-100' : 'invisible grid-rows-[0fr] opacity-0',
+      )}
+    >
+      <div className="min-h-0 overflow-hidden">
+        <div className="border-t border-border pb-1 pt-2">
           <p
             dir="auto"
             className="select-text whitespace-pre-wrap [overflow-wrap:anywhere] text-[15px] leading-5 text-fg"
           >
-            {view.text}
+            {text}
           </p>
-          <button
-            type="button"
-            aria-label="Collapse transcript"
-            aria-expanded
-            onClick={() => props.onCollapse(true)}
-            className="mx-auto flex h-7 w-11 items-center justify-center text-fg-2"
-          >
-            <ChevronUpGlyph />
-          </button>
         </div>
-      );
+      </div>
+    </div>
+  );
+}
+
+/** An own note's in-flight or failed status line (own notes carry no link). */
+function OwnTranscriptStatus({ view }: { view: TranscriptView }): ReactElement | null {
+  if (view.kind === 'pending') {
+    return (
+      <p
+        data-voice-transcript="pending"
+        role="status"
+        className="flex h-11 items-center border-t border-border text-[15px] leading-5 text-fg-2"
+      >
+        Transcribing…
+      </p>
+    );
   }
+  if (view.kind === 'failed') {
+    return (
+      <p
+        data-voice-transcript="failed"
+        className="flex h-11 items-center border-t border-border text-[15px] leading-5 text-fg-3"
+      >
+        Transcript not available
+      </p>
+    );
+  }
+  return null;
 }
 
 export function VoiceNote({
@@ -325,6 +426,8 @@ export function VoiceNote({
   mine = false,
   sender,
   nextVoiceId,
+  meta,
+  onTranscribe,
 }: {
   url: string | null;
   name: string;
@@ -334,12 +437,16 @@ export function VoiceNote({
   spacer?: ReactNode;
   /** The recorded message's id: keys the played state and the transcript. */
   messageId?: string | undefined;
-  /** Own bubble: the dot and badge draw on the bubble-own fill. */
+  /** Own bubble: photo first, the dot and badge draw on the bubble-own fill. */
   mine?: boolean | undefined;
-  /** Whose photo fills the end slot while the note is not playing. */
+  /** Whose photo fills the photo slot while the note is not playing. */
   sender?: { name: string; src?: string | undefined } | undefined;
   /** The message right below, when it is a voice note from the same sender. */
   nextVoiceId?: string | null | undefined;
+  /** The bubble's time (and ticks): right of the Transcribe row, or of the length on own notes. */
+  meta?: ReactNode;
+  /** Received, recorded notes only: run the tap-to-transcribe flow. */
+  onTranscribe?: (() => void) | undefined;
 }): ReactElement {
   const audioRef = useRef<HTMLAudioElement>(null);
   const waveRef = useRef<HTMLDivElement>(null);
@@ -349,7 +456,8 @@ export function VoiceNote({
   const [rate, setRate] = useState(sessionRate);
   // The drag position (0..1) while the wave is held; null when not dragging.
   const [drag, setDrag] = useState<number | null>(null);
-  const touchPointer = useRef(false);
+  // The touch on the wave, from its pointerdown until it lifts.
+  const touch = useRef<{ x: number; y: number; t: number; phase: WaveTouchPhase } | null>(null);
   const { record, pending } = useVoiceRecord(messageId);
   const played = record?.playedAt !== undefined;
   const latest = useRef({ messageId, nextVoiceId });
@@ -451,40 +559,84 @@ export function VoiceNote({
     audio.currentTime = seconds;
     setCurrent(seconds);
   };
-  // The wave owns its pointer: a drag never reaches the bubble's swipe-to-reply
-  // or long-press, and never starts a native selection or callout.
+  const canSeek = !disabled && total !== null;
+  // Start a drag: the wave captures the pointer so the moves stay its own.
+  const beginDrag = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // The pointer is already gone; the drag ends on its own.
+    }
+    setDrag(fractionAt(e.clientX));
+  };
+  // The hold timers armed by this press on the bubble (or on anything holding the note).
+  const cancelHolds = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    const scope = e.currentTarget.closest('[data-bubble]') ?? document.body;
+    cancelPendingLongPressesWithin(scope);
+  };
+  // Mouse: the wave owns its pointer, a press seeks at once (unchanged). Touch
+  // and pen, WhatsApp style: the press reaches the bubble, which arms its
+  // long-press and swipe; the wave keeps the moves (the swipe never sees them)
+  // and a horizontal move of 8px within 450ms cancels the hold and seeks. A
+  // still finger at 450ms is the bubble's long-press. The wave is touch-none,
+  // select-none and callout-free, so no native selection or callout starts.
   const wave = {
     onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => {
-      e.stopPropagation();
-      touchPointer.current = e.pointerType !== 'mouse';
-      if (disabled || total === null || e.button !== 0) return;
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch {
-        // The pointer is already gone; the drag ends on its own.
+      if (e.pointerType !== 'mouse') {
+        touch.current = { x: e.clientX, y: e.clientY, t: e.timeStamp, phase: 'pending' };
+        return;
       }
-      setDrag(fractionAt(e.clientX));
+      e.stopPropagation();
+      touch.current = null;
+      if (!canSeek || e.button !== 0) return;
+      beginDrag(e);
     },
     onPointerMove: (e: ReactPointerEvent<HTMLDivElement>) => {
+      const held = touch.current;
+      if (held === null) {
+        e.stopPropagation();
+        if (drag !== null) setDrag(fractionAt(e.clientX));
+        return;
+      }
+      if (held.phase === 'hold') return;
       e.stopPropagation();
-      if (drag !== null) setDrag(fractionAt(e.clientX));
+      if (held.phase === 'pending') {
+        held.phase = waveTouchPhase(held, { x: e.clientX, y: e.clientY, t: e.timeStamp });
+        if (held.phase === 'hold') return;
+        if (held.phase === 'seek' || held.phase === 'none') cancelHolds(e);
+        if (held.phase === 'seek') {
+          if (canSeek) beginDrag(e);
+          else held.phase = 'none';
+        }
+        return;
+      }
+      if (held.phase === 'seek' && drag !== null) setDrag(fractionAt(e.clientX));
     },
     onPointerUp: (e: ReactPointerEvent<HTMLDivElement>) => {
-      e.stopPropagation();
+      const held = touch.current;
+      touch.current = null;
+      // A touch release reaches the bubble so its swipe and hold reset.
+      if (held === null) e.stopPropagation();
       if (drag === null) return;
       seekTo(fractionAt(e.clientX));
       setDrag(null);
     },
     onPointerCancel: (e: ReactPointerEvent<HTMLDivElement>) => {
-      e.stopPropagation();
+      if (touch.current === null) e.stopPropagation();
+      touch.current = null;
       setDrag(null);
     },
     onContextMenu: (e: ReactMouseEvent<HTMLDivElement>) => {
-      // A touch hold on the wave is a drag, never the menu or a callout.
-      if (touchPointer.current) {
-        e.preventDefault();
-        e.stopPropagation();
+      const held = touch.current;
+      if (held === null) return;
+      // Never the native menu or callout. A still touch is the bubble's hold
+      // (its contextmenu acts as the hold); a seek or a moved touch is not.
+      e.preventDefault();
+      if (held.phase === 'pending' || held.phase === 'hold') {
+        held.phase = 'hold';
+        return;
       }
+      e.stopPropagation();
     },
     onKeyDown: (e: ReactKeyboardEvent<HTMLDivElement>) => {
       if (total === null || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return;
@@ -496,23 +648,108 @@ export function VoiceNote({
   };
 
   const view = transcriptView(record, pending);
+  const received = !mine;
+  const link =
+    received && messageId !== undefined ? (
+      <TranscribeLink
+        state={transcribeLinkState(view)}
+        onTranscribe={onTranscribe}
+        onCollapse={(collapsed) => voiceStore.update(messageId, { collapsed })}
+      />
+    ) : null;
+  // Own notes carry no link, so a stored transcript there is always open.
+  const dropOpen = view.kind === 'shown' && (mine || !view.collapsed);
+  const showDrop = messageId !== undefined && (received || view.kind === 'shown');
+  const metaSlot =
+    meta !== undefined ? (
+      <span data-voice-meta="" className="ml-auto flex shrink-0 items-center [&>*]:mt-0">
+        {meta}
+      </span>
+    ) : null;
 
-  return (
-    <div data-voice-note="" className="flex w-full flex-col">
-      <audio ref={audioRef} src={url ?? undefined} preload="metadata" className="hidden" />
-      <div className="flex items-center gap-2">
-        {/* 44x44 hit area around the 36px square play control (primary button look). */}
+  // 44x44 hit area around the 36px square play control (primary button look).
+  const playButton = (
+    <button
+      type="button"
+      onClick={toggle}
+      disabled={disabled}
+      aria-label={playing ? 'Pause voice note' : 'Play voice note'}
+      className={cn(
+        'group/play flex h-11 w-11 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-40',
+        received && '-ml-1',
+      )}
+    >
+      <span className="flex h-9 w-9 items-center justify-center rounded-md bg-accent text-accent-fg group-hover/play:bg-accent-hover">
+        {playing ? <IconPause size={18} /> : <IconPlay size={18} />}
+      </span>
+    </button>
+  );
+
+  // The 44px photo slot: the sender photo (40px) with the mic badge, or while
+  // playing the speed pill.
+  const photoSlot = (
+    <div className={cn('flex h-11 w-11 shrink-0 items-center justify-center', mine && '-ml-0.5')}>
+      {playing ? (
         <button
           type="button"
-          onClick={toggle}
-          disabled={disabled}
-          aria-label={playing ? 'Pause voice note' : 'Play voice note'}
-          className="group/play -ml-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-40"
+          data-voice-speed=""
+          onClick={cycleSpeed}
+          aria-label={`Playback speed ${speedLabel(rate)}`}
+          className="flex h-11 w-11 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         >
-          <span className="flex h-9 w-9 items-center justify-center rounded-md bg-accent text-accent-fg group-hover/play:bg-accent-hover">
-            {playing ? <IconPause size={18} /> : <IconPlay size={18} />}
+          <span className="rounded-full bg-accent px-2 py-0.5 font-mono text-xs text-accent-fg">
+            {speedLabel(rate)}
           </span>
         </button>
+      ) : sender !== undefined ? (
+        <span className="relative flex" data-voice-played={played ? '' : undefined}>
+          <Avatar
+            name={sender.name}
+            {...(sender.src !== undefined ? { src: sender.src } : {})}
+            size="header"
+          />
+          <span
+            aria-hidden="true"
+            data-voice-mic=""
+            className={cn(
+              'absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full',
+              mine ? 'bg-bubble-own' : 'bg-panel-2',
+              mine
+                ? played
+                  ? 'text-accent-fg'
+                  : 'text-accent-fg opacity-60'
+                : played
+                  ? 'text-accent'
+                  : 'text-fg-3',
+            )}
+          >
+            <IconMic size={12} />
+          </span>
+        </span>
+      ) : null}
+    </div>
+  );
+
+  const duration = (
+    <span
+      data-voice-duration=""
+      className="font-mono text-xs leading-4 tabular-nums text-fg-2"
+      title={name}
+    >
+      {label}
+    </span>
+  );
+
+  return (
+    <div
+      data-voice-note=""
+      data-voice-side={mine ? 'own' : 'received'}
+      className="flex w-full flex-col"
+    >
+      <audio ref={audioRef} src={url ?? undefined} preload="metadata" className="hidden" />
+      <div className="flex items-center gap-2">
+        {mine ? photoSlot : null}
+        {playButton}
         <div className="flex min-w-[120px] flex-1 flex-col">
           <div
             ref={waveRef}
@@ -550,59 +787,26 @@ export function VoiceNote({
               style={{ left: `${progress}%` }}
             />
           </div>
-          <span
-            data-voice-duration=""
-            className="-mt-1 font-mono text-xs leading-4 tabular-nums text-fg-2"
-            title={name}
-          >
-            {label}
-          </span>
+          {/* Row 2: the length under the wave's start; own notes end it with the time and ticks. */}
+          <div className="-mt-1 flex min-h-4 items-center gap-2 whitespace-nowrap">
+            {duration}
+            {mine ? metaSlot : null}
+          </div>
         </div>
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center">
-          {playing ? (
-            <button
-              type="button"
-              data-voice-speed=""
-              onClick={cycleSpeed}
-              aria-label={`Playback speed ${speedLabel(rate)}`}
-              className="flex h-11 w-11 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-            >
-              <span className="rounded-full bg-accent px-2 py-0.5 font-mono text-xs text-accent-fg">
-                {speedLabel(rate)}
-              </span>
-            </button>
-          ) : sender !== undefined ? (
-            <span className="relative flex" data-voice-played={played ? '' : undefined}>
-              <Avatar
-                name={sender.name}
-                {...(sender.src !== undefined ? { src: sender.src } : {})}
-                size="header"
-              />
-              <span
-                aria-hidden="true"
-                className={cn(
-                  'absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full',
-                  mine ? 'bg-bubble-own' : 'bg-panel-2',
-                  mine
-                    ? played
-                      ? 'text-accent-fg'
-                      : 'text-accent-fg opacity-60'
-                    : played
-                      ? 'text-accent'
-                      : 'text-fg-3',
-                )}
-              >
-                <IconMic size={12} />
-              </span>
-            </span>
-          ) : null}
-        </div>
+        {received ? photoSlot : null}
       </div>
-      {messageId !== undefined ? (
-        <TranscriptBlock
-          view={view}
-          onCollapse={(collapsed) => voiceStore.update(messageId, { collapsed })}
-        />
+      {received && (link !== null || metaSlot !== null) ? (
+        // Row 3: a fixed 44px row, so a label change never moves the time.
+        <div data-voice-foot="" className="flex h-11 items-center gap-3 whitespace-nowrap">
+          <span className="flex min-w-0 items-center gap-1" {...STOP_POINTER}>
+            {link}
+          </span>
+          {metaSlot}
+        </div>
+      ) : null}
+      {mine ? <OwnTranscriptStatus view={view} /> : null}
+      {showDrop ? (
+        <TranscriptDrop text={view.kind === 'shown' ? view.text : ''} open={dropOpen} />
       ) : null}
       {spacer !== undefined ? (
         <p className="h-3 text-xs leading-3" aria-hidden="true">
