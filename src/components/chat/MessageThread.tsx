@@ -152,7 +152,7 @@ import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { ContactSheet } from '@/components/chat/ContactSheet';
 import type { GroupInfoTabsWiring } from '@/components/chat/GroupInfoSheet';
 import { SelectionBar, SelectionHeader } from '@/components/chat/SelectionBar';
-import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
+import { quoteMedia, ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { withDaySeparators } from '@/components/chat/day-separators';
 import { ForwardPicker, type ForwardSendResult } from '@/components/chat/ForwardPicker';
 import {
@@ -1462,6 +1462,8 @@ export function MessageBubble(props: {
   postRefs?: BubblePostRefs | undefined;
   /** A voice-only bubble: the voice note right below from the same sender. */
   nextVoiceId?: string | null | undefined;
+  /** The quoted message when it is loaded in the thread (the quote reads its media). */
+  quoted?: ThreadMessage | undefined;
   bubbleRef?: Ref<HTMLDivElement>;
   /** The row; in selection mode its taps and holds are the selection gesture's. */
   rowRef?: Ref<HTMLLIElement>;
@@ -1677,6 +1679,8 @@ export function MessageBubble(props: {
                 }
                 deleted={parentDeleted}
                 inBubble={layout}
+                media={parentDeleted ? null : quoteMedia(props.quoted)}
+                thumbSource={{ cache, presignEnabled }}
                 onJump={() => props.onJumpToMessage?.(reply.id)}
                 className={album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1'}
               />
@@ -2007,6 +2011,7 @@ function MessageRow(props: {
   postRefs?: BubblePostRefs | undefined;
   /** A voice-only row: the voice note right below from the same sender. */
   nextVoiceId?: string | null | undefined;
+  quoted?: ThreadMessage | undefined;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const iconRef = useRef<HTMLSpanElement>(null);
@@ -2125,6 +2130,7 @@ function MessageRow(props: {
       workspaceId={props.workspaceId}
       meta={props.meta}
       nextVoiceId={props.nextVoiceId}
+      quoted={props.quoted}
       bubbleRef={bubbleRef}
       rowRef={rowRef}
       swipe={{ iconRef }}
@@ -2436,6 +2442,11 @@ function ThreadBody(
   const { onNewestVisible, jumpRequest } = props;
   // Auto-play chain: each voice note's same-sender voice note right below.
   const voiceNext = useMemo(() => nextVoiceIds(props.messages), [props.messages]);
+  // Reply quotes read the quoted message's media from the loaded thread (no fetch).
+  const messagesById = useMemo(
+    () => new Map(props.messages.map((m) => [m.id, m] as const)),
+    [props.messages],
+  );
   // The open menu: its message, anchor, held bubble and the server moment its
   // rows were judged at (the edit and delete windows). While it is open, one
   // timeout for the message's next window boundary re-judges them.
@@ -2888,6 +2899,9 @@ function ThreadBody(
               onSwipeReply={props.onReply}
               onJumpToMessage={scrollToMessage}
               nextVoiceId={voiceNext.get(row.message.id) ?? null}
+              quoted={
+                row.message.reply !== null ? messagesById.get(row.message.reply.id) : undefined
+              }
               postRefs={{
                 chip: props.chipFor?.(row.message),
                 onTalkAbout: props.onTalkAbout,
@@ -4052,6 +4066,12 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           onCancelReply={() => setReplyDraft(null)}
           viewerUserId={props.currentUserId}
           {...(replyDraft !== null ? { reply: replyDraft } : {})}
+          {...(replyDraft !== null && replyDraft.deleted !== true
+            ? {
+                replyMedia: quoteMedia(props.messages.find((m) => m.id === replyDraft.quote.id)),
+                replyThumbSource: { cache: presignCache, presignEnabled },
+              }
+            : {})}
           {...(aboutDraft !== null && !aboutGone ? { about: aboutPost ?? null } : {})}
           onCancelAbout={() => setAboutDraft(null)}
           sharedPostIds={sharedInChat}

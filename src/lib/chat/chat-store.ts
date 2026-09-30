@@ -17,8 +17,20 @@ import {
   type PreviewContent,
   type UnreadCount,
 } from '@/lib/chat/history';
-import type { LocalMessageContent, ThreadMessage } from '@/lib/chat/thread';
-import { withoutLocal, type MessageAttachment, type ReplyQuote } from '@/lib/chat/attachments';
+import {
+  attachmentSummary,
+  attachmentSummaryText,
+  SUMMARY_LABELS,
+  type LocalMessageContent,
+  type SummaryAttachment,
+  type ThreadMessage,
+} from '@/lib/chat/thread';
+import {
+  withoutLocal,
+  type AttachmentKind,
+  type MessageAttachment,
+  type ReplyQuote,
+} from '@/lib/chat/attachments';
 
 /** Sender label written before the preview when the current user sent it. */
 export const OWN_PREFIX = 'You';
@@ -30,10 +42,17 @@ export const ATTACHMENT_PREVIEW = 'Attachment';
 export const PREVIEW_LABELS = {
   post: 'Post',
   brief: 'Brief',
-  photo: 'Photo',
-  file: 'File',
-  voice: 'Voice message',
+  photo: SUMMARY_LABELS.photo,
+  file: SUMMARY_LABELS.file,
+  voice: SUMMARY_LABELS.voice,
 } as const;
+
+/** A stand-in attachment per preview kind: the list line knows kinds, not names. */
+const KIND_ATTACHMENT: Record<AttachmentKind, SummaryAttachment> = {
+  image: { assetId: '', name: '', mime: 'image/jpeg' },
+  audio: { assetId: '', name: '', mime: 'audio/webm' },
+  file: { assetId: '', name: '', mime: '' },
+};
 
 /** A registry name lookup (display name by user id; undefined when not loaded). */
 export type PreviewNameOf = (userId: string) => string | undefined;
@@ -167,10 +186,10 @@ export function previewText(content: PreviewContent): string {
   if (content.body.trim() !== '') return content.body;
   if ((content.sharedPostCount ?? 0) > 0) return PREVIEW_LABELS.post;
   if ((content.sharedBriefCount ?? 0) > 0) return PREVIEW_LABELS.brief;
-  const kinds = content.attachmentKinds ?? [];
-  if (kinds.includes('image')) return PREVIEW_LABELS.photo;
-  if (kinds.includes('file')) return PREVIEW_LABELS.file;
-  if (kinds.includes('audio')) return PREVIEW_LABELS.voice;
+  const summary = attachmentSummary({
+    attachments: (content.attachmentKinds ?? []).map((kind) => KIND_ATTACHMENT[kind]),
+  });
+  if (summary !== null) return attachmentSummaryText(summary);
   return content.hasAttachments ? ATTACHMENT_PREVIEW : '';
 }
 

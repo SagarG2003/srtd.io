@@ -229,7 +229,8 @@ describe('P4: preview text for a message with no body', () => {
   const cases: Array<[string, Partial<ThreadMessage>, string]> = [
     ['shared post', { sharedPostIds: ['p1'] }, 'Post'],
     ['shared brief', { sharedBriefIds: ['b1'] }, 'Brief'],
-    ['images', { attachments: [img, img] }, 'Photo'],
+    ['image', { attachments: [img] }, 'Photo'],
+    ['images', { attachments: [img, img] }, '2 photos'],
     ['file', { attachments: [pdf] }, 'File'],
     ['voice', { attachments: [voice] }, 'Voice message'],
     ['mixed post + photo', { sharedPostIds: ['p1'], attachments: [img] }, 'Post'],

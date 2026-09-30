@@ -24,6 +24,8 @@ import { cn } from '@/lib/cn';
 import type { PresignCache } from '@/lib/asset-presign';
 import {
   classifyAttachment,
+  isVoiceAttachment,
+  localAudioUrl,
   splitAlbum,
   uploadProgress,
   type MessageAttachment,
@@ -153,6 +155,8 @@ export type AttachmentView =
       url: string | null;
       name: string;
       durationMs: number | undefined;
+      /** Own instant send: upload progress until the version id lands; null once sent. */
+      progress: number | null;
     }
   | { kind: 'file'; name: string; url: string | null; progress?: number };
 
@@ -173,12 +177,26 @@ export function attachmentView(args: {
   presignEnabled: boolean;
   url: string | null;
   failed: boolean;
+  /** An own voice note's recorded file (object URL); plays before and after the upload. */
+  localUrl?: string | null;
 }): AttachmentView {
   const { attachment, presignEnabled, url, failed } = args;
   const progress = uploadProgress(attachment);
   const previewUrl = attachment.local?.previewUrl ?? null;
   if (classifyAttachment(attachment.mime) === 'image' && previewUrl !== null) {
     return { kind: 'image-local', src: previewUrl, alt: attachment.name, progress };
+  }
+  // A voice note is always the voice bubble, uploading or sent, so the switch
+  // never changes its size; it plays from the local file when there is one.
+  if (isVoiceAttachment(attachment)) {
+    const localUrl = args.localUrl ?? null;
+    return {
+      kind: 'audio',
+      url: localUrl ?? (presignEnabled && !failed ? url : null),
+      name: attachment.name,
+      durationMs: attachment.durationMs,
+      progress,
+    };
   }
   if (progress !== null) {
     return { kind: 'file', name: attachment.name, url: null, progress };
@@ -187,14 +205,6 @@ export function attachmentView(args: {
     return url !== null
       ? { kind: 'image', src: url, alt: attachment.name }
       : { kind: 'image-pending', alt: attachment.name };
-  }
-  if (classifyAttachment(attachment.mime) === 'audio' && presignEnabled && !failed) {
-    return {
-      kind: 'audio',
-      url,
-      name: attachment.name,
-      durationMs: attachment.durationMs,
-    };
   }
   return { kind: 'file', name: attachment.name, url };
 }
@@ -216,14 +226,16 @@ function AttachmentItem({
 }): ReactElement {
   // The render layer presigns the attachment's VERSION id (assetId carries the
   // asset_versions.id) through the shared cache, which dedupes in-flight ids.
-  // A local preview is the tile for the session: it never presigns.
-  const hasPreview = attachment.local?.previewUrl != null;
+  // A local preview (or an own voice note's recorded file) is the source for
+  // the session: it never presigns.
+  const localUrl = isVoiceAttachment(attachment) ? localAudioUrl(attachment) : null;
+  const hasPreview = attachment.local?.previewUrl != null || localUrl !== null;
   const { url, failed } = useAttachmentUrl(
     attachment.assetId,
     cache,
     presignEnabled && !hasPreview,
   );
-  const view = attachmentView({ attachment, presignEnabled, url, failed });
+  const view = attachmentView({ attachment, presignEnabled, url, failed, localUrl });
 
   switch (view.kind) {
     case 'image': {
@@ -268,14 +280,19 @@ function AttachmentItem({
     case 'image-pending':
       return <div className="h-32 w-44 animate-pulse rounded-lg border border-border bg-panel-2" />;
     case 'audio':
+      // One wrapper in both states; the upload bar is absolute, so the bubble
+      // keeps its size when the upload completes.
       return (
-        <VoiceNote
-          url={view.url}
-          name={view.name}
-          durationMs={view.durationMs}
-          {...(voiceSpacer !== undefined ? { spacer: voiceSpacer } : {})}
-          {...(voice !== undefined ? voice : {})}
-        />
+        <div data-voice-upload={view.progress !== null ? '' : undefined} className="relative">
+          <VoiceNote
+            url={view.url}
+            name={view.name}
+            durationMs={view.durationMs}
+            {...(voiceSpacer !== undefined ? { spacer: voiceSpacer } : {})}
+            {...(voice !== undefined ? voice : {})}
+          />
+          {view.progress !== null ? <UploadBar progress={view.progress} /> : null}
+        </div>
       );
     case 'file':
       return <FileChip name={view.name} url={view.url} progress={view.progress} />;
