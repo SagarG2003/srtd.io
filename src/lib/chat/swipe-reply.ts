@@ -55,7 +55,8 @@ export const SWIPE_REST: SwipeFrame = {
 export interface SwipeReplyHandlers {
   onPointerDown: (event: SwipePointerSample) => void;
   onPointerMove: (event: SwipePointerSample) => void;
-  onPointerUp: () => void;
+  /** The release; its timeStamp (absent: the controller's clock) ends the velocity window. */
+  onPointerUp: (event?: Pick<SwipePointerSample, 'timeStamp'>) => void;
   onPointerCancel: () => void;
 }
 
@@ -213,9 +214,15 @@ export function createSwipeReplyController({
     );
   }
 
-  function velocity(): number {
-    const last = samples[samples.length - 1];
-    const first = samples[0];
+  /**
+   * The release velocity (px/ms): only the samples of the last
+   * SWIPE_VELOCITY_WINDOW_MS before the release count, and a finger that
+   * stopped moving longer ago than that is not flicking (0).
+   */
+  function velocity(releaseT: number): number {
+    const recent = samples.filter((sample) => releaseT - sample.t <= SWIPE_VELOCITY_WINDOW_MS);
+    const last = recent[recent.length - 1];
+    const first = recent[0];
     if (last === undefined || first === undefined || last.t <= first.t) return 0;
     return (last.x - first.x) / (last.t - first.t);
   }
@@ -268,8 +275,9 @@ export function createSwipeReplyController({
     });
   }
 
-  function onPointerUp(): void {
-    const reply = phase === 'swiping' && swipeTriggers(dx, velocity());
+  function onPointerUp(event?: Pick<SwipePointerSample, 'timeStamp'>): void {
+    const releaseT = event?.timeStamp ?? now();
+    const reply = phase === 'swiping' && swipeTriggers(dx, velocity(releaseT));
     reset();
     if (reply) onReply();
   }

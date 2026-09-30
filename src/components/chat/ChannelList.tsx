@@ -322,8 +322,7 @@ export function channelListError(onRetry: () => void): ReactElement {
   return (
     <EmptyState
       icon={<IconChat size={24} />}
-      title="Couldn't load conversations"
-      description="Check your connection and try again."
+      title="Couldn't load chats"
       action={
         <Button size="lg" variant="primary" className="min-w-[44px]" onClick={onRetry}>
           Retry

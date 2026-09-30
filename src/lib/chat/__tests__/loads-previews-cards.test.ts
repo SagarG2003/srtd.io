@@ -379,7 +379,7 @@ describe('P7: cards are batched per thread', () => {
     expect(cache.posts(postIds).loading).toBe(true);
     await settle();
     expect(readPosts).toHaveBeenCalledTimes(1);
-    expect(readPosts).toHaveBeenCalledWith(postIds);
+    expect(readPosts).toHaveBeenCalledWith(postIds, expect.any(AbortSignal));
     expect(readBriefs).toHaveBeenCalledTimes(1);
     expect(readNames).toHaveBeenCalledTimes(1);
     const snap = cache.posts(['p3']);
@@ -391,7 +391,7 @@ describe('P7: cards are batched per thread', () => {
     cache.request({ postIds: [...postIds, 'p10'] });
     await settle();
     expect(readPosts).toHaveBeenCalledTimes(2);
-    expect(readPosts).toHaveBeenLastCalledWith(['p10']);
+    expect(readPosts).toHaveBeenLastCalledWith(['p10'], expect.any(AbortSignal));
     cache.dispose();
   });
 
@@ -403,17 +403,15 @@ describe('P7: cards are batched per thread', () => {
     expect(readPosts.mock.calls.map(([ids]) => ids.length)).toEqual([CARD_READ_CHUNK, 100, 50]);
   });
 
-  it('a read that times out (5s) settles as the fallback, never a skeleton forever', async () => {
+  it('a read that times out (5s) keeps the skeleton (never "not visible") and retries', async () => {
     vi.useFakeTimers();
     const never = () => new Promise<never>(() => {});
     const { readers } = cardReaders({ readPosts: never, readBriefs: never });
     const cache = createSharedCardCache(readers, { schedule: (flush) => flush() });
     cache.request({ postIds: ['p1'], briefIds: ['b1'] });
-    await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS - 1);
-    expect(cache.posts(['p1']).loading).toBe(true);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(cache.posts(['p1'])).toMatchObject({ loading: false, posts: [] });
-    expect(cache.briefs(['b1'])).toEqual({ loading: false, briefs: [] });
+    await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+    expect(cache.posts(['p1'])).toMatchObject({ loading: true, posts: [], failed: [] });
+    expect(cache.briefs(['b1'])).toMatchObject({ loading: true, failed: [] });
   });
 
   it('a failed refresh keeps the cards shown; dispose ignores reads in flight', async () => {

@@ -5,10 +5,14 @@
 // is discarded. The thread (open channel) and the store (badges, toasts) both
 // receive the same Agora message, so one verifier per Supabase client is
 // shared between them: the lookup runs once per id and the "absent" warning is
-// logged once, by the verifier, never by both callers.
+// logged once, by the verifier, never by both callers. A lookup that fails
+// (an error or its 5s timeout) is tried once more after 5s; if that fails too
+// the verifier gives up on it and tells its listeners, and the store re-reads
+// the list lines and unread counts, so the message is never silently lost.
 
 import type { Client } from '@srtdio/rpc';
 import { logger } from '@/lib/logger';
+import { READ_TIMEOUT_MS } from '@/lib/chat-reads';
 import { loadMessageById, type MessageLookup } from '@/lib/chat/history';
 
 /** How many settled lookups are remembered (FIFO) for dedupe. */
@@ -22,7 +26,18 @@ export interface LiveVerifier {
 export interface LiveVerifierDeps {
   lookup: (messageId: string) => Promise<MessageLookup | { error: string }>;
   warn: (message: string, context: Record<string, unknown>) => void;
+  /** Retry a failed lookup once after this long (ms); absent: no retry. */
+  retryDelayMs?: number;
+  /** Both tries failed: the message could not be verified. */
+  onGiveUp?: (messageId: string) => void;
+  /** Injected in tests. */
+  delay?: (ms: number) => Promise<void>;
 }
+
+const wait = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 /** Build a verifier over an injected lookup (unit-tested with a fake). */
 export function createLiveVerifier(deps: LiveVerifierDeps): LiveVerifier {
@@ -30,7 +45,19 @@ export function createLiveVerifier(deps: LiveVerifierDeps): LiveVerifier {
   const verify = (messageId: string): Promise<MessageLookup> => {
     const known = results.get(messageId);
     if (known !== undefined) return known;
-    const pending = deps.lookup(messageId).then((outcome): MessageLookup => {
+    const retryDelayMs = deps.retryDelayMs;
+    const first = deps.lookup(messageId);
+    const attempt =
+      retryDelayMs === undefined
+        ? first
+        : first.then(async (outcome) => {
+            if (!('error' in outcome)) return outcome;
+            await (deps.delay ?? wait)(retryDelayMs);
+            const again = await deps.lookup(messageId);
+            if ('error' in again) deps.onGiveUp?.(messageId);
+            return again;
+          });
+    const pending = attempt.then((outcome): MessageLookup => {
       if ('error' in outcome) {
         deps.warn('chat: live message verification failed, discarded', {
           message_id: messageId,
@@ -57,6 +84,17 @@ export function createLiveVerifier(deps: LiveVerifierDeps): LiveVerifier {
 
 const verifiers = new WeakMap<Client, LiveVerifier>();
 
+/** Who hears that a live message could not be verified after its retry. */
+const giveUpListeners = new Set<(messageId: string) => void>();
+
+/** Subscribe to verify give-ups (the store re-reads lines and counts); returns the unsubscribe. */
+export function onLiveVerifyGiveUp(listener: (messageId: string) => void): () => void {
+  giveUpListeners.add(listener);
+  return () => {
+    giveUpListeners.delete(listener);
+  };
+}
+
 /** The verifier shared by every caller on this Supabase client. */
 export function liveVerifierFor(client: Client): LiveVerifier {
   const existing = verifiers.get(client);
@@ -67,6 +105,10 @@ export function liveVerifierFor(client: Client): LiveVerifier {
       return result.ok ? result.data : { error: result.error.message };
     },
     warn: (message, context) => logger.warn(message, context),
+    retryDelayMs: READ_TIMEOUT_MS,
+    onGiveUp: (messageId) => {
+      for (const listener of [...giveUpListeners]) listener(messageId);
+    },
   });
   verifiers.set(client, verifier);
   return verifier;

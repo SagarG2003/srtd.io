@@ -11,6 +11,7 @@ import { isAgencySide, isClient } from '@/components/pages/pcs/roles';
 import { fetchMemberRole } from '@/lib/assets';
 import { useSession } from '@/lib/session-context';
 import { supabase } from '@/lib/supabase';
+import { READ_TIMEOUT_MS } from '@/lib/chat-reads';
 
 export { fetchMemberRole };
 
@@ -50,8 +51,16 @@ export function resolveViewerSide(
   if (hit !== undefined) return Promise.resolve(hit);
   const pending = inFlight.get(key);
   if (pending !== undefined) return pending;
-  const next = fetchMemberRole(client, workspaceId, userId)
-    .then(sideForRole, () => 'unknown' as const)
+  // Bounded at 5s: a role read that never answers settles as 'unknown' (not
+  // cached, so the next mount retries it) and never holds a card or the strip.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const next = Promise.race([
+    fetchMemberRole(client, workspaceId, userId).then(sideForRole, () => 'unknown' as const),
+    new Promise<ViewerSide>((resolve) => {
+      timer = setTimeout(() => resolve('unknown'), READ_TIMEOUT_MS);
+    }),
+  ])
+    .finally(() => clearTimeout(timer))
     .then((side) => {
       inFlight.delete(key);
       if (side !== 'unknown') resolved.set(key, side);

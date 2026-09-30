@@ -9,7 +9,13 @@ import { useEffect, useMemo, useRef } from 'react';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Tag } from '@/components/ui/Tag';
-import { SHARED_CARD, useThreadCardCache } from '@/components/chat/PostCard';
+import {
+  CouldntLoadCard,
+  SHARED_CARD,
+  useRetryInView,
+  useThreadCardCache,
+  type ThreadCardCache,
+} from '@/components/chat/PostCard';
 import { IconBriefs } from '@/components/ui/icons';
 import {
   briefRoute,
@@ -18,7 +24,12 @@ import {
   type SharedBriefView,
 } from '@/lib/chat/briefs';
 
-function useSharedBriefs(briefIds: string[]): { views: SharedBriefView[]; loading: boolean } {
+function useSharedBriefs(briefIds: string[]): {
+  views: SharedBriefView[];
+  loading: boolean;
+  failed: string[];
+  cache: ThreadCardCache | null;
+} {
   const cache = useThreadCardCache();
   const key = briefIds.join(',');
   const idsRef = useRef(briefIds);
@@ -29,7 +40,9 @@ function useSharedBriefs(briefIds: string[]): { views: SharedBriefView[]; loadin
   }, [cache, key]);
 
   const snapshot =
-    cache !== null && briefIds.length > 0 ? cache.briefs(briefIds) : { loading: false, briefs: [] };
+    cache !== null && briefIds.length > 0
+      ? cache.briefs(briefIds)
+      : { loading: false, briefs: [], failed: [] };
   const version = cache?.version() ?? 0;
   const views = useMemo(
     () => sharedBriefViews(briefIds, snapshot.briefs),
@@ -37,15 +50,18 @@ function useSharedBriefs(briefIds: string[]): { views: SharedBriefView[]; loadin
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [key, cache, version],
   );
-  return { views, loading: snapshot.loading };
+  return { views, loading: snapshot.loading, failed: snapshot.failed, cache };
 }
 
 export function SharedBriefCards({ briefIds }: { briefIds: string[] }): ReactElement {
-  const { views, loading } = useSharedBriefs(briefIds);
+  const { views, loading, failed, cache } = useSharedBriefs(briefIds);
+  const retryInView = useRetryInView(cache, { briefIds }, loading);
   if (briefIds.length === 0) return <></>;
   if (loading) {
+    // A read that failed keeps this skeleton and retries (tab visible, online,
+    // connected, or scrolled into view); "Brief unavailable" is only for RLS.
     return (
-      <div className="mt-1.5 flex flex-col items-start gap-1.5">
+      <div ref={retryInView} className="mt-1.5 flex flex-col items-start gap-1.5">
         {briefIds.map((id) => (
           <div
             key={id}
@@ -57,9 +73,16 @@ export function SharedBriefCards({ briefIds }: { briefIds: string[] }): ReactEle
   }
   return (
     <div className="mt-1.5 flex flex-col items-start gap-1.5">
-      {views.map((view) => (
-        <BriefCardItem key={view.briefId} view={view} />
-      ))}
+      {views.map((view) =>
+        failed.includes(view.briefId) ? (
+          <CouldntLoadCard
+            key={view.briefId}
+            onRetry={() => cache?.retry({ briefIds: [view.briefId] })}
+          />
+        ) : (
+          <BriefCardItem key={view.briefId} view={view} />
+        ),
+      )}
     </div>
   );
 }

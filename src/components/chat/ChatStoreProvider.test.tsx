@@ -184,10 +184,10 @@ describe('loadChatList', () => {
     const started: string[] = [];
     const base = readers();
     const tracked: ChatListReaders = {
-      roster: () => (started.push('roster'), base.roster()),
-      clears: () => (started.push('clears'), base.clears()),
-      previews: () => (started.push('previews'), base.previews()),
-      counts: () => (started.push('counts'), base.counts()),
+      roster: (signal) => (started.push('roster'), base.roster(signal)),
+      clears: (signal) => (started.push('clears'), base.clears(signal)),
+      previews: (signal) => (started.push('previews'), base.previews(signal)),
+      counts: (signal) => (started.push('counts'), base.counts(signal)),
     };
     const pending = loadChatList(tracked, SCOPE, ME);
     // Each read starts inside its 5s timeout wrapper, all in the same tick.
@@ -234,7 +234,7 @@ describe('loadChatList', () => {
       expect(rowIds(tree)).toEqual([]);
       const empties = findAll(tree, (el) => el.type === EmptyState);
       expect(empties).toHaveLength(1);
-      expect((empties[0]!.props as { title: string }).title).toBe("Couldn't load conversations");
+      expect((empties[0]!.props as { title: string }).title).toBe("Couldn't load chats");
       const retry = findAll(
         (empties[0]!.props as { action: ReactNode }).action,
         (el) => (el.props as { children?: unknown }).children === 'Retry',

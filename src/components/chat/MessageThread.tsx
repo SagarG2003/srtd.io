@@ -65,7 +65,7 @@ import {
 } from '@/components/ui/icons';
 import { useLongPress } from '@/components/ui';
 import {
-  cancelPendingLongPresses,
+  cancelPendingLongPressesWithin,
   LONG_PRESS_MS,
   MOVE_CANCEL_PX,
 } from '@/components/ui/useLongPress';
@@ -224,6 +224,8 @@ interface MessageThreadProps {
   marks?: Map<string, ChatMark>;
   /** The channel's marks read has settled; the open-loops strip holds its first paint until then. */
   marksLoaded: boolean;
+  /** The marks have never been read (failed or timed out): the strip is hidden, never "Nothing open". */
+  marksFailed?: boolean;
   /** Marked messages read from the record, for sheet rows beyond loaded history. */
   markedMessages?: Map<string, ThreadMessage>;
   /** Mark a message, or change an open pending mark's priority (same type). */
@@ -306,7 +308,8 @@ export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 export interface BubblePointerHandlers {
   onPointerDown: (event: PointerEvent<HTMLElement>) => void;
   onPointerMove: (event: PointerEvent<HTMLElement>) => void;
-  onPointerUp: () => void;
+  /** The release event ends the swipe's flick window at its own timeStamp. */
+  onPointerUp: (event?: PointerEvent<HTMLElement>) => void;
   onPointerCancel: () => void;
 }
 
@@ -1987,10 +1990,11 @@ function MessageRow(props: {
       onFrame: (frame) => paintSwipe(bubbleRef.current, iconRef.current, frame),
       onStart: (pointerId) => {
         // A swipe never opens a menu: stop the bubble's hold timer (8px < its
-        // 10px) and any hold inside it (a post card's), which never sees the
-        // captured moves. Drop any text selection the press started.
+        // 10px) and any hold inside this bubble (a post card's), which never
+        // sees the captured moves; holds anywhere else are left alone. Drop
+        // any text selection the press started.
         cancel();
-        cancelPendingLongPresses();
+        if (bubbleRef.current !== null) cancelPendingLongPressesWithin(bubbleRef.current);
         window.getSelection()?.removeAllRanges();
         if (pointerId === undefined) return;
         try {
@@ -2046,9 +2050,9 @@ function MessageRow(props: {
       handlers.onPointerMove(e);
       swipe.handlers.onPointerMove(e);
     },
-    onPointerUp: () => {
+    onPointerUp: (e) => {
       handlers.onPointerUp();
-      swipe.handlers.onPointerUp();
+      swipe.handlers.onPointerUp(e);
     },
     onPointerCancel: () => {
       handlers.onPointerCancel();
@@ -2787,6 +2791,9 @@ function ThreadBody(
         }}
         className={THREAD_LIST_CLASS}
       >
+        {props.loadFailed === true && props.filtering !== true
+          ? threadLoadErrorRow(props.onRetryLoad)
+          : null}
         {threadListItems(
           threadRows(props.messages, nowMs, props.timeZone, { showTicks: props.showTicks }),
           props.loadingOlder === true,
@@ -2977,11 +2984,35 @@ export function threadLoadError(onRetry: (() => void) | undefined): ReactElement
 }
 
 /**
+ * The history failed but the chat has pending or failed sends on screen: the
+ * same line and 44px Retry as a row above them, so the sends stay visible.
+ */
+export function threadLoadErrorRow(onRetry: (() => void) | undefined): ReactElement {
+  return (
+    <li
+      key="load-failed"
+      data-thread-load-error=""
+      className="flex items-center justify-center gap-3 px-4 py-2 text-sm text-fg-2"
+    >
+      <span>Couldn&apos;t load messages</span>
+      {onRetry !== undefined ? (
+        <Button size="lg" variant="default" className="min-w-[44px]" onClick={onRetry}>
+          Retry
+        </Button>
+      ) : null}
+    </li>
+  );
+}
+
+/**
  * A chat being opened before its row is known (a deep link, an Activity tap,
  * a reload inside the thread): the thread's own header and message
  * placeholders from the first frame, never another screen first.
  */
-export function threadOpeningSkeleton(layout: ChatLayout = 'touch'): ReactElement {
+export function threadOpeningSkeleton(
+  layout: ChatLayout = 'touch',
+  onBack?: () => void,
+): ReactElement {
   return (
     <div data-thread-opening="" aria-busy="true" className="flex h-full min-h-0 flex-col bg-bg">
       <div
@@ -2990,6 +3021,11 @@ export function threadOpeningSkeleton(layout: ChatLayout = 'touch'): ReactElemen
           sized(HEADER_PAD, layout),
         )}
       >
+        {onBack !== undefined ? (
+          <IconButton label="Back to conversations" onClick={onBack}>
+            <IconChevronLeft size={20} />
+          </IconButton>
+        ) : null}
         <div className="h-9 w-9 shrink-0 animate-pulse rounded-full bg-panel-2" />
         <div className="h-3.5 w-32 animate-pulse rounded bg-panel-2" />
       </div>
@@ -3759,7 +3795,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     : null;
   const stripSlot = threadStripSlot({
     filtering: filterPostId !== null,
-    hasMarks: props.marks !== undefined,
+    hasMarks: props.marks !== undefined && props.marksFailed !== true,
     selecting,
   });
   return (

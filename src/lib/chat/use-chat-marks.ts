@@ -52,6 +52,12 @@ export interface UseChatMarks {
    * on every channel switch until that channel's read resolves.
    */
   loaded: boolean;
+  /**
+   * The open channel's marks have never been read (the read failed or timed
+   * out): the strip stays hidden, never "Nothing open". The next catch-up
+   * (tab visible, online, connected) re-reads them.
+   */
+  failed: boolean;
   /** Marked messages read from the record (for sheet rows beyond loaded history). */
   markedMessages: Map<string, ThreadMessage>;
   /** Re-read all marks of the open channel. */
@@ -62,6 +68,18 @@ export interface UseChatMarks {
   resolve: (messageId: string) => Promise<WriteResult>;
   /** Return a stamped mark to open. */
   reopen: (messageId: string) => Promise<WriteResult>;
+}
+
+/**
+ * The open channel's marks read settled without ever succeeding: the strip is
+ * hidden (never "Nothing open") until a re-read lands. Pure.
+ */
+export function marksReadFailed(
+  loaded: boolean,
+  readOkFor: string | null,
+  channelId: string | null,
+): boolean {
+  return loaded && channelId !== null && readOkFor !== channelId;
 }
 
 /**
@@ -116,6 +134,8 @@ export function useChatMarks(params: {
   const [markedMessages, setMarkedMessages] = useState<Map<string, ThreadMessage>>(new Map());
   // The channel whose marks read has settled (ok or not); null until one has.
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  // The channel whose marks have been read successfully at least once.
+  const [readOkFor, setReadOkFor] = useState<string | null>(null);
   const marksRef = useRef(marks);
   marksRef.current = marks;
   const channelRef = useRef(channelId);
@@ -154,11 +174,13 @@ export function useChatMarks(params: {
           channel_id: forChannel,
           error: result.error.message,
         });
-        // Settled all the same: the strip stops holding and shows what it has.
+        // Settled all the same (nothing holds on it); with no good read yet the
+        // strip stays hidden until a re-read lands.
         setLoadedFor(forChannel);
         return;
       }
       setMarks(indexMarks(result.data));
+      setReadOkFor(forChannel);
       setLoadedFor(forChannel);
       await loadMarkedMessages(
         result.data.map((m) => m.messageId),
@@ -172,6 +194,7 @@ export function useChatMarks(params: {
     setMarks(new Map());
     setMarkedMessages(new Map());
     setLoadedFor(null);
+    setReadOkFor(null);
     if (channelId === null) return;
     void load(channelId);
   }, [channelId, load]);
@@ -307,8 +330,9 @@ export function useChatMarks(params: {
   );
 
   const loaded = marksReadSettled(loadedFor, channelId);
+  const failed = marksReadFailed(loaded, readOkFor, channelId);
   return useMemo(
-    () => ({ marks, loaded, markedMessages, refetch, setMark, resolve, reopen }),
-    [marks, loaded, markedMessages, refetch, setMark, resolve, reopen],
+    () => ({ marks, loaded, failed, markedMessages, refetch, setMark, resolve, reopen }),
+    [marks, loaded, failed, markedMessages, refetch, setMark, resolve, reopen],
   );
 }

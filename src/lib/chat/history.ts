@@ -19,12 +19,19 @@
 // a chat's last line.
 //
 // Every read here is bounded by withReadTimeout (5s): a hang resolves to a
-// failed Result, so no caller can wait forever on one.
+// failed Result, so no caller can wait forever on one, and the request is
+// aborted on the wire (.abortSignal). The raw readers (read*) are unbounded
+// for callers that let a late answer win (withLateRead).
 
 import type { Client, Result } from '@srtdio/rpc';
 import type { Database } from '@srtdio/schemas';
-import { withReadTimeout } from '@/lib/chat-reads';
-import { parseAttachmentMeta } from '@/lib/chat/attachments';
+import { abortable, anySignal, withReadTimeout } from '@/lib/chat-reads';
+import {
+  classifyAttachment,
+  parseAttachmentMeta,
+  type AttachmentKind,
+  type MessageAttachment,
+} from '@/lib/chat/attachments';
 import type { ChatMessageRow, MessageCursor, MessageReaction } from '@/lib/chat/thread';
 
 /** History page size; also the "has more" probe (a full page means keep paging). */
@@ -71,22 +78,32 @@ function toPage(rows: ChatMessageRow[]): HistoryPage {
   return { rows: [...rows].reverse(), hasMore: rows.length >= HISTORY_PAGE_SIZE };
 }
 
-/** The newest page of a channel (50 rows, returned oldest-first). */
+/** The newest page of a channel (50 rows, returned oldest-first). 5s timeout. */
 export function loadLatestMessages(
   client: Client,
   channelId: string,
 ): Promise<Result<HistoryPage>> {
-  return withReadTimeout(async () => {
-    const res = await client
+  return withReadTimeout((signal) => readLatestMessages(client, channelId, signal));
+}
+
+/** The latest-page read itself, unbounded; `signal` cancels it. */
+export async function readLatestMessages(
+  client: Client,
+  channelId: string,
+  signal?: AbortSignal,
+): Promise<Result<HistoryPage>> {
+  const res = await abortable(
+    client
       .from('chat_messages')
       .select(MESSAGE_COLUMNS)
       .eq('channel_id', channelId)
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
-      .limit(HISTORY_PAGE_SIZE);
-    if (res.error) return fail(`loadLatestMessages: ${res.error.message}`);
-    return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
-  });
+      .limit(HISTORY_PAGE_SIZE),
+    signal,
+  );
+  if (res.error) return fail(`loadLatestMessages: ${res.error.message}`);
+  return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
 }
 
 /**
@@ -99,7 +116,7 @@ export function loadOlderMessages(
   cursor: MessageCursor,
   signal?: AbortSignal,
 ): Promise<Result<HistoryPage>> {
-  return withReadTimeout(async () => {
+  return withReadTimeout(async (deadline) => {
     const query = client
       .from('chat_messages')
       .select(MESSAGE_COLUMNS)
@@ -108,7 +125,7 @@ export function loadOlderMessages(
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
       .limit(HISTORY_PAGE_SIZE);
-    const res = await (signal !== undefined ? query.abortSignal(signal) : query);
+    const res = await abortable(query, anySignal(deadline, signal));
     if (res.error) return fail(`loadOlderMessages: ${res.error.message}`);
     return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
   });
@@ -120,15 +137,18 @@ export function loadNewerMessages(
   channelId: string,
   cursor: MessageCursor,
 ): Promise<Result<ChatMessageRow[]>> {
-  return withReadTimeout(async () => {
-    const res = await client
-      .from('chat_messages')
-      .select(MESSAGE_COLUMNS)
-      .eq('channel_id', channelId)
-      .or(newerThanFilter(cursor))
-      .order('created_at', { ascending: true })
-      .order('id', { ascending: true })
-      .limit(CATCH_UP_LIMIT);
+  return withReadTimeout(async (signal) => {
+    const res = await abortable(
+      client
+        .from('chat_messages')
+        .select(MESSAGE_COLUMNS)
+        .eq('channel_id', channelId)
+        .or(newerThanFilter(cursor))
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .limit(CATCH_UP_LIMIT),
+      signal,
+    );
     if (res.error) return fail(`loadNewerMessages: ${res.error.message}`);
     return { ok: true, data: (res.data ?? []) as ChatMessageRow[] };
   });
@@ -143,13 +163,15 @@ export type MessageLookup = { found: true; row: ChatMessageRow } | { found: fals
  * can read is shown.
  */
 export function loadMessageById(client: Client, messageId: string): Promise<Result<MessageLookup>> {
-  return withReadTimeout(async () => {
-    const res = await client
-      .from('chat_messages')
-      .select(MESSAGE_COLUMNS)
-      .eq('id', messageId)
-      .is('deleted_at', null)
-      .maybeSingle();
+  return withReadTimeout(async (signal) => {
+    const res = await abortable(
+      client
+        .from('chat_messages')
+        .select(MESSAGE_COLUMNS)
+        .eq('id', messageId)
+        .is('deleted_at', null),
+      signal,
+    ).maybeSingle();
     if (res.error) return fail(`loadMessageById: ${res.error.message}`);
     const row = res.data as ChatMessageRow | null;
     return { ok: true, data: row === null ? { found: false } : { found: true, row } };
@@ -165,11 +187,14 @@ export async function loadMessagesByIds(
   messageIds: readonly string[],
 ): Promise<Result<ChatMessageRow[]>> {
   if (messageIds.length === 0) return { ok: true, data: [] };
-  return withReadTimeout(async () => {
-    const res = await client
-      .from('chat_messages')
-      .select(MESSAGE_COLUMNS)
-      .in('id', [...messageIds]);
+  return withReadTimeout(async (signal) => {
+    const res = await abortable(
+      client
+        .from('chat_messages')
+        .select(MESSAGE_COLUMNS)
+        .in('id', [...messageIds]),
+      signal,
+    );
     if (res.error) return fail(`loadMessagesByIds: ${res.error.message}`);
     return { ok: true, data: (res.data ?? []) as ChatMessageRow[] };
   });
@@ -206,12 +231,12 @@ export async function loadReactions(
   signal?: AbortSignal,
 ): Promise<Result<Map<string, MessageReaction[]>>> {
   if (messageIds.length === 0) return { ok: true, data: new Map() };
-  return withReadTimeout(async () => {
+  return withReadTimeout(async (deadline) => {
     const query = client
       .from('chat_reactions')
       .select('message_id, emoji, user_id')
       .in('message_id', [...messageIds]);
-    const res = await (signal !== undefined ? query.abortSignal(signal) : query);
+    const res = await abortable(query, anySignal(deadline, signal));
     if (res.error) return fail(`loadReactions: ${res.error.message}`);
     const rows = (res.data ?? []) as Pick<ChatReactionRow, 'message_id' | 'emoji' | 'user_id'>[];
     return { ok: true, data: aggregateReactions(rows, currentUserId) };
@@ -229,20 +254,23 @@ export function loadPeerReadCursor(
   channelId: string,
   peerUserId: string,
 ): Promise<Result<PeerReadCursor>> {
-  return withReadTimeout(() => readPeerCursor(client, channelId, peerUserId));
+  return withReadTimeout((signal) => readPeerCursor(client, channelId, peerUserId, signal));
 }
 
 async function readPeerCursor(
   client: Client,
   channelId: string,
   peerUserId: string,
+  signal: AbortSignal,
 ): Promise<Result<PeerReadCursor>> {
-  const res = await client
-    .from('chat_read_cursors')
-    .select('last_read_message_id, last_read_at')
-    .eq('channel_id', channelId)
-    .eq('user_id', peerUserId)
-    .maybeSingle();
+  const res = await abortable(
+    client
+      .from('chat_read_cursors')
+      .select('last_read_message_id, last_read_at')
+      .eq('channel_id', channelId)
+      .eq('user_id', peerUserId),
+    signal,
+  ).maybeSingle();
   if (res.error) return fail(`loadPeerReadCursor: ${res.error.message}`);
   const row = res.data as Pick<ChatReadCursorRow, 'last_read_message_id' | 'last_read_at'> | null;
   if (row === null) return { ok: true, data: { found: false } };
@@ -273,17 +301,19 @@ export function loadUnreadCounts(
   client: Client,
   workspaceId: string,
 ): Promise<Result<UnreadCount[]>> {
-  return withReadTimeout(() => readUnreadCounts(client, workspaceId));
+  return withReadTimeout((signal) => readUnreadCounts(client, workspaceId, signal));
 }
 
-async function readUnreadCounts(
+/** The unread-counts read itself, unbounded; `signal` cancels it. */
+export async function readUnreadCounts(
   client: Client,
   workspaceId: string,
+  signal?: AbortSignal,
 ): Promise<Result<UnreadCount[]>> {
   const args: Database['public']['Functions']['chat_unread_counts']['Args'] = {
     p_workspace_id: workspaceId,
   };
-  const { data, error } = await client.rpc('chat_unread_counts', args);
+  const { data, error } = await abortable(client.rpc('chat_unread_counts', args), signal);
   if (error) return fail(`loadUnreadCounts: ${error.message}`);
   const rows = (data ?? []) as UnreadCountRow[];
   return {
@@ -305,8 +335,8 @@ export interface PreviewContent {
   body: string;
   /** Any attachment or share at all (the 'Attachment' fallback when nothing finer is known). */
   hasAttachments: boolean;
-  /** Each attachment's mime ('' when its meta is unknown). */
-  attachmentMimes?: readonly string[];
+  /** Each attachment's kind (see attachmentPreviewKind). */
+  attachmentKinds?: readonly AttachmentKind[];
   sharedPostCount?: number;
   sharedBriefCount?: number;
 }
@@ -317,6 +347,26 @@ export type PreviewRow = Pick<
   'body' | 'attachment_asset_ids' | 'attachment_meta' | 'shared_post_ids' | 'shared_brief_ids'
 >;
 
+const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'avif']);
+const AUDIO_EXTENSIONS = new Set(['webm', 'm4a', 'mp3', 'ogg', 'oga', 'wav', 'aac', 'opus']);
+
+/**
+ * What an attachment is for its list line, from its own kind first: a voice
+ * note (it has a recorded length or a transcript) is audio whatever its mime,
+ * then the mime, and with no mime its name's extension; anything else is a
+ * file. Pure.
+ */
+export function attachmentPreviewKind(
+  attachment: Pick<MessageAttachment, 'mime' | 'name' | 'durationMs' | 'transcript'>,
+): AttachmentKind {
+  if (attachment.durationMs !== undefined || attachment.transcript !== undefined) return 'audio';
+  if (attachment.mime !== '') return classifyAttachment(attachment.mime);
+  const ext = attachment.name.toLowerCase().split('.').pop() ?? '';
+  if (IMAGE_EXTENSIONS.has(ext)) return 'image';
+  if (AUDIO_EXTENSIONS.has(ext)) return 'audio';
+  return 'file';
+}
+
 /** A recorded row's preview content (live verify, the reload scan). Pure. */
 export function rowPreviewContent(row: PreviewRow): PreviewContent {
   const assetIds = row.attachment_asset_ids ?? [];
@@ -325,7 +375,7 @@ export function rowPreviewContent(row: PreviewRow): PreviewContent {
   return {
     body: row.body ?? '',
     hasAttachments: assetIds.length > 0 || sharedPostCount > 0 || sharedBriefCount > 0,
-    attachmentMimes: parseAttachmentMeta(row.attachment_meta, assetIds).map((a) => a.mime),
+    attachmentKinds: parseAttachmentMeta(row.attachment_meta, assetIds).map(attachmentPreviewKind),
     sharedPostCount,
     sharedBriefCount,
   };
@@ -380,15 +430,25 @@ export function loadConversationPreviews(
   client: Client,
   workspaceId: string,
 ): Promise<Result<ConversationPreview[]>> {
-  return withReadTimeout(async () => {
-    const res = await client
+  return withReadTimeout((signal) => readConversationPreviews(client, workspaceId, signal));
+}
+
+/** The preview scan itself, unbounded; `signal` cancels it. */
+export async function readConversationPreviews(
+  client: Client,
+  workspaceId: string,
+  signal?: AbortSignal,
+): Promise<Result<ConversationPreview[]>> {
+  const res = await abortable(
+    client
       .from('chat_messages')
       .select(PREVIEW_COLUMNS)
       .eq('workspace_id', workspaceId)
       .is('deleted_at', null)
       .order('created_at', { ascending: false })
-      .limit(PREVIEW_SCAN_LIMIT);
-    if (res.error) return fail(`loadConversationPreviews: ${res.error.message}`);
-    return { ok: true, data: latestPerChannel((res.data ?? []) as PreviewScanRow[]) };
-  });
+      .limit(PREVIEW_SCAN_LIMIT),
+    signal,
+  );
+  if (res.error) return fail(`loadConversationPreviews: ${res.error.message}`);
+  return { ok: true, data: latestPerChannel((res.data ?? []) as PreviewScanRow[]) };
 }

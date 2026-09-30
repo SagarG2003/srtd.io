@@ -349,8 +349,14 @@ export function openingChannelId(input: {
   pendingOpen: string | null;
   loadStatus: ChatLoadStatus;
 }): string | null {
-  if (input.selectedChannelId !== null || input.loadStatus === 'error') return null;
-  return input.channelParam ?? input.pendingOpen;
+  if (input.loadStatus === 'error') return null;
+  // A link to another chat while one is open (A open, link to B): B's
+  // skeleton at once, never another frame of A.
+  if (input.channelParam !== null && input.channelParam !== input.selectedChannelId) {
+    return input.channelParam;
+  }
+  if (input.selectedChannelId !== null) return null;
+  return input.pendingOpen;
 }
 
 /** The jump the open chat takes: the pending one only while it is for this chat. Pure. */
@@ -724,7 +730,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
 
   // Keyed on the channel the send was recorded in, which may no longer be open.
   const onOwnMessage = useCallback(
-    (channelId: string, text: string, ts: number) => updateOwnMessage(channelId, text, ts),
+    (channelId: string, text: string, ts: number, messageId?: string) =>
+      updateOwnMessage(channelId, text, ts, messageId),
     [updateOwnMessage],
   );
 
@@ -973,6 +980,11 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   });
   const showList = isDesktop || (selected === null && opening === null);
   const showThread = isDesktop || selected !== null || opening !== null;
+  // Back out of a chat still opening: drop the link and any pending open.
+  const onBackFromOpening = (): void => {
+    clearPendingOpen();
+    closeChannel();
+  };
 
   const isGroup = selected?.channelType === 'group';
   const infoGroupId = isGroup ? (selected?.groupId ?? null) : null;
@@ -996,12 +1008,15 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       ) : null}
       {showThread ? (
         <div className="h-full min-w-0 flex-1">
-          {selected !== null ? (
+          {opening !== null ? (
+            threadOpeningSkeleton(layout, isDesktop ? undefined : onBackFromOpening)
+          ) : selected !== null ? (
             <SharedCardsProvider
               workspaceId={workspaceId}
               channelId={selected.channelId}
               postIds={cardIds.postIds}
               briefIds={cardIds.briefIds}
+              status={status}
             >
               <MessageThread
                 key={selected.channelId}
@@ -1029,6 +1044,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                 onToggleReaction={thread.toggleReaction}
                 marks={marks.marks}
                 marksLoaded={marks.loaded}
+                marksFailed={marks.failed}
                 markedMessages={marks.markedMessages}
                 onSetMark={marks.setMark}
                 onResolveMark={marks.resolve}
@@ -1078,8 +1094,6 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                   : {})}
               />
             </SharedCardsProvider>
-          ) : opening !== null ? (
-            threadOpeningSkeleton(layout)
           ) : (
             <div className="flex h-full flex-col justify-center bg-bg">
               <EmptyState icon={<IconChat size={22} />} title="Select a conversation" />

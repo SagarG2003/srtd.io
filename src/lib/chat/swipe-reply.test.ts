@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cancelPendingLongPresses, createLongPressController } from '@/components/ui/useLongPress';
+import {
+  cancelPendingLongPressesWithin,
+  createLongPressController,
+} from '@/components/ui/useLongPress';
 import {
   createSwipeReplyController,
   defaultVibrate,
@@ -19,13 +22,13 @@ import {
 
 // Presses start well clear of the left edge (the iOS back gesture's).
 const X0 = 100;
-const touch = (x: number, y: number, timeStamp = 0, pointerId = 1) => ({
-  clientX: X0 + x,
-  clientY: y,
-  pointerType: 'touch',
-  pointerId,
-  timeStamp,
-});
+// The controller's clock follows the last sample, so a release lands right
+// after the last move unless a test moves it on.
+let clock = 0;
+const touch = (x: number, y: number, timeStamp = 0, pointerId = 1) => {
+  clock = timeStamp;
+  return { clientX: X0 + x, clientY: y, pointerType: 'touch', pointerId, timeStamp };
+};
 
 function setup(over: Partial<SwipeReplyOptions> = {}) {
   const frames: SwipeFrame[] = [];
@@ -43,6 +46,7 @@ function setup(over: Partial<SwipeReplyOptions> = {}) {
     vibrate,
     raf,
     cancelRaf: () => {},
+    now: () => clock,
     onFrame: (f) => frames.push(f),
     ...over,
   });
@@ -196,15 +200,18 @@ describe('createSwipeReplyController', () => {
     const cardHold = vi.fn();
     const bubble = createLongPressController({ onLongPress: bubbleHold, ignoreMouse: true });
     const card = createLongPressController({ onLongPress: cardHold, thresholdMs: 450 });
+    // A fake DOM: the card element sits inside the bubble element.
+    const cardEl = { id: 'card' };
+    const bubbleEl = { contains: (n: unknown) => n === cardEl || n === bubbleEl };
     const { c } = setup({
       onStart: () => {
         bubble.cancel();
-        cancelPendingLongPresses();
+        cancelPendingLongPressesWithin(bubbleEl);
       },
     });
     // One press lands on the card (inner) and the bubble (outer).
-    card.handlers.onPointerDown(touch(0, 0));
-    bubble.handlers.onPointerDown(touch(0, 0));
+    card.handlers.onPointerDown({ ...touch(0, 0), currentTarget: cardEl });
+    bubble.handlers.onPointerDown({ ...touch(0, 0), currentTarget: bubbleEl });
     c.handlers.onPointerDown(touch(0, 0));
     // Pointer capture: the moves reach the bubble only, never the card.
     bubble.handlers.onPointerMove(touch(9, 0, 50));
@@ -214,6 +221,45 @@ describe('createSwipeReplyController', () => {
     expect(cardHold).not.toHaveBeenCalled();
     expect(card.consumeClickSuppression()).toBe(false);
     c.dispose();
+  });
+
+  it('E15: a hold outside the swiped bubble is not cancelled', () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { addEventListener: () => {}, removeEventListener: () => {} });
+    const elsewhere = vi.fn();
+    const other = createLongPressController({ onLongPress: elsewhere });
+    const otherEl = { id: 'row-in-another-list' };
+    other.handlers.onPointerDown({ ...touch(0, 0), currentTarget: otherEl });
+    cancelPendingLongPressesWithin({ contains: () => false });
+    vi.advanceTimersByTime(1000);
+    expect(elsewhere).toHaveBeenCalledTimes(1);
+  });
+
+  it('T6: a flick that paused over 100ms before release does not reply', () => {
+    const { c, onReply } = setup();
+    c.handlers.onPointerDown(touch(0, 0, 0));
+    c.handlers.onPointerMove(touch(15, 0, 10));
+    c.handlers.onPointerMove(touch(40, 0, 40));
+    // Finger holds still, then lifts 150ms after the last move.
+    c.handlers.onPointerUp({ timeStamp: 190 });
+    expect(onReply).not.toHaveBeenCalled();
+  });
+
+  it('T6: velocity counts only the last 100ms of samples before release', () => {
+    const { c, onReply } = setup();
+    c.handlers.onPointerDown(touch(0, 0, 0));
+    // Fast early, then slow for the last 100ms: no flick.
+    c.handlers.onPointerMove(touch(20, 0, 10));
+    c.handlers.onPointerMove(touch(30, 0, 150));
+    c.handlers.onPointerMove(touch(34, 0, 240));
+    c.handlers.onPointerUp({ timeStamp: 245 });
+    expect(onReply).not.toHaveBeenCalled();
+    // A fast flick released at once still replies.
+    c.handlers.onPointerDown(touch(0, 0, 1000));
+    c.handlers.onPointerMove(touch(10, 0, 1010));
+    c.handlers.onPointerMove(touch(30, 0, 1040));
+    c.handlers.onPointerUp({ timeStamp: 1045 });
+    expect(onReply).toHaveBeenCalledTimes(1);
   });
 
   it('the click that trails a swipe is suppressed once; a tap is not', () => {

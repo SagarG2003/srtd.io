@@ -11,14 +11,14 @@
 // the storage as a parameter and never throw.
 
 import type { ChannelSummary } from '@/lib/chat-reads';
-import type { ConversationPreview, PreviewContent, UnreadCount } from '@/lib/chat/history';
-import type { LocalMessageContent, ThreadMessage } from '@/lib/chat/thread';
 import {
-  classifyAttachment,
-  withoutLocal,
-  type MessageAttachment,
-  type ReplyQuote,
-} from '@/lib/chat/attachments';
+  attachmentPreviewKind,
+  type ConversationPreview,
+  type PreviewContent,
+  type UnreadCount,
+} from '@/lib/chat/history';
+import type { LocalMessageContent, ThreadMessage } from '@/lib/chat/thread';
+import { withoutLocal, type MessageAttachment, type ReplyQuote } from '@/lib/chat/attachments';
 
 /** Sender label written before the preview when the current user sent it. */
 export const OWN_PREFIX = 'You';
@@ -167,9 +167,7 @@ export function previewText(content: PreviewContent): string {
   if (content.body.trim() !== '') return content.body;
   if ((content.sharedPostCount ?? 0) > 0) return PREVIEW_LABELS.post;
   if ((content.sharedBriefCount ?? 0) > 0) return PREVIEW_LABELS.brief;
-  const kinds = (content.attachmentMimes ?? []).map((mime) =>
-    mime === '' ? 'file' : classifyAttachment(mime),
-  );
+  const kinds = content.attachmentKinds ?? [];
   if (kinds.includes('image')) return PREVIEW_LABELS.photo;
   if (kinds.includes('file')) return PREVIEW_LABELS.file;
   if (kinds.includes('audio')) return PREVIEW_LABELS.voice;
@@ -186,7 +184,7 @@ export function messagePreviewContent(
       message.attachments.length > 0 ||
       message.sharedPostIds.length > 0 ||
       message.sharedBriefIds.length > 0,
-    attachmentMimes: message.attachments.map((a) => a.mime),
+    attachmentKinds: message.attachments.map(attachmentPreviewKind),
     sharedPostCount: message.sharedPostIds.length,
     sharedBriefCount: message.sharedBriefIds.length,
   };
