@@ -78,6 +78,7 @@ import {
   ownReadCount,
   partitionTimestamp,
   randomSuffix,
+  seedAsset,
   seedDmChannel,
   seedMember,
   seedScaffold,
@@ -418,11 +419,20 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
     });
 
     it('accepts an attachments-only message', async () => {
-      const args = sendArgs(ctx.channelId, null, { attachments: [ctx.assetId] });
+      // p_attachment_asset_ids carries asset VERSION ids, never asset ids.
+      const args = sendArgs(ctx.channelId, null, { attachments: [ctx.assetVersionId] });
       const res = await clientFor(userB.id).rpc('chat_message_send', args);
       expect(res.error).toBeNull();
       expect(res.data?.body).toBeNull();
-      expect(res.data?.attachment_asset_ids).toEqual([ctx.assetId]);
+      expect(res.data?.attachment_asset_ids).toEqual([ctx.assetVersionId]);
+    });
+
+    it("refuses another workspace's asset version id ('attachment not available')", async () => {
+      const foreign = await seedAsset(adminGeneric, wsOther.id, outsider.id);
+      const args = sendArgs(ctx.channelId, null, { attachments: [foreign.versionId] });
+      const res = await clientFor(userB.id).rpc('chat_message_send', args);
+      expect(res.error?.message).toBe('attachment not available');
+      expect(await countWhere(adminGeneric, 'chat_messages', [['id', args.p_id]])).toBe(0);
     });
 
     it('raises when the body exceeds 5000 characters', async () => {

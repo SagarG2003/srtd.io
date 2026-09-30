@@ -82,3 +82,54 @@ export function uploadFailureStatus(result: { ok: false; message: string }): num
   const status = (result as { status?: unknown }).status;
   return typeof status === 'number' ? status : undefined;
 }
+
+/** The upload Worker codes whose Result copy is recognisable, by that copy. */
+const UPLOAD_CODE_BY_MESSAGE: ReadonlyMap<string, string> = new Map(
+  ['file_too_large', 'unsupported_mime', 'mime_mismatch', 'virus_detected'].map((code) => [
+    uploadErrorMessage(code),
+    code,
+  ]),
+);
+
+/**
+ * The Worker's error code behind a failed upload's Result copy: the refusal
+ * codes are recognised; any other copy (a generic 4xx) reads 'unknown'. Pure.
+ */
+export function uploadFailureCode(message: string): string {
+  return UPLOAD_CODE_BY_MESSAGE.get(message) ?? 'unknown';
+}
+
+/**
+ * The one log line for a permanently refused upload: why it was refused and
+ * what was sent, never what it said. Only these keys, no file name, no audio
+ * beyond the header bytes as hex. Pure.
+ */
+export type UploadRefusalContext = {
+  status: number | null;
+  code: string;
+  mime: string;
+  size: number;
+  recorder_mime: string | null;
+  header_hex: string;
+  user_agent: string;
+};
+
+export function uploadRefusalContext(input: {
+  message: string;
+  status: number | undefined;
+  mime: string;
+  size: number;
+  recorderMime: string | undefined;
+  headerHex: string;
+  userAgent: string;
+}): UploadRefusalContext {
+  return {
+    status: input.status ?? null,
+    code: uploadFailureCode(input.message),
+    mime: input.mime,
+    size: input.size,
+    recorder_mime: input.recorderMime ?? null,
+    header_hex: input.headerHex,
+    user_agent: input.userAgent,
+  };
+}

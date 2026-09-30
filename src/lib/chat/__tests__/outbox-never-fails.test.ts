@@ -15,6 +15,7 @@ import type { Outbox, OutboxEntry, OutboxEvent } from '@/lib/chat/chat-store';
 import { rowToThreadMessage, type ChatMessageRow } from '@/lib/chat/thread';
 import type { ChatAttachmentUpload, MessageAttachment } from '@/lib/chat/attachments';
 import { uploadErrorMessage, xhrPost } from '@/lib/asset-upload';
+import { logger } from '@/lib/logger';
 
 const ME = '11111111-1111-4111-8111-111111111111';
 const CHANNEL = 'group__ws__g1';
@@ -361,6 +362,39 @@ describe('upload stall', () => {
     sender.enqueue(CHANNEL, entry('m2'));
     await vi.waitFor(() => expect(recordedIds).toEqual(['m2']));
     expect(sender.entries(CHANNEL).map((e) => e.state)).toEqual(['failed']);
+  });
+
+  it('T4: a permanent upload refusal logs its reason once; a transient one does not', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const refused = vi.fn(
+        async (): Promise<ChatAttachmentUpload> =>
+          ({ ok: false, message: uploadErrorMessage('unsupported_mime'), status: 415 }) as never,
+      );
+      const { sender } = harness();
+      sender.enqueue(
+        CHANNEL,
+        entry('m1', {
+          local: {
+            attachments: [
+              fileAttachment('voice-note.m4a', refused, { mime: 'audio/mp4', durationMs: 1000 }),
+            ],
+            sharedPostIds: [],
+            reply: null,
+          },
+        }),
+      );
+      await vi.waitFor(() => expect(sender.entries(CHANNEL)[0]?.state).toBe('failed'));
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+      const [msg, context] = warn.mock.calls[0] ?? [];
+      expect(msg).toBe('chat: upload refused');
+      expect(context).toMatchObject({ status: 415, code: 'unsupported_mime' });
+      expect(Object.keys(context ?? {}).sort()).toEqual(
+        ['code', 'header_hex', 'mime', 'recorder_mime', 'size', 'status', 'user_agent'].sort(),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

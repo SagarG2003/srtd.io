@@ -8,9 +8,10 @@
 // URL) for the whole session, before and after it records, so the tile never
 // swaps to the presigned URL. While its upload runs the image is dimmed and an
 // UploadRing (X in a circle, ring = progress; tap cancels the send) sits
-// centred on it: one ring over a whole album (progress across every
-// attachment's bytes), one in a file chip's icon spot, one in a voice note's
-// play spot. When the upload finishes the X is gone; only opacity and the
+// centred on it (56px): one ring over a whole album (progress across every
+// attachment's bytes), one in flow in a file chip's icon spot (44px), one in
+// a voice note's play spot (40px). The ring never positions itself; each spot
+// here does. When the upload finishes the X is gone; only opacity and the
 // ring's stroke animate, and nothing changes size.
 //
 // Chat groups a message's images into one album (AlbumGrid): the grid is sized
@@ -79,8 +80,15 @@ export function useAttachmentUrl(
   return { url, failed };
 }
 
-/** Centres an UploadRing over its (relative) container without taking layout space. */
-const RING_CENTRE = 'absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2';
+/** The file chip's icon spot: 44px (the ring's size) laid out as 36px. */
+export const FILE_ICON_SPOT = '-m-1 flex h-11 w-11 shrink-0 items-center justify-center';
+
+/**
+ * Centres an UploadRing over its (relative) image or grid without taking
+ * layout space. The container clips (overflow-hidden), so the 56px ring never
+ * leaves the bubble.
+ */
+export const RING_CENTRE = 'absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2';
 
 /**
  * The ring for these attachments while the send can still be cancelled: null
@@ -111,24 +119,16 @@ function FileChip({
   const uploading = ring != null;
   return (
     <div className="relative flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-panel px-2.5 py-2">
-      {/* The 36px icon spot keeps its size; the 48px ring is centred over it. */}
-      <span className="relative flex h-9 w-9 shrink-0 items-center justify-center">
-        <span
-          className={cn(
-            'flex h-9 w-9 items-center justify-center rounded-md bg-panel-3 text-fg-3',
-            'transition-opacity duration-150 motion-reduce:transition-none',
-            uploading && 'opacity-0',
-          )}
-        >
-          <IconFile size={18} />
-        </span>
+      {/* The icon spot is 44px with a -4px margin, so it takes the 36px icon's
+          room: the 44px ring sits in it, in flow, inside the chip's padding. */}
+      <span data-file-icon-spot="" className={FILE_ICON_SPOT}>
         {uploading ? (
-          <UploadRing
-            progress={ring.progress}
-            onCancel={onCancelUpload}
-            className={cn(RING_CENTRE, 'z-10')}
-          />
-        ) : null}
+          <UploadRing progress={ring.progress} onCancel={onCancelUpload} variant="file" />
+        ) : (
+          <span className="flex h-9 w-9 items-center justify-center rounded-md bg-panel-3 text-fg-3">
+            <IconFile size={18} />
+          </span>
+        )}
       </span>
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-xs font-medium text-fg" title={label}>
@@ -300,6 +300,7 @@ function AttachmentItem({
             <UploadRing
               progress={ring.progress}
               onCancel={onCancelUpload}
+              variant="image"
               className={RING_CENTRE}
             />
           ) : null}
@@ -498,7 +499,8 @@ export function AlbumGrid({
         <UploadRing
           progress={ring.progress}
           onCancel={onCancelUpload}
-          className={cn(RING_CENTRE, 'z-10')}
+          variant="image"
+          className={RING_CENTRE}
         />
       ) : null}
     </div>

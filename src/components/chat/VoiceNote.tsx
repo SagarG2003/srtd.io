@@ -21,8 +21,8 @@
 // "Transcript not available" + "Try again"; the transcript drops down under the
 // link row. Own notes carry no link (the menu's Transcribe stays).
 //
-// The bars are drawn from the note's own peaks (the recorder's waveform,
-// resampled to the bar count) when it carries them; older notes and older
+// The bars are drawn from the note's own peaks (read from the finished
+// recording, resampled to the bar count) when it carries them; older notes and older
 // clients fall back to the fixed WAVEFORM_BARS. While an own note uploads, the
 // play spot holds the UploadRing (tap X cancels the send) and the wave is a
 // plain flat line of the same length; when the upload finishes, X becomes play
@@ -445,6 +445,10 @@ function OwnTranscriptStatus({ view }: { view: TranscriptView }): ReactElement |
   return null;
 }
 
+/** The voice ring's place: absolutely centred inside the (relative, 44px) play slot. */
+export const VOICE_RING_POSITION =
+  'absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2';
+
 /** An own note's upload: the ring (active) or, once done, play in its place. */
 export interface VoiceUpload {
   /** True while the file still uploads: the X shows, the wave is a flat line. */
@@ -736,7 +740,8 @@ export function VoiceNote({
     </button>
   );
   // An own note sent this session: the play spot holds the ring while it
-  // uploads (centred, 48px over the 44px spot, so nothing moves), then play.
+  // uploads (40px, absolutely centred inside the 44px spot, so nothing moves
+  // and nothing leaves the slot), then play.
   // The slot is the same element with or without an upload, so play never
   // remounts (or loses focus) when the send records and the ring goes.
   const playButton = (
@@ -750,7 +755,8 @@ export function VoiceNote({
           progress={upload.progress}
           onCancel={upload.onCancel}
           hidden={!uploading}
-          className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2"
+          variant="voice"
+          className={VOICE_RING_POSITION}
         />
       ) : null}
     </div>

@@ -396,7 +396,7 @@ describe('instant send tile (local preview + upload progress)', () => {
     expect(html).toContain('brightness-75');
     expect(html).toContain('aria-label="Cancel upload"');
     expect(html).toContain('data-upload-progress="40"');
-    expect(html).toContain('absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2');
+    expect(html).toContain('absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2');
     expect(html).not.toContain('progressbar');
     // The local preview never presigns.
     expect(fetcher).not.toHaveBeenCalled();
@@ -413,7 +413,7 @@ describe('instant send tile (local preview + upload progress)', () => {
       />,
     );
     expect(html).toContain('data-upload-progress="unknown"');
-    expect(html).toContain('animate-spin motion-reduce:animate-none');
+    expect(html).toContain('animate-pulse motion-reduce:animate-none');
   });
 
   it('T6: a file chip shows the ring in the icon spot while uploading', () => {
@@ -435,9 +435,10 @@ describe('instant send tile (local preview + upload progress)', () => {
     );
     expect(html).toContain('brief.pdf');
     expect(html).toContain('data-upload-progress="50"');
-    // The icon spot keeps its 36px box; the icon is faded under the ring.
-    expect(html).toContain('relative flex h-9 w-9 shrink-0');
-    expect(html).toMatch(/rounded-md bg-panel-3 text-fg-3[^"]*opacity-0/);
+    // The 44px icon spot (laid out as 36px) holds the ring in flow, not the icon.
+    expect(html).toContain('data-file-icon-spot="" class="-m-1 flex h-11 w-11 shrink-0');
+    expect(html).toContain('data-ring-variant="file"');
+    expect(html).not.toContain('rounded-md bg-panel-3 text-fg-3');
     expect(html).not.toContain('progressbar');
     const sent = renderToStaticMarkup(
       <MessageAttachments
@@ -588,7 +589,7 @@ describe('album grid', () => {
         onCancelUpload={() => {}}
       />,
     );
-    expect(html.match(/data-upload-ring/g)).toHaveLength(1);
+    expect(html.match(/data-upload-ring=/g)).toHaveLength(1);
     expect(html).toContain('data-upload-progress="50"');
     // A file below the album carries no ring of its own: still ONE for the message.
     const mixed = renderToStaticMarkup(
@@ -609,7 +610,7 @@ describe('album grid', () => {
         onCancelUpload={() => {}}
       />,
     );
-    expect(mixed.match(/data-upload-ring/g)).toHaveLength(1);
+    expect(mixed.match(/data-upload-ring=/g)).toHaveLength(1);
     // Uploading tiles are dimmed; the grid holds the ring.
     expect((html.match(/brightness-75/g) ?? []).length).toBe(2);
     expect(html).toContain('relative w-[320px]');

@@ -81,7 +81,7 @@ describe('T3: the composer carries the recorder peaks', () => {
     expect(attachment.peaks).not.toBe(peaks);
   });
 
-  it('no peaks (no AudioContext): the note sends exactly as before', () => {
+  it('no peaks (none read from the recording): the note sends exactly as before', () => {
     expect(voiceNoteAttachment(file, 4000, vi.fn())).not.toHaveProperty('peaks');
     expect(voiceNoteAttachment(file, 4000, vi.fn(), [])).not.toHaveProperty('peaks');
   });
