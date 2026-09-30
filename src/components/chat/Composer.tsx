@@ -15,7 +15,9 @@ import {
   IconX,
 } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
-import { useAudioRecorder, recordingFileName } from '@/lib/chat/use-audio-recorder';
+import { useAudioRecorder } from '@/lib/chat/use-audio-recorder';
+import { readHeader, rememberRecorderMime, voiceFileType } from '@/lib/chat/audio-sniff';
+import { voicePeaks } from '@/lib/chat/voice-peaks';
 import { AttachmentMenu } from '@/components/chat/AttachmentMenu';
 import { PostPicker } from '@/components/chat/PostPicker';
 import { MentionPicker, stepActive } from '@/components/chat/MentionPicker';
@@ -676,8 +678,8 @@ export function draftAttachments(
 
 /**
  * A recorded voice note as an instant-send attachment: the local file (no
- * version id yet, no preview) plus its recorded length and, when the recorder
- * captured them, its waveform peaks, so the outbox uploads it and records it
+ * version id yet, no preview) plus its recorded length and, when they could be
+ * read from the finished recording, its waveform peaks, so the outbox uploads it and records it
  * like any picked file. Pure.
  */
 export function voiceNoteAttachment(
@@ -1023,14 +1025,20 @@ export function Composer(props: ComposerProps): ReactElement {
     setVoiceBusy(true);
     const durationMs = recorder.seconds * 1000;
     const rec = await recorder.stop();
-    if (rec === null) {
+    // No chunks, or chunks with no bytes: nothing to send.
+    if (rec === null || rec.blob.size === 0) {
       setVoiceBusy(false);
       return;
     }
-    const file = new File([rec.blob], recordingFileName(rec.mime), { type: rec.mime });
+    // Type and name from the bytes, not the recorder's say-so.
+    const { type, name } = voiceFileType(await readHeader(rec.blob), rec.recorderMime, rec.mime);
+    const file = new File([rec.blob], name, { type });
+    rememberRecorderMime(file, rec.recorderMime);
+    // Peaks from the finished file, capped at 1s; none on any failure.
+    const peaks = await voicePeaks(file);
     const taken = dispatchSend(props.onSend, {
       text: '',
-      attachments: [voiceNoteAttachment(file, durationMs, props.uploadFile, rec.peaks)],
+      attachments: [voiceNoteAttachment(file, durationMs, props.uploadFile, peaks)],
       sharedPostIds: [],
       reply: props.reply?.quote ?? null,
       sharedBriefIds: [],

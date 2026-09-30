@@ -1,7 +1,7 @@
-// A voice note's waveform, drawn from the real audio. The recorder samples the
-// microphone's RMS level every PEAK_SAMPLE_MS while recording; on stop the
-// samples are folded into exactly PEAK_COUNT integers 0..100, normalised to the
-// note's own peak, and carried as the attachment meta key `peaks`. Readers
+// A voice note's waveform, drawn from the real audio. voice-peaks.ts decodes
+// the finished recording and takes the RMS level of each PEAK_SAMPLE_MS
+// window; the levels are folded into exactly PEAK_COUNT integers 0..100,
+// normalised to the note's own peak, and carried as the attachment meta key `peaks`. Readers
 // validate them (parsePeaks): anything that is not an array of up to
 // PEAK_COUNT finite numbers is absent, and the note draws the fixed bars.
 // Pure: no audio API here, so every step is unit-tested directly.
@@ -9,7 +9,7 @@
 /** How many peaks a note carries. */
 export const PEAK_COUNT = 48;
 
-/** How often the recorder samples the level while recording. */
+/** The length of one level window read from the decoded recording. */
 export const PEAK_SAMPLE_MS = 50;
 
 /** A sample as a usable level: non-finite or negative reads as silence. */

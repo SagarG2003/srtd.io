@@ -1,51 +1,96 @@
 // The WhatsApp upload control on an uploading photo, album, file or voice
-// note: an X inside a dark circle, with a ring around it that fills with the
-// upload's progress. Tapping it cancels the send (no confirm). While progress
-// is unknown (queued, waiting, backoff, offline) the ring is an indeterminate
-// arc that spins; with reduced motion it stays a static partial arc.
+// note: a 16px X on a dark translucent disc, with a ring around it that fills
+// with the upload's progress (a light arc on a translucent track). Tapping it
+// cancels the send (no confirm). While progress is unknown (queued, waiting,
+// backoff, offline) the ring is a partial arc that pulses; with reduced motion
+// it stays still.
+//
+// It never positions itself: the caller does (absolutely centred in the voice
+// play slot or over an image, in flow in the file icon spot). Its layers stack
+// in one grid cell, so nothing inside needs a positioned ancestor either.
+// Sizes follow the approved prototype: voice 40, photo and album 56, file 44;
+// the button is never under 44x44 (the voice ring sits in a 44px button).
 //
 // It draws on the overlay tokens (a dark disc, light ink, the same values in
 // light and dark), so it reads the same over a photo, on the own bubble's fill
 // and on a peer bubble, in both themes. The button carries data-upload-ring so
 // the own-bubble restyle (MessageThread OWN_BUBBLE_CONTENT) leaves it alone.
-// Only opacity and the ring's stroke ever change; its box is fixed at 48px.
+// Only opacity and the ring's stroke ever change.
 
 import type { ReactElement } from 'react';
 import { IconX } from '@/components/ui/icons';
 import { cn } from '@/lib/cn';
 
-/** The ring's box (px); the tap target is the whole circle (>= 44x44). */
-export const UPLOAD_RING_SIZE = 48;
+export type UploadRingVariant = 'voice' | 'image' | 'file';
+
+/** The ring's box (px) per variant, from the prototype. */
+export const UPLOAD_RING_SIZES: Readonly<Record<UploadRingVariant, number>> = {
+  voice: 40,
+  image: 56,
+  file: 44,
+};
+
+/** The drawn ring (disc, track, arc) per variant. */
+const RING_CLASS: Readonly<Record<UploadRingVariant, string>> = {
+  voice: 'h-10 w-10',
+  image: 'h-14 w-14',
+  file: 'h-11 w-11',
+};
+
+/** The tap target per variant: never under 44x44 (the 40px voice ring gets a 44px button). */
+const HIT_CLASS: Readonly<Record<UploadRingVariant, string>> = {
+  voice: 'h-11 w-11',
+  image: 'h-14 w-14',
+  file: 'h-11 w-11',
+};
+
 const STROKE = 3;
-const RADIUS = (UPLOAD_RING_SIZE - STROKE) / 2;
-const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+/** The X inside the ring (px). */
+export const UPLOAD_RING_X = 16;
 /** The indeterminate arc's share of the ring. */
 const ARC = 0.25;
 
-/** The stroke offset for a progress 0..1 (null: the indeterminate arc). Pure. */
-export function ringDashOffset(progress: number | null): number {
-  const shown = progress === null ? ARC : Math.min(Math.max(progress, 0), 1);
-  return CIRCUMFERENCE * (1 - shown);
+function circumference(size: number): number {
+  return 2 * Math.PI * ((size - STROKE) / 2);
 }
+
+/** The stroke offset for a progress 0..1 (null: the indeterminate arc). Pure. */
+export function ringDashOffset(
+  progress: number | null,
+  size: number = UPLOAD_RING_SIZES.image,
+): number {
+  const shown = progress === null ? ARC : Math.min(Math.max(progress, 0), 1);
+  return circumference(size) * (1 - shown);
+}
+
+/** One grid cell for every layer: they stack without any positioning. */
+const LAYER = '[grid-area:1/1]';
 
 export function UploadRing({
   progress,
   onCancel,
   className,
+  variant,
   hidden = false,
 }: {
-  /** Upload progress 0..1; null while unknown (the ring spins). */
+  /** Upload progress 0..1; null while unknown (the arc pulses). */
   progress: number | null;
   onCancel?: (() => void) | undefined;
+  /** Where it goes (the caller's position classes); never a size. */
   className?: string | undefined;
+  /** Which prototype size: voice 40, image (photo, album) 56, file 44. */
+  variant: UploadRingVariant;
   /** Faded out (upload done): kept in place for the crossfade, not focusable. */
   hidden?: boolean;
 }): ReactElement {
   const indeterminate = progress === null;
+  const size = UPLOAD_RING_SIZES[variant];
+  const radius = (size - STROKE) / 2;
   return (
     <button
       type="button"
       data-upload-ring=""
+      data-ring-variant={variant}
       data-upload-progress={indeterminate ? 'unknown' : String(Math.round(progress * 100))}
       aria-label="Cancel upload"
       aria-hidden={hidden ? true : undefined}
@@ -57,26 +102,28 @@ export function UploadRing({
         if (!hidden) onCancel?.();
       }}
       className={cn(
-        'relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-overlay-fg',
+        'grid shrink-0 place-items-center rounded-full text-overlay-fg',
+        HIT_CLASS[variant],
         'transition-[opacity,visibility] duration-150 motion-reduce:transition-none',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-overlay-fg',
         hidden ? 'pointer-events-none invisible opacity-0' : 'visible opacity-100',
         className,
       )}
     >
-      <span aria-hidden="true" className="absolute inset-0 rounded-full bg-overlay opacity-60" />
+      <span
+        aria-hidden="true"
+        data-upload-disc=""
+        className={cn(LAYER, RING_CLASS[variant], 'rounded-full bg-overlay opacity-60')}
+      />
       <svg
         aria-hidden="true"
-        viewBox={`0 0 ${UPLOAD_RING_SIZE} ${UPLOAD_RING_SIZE}`}
-        className={cn(
-          'absolute inset-0 h-12 w-12 -rotate-90',
-          indeterminate && 'animate-spin motion-reduce:animate-none',
-        )}
+        viewBox={`0 0 ${size} ${size}`}
+        className={cn(LAYER, RING_CLASS[variant], '-rotate-90')}
       >
         <circle
-          cx={UPLOAD_RING_SIZE / 2}
-          cy={UPLOAD_RING_SIZE / 2}
-          r={RADIUS}
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
           fill="none"
           stroke="currentColor"
           strokeWidth={STROKE}
@@ -84,19 +131,22 @@ export function UploadRing({
         />
         <circle
           data-upload-arc=""
-          cx={UPLOAD_RING_SIZE / 2}
-          cy={UPLOAD_RING_SIZE / 2}
-          r={RADIUS}
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
           fill="none"
           stroke="currentColor"
           strokeWidth={STROKE}
           strokeLinecap="round"
-          strokeDasharray={CIRCUMFERENCE}
-          strokeDashoffset={ringDashOffset(progress)}
-          className="text-overlay-fg transition-[stroke-dashoffset] duration-150 motion-reduce:transition-none"
+          strokeDasharray={circumference(size)}
+          strokeDashoffset={ringDashOffset(progress, size)}
+          className={cn(
+            'text-overlay-fg transition-[stroke-dashoffset] duration-150 motion-reduce:transition-none',
+            indeterminate && 'animate-pulse motion-reduce:animate-none',
+          )}
         />
       </svg>
-      <IconX size={18} className="relative" />
+      <IconX size={UPLOAD_RING_X} className={LAYER} />
     </button>
   );
 }

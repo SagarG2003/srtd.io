@@ -81,13 +81,46 @@ import {
   classifyRecordFailure,
   classifyUploadFailure,
   uploadFailureStatus,
+  uploadRefusalContext,
   type SendErrorClass,
 } from '@/lib/chat/send-errors';
+import { headerHex, readHeader, recorderMimeOf } from '@/lib/chat/audio-sniff';
+import { logger } from '@/lib/logger';
 import {
   rowToThreadMessage,
   type LocalMessageContent,
   type ThreadMessage,
 } from '@/lib/chat/thread';
+
+/**
+ * Log a permanently refused upload once, when it is refused: the status, the
+ * Worker code, what was sent (type, size, the recorder's reported mimeType
+ * when known, the first 12 bytes as hex) and the user agent. Nothing else:
+ * no name, no content past the header. Never throws.
+ */
+export async function logUploadRefusal(
+  file: Blob,
+  message: string,
+  status: number | undefined,
+): Promise<void> {
+  try {
+    const header = await readHeader(file);
+    logger.warn(
+      'chat: upload refused',
+      uploadRefusalContext({
+        message,
+        status,
+        mime: file.type,
+        size: file.size,
+        recorderMime: recorderMimeOf(file),
+        headerHex: headerHex(header),
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+      }),
+    );
+  } catch {
+    // Logging never fails a send.
+  }
+}
 
 /** The Agora publish is abandoned (the bubble stays sent) after this long. */
 export const LIVE_PUBLISH_TIMEOUT_MS = 5_000;
@@ -678,11 +711,10 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
         if (latest?.local !== undefined) {
           publish({ ...latest, local: { ...latest.local, uploading: false } }, false);
         }
-        return {
-          ok: false,
-          error: result.message,
-          errorClass: classifyUploadFailure(result.message, uploadFailureStatus(result)),
-        };
+        const status = uploadFailureStatus(result);
+        const errorClass = classifyUploadFailure(result.message, status);
+        if (errorClass === 'permanent') void logUploadRefusal(file, result.message, status);
+        return { ok: false, error: result.message, errorClass };
       }
       publish(
         {
