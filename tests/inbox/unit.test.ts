@@ -2,7 +2,7 @@
 // event in the EVENT MAP. Pure - the RecipientReader is faked, so no database
 // is touched and every branch is exercised deterministically.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   computeRecipients,
   extractMentions,
@@ -271,6 +271,27 @@ describe('computeRecipients - briefs / assets / members', () => {
       table: 'assets',
       type: 'INSERT',
       row: { id: 'asset1', workspace_id: U.ws, filename: 'f.png' } as never,
+    };
+    const recs = await computeRecipients(event, reader({ membersByRole: async () => [U.agency] }));
+    expect(ids(recs, 'asset_uploaded')).toEqual(new Set([U.agency]));
+  });
+
+  it('chat-origin asset INSERT -> no recipients (chat files stay in chat)', async () => {
+    const membersByRole = vi.fn(async () => [U.agency]);
+    const event: ChangeEvent = {
+      table: 'assets',
+      type: 'INSERT',
+      row: { id: 'asset2', workspace_id: U.ws, filename: 'f.png', origin: 'chat' } as never,
+    };
+    expect(await computeRecipients(event, reader({ membersByRole }))).toEqual([]);
+    expect(membersByRole).not.toHaveBeenCalled();
+  });
+
+  it('library-origin asset INSERT still -> asset_uploaded', async () => {
+    const event: ChangeEvent = {
+      table: 'assets',
+      type: 'INSERT',
+      row: { id: 'asset3', workspace_id: U.ws, filename: 'f.png', origin: 'library' } as never,
     };
     const recs = await computeRecipients(event, reader({ membersByRole: async () => [U.agency] }));
     expect(ids(recs, 'asset_uploaded')).toEqual(new Set([U.agency]));

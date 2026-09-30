@@ -114,3 +114,18 @@ describe('runLinkAttachment', () => {
     expect(result.ok).toBe(false);
   });
 });
+
+describe('AttachmentsField upload origin', () => {
+  it("uploads post/brief attachments with origin 'library', never 'chat'", async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const source = readFileSync(
+      fileURLToPath(new URL('./AttachmentsField.tsx', import.meta.url)),
+      'utf8',
+    );
+    const call = source.slice(source.indexOf('return uploadChatAttachment({'));
+    const args = call.slice(0, call.indexOf('});'));
+    expect(args).toContain("origin: 'library'");
+    expect(source).not.toContain("origin: 'chat'");
+  });
+});

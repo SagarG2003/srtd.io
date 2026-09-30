@@ -10,7 +10,7 @@ import { Avatar } from '@/components/ui/Avatar';
 import { cn } from '@/lib/cn';
 import { relativeLong, relativeShort } from '@/lib/relative-time';
 import { MessageAttachments } from '@/components/chat/MessageAttachments';
-import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
+import { useCommentAttachments } from '@/lib/chat/use-chat-attachments';
 import { supabase } from '@/lib/supabase';
 import { useNewTrace } from '@/lib/trace-context';
 import {
@@ -778,7 +778,7 @@ export function Comments({
   viewerIsClient,
 }: CommentsProps) {
   const newTrace = useNewTrace();
-  const { canAttach, presignEnabled, presignCache, uploadFile } = useChatAttachments();
+  const { canAttach, presignEnabled, presignCache, uploadFile } = useCommentAttachments();
   // Members for the @-mention picker; resolved once and shared by both composers.
   const { candidates } = useMentionCandidates(workspaceId);
 

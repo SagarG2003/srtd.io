@@ -69,15 +69,26 @@ async function mintToken(sub: string, expSecondsFromNow = 3600): Promise<string>
 }
 
 class FakeStore implements AssetReadStore {
+  readonly chatChecks: Array<{ userId: string; assetVersionId: string }> = [];
+  memberChecks = 0;
   constructor(
     private readonly version: AssetVersionLocator | null,
     private readonly members: ReadonlySet<string>,
+    /** `${userId}:${assetVersionId}` pairs chat_attachment_readable allows. */
+    private readonly chatReaders: ReadonlySet<string> = new Set(),
+    private readonly chatRpcError: Error | null = null,
   ) {}
   findVersion(): Promise<AssetVersionLocator | null> {
     return Promise.resolve(this.version);
   }
   isActiveMember(input: { userId: string; workspaceId: string }): Promise<boolean> {
+    this.memberChecks += 1;
     return Promise.resolve(this.members.has(`${input.userId}:${input.workspaceId}`));
+  }
+  isChatAttachmentReadable(input: { userId: string; assetVersionId: string }): Promise<boolean> {
+    this.chatChecks.push(input);
+    if (this.chatRpcError !== null) return Promise.reject(this.chatRpcError);
+    return Promise.resolve(this.chatReaders.has(`${input.userId}:${input.assetVersionId}`));
   }
 }
 
@@ -92,6 +103,7 @@ class RecordingSigner implements PresignedUrlSigner {
 const located: AssetVersionLocator = {
   workspaceId: WORKSPACE,
   bucket: BUCKET,
+  origin: 'library',
   kind: 'image',
   r2Key: R2_KEY,
 };
@@ -208,6 +220,7 @@ describe('authorizeAndSign', () => {
     const link: AssetVersionLocator = {
       workspaceId: WORKSPACE,
       bucket: BUCKET,
+      origin: 'library',
       kind: 'link',
       r2Key: null,
     };
@@ -235,6 +248,64 @@ describe('authorizeAndSign', () => {
     if (!result.ok) {
       expect(result.error.code).toBe('not_found');
     }
+    expect(signer.calls).toHaveLength(0);
+  });
+});
+
+describe('authorizeAndSign chat-origin gate', () => {
+  const chatLocated: AssetVersionLocator = { ...located, origin: 'chat' };
+  const chatReader = new Set<string>([`${USER}:${VERSION_ID}`]);
+
+  it('signs a chat file when chat_attachment_readable is true', async () => {
+    const signer = new RecordingSigner();
+    // The caller is not even a workspace member: chat membership alone decides.
+    const store = new FakeStore(chatLocated, new Set(), chatReader);
+    const result = await authorizeAndSign(
+      { store, signer },
+      { userId: USER, assetVersionId: VERSION_ID },
+    );
+    expect(result.ok).toBe(true);
+    expect(store.chatChecks).toEqual([{ userId: USER, assetVersionId: VERSION_ID }]);
+    expect(store.memberChecks).toBe(0);
+    expect(signer.calls).toHaveLength(1);
+  });
+
+  it('denies a chat file when not readable, with the exact non-member error', async () => {
+    const signer = new RecordingSigner();
+    // A workspace member who is not in the chat is still denied.
+    const chatStore = new FakeStore(chatLocated, memberOfWorkspace, chatReader);
+    const denied = await authorizeAndSign(
+      { store: chatStore, signer },
+      { userId: OTHER_USER, assetVersionId: VERSION_ID },
+    );
+    const libraryDenied = await authorizeAndSign(
+      { store: new FakeStore(located, memberOfWorkspace), signer },
+      { userId: OTHER_USER, assetVersionId: VERSION_ID },
+    );
+    expect(denied.ok).toBe(false);
+    expect(denied).toEqual(libraryDenied);
+    expect(chatStore.memberChecks).toBe(0);
+    expect(signer.calls).toHaveLength(0);
+  });
+
+  it('keeps the library gate unchanged: membership only, no chat RPC', async () => {
+    const signer = new RecordingSigner();
+    const store = new FakeStore(located, memberOfWorkspace, chatReader);
+    const result = await authorizeAndSign(
+      { store, signer },
+      { userId: USER, assetVersionId: VERSION_ID },
+    );
+    expect(result.ok).toBe(true);
+    expect(store.memberChecks).toBe(1);
+    expect(store.chatChecks).toHaveLength(0);
+  });
+
+  it('propagates a chat RPC error (worker 5xx) and never signs', async () => {
+    const signer = new RecordingSigner();
+    const store = new FakeStore(chatLocated, memberOfWorkspace, chatReader, new Error('rpc down'));
+    await expect(
+      authorizeAndSign({ store, signer }, { userId: USER, assetVersionId: VERSION_ID }),
+    ).rejects.toThrow('rpc down');
     expect(signer.calls).toHaveLength(0);
   });
 });

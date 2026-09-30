@@ -28,6 +28,7 @@ function input(overrides: Partial<UploadInput> = {}): UploadInput {
     contentType: 'image/png',
     bytes: pngBytes(100, 50),
     traceId: TRACE,
+    origin: 'library',
     ...overrides,
   };
 }

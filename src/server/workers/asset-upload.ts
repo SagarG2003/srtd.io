@@ -1,6 +1,8 @@
 // Cloudflare Worker: asset upload + read route.
 //
-// POST  multipart/form-data { file, workspace_id, asset_id? }
+// POST  multipart/form-data { file, workspace_id, origin?, asset_id?, folder_id? }
+//   origin is 'library' (default when missing) or 'chat'. A chat file never
+//   becomes a version of another asset and never goes into a folder.
 //   -> verifies the caller's Bearer token, confirms they are an active member of
 //      workspace_id, runs the upload pipeline, and returns the asset summary.
 //      The acting user is the verified token's `sub` claim only - the body never
@@ -24,6 +26,7 @@ import {
   selectScanner,
   err,
   ok,
+  type AssetOrigin,
   type AssetRepository,
   type AssetSummary,
   type Result,
@@ -140,6 +143,8 @@ export interface AuthorizedUploadInput {
   contentType: string;
   bytes: Uint8Array;
   traceId: string;
+  /** Parsed from the form's `origin` field; missing means 'library'. */
+  origin: AssetOrigin;
   assetId?: string;
   /** Verified destination folder for a new upload (live + in this workspace). */
   folderId?: string;
@@ -177,6 +182,7 @@ export async function authorizeAndUpload(
     contentType: input.contentType,
     bytes: input.bytes,
     traceId: input.traceId,
+    origin: input.origin,
     ...(input.assetId !== undefined ? { assetId: input.assetId } : {}),
     ...(input.folderId !== undefined ? { folderId: input.folderId } : {}),
     ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
@@ -321,6 +327,7 @@ async function handlePost(
   const assetId = form.get('asset_id');
   const folderIdField = form.get('folder_id');
   const displayNameField = form.get('display_name');
+  const originField = form.get('origin');
 
   if (!(file instanceof File)) {
     return json(
@@ -342,6 +349,35 @@ async function handlePost(
     return json(
       400,
       { error: { code: 'bad_request', message: 'Invalid id format.' } },
+      traceId,
+      acao,
+    );
+  }
+
+  // Upload origin: missing is 'library'; anything but 'library' or 'chat' is 400.
+  let origin: AssetOrigin = 'library';
+  if (originField !== null) {
+    if (originField !== 'library' && originField !== 'chat') {
+      return json(
+        400,
+        { error: { code: 'bad_request', message: 'origin must be library or chat.' } },
+        traceId,
+        acao,
+      );
+    }
+    origin = originField;
+  }
+  const hasAssetId = typeof assetId === 'string' && assetId !== '';
+  const hasFolderId = typeof folderIdField === 'string' && folderIdField !== '';
+  if (origin === 'chat' && (hasAssetId || hasFolderId)) {
+    return json(
+      400,
+      {
+        error: {
+          code: 'bad_request',
+          message: 'A chat upload cannot target an asset or a folder.',
+        },
+      },
       traceId,
       acao,
     );
@@ -400,6 +436,7 @@ async function handlePost(
       contentType: file.type,
       bytes,
       traceId,
+      origin,
       ...(typeof assetId === 'string' && assetId !== '' ? { assetId } : {}),
       ...(folderId !== undefined ? { folderId } : {}),
       ...(displayName !== undefined ? { displayName } : {}),

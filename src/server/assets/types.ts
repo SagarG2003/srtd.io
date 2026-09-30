@@ -12,6 +12,13 @@ export type AssetRow = Database['public']['Tables']['assets']['Row'];
 export type AssetVersionRow = Database['public']['Tables']['asset_versions']['Row'];
 export type FolderRow = Database['public']['Tables']['folders']['Row'];
 
+/**
+ * Where an asset was uploaded from (assets.origin). A 'chat' asset stays inside
+ * its chat: RLS hides it from the Assets library and asset-read gates it by
+ * chat membership. Missing on the wire means 'library'.
+ */
+export type AssetOrigin = 'library' | 'chat';
+
 /** Every expected, caller-handled failure in the pipeline. */
 export type UploadErrorCode =
   | 'unsupported_mime'
@@ -134,6 +141,8 @@ export interface UploadInput {
   filename: string;
   contentType: string;
   bytes: Uint8Array;
+  /** Where the upload came from; persisted as assets.origin and scopes dedup. */
+  origin: AssetOrigin;
   /** When set, the upload is treated as a new version of this existing asset. */
   assetId?: string;
   /** Destination folder for a new asset (already verified live + in-workspace). */

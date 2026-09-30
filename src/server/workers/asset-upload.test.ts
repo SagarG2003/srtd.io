@@ -369,6 +369,66 @@ describe('asset-upload worker.fetch', () => {
   });
 });
 
+describe('asset-upload origin field', () => {
+  async function post(fields: Record<string, string>): Promise<Response> {
+    const token = await mintToken(USER);
+    state.members.add(`${USER}:${WORKSPACE}`);
+    return worker.fetch(uploadRequest(token, { workspace_id: WORKSPACE, ...fields }), env);
+  }
+
+  it("defaults a missing origin to 'library'", async () => {
+    const res = await post({});
+    expect(res.status).toBe(201);
+    expect(state.capturedInput?.origin).toBe('library');
+  });
+
+  it("passes origin 'library' through when sent explicitly", async () => {
+    const res = await post({ origin: 'library' });
+    expect(res.status).toBe(201);
+    expect(state.capturedInput?.origin).toBe('library');
+  });
+
+  it("stores origin 'chat' through the pipeline", async () => {
+    const res = await post({ origin: 'chat' });
+    expect(res.status).toBe(201);
+    expect(state.capturedInput?.origin).toBe('chat');
+  });
+
+  it('rejects any other origin with 400 before the pipeline runs', async () => {
+    for (const origin of ['', 'Chat', 'assets', 'post']) {
+      state.capturedInput = null;
+      const res = await post({ origin });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { code: string } };
+      expect(body.error.code).toBe('bad_request');
+      expect(state.capturedInput).toBeNull();
+    }
+  });
+
+  it("rejects origin 'chat' with an asset_id with 400", async () => {
+    const res = await post({ origin: 'chat', asset_id: ASSET });
+    expect(res.status).toBe(400);
+    expect(state.capturedInput).toBeNull();
+  });
+
+  it("rejects origin 'chat' with a folder_id with 400", async () => {
+    const now = new Date().toISOString();
+    state.repo.folders.set(FOLDER, {
+      id: FOLDER,
+      workspace_id: WORKSPACE,
+      name: 'Campaigns',
+      parent_id: null,
+      created_by: USER,
+      created_at: now,
+      updated_at: now,
+      deleted_at: null,
+    });
+    const res = await post({ origin: 'chat', folder_id: FOLDER });
+    expect(res.status).toBe(400);
+    expect(state.capturedInput).toBeNull();
+  });
+});
+
 describe('POST /links', () => {
   const URL_VAL = 'https://example.com/asset';
 

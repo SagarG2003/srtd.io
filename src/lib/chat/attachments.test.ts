@@ -19,6 +19,7 @@ import {
   buildAttachmentMeta,
   parseAttachmentMeta,
   uploadChatAttachment,
+  type ChatUploadParams,
   type MessageAttachment,
   type ReplyQuote,
   uploadRing,
@@ -52,6 +53,7 @@ describe('uploadChatAttachment', () => {
     const outcome = await uploadChatAttachment({
       file,
       workspaceId: 'ws-1',
+      origin: 'chat',
       token: 'jwt',
       endpoint: 'https://upload',
       fetcher,
@@ -66,7 +68,39 @@ describe('uploadChatAttachment', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer jwt');
     const form = init.body as FormData;
     expect(form.get('workspace_id')).toBe('ws-1');
+    expect(form.get('origin')).toBe('chat');
     expect((form.get('file') as File).name).toBe('photo.png');
+  });
+
+  it("forwards origin 'library' (post/brief fields and comments) unchanged", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(
+        workerResponse(201, { asset: { assetId: ASSET_ID, versionId: VERSION_ID, reused: false } }),
+      );
+    await uploadChatAttachment({
+      file: new File(['x'], 'brief.pdf', { type: 'application/pdf' }),
+      workspaceId: 'ws-1',
+      origin: 'library',
+      token: 'jwt',
+      endpoint: 'https://upload',
+      fetcher,
+    });
+    const [, init] = fetcher.mock.calls[0] as [string, RequestInit];
+    expect((init.body as FormData).get('origin')).toBe('library');
+  });
+
+  it('requires origin at the type level', () => {
+    const fetcher = vi.fn();
+    // @ts-expect-error origin is required: no caller may forget it.
+    const params: ChatUploadParams = {
+      file: new File(['x'], 'a.png', { type: 'image/png' }),
+      workspaceId: 'ws-1',
+      token: 'jwt',
+      endpoint: 'https://upload',
+      fetcher,
+    };
+    expect(params).toBeDefined();
   });
 
   it('treats a reused (200) response as success and still carries the version id', async () => {
@@ -79,6 +113,7 @@ describe('uploadChatAttachment', () => {
     const outcome = await uploadChatAttachment({
       file: new File(['x'], 'a.pdf', { type: 'application/pdf' }),
       workspaceId: 'ws-1',
+      origin: 'chat',
       token: 'jwt',
       endpoint: 'https://upload',
       fetcher,
@@ -95,6 +130,7 @@ describe('uploadChatAttachment', () => {
     const outcome = await uploadChatAttachment({
       file: new File(['x'], 'a.png', { type: 'image/png' }),
       workspaceId: 'ws-1',
+      origin: 'chat',
       token: 'jwt',
       endpoint: 'https://upload',
       fetcher,
@@ -112,6 +148,7 @@ describe('uploadChatAttachment', () => {
     const outcome = await uploadChatAttachment({
       file: new File(['x'], 'a.pdf', { type: 'application/pdf' }),
       workspaceId: 'ws-1',
+      origin: 'chat',
       token: 'jwt',
       endpoint: 'https://upload',
       fetcher,
@@ -437,6 +474,7 @@ describe('uploadChatAttachment over XHR', () => {
     const outcome = await uploadChatAttachment({
       file: new File(['x'], 'photo.png', { type: 'image/png' }),
       workspaceId: 'ws-1',
+      origin: 'chat',
       token: 'jwt',
       endpoint: 'https://upload',
       xhr: {

@@ -403,6 +403,7 @@ export function AssetsPage() {
         endpoint: uploadEndpoint,
         token,
         workspaceId,
+        origin: 'library',
         filename: file.name,
         displayName,
         folderId: targetFolderId,

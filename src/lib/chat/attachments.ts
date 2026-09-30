@@ -15,6 +15,7 @@ import { ALLOWED_MIME_TYPES, isImageMime } from '@srtdio/storage';
 import {
   precheckFile,
   uploadAssetFile,
+  type AssetOrigin,
   uploadErrorMessage,
   UPLOAD_ACCEPT,
   type Precheck,
@@ -489,6 +490,8 @@ export function toMessageAttachment(file: File, versionId: string): MessageAttac
 export type ChatUploadParams = {
   file: File;
   workspaceId: string;
+  /** 'chat' from the chat composer/outbox; 'library' from comments and post/brief fields. */
+  origin: AssetOrigin;
   token: string;
   endpoint: string;
 } & UploadTransport;
@@ -529,6 +532,7 @@ export async function uploadChatAttachment(
     endpoint: params.endpoint,
     token: params.token,
     workspaceId: params.workspaceId,
+    origin: params.origin,
     filename: params.file.name,
   };
   const outcome = await uploadAssetFile(
