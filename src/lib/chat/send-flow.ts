@@ -126,6 +126,13 @@ export interface SendFlowDeps {
       }) => Promise<unknown>)
     | undefined;
   /**
+   * Resolve the live target before the publish starts (an unsynced group's
+   * member read, bounded on its own). Awaited after the record and never
+   * counted against the publish timeout; a throw is ignored (the publish then
+   * finds no target).
+   */
+  beforePublish?: () => Promise<unknown>;
+  /**
    * Re-read who this chat's mentions may name, after the server refused one.
    * Absent (or failed): the retry carries no mentions.
    */
@@ -238,6 +245,13 @@ export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<Sen
   if (deps.publishLive === undefined) {
     deps.onLiveWarning({ trace_id: input.traceId, message_id: input.id, skipped: 'no connection' });
     return { ok: true, message, livePublished: false };
+  }
+  if (deps.beforePublish !== undefined) {
+    try {
+      await deps.beforePublish();
+    } catch {
+      // The publish below finds no target and is reported there.
+    }
   }
   let publish: Promise<unknown>;
   try {

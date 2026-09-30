@@ -464,6 +464,21 @@ export function applyIncoming(state: ChatStoreState, message: IncomingMessage): 
   );
 }
 
+/**
+ * A roster re-read and the messages held for it, as ONE transition: the new
+ * chats' tiles land with their preview, unread and time already set, so a
+ * tile never paints empty first. Existing chats keep their summaries.
+ */
+export function applyRosterWithIncoming(
+  state: ChatStoreState,
+  roster: readonly ChannelSummary[],
+  incoming: readonly IncomingMessage[],
+): ChatStoreState {
+  let next = applyRoster(state, roster);
+  for (const message of incoming) next = applyIncoming(next, message);
+  return next;
+}
+
 /** Zero one channel's unread; a no-op when it is already read or unknown. */
 export function markRead(state: ChatStoreState, channelId: string): ChatStoreState {
   const existing = state.conversations[channelId];

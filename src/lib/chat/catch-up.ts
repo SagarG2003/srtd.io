@@ -136,6 +136,8 @@ export function browserCatchUpTriggers(run: (reason: CatchUpReason) => void): ()
 
 /** Ids per reactions re-read (one IN read each). */
 export const REACTION_RECHECK_CHUNK = 100;
+/** At most this many reactions chunk reads in flight at once. */
+export const REACTION_RECHECK_CONCURRENCY = 3;
 
 /**
  * Whether a catch-up re-reads the loaded rows' reactions: on 'connected' and
@@ -151,9 +153,10 @@ export function reactionRecheckIds(messages: readonly ThreadMessage[]): string[]
 }
 
 /**
- * Re-read the reactions of these ids, chunked by REACTION_RECHECK_CHUNK (the
- * chunks run in parallel, each with the 5s read timeout). Any failed chunk
- * fails the whole re-read, so the caller keeps what it shows. Never throws.
+ * Re-read the reactions of these ids, chunked by REACTION_RECHECK_CHUNK, at
+ * most REACTION_RECHECK_CONCURRENCY chunks in flight, each with the 5s read
+ * timeout. Any failed chunk fails the whole re-read (no further chunk starts),
+ * so the caller keeps what it shows. Never throws.
  */
 export async function rereadReactions(
   load: (
@@ -167,13 +170,36 @@ export async function rereadReactions(
   for (let i = 0; i < ids.length; i += REACTION_RECHECK_CHUNK) {
     chunks.push(ids.slice(i, i + REACTION_RECHECK_CHUNK));
   }
-  const results = await Promise.all(
-    chunks.map((chunk) => withReadTimeout((signal) => load(chunk, signal), timeoutMs)),
-  );
   const merged = new Map<string, MessageReaction[]>();
-  for (const result of results) {
-    if (!result.ok) return result;
-    for (const [id, reactions] of result.data) merged.set(id, reactions);
-  }
-  return { ok: true, data: merged };
+  let failure: Result<Map<string, MessageReaction[]>> | null = null;
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (failure === null && next < chunks.length) {
+      const chunk = chunks[next] ?? [];
+      next += 1;
+      const result = await withReadTimeout((signal) => load(chunk, signal), timeoutMs);
+      if (!result.ok) {
+        failure = result;
+        return;
+      }
+      for (const [id, reactions] of result.data) merged.set(id, reactions);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(REACTION_RECHECK_CONCURRENCY, chunks.length) }, worker),
+  );
+  return failure ?? { ok: true, data: merged };
+}
+
+/**
+ * The re-read ids whose reactions may be applied: those not toggled locally
+ * after the re-read started (`touched` maps an id to its last toggle number,
+ * `startedAt` is the toggle number when the re-read began). Pure.
+ */
+export function untouchedSince(
+  ids: readonly string[],
+  touched: ReadonlyMap<string, number>,
+  startedAt: number,
+): string[] {
+  return ids.filter((id) => (touched.get(id) ?? 0) <= startedAt);
 }

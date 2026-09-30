@@ -196,7 +196,7 @@ interface GroupInfoSheetProps {
   /** Called after rename / photo / add / remove so the parent refreshes the channel list. */
   onChanged: () => void;
   /**
-   * Tell the others after a successful rename / photo / add / remove (the live
+   * Tell the others after a successful rename / photo / add / remove / leave (the live
    * roster command). Fire-and-forget: it never delays or changes the result.
    */
   signalRoster?: (change: RosterChange) => Promise<void>;
@@ -700,7 +700,17 @@ export function GroupInfoSheet(props: GroupInfoSheetProps): ReactElement {
     const failure = await withGroupBusy({
       setBusy,
       run: () =>
-        leaveGroupChannel(supabase, { groupId: props.groupId, traceId: newTrace() }, props.onLeft),
+        leaveGroupChannel(
+          supabase,
+          { groupId: props.groupId, traceId: newTrace() },
+          withRosterSignal(
+            props.onLeft,
+            () =>
+              props.signalRoster?.({ kind: 'members', removed: [props.currentUserId] }) ??
+              Promise.resolve(),
+            (context) => logger.warn('chat: roster signal failed', context),
+          ),
+        ),
       onThrow: THROWN_FAILURE,
     });
     setLeaving(false);

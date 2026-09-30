@@ -89,6 +89,39 @@ export function sameTarget(a: ChannelTarget | null, b: ChannelTarget | null): bo
   return a.fanout.length === b.fanout.length && a.fanout.every((to, i) => to === b.fanout?.[i]);
 }
 
+/** The `ext` key every live message carries the sender's current workspace under. */
+export const LIVE_WORKSPACE_KEY = 'sorted_workspace_id';
+
+// The workspace the chat store is in, stamped on every live send. Set by the
+// store on each workspace (null outside one); never hardcoded.
+let liveWorkspaceId: string | null = null;
+
+/** Set (or clear) the workspace every live send is stamped with. */
+export function setLiveWorkspaceId(workspaceId: string | null): void {
+  liveWorkspaceId = workspaceId;
+}
+
+/** The workspace a live message names on its ext; null when absent (older client). */
+export function extWorkspaceId(ext: unknown): string | null {
+  if (typeof ext !== 'object' || ext === null) return null;
+  const value = (ext as Record<string, unknown>)[LIVE_WORKSPACE_KEY];
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+/** A live message from another workspace than the current one (absent = not foreign). Pure. */
+export function isForeignWorkspace(ext: unknown, currentWorkspaceId: string | null): boolean {
+  const named = extWorkspaceId(ext);
+  return named !== null && currentWorkspaceId !== null && named !== currentWorkspaceId;
+}
+
+/** Stamp the current workspace onto a built message's ext (in place). */
+function stampWorkspace(message: AgoraChat.MessageBody): AgoraChat.MessageBody {
+  if (liveWorkspaceId === null) return message;
+  const carrier = message as { ext?: Record<string, unknown> };
+  carrier.ext = { ...(carrier.ext ?? {}), [LIVE_WORKSPACE_KEY]: liveWorkspaceId };
+  return message;
+}
+
 /** The `send` member every live publish goes through. */
 export interface LiveSendConnection {
   send(message: AgoraChat.MessageBody): Promise<AgoraChat.SendMsgResult>;
@@ -97,7 +130,7 @@ export interface LiveSendConnection {
 /**
  * Send one live message to a target: once to the group or peer, or, for a
  * fan-out target, once per member as singleChat (the builder gets each
- * recipient). A fan-out resolves with the first delivery and rejects only when
+ * recipient). Every message carries the current workspace on its ext. A fan-out resolves with the first delivery and rejects only when
  * every delivery failed.
  */
 export async function sendRouted(
@@ -106,11 +139,11 @@ export async function sendRouted(
   build: (to: string, chatType: ThreadChatType) => AgoraChat.MessageBody,
 ): Promise<AgoraChat.SendMsgResult> {
   if (target.fanout === undefined) {
-    return connection.send(build(target.targetId, target.chatType));
+    return connection.send(stampWorkspace(build(target.targetId, target.chatType)));
   }
   const results = await Promise.allSettled(
     target.fanout.map((to) =>
-      Promise.resolve().then(() => connection.send(build(to, 'singleChat'))),
+      Promise.resolve().then(() => connection.send(stampWorkspace(build(to, 'singleChat')))),
     ),
   );
   const delivered = results.find(

@@ -25,6 +25,7 @@ import {
 import {
   cmdChannelId,
   createGroupMemberCache,
+  createHeldMessages,
   createRosterReloader,
   openChannelAfterRoster,
   parseRosterCmd,
@@ -275,49 +276,49 @@ describe('L3 roster reload', () => {
     reloader.dispose();
   });
 
-  it('an unknown-channel message is held and processed after the reload', async () => {
-    const roster = new Set<string>();
-    const reload = vi.fn(() => {
-      roster.add(CHANNEL);
-      return Promise.resolve(true);
-    });
-    const reloader = createRosterReloader({ reload });
-    const processed = vi.fn();
-    const dropped = vi.fn();
-    reloader.hold(() => (roster.has(CHANNEL) ? processed() : dropped()), dropped);
-    reloader.request();
-    expect(processed).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(500);
-    expect(processed).toHaveBeenCalledTimes(1);
-    expect(dropped).not.toHaveBeenCalled();
-    reloader.dispose();
+  it('an unknown-channel message is held and handed back with the reload that lists it', () => {
+    const held = createHeldMessages<string>();
+    held.add(CHANNEL, 'm1', 0);
+    expect(held.settle(() => false, 0)).toEqual([]);
+    expect(held.size()).toBe(1);
+    expect(held.settle((id) => id === CHANNEL, 1)).toEqual(['m1']);
+    expect(held.size()).toBe(0);
+    held.dispose();
   });
 
-  it('still unknown after the reload = dropped', async () => {
-    const reloader = createRosterReloader({ reload: () => Promise.resolve(true) });
-    const processed = vi.fn();
-    const dropped = vi.fn();
-    const roster = new Set<string>();
-    reloader.hold(() => (roster.has(CHANNEL) ? processed() : dropped()), dropped);
-    reloader.request();
-    await vi.advanceTimersByTimeAsync(500);
-    expect(processed).not.toHaveBeenCalled();
-    expect(dropped).toHaveBeenCalledTimes(1);
-    reloader.dispose();
+  it('still unknown after a reload that started after the hold = dropped', () => {
+    const onDrop = vi.fn();
+    const held = createHeldMessages<string>({ onDrop });
+    held.add(CHANNEL, 'm1', 0);
+    expect(held.settle(() => false, 1)).toEqual([]);
+    expect(onDrop).toHaveBeenCalledWith('m1');
+    expect(held.size()).toBe(0);
   });
 
-  it('a hold with no reload within 5s is dropped; dispose drops the rest and clears timers', async () => {
-    const reload = vi.fn(() => new Promise<boolean>(() => {}));
-    const reloader = createRosterReloader({ reload });
-    const dropped = vi.fn();
-    reloader.hold(vi.fn(), dropped);
+  it('J5 a hold survives an in-flight reload and applies after the next; drop at 10s', async () => {
+    const onDrop = vi.fn();
+    const held = createHeldMessages<string>({ onDrop });
+    // Reload #1 already started (1 started) when the message is held.
+    held.add(CHANNEL, 'm1', 1);
+    expect(held.settle(() => false, 1)).toEqual([]);
+    expect(onDrop).not.toHaveBeenCalled();
+    expect(held.settle((id) => id === CHANNEL, 2)).toEqual(['m1']);
+
+    held.add(CHANNEL, 'm2', 2);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(onDrop).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onDrop).toHaveBeenCalledWith('m2');
+    held.add(CHANNEL, 'm3', 2);
+    held.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('dispose clears the reloader timers, including an in-flight timeout', async () => {
+    const reloader = createRosterReloader({ reload: () => new Promise<boolean>(() => {}) });
     reloader.request();
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(dropped).toHaveBeenCalledTimes(1);
-    const later = vi.fn();
-    reloader.hold(vi.fn(), later);
+    await vi.advanceTimersByTimeAsync(600);
     reloader.dispose();
-    expect(later).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 

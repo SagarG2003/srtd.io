@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
@@ -23,9 +23,12 @@ import {
   type ThreadMessage,
 } from '@/lib/chat/thread';
 import { createCmdMessage } from '@/lib/chat/message-factory';
+import { loadScope } from '@/lib/chat/chat-store';
 import {
   openChannelAfterRoster,
+  reloadedFor,
   resolveLiveTarget,
+  shownChannel,
   rosterSignalTargets,
   sendRosterSignal,
   withRosterSignal,
@@ -411,7 +414,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     roster,
     retryLoad,
     reloadRoster,
-    rosterVersion,
+    rosterReload,
     groupMembers: groupMemberCache,
     setActive,
     markConversationRead,
@@ -571,16 +574,26 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // Tell the others about a group change after its RPC succeeded: a roster
   // command to the right people, fire-and-forget (5s per send, failure only
   // logged). Never awaited by the action or the UI.
+  // Sends started in one workspace are aborted on a switch or unmount: nothing
+  // more goes out and late results are ignored.
   const clientRef = useRef(client);
   clientRef.current = client;
+  const signalAbortRef = useRef<AbortController>(new AbortController());
+  useEffect(() => {
+    const controller = new AbortController();
+    signalAbortRef.current = controller;
+    return () => controller.abort();
+  }, [workspaceId]);
   const signalRoster = useCallback(
     async (channel: ChannelSummary, change: RosterChange): Promise<void> => {
+      const signal = signalAbortRef.current.signal;
       const connection = clientRef.current;
-      if (connection === null) return;
+      if (connection === null || signal.aborted) return;
       const groupTarget =
         change.kind === 'created'
           ? null
           : await resolveLiveTarget(channel, currentUserId, groupMemberCache);
+      if (signal.aborted) return;
       await sendRosterSignal({
         connection: connection as ThreadConnection,
         createCmd: createCmdMessage,
@@ -588,6 +601,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
         channelId: channel.channelId,
         kind: change.kind,
         onError: (context) => logger.warn('chat: roster signal failed', context),
+        signal,
       });
     },
     [currentUserId, groupMemberCache],
@@ -601,7 +615,9 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       withRosterSignal(
         () => {},
         async () => {
+          const signal = signalAbortRef.current.signal;
           const next = await reloadRoster();
+          if (signal.aborted) return;
           const channel = next?.find((c) => c.groupId === groupId);
           if (channel === undefined) return;
           await signalRoster(channel, { kind: 'created', memberUserIds });
@@ -688,25 +704,33 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
 
   // The open chat's row follows every roster re-read: a rename, photo or sync
   // updates it in place (same object when nothing changed), and a chat that is
-  // gone after a re-read (removed from the group) closes to chat home.
+  // gone after a re-read applied for THIS workspace (removed from the group)
+  // closes to chat home before the next paint. A re-read from a previous
+  // workspace never closes a chat.
+  const rosterVersion = rosterReload.version;
   const seenRosterVersion = useRef(rosterVersion);
-  useEffect(() => {
+  const scope = loadScope(workspaceId, currentUserId);
+  useLayoutEffect(() => {
+    const reloaded = reloadedFor(seenRosterVersion.current, rosterReload, scope);
+    seenRosterVersion.current = rosterReload.version;
     if (loadStatus !== 'ready') return;
-    const reloaded = seenRosterVersion.current !== rosterVersion;
-    seenRosterVersion.current = rosterVersion;
     const step = openChannelAfterRoster(selectedRef.current, roster, reloaded);
     if (step.kind === 'update') setSelected(step.channel);
     else if (step.kind === 'close') {
       setGroupInfoOpen(false);
       closeChannel();
     }
-  }, [roster, rosterVersion, loadStatus, closeChannel]);
+  }, [roster, rosterReload, scope, loadStatus, closeChannel]);
 
   // A group's member ids, so its typing row only names members and an unsynced
   // group's live traffic reaches each of them. Tagged with the group they
   // belong to; another group's set never applies. Re-read on every roster
   // re-read (a member added or removed elsewhere).
   const selectedGroupId = selected?.channelType === 'group' ? (selected.groupId ?? null) : null;
+  // What the open chat shows (header, group info, target): its row in the
+  // roster the list renders from, so a rename or photo lands in the header and
+  // the tile in the same commit.
+  const shown = useMemo(() => shownChannel(selected, roster), [selected, roster]);
   const [groupMembers, setGroupMembers] = useState<{
     groupId: string;
     ids: ReadonlySet<string>;
@@ -735,8 +759,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // The same target object while it routes the same way, so a rename or photo
   // change never re-subscribes the thread, typing or marks.
   const computedTarget = useMemo(
-    () => safeTarget(selected, openMemberIds === null ? null : [...openMemberIds], currentUserId),
-    [selected, openMemberIds, currentUserId],
+    () => safeTarget(shown, openMemberIds === null ? null : [...openMemberIds], currentUserId),
+    [shown, openMemberIds, currentUserId],
   );
   const targetRef = useRef(computedTarget);
   if (!sameTarget(targetRef.current, computedTarget)) targetRef.current = computedTarget;
@@ -756,6 +780,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     target,
     currentUserId,
     peerUserId: selected?.peerUserId ?? null,
+    channelType: selected?.channelType ?? null,
     onOwnMessage,
     onCaughtUp,
     onMessagesDeleted,
@@ -938,11 +963,11 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
           {selected !== null ? (
             <MessageThread
               key={selected.channelId}
-              title={selected.title}
+              title={(shown ?? selected).title}
               channelId={selected.channelId}
-              avatarUrl={selected.avatarUrl}
+              avatarUrl={(shown ?? selected).avatarUrl}
               {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
-              {...(!isGroup ? { role: selected.role ?? null } : {})}
+              {...(!isGroup ? { role: (shown ?? selected).role ?? null } : {})}
               isGroup={isGroup}
               profiles={profiles}
               messages={threadCurrent ? threadMessages : NO_MESSAGES}
@@ -991,15 +1016,15 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                         workspaceId={workspaceId}
                         workspaceName={workspace?.name}
                         groupId={infoGroupId}
-                        groupName={selected.title}
-                        avatarUrl={selected.avatarUrl}
-                        createdBy={selected.createdBy ?? null}
+                        groupName={(shown ?? selected).title}
+                        avatarUrl={(shown ?? selected).avatarUrl}
+                        createdBy={(shown ?? selected).createdBy ?? null}
                         viewerRole={
                           mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null
                         }
                         currentUserId={currentUserId}
                         onChanged={onGroupChanged}
-                        signalRoster={(change) => signalRoster(selected, change)}
+                        signalRoster={(change) => signalRoster(shown ?? selected, change)}
                         membersVersion={rosterVersion}
                         onLeft={onGroupLeft}
                         tabs={tabs}

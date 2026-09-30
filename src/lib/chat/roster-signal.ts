@@ -41,8 +41,6 @@ const ROSTER_KINDS: readonly RosterKind[] = ['created', 'renamed', 'photo', 'mem
 export const ROSTER_TIMEOUT_MS = 5_000;
 /** Roster commands arriving this close together share one reload. */
 export const ROSTER_DEBOUNCE_MS = 500;
-/** A message for an unknown channel waits at most this long for the reload. */
-export const UNKNOWN_HOLD_MS = 5_000;
 
 /** The ext of a roster command. */
 export function rosterExt(channelId: string, kind: RosterKind): Record<string, unknown> {
@@ -87,7 +85,7 @@ export interface GroupMemberCache {
   set: (groupId: string, ids: readonly string[]) => void;
   /** The loaded ids, else one read (5s timeout, shared by concurrent callers); null on failure. */
   get: (groupId: string) => Promise<readonly string[] | null>;
-  /** Forget every group (roster reload, workspace switch, sign-out). */
+  /** Forget every group and abort the reads in flight (roster reload, workspace switch, sign-out). */
   clear: () => void;
 }
 
@@ -97,6 +95,7 @@ export function createGroupMemberCache(
 ): GroupMemberCache {
   let loaded = new Map<string, readonly string[]>();
   let pending = new Map<string, Promise<readonly string[] | null>>();
+  let aborts = new Set<AbortController>();
   return {
     peek: (groupId) => loaded.get(groupId),
     set: (groupId, ids) => {
@@ -109,9 +108,17 @@ export function createGroupMemberCache(
       if (inFlight !== undefined) return inFlight;
       const into = loaded;
       const flights = pending;
-      const run = withReadTimeout((signal) => read(groupId, signal), timeoutMs).then((result) => {
+      const live = aborts;
+      const controller = new AbortController();
+      live.add(controller);
+      const run = withReadTimeout((timeout) => {
+        timeout.addEventListener('abort', () => controller.abort());
+        return read(groupId, controller.signal);
+      }, timeoutMs).then((result) => {
+        live.delete(controller);
         flights.delete(groupId);
-        if (!result.ok) return null;
+        // Cleared meanwhile: the answer is discarded, never written.
+        if (!result.ok || controller.signal.aborted) return null;
         into.set(groupId, result.data);
         return result.data;
       });
@@ -119,6 +126,8 @@ export function createGroupMemberCache(
       return run;
     },
     clear: () => {
+      for (const controller of aborts) controller.abort();
+      aborts = new Set();
       loaded = new Map();
       pending = new Map();
     },
@@ -197,11 +206,15 @@ export async function sendRosterSignal(params: {
   kind: RosterKind;
   onError: (context: Record<string, unknown>) => void;
   timeoutMs?: number;
+  /** Aborted (workspace switch, unmount): nothing more is sent and late results are ignored. */
+  signal?: AbortSignal;
 }): Promise<void> {
   const timeoutMs = params.timeoutMs ?? ROSTER_TIMEOUT_MS;
   const ext = rosterExt(params.channelId, params.kind);
+  const aborted = (): boolean => params.signal?.aborted === true;
   await Promise.all(
     params.targets.map(async (target) => {
+      if (aborted()) return;
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -215,6 +228,7 @@ export async function sendRosterSignal(params: {
           }),
         ]);
       } catch (error) {
+        if (aborted()) return;
         params.onError({ channel_id: params.channelId, kind: params.kind, error: String(error) });
       } finally {
         if (timer !== undefined) clearTimeout(timer);
@@ -243,17 +257,11 @@ export function withRosterSignal(
   };
 }
 
-/** One debounced, single-flight roster reload plus the messages held for it. */
+/** One debounced, single-flight roster reload. */
 export interface RosterReloader {
   /** Ask for a reload (debounced; at most one in flight, a request during it runs once after). */
   request: () => void;
-  /**
-   * Hold work for a channel not in the roster: `process` runs once a reload
-   * that started after this call has finished (it re-checks the roster itself).
-   * Dropped (`onDrop`) when that has not happened within the hold time, or on dispose.
-   */
-  hold: (process: () => void, onDrop?: () => void) => void;
-  /** Clear every timer and held message; an answer still in flight is ignored. */
+  /** Clear every timer; an answer still in flight is ignored. */
   dispose: () => void;
 }
 
@@ -262,25 +270,16 @@ export function createRosterReloader(params: {
   reload: () => Promise<boolean>;
   debounceMs?: number;
   timeoutMs?: number;
-  holdMs?: number;
   onError?: (context: Record<string, unknown>) => void;
 }): RosterReloader {
   const debounceMs = params.debounceMs ?? ROSTER_DEBOUNCE_MS;
   const timeoutMs = params.timeoutMs ?? ROSTER_TIMEOUT_MS;
-  const holdMs = params.holdMs ?? UNKNOWN_HOLD_MS;
   let disposed = false;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let inFlight = false;
   let again = false;
-  let started = 0;
   // The in-flight reload's timeout; dispose clears it and settles the race.
   let stopWaiting: (() => void) | undefined;
-  const holds = new Set<{
-    after: number;
-    process: () => void;
-    onDrop: (() => void) | undefined;
-    timer: ReturnType<typeof setTimeout>;
-  }>();
 
   const run = async (): Promise<void> => {
     if (disposed) return;
@@ -289,8 +288,6 @@ export function createRosterReloader(params: {
       return;
     }
     inFlight = true;
-    started += 1;
-    const runId = started;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const ok = await Promise.race([
@@ -305,19 +302,13 @@ export function createRosterReloader(params: {
           };
         }),
       ]);
-      if (!ok) params.onError?.({ error: 'roster reload failed or timed out' });
+      if (!ok && !disposed) params.onError?.({ error: 'roster reload failed or timed out' });
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       stopWaiting = undefined;
       inFlight = false;
     }
     if (disposed) return;
-    for (const held of [...holds]) {
-      if (held.after >= runId) continue;
-      holds.delete(held);
-      clearTimeout(held.timer);
-      held.process();
-    }
     if (again) {
       again = false;
       request();
@@ -335,35 +326,104 @@ export function createRosterReloader(params: {
 
   return {
     request,
-    hold: (process, onDrop) => {
-      if (disposed) {
-        onDrop?.();
-        return;
-      }
-      const held = {
-        after: started,
-        process,
-        onDrop,
-        timer: setTimeout(() => {
-          holds.delete(held);
-          onDrop?.();
-        }, holdMs),
-      };
-      holds.add(held);
-    },
     dispose: () => {
       disposed = true;
       stopWaiting?.();
       if (debounce !== undefined) clearTimeout(debounce);
       debounce = undefined;
-      const dropped = [...holds];
-      holds.clear();
-      for (const held of dropped) {
-        clearTimeout(held.timer);
-        held.onDrop?.();
-      }
     },
   };
+}
+
+/** A verified message for a chat not in the roster yet, held for a re-read (max total). */
+export const HELD_MAX_MS = 10_000;
+
+/**
+ * Messages held for a roster re-read. Each is tagged with how many re-reads
+ * had started when it was held. A completed re-read hands back the ones whose
+ * chat it now lists (to commit with that roster, in one update), and drops the
+ * ones it does not list only when that re-read STARTED after they were held;
+ * an earlier re-read still in flight never drops them. HELD_MAX_MS in total
+ * drops one either way.
+ */
+export interface HeldMessages<T> {
+  /** Hold `item` for `channelId`; `startedReloads` = re-reads started so far. */
+  add: (channelId: string, item: T, startedReloads: number) => void;
+  /**
+   * A re-read (the `reloadNumber`-th started) completed: the items whose chat
+   * `listed` now holds, in hold order; the rest are kept or dropped as above.
+   */
+  settle: (listed: (channelId: string) => boolean, reloadNumber: number) => T[];
+  /** How many are held. */
+  size: () => number;
+  /** Drop everything and clear every timer. */
+  dispose: () => void;
+}
+
+export function createHeldMessages<T>(
+  params: { maxMs?: number; onDrop?: (item: T) => void } = {},
+): HeldMessages<T> {
+  const maxMs = params.maxMs ?? HELD_MAX_MS;
+  const held: Array<{
+    channelId: string;
+    item: T;
+    after: number;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
+  const remove = (entry: (typeof held)[number]): void => {
+    const at = held.indexOf(entry);
+    if (at >= 0) held.splice(at, 1);
+    clearTimeout(entry.timer);
+  };
+  return {
+    add: (channelId, item, startedReloads) => {
+      const entry = {
+        channelId,
+        item,
+        after: startedReloads,
+        timer: setTimeout(() => {
+          remove(entry);
+          params.onDrop?.(item);
+        }, maxMs),
+      };
+      held.push(entry);
+    },
+    settle: (listed, reloadNumber) => {
+      const ready: T[] = [];
+      for (const entry of [...held]) {
+        if (listed(entry.channelId)) {
+          remove(entry);
+          ready.push(entry.item);
+        } else if (reloadNumber > entry.after) {
+          remove(entry);
+          params.onDrop?.(entry.item);
+        }
+      }
+      return ready;
+    },
+    size: () => held.length,
+    dispose: () => {
+      for (const entry of [...held]) remove(entry);
+    },
+  };
+}
+
+/** A roster re-read that was applied: its count and the workspace scope it belongs to. */
+export interface RosterReload {
+  version: number;
+  scope: string | null;
+}
+
+/**
+ * Whether a re-read was applied for this scope since `seenVersion`: a bump
+ * from another (previous) workspace scope never counts. Pure.
+ */
+export function reloadedFor(
+  seenVersion: number,
+  reload: RosterReload,
+  scope: string | null,
+): boolean {
+  return reload.version !== seenVersion && scope !== null && reload.scope === scope;
 }
 
 /** What the open chat does after a roster reload. */
@@ -398,4 +458,17 @@ export function openChannelAfterRoster(
   const found = roster.find((c) => c.channelId === open.channelId);
   if (found === undefined) return reloaded ? { kind: 'close' } : { kind: 'keep' };
   return summaryChanged(open, found) ? { kind: 'update', channel: found } : { kind: 'keep' };
+}
+
+/**
+ * What the open chat shows: its row in the roster the list renders from (so
+ * header, group info and tile change in the same commit), else the row it was
+ * opened with. Pure.
+ */
+export function shownChannel(
+  open: ChannelSummary | null,
+  roster: readonly ChannelSummary[],
+): ChannelSummary | null {
+  if (open === null) return null;
+  return roster.find((c) => c.channelId === open.channelId) ?? open;
 }

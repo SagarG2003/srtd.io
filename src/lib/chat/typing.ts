@@ -72,12 +72,13 @@ export function typingChannelId(ext: unknown): string | null {
  */
 export function typingForChannel(
   msg: AgoraChat.CmdMsgBody,
-  target: ChannelTarget,
+  target: ChannelTarget | null,
   channelId: string | undefined,
 ): boolean {
   const named = typingChannelId((msg as { ext?: unknown }).ext);
   if (named !== null && channelId !== undefined) return named === channelId;
-  return cmdBelongsToTarget(msg, target);
+  // An older client (no channel id) only matches a known Agora target.
+  return target !== null && cmdBelongsToTarget(msg, target);
 }
 
 /**
@@ -134,7 +135,8 @@ export function sendSignal(params: {
  */
 export function subscribeTyping(params: {
   connection: TypingConnection;
-  target: ChannelTarget;
+  /** The open chat's Agora target, for older clients' commands; null routes by channel id only. */
+  target: ChannelTarget | null;
   /** The open Sorted channel; a command naming another channel is dropped. */
   channelId?: string;
   currentUserId: string;

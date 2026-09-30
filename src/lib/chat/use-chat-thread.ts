@@ -37,6 +37,7 @@ import {
   reactionRecheckIds,
   reactionRecheckWanted,
   rereadReactions,
+  untouchedSince,
   type CatchUpReason,
 } from '@/lib/chat/catch-up';
 import { liveVerifierFor, type LiveVerifier } from '@/lib/chat/live-verify';
@@ -109,7 +110,10 @@ export function editChannelType(target: ChannelTarget | null): 'dm' | 'group' | 
 
 /**
  * The exact input editMessage hands runEdit: the edit itself plus the chat's
- * type from the open chat's live target (absent when there is none). Pure.
+ * type. With `channelType` (the open chat's row: group or DM) that is used and
+ * the live target is ignored, so an unsynced group, whose fan-out target is
+ * singleChat, still edits as a group. Without it, from the target (absent when
+ * there is none). Pure.
  */
 export function editRunInput(input: {
   channelId: string;
@@ -117,8 +121,12 @@ export function editRunInput(input: {
   body: string;
   traceId: string;
   target: ChannelTarget | null;
+  channelType?: 'dm' | 'group' | null;
 }): Parameters<typeof runEdit>[1] {
-  const channelType = editChannelType(input.target);
+  const channelType =
+    input.channelType !== undefined
+      ? (input.channelType ?? undefined)
+      : editChannelType(input.target);
   return {
     channelId: input.channelId,
     messageId: input.messageId,
@@ -334,6 +342,8 @@ export function useChatThread(params: {
    * group fans out per member). Absent: the synced group or DM peer only.
    */
   resolveTarget?: (channel: ChannelSummary) => Promise<ChannelTarget | null>;
+  /** The open chat's type from its row (group or DM); edits take it, never the target's chatType. */
+  channelType?: 'dm' | 'group' | null;
   currentUserId: string;
   /** The DM peer, for the seen ticks; null for groups. */
   peerUserId: string | null;
@@ -372,6 +382,14 @@ export function useChatThread(params: {
   targetRef.current = target;
   const resolveTargetRef = useRef(params.resolveTarget);
   resolveTargetRef.current = params.resolveTarget;
+  const channelTypeRef = useRef(params.channelType ?? null);
+  channelTypeRef.current = params.channelType ?? null;
+  // Local reaction toggles, numbered: a reactions re-read started before a
+  // toggle never overwrites that message's reactions with its older result.
+  const reactionTouchesRef = useRef<{ seq: number; byId: Map<string, number> }>({
+    seq: 0,
+    byId: new Map(),
+  });
   const channelRef = useRef(channelId);
   channelRef.current = channelId;
   const onOwnMessageRef = useRef(onOwnMessage);
@@ -604,6 +622,7 @@ export function useChatThread(params: {
       const reactionIds = reactionRecheckWanted(reason)
         ? reactionRecheckIds(messagesRef.current)
         : [];
+      const reactionsFrom = reactionTouchesRef.current.seq;
       const reactionsRead =
         reactionIds.length > 0
           ? rereadReactions(
@@ -633,7 +652,12 @@ export function useChatThread(params: {
           }
           if (reread !== null && reread.ok) {
             const byId = reread.data;
-            setMessages((prev) => replaceReactions(prev, reactionIds, byId));
+            const apply = untouchedSince(
+              reactionIds,
+              reactionTouchesRef.current.byId,
+              reactionsFrom,
+            );
+            setMessages((prev) => replaceReactions(prev, apply, byId));
           }
           if (rechecked !== null && !rechecked.ok) {
             logger.warn('chat: catch-up recheck failed', {
@@ -944,6 +968,9 @@ export function useChatThread(params: {
       if (forChannel === null) return;
       const op = currentlyMine ? 'remove' : 'add';
       const traceId = generateTraceId();
+      const touches = reactionTouchesRef.current;
+      touches.seq += 1;
+      touches.byId.set(messageId, touches.seq);
       setMessages((prev) => applyReactionOp(prev, { messageId, emoji, op, mine: true }));
       const params = { client: db, channelId: forChannel, messageId, emoji, traceId };
       void recordThenSignal({
@@ -1063,7 +1090,14 @@ export function useChatThread(params: {
           onSignalFailed: (error) =>
             logger.warn('chat: edit signal failed', { trace_id: traceId, error: String(error) }),
         },
-        editRunInput({ channelId: forChannel, messageId, body, traceId, target: liveTarget }),
+        editRunInput({
+          channelId: forChannel,
+          messageId,
+          body,
+          traceId,
+          target: liveTarget,
+          channelType: channelTypeRef.current,
+        }),
       );
       if (result.ok) return { ok: true };
       logger.warn('chat: edit failed', {

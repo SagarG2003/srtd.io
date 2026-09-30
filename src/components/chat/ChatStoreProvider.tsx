@@ -78,21 +78,26 @@ import { revokeLocalPreviews, type AttachmentUploader } from '@/lib/chat/attachm
 import type { TranscribeResult } from '@/lib/chat/transcribe';
 import { isImageMime } from '@srtdio/storage';
 import {
+  isForeignWorkspace,
   mapLiveTextMessage,
   parseLiveEvent,
   sendText,
+  setLiveWorkspaceId,
+  type ChannelTarget,
   type ChatMessageRow,
   type ThreadConnection,
 } from '@/lib/chat/thread';
 import { liveVerifierFor } from '@/lib/chat/live-verify';
 import { subscribeGlobalCmds, subscribeGlobalMessages } from '@/lib/chat/controller';
 import {
-  cmdChannelId,
   createGroupMemberCache,
+  createHeldMessages,
   createRosterReloader,
   parseRosterCmd,
   resolveLiveTarget,
   type GroupMemberCache,
+  type HeldMessages,
+  type RosterReload,
   type RosterReloader,
 } from '@/lib/chat/roster-signal';
 import {
@@ -124,8 +129,11 @@ export interface ChatStoreContextValue {
   retryLoad: () => void;
   /** Re-read the roster after a mutation; resolves to it, or null when the read failed. */
   reloadRoster: () => Promise<readonly ChannelSummary[] | null>;
-  /** Bumped each time a roster re-read is applied (live roster signal, mutation, unknown chat). */
-  rosterVersion: number;
+  /**
+   * Bumped each time a roster re-read is applied (live roster signal, mutation,
+   * unknown chat), tagged with the workspace scope it was applied for.
+   */
+  rosterReload: RosterReload;
   /** Group member ids for an unsynced group's live fan-out; cleared on every roster re-read. */
   groupMembers: GroupMemberCache;
   /** Sum of unread across every channel; the Chat-tab badge reads this. */
@@ -198,6 +206,41 @@ function restoredPreview(file: File): string | null {
   } catch {
     return null;
   }
+}
+
+/** A verified message held for a roster re-read, with the list update it commits. */
+interface HeldIncoming {
+  row: ChatMessageRow;
+  incoming: store.IncomingMessage;
+}
+
+/**
+ * Whether a live command re-reads the roster: only a roster command, and not
+ * one stamped with another workspace (absent = older client, counts). Pure.
+ */
+export function rosterCmdTriggersReload(
+  message: { action?: string; ext?: unknown },
+  currentWorkspaceId: string | null,
+): boolean {
+  if (parseRosterCmd(message) === null) return false;
+  return !isForeignWorkspace(message.ext, currentWorkspaceId);
+}
+
+/**
+ * What a verified incoming row does to the list: 'apply' when its chat is in
+ * the roster; for a chat not in it, 'hold' (one roster re-read, the only
+ * reload a message may trigger) when the list is ready and the message is not
+ * stamped with another workspace, else 'drop' (the pre-live-roster handling:
+ * verified, then dropped). Pure.
+ */
+export function incomingRowAction(input: {
+  known: boolean;
+  foreignWorkspace: boolean;
+  listReady: boolean;
+}): 'apply' | 'hold' | 'drop' {
+  if (input.known) return 'apply';
+  if (input.foreignWorkspace || !input.listReady) return 'drop';
+  return 'hold';
 }
 
 /** Remember a live message id; true when it was already seen. Bounded FIFO. */
@@ -394,7 +437,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
 
   const [state, setState] = useState<ChatStoreState>(store.initialState);
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const [rosterVersion, setRosterVersion] = useState(0);
+  const [rosterReload, setRosterReload] = useState<RosterReload>({ version: 0, scope: null });
   // One group-member cache per provider; emptied on every scope change and re-read.
   const groupMembers = useMemo(
     () =>
@@ -404,6 +447,12 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     [],
   );
   const reloaderRef = useRef<RosterReloader | null>(null);
+  // Verified messages for chats not in the roster yet, and how many re-reads
+  // have started (a held message waits for one that starts after it).
+  const heldRef = useRef<HeldMessages<HeldIncoming> | null>(null);
+  const reloadsStartedRef = useRef(0);
+  // Badge refresh and toast for a message committed to the list (set below).
+  const afterIncomingRef = useRef<(row: ChatMessageRow, text: string) => void>(() => {});
   const scope =
     workspaceId && currentUserId !== null ? store.loadScope(workspaceId, currentUserId) : null;
 
@@ -599,8 +648,12 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   // A failed or timed-out (5s) re-read keeps the current roster. A success also
   // refreshes the live lookup at once (held messages re-check it right after)
   // and drops the cached group members, so the next fan-out reads them again.
+  // Held messages whose chat the re-read lists commit in the SAME update as
+  // the roster, so their new tile paints once, final.
   const reloadRoster = useCallback(async (): Promise<readonly ChannelSummary[] | null> => {
     if (scope === null || !workspaceId || currentUserId === null) return null;
+    reloadsStartedRef.current += 1;
+    const reloadNumber = reloadsStartedRef.current;
     const result = await withReadTimeout(() =>
       listChannelSummaries(supabase, { workspaceId, currentUserId }),
     );
@@ -609,12 +662,29 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       return null;
     }
     if (stateRef.current.scope !== scope) return null;
-    summariesRef.current = indexSummaries(result.data);
+    const listed = indexSummaries(result.data);
+    summariesRef.current = listed;
     groupMembers.clear();
-    setState((prev) => (prev.scope === scope ? store.applyRoster(prev, result.data) : prev));
-    setRosterVersion((n) => n + 1);
+    const ready = heldRef.current?.settle((id) => listed.has(id), reloadNumber) ?? [];
+    setState((prev) =>
+      prev.scope === scope
+        ? store.applyRosterWithIncoming(
+            prev,
+            result.data,
+            ready.map((held) => held.incoming),
+          )
+        : prev,
+    );
+    setRosterReload((prev) => ({ version: prev.version + 1, scope }));
+    for (const held of ready) afterIncomingRef.current(held.row, held.incoming.text);
     return result.data;
   }, [scope, workspaceId, currentUserId, groupMembers]);
+
+  // Every live send is stamped with this workspace (receivers elsewhere skip it).
+  useEffect(() => {
+    setLiveWorkspaceId(workspaceId || null);
+    return () => setLiveWorkspaceId(null);
+  }, [workspaceId]);
 
   // One debounced, single-flight live reload per workspace and user. Teardown
   // (workspace switch, sign-out, unmount) clears its timers and held messages.
@@ -627,10 +697,14 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       reload: async () => (await reloadRosterRef.current()) !== null,
       onError: (context) => logger.warn('chat store: live roster reload failed', context),
     });
+    const held = createHeldMessages<HeldIncoming>();
     reloaderRef.current = reloader;
+    heldRef.current = held;
     return () => {
       reloader.dispose();
+      held.dispose();
       if (reloaderRef.current === reloader) reloaderRef.current = null;
+      if (heldRef.current === held) heldRef.current = null;
       groupMembers.clear();
     };
   }, [scope, groupMembers]);
@@ -670,6 +744,9 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         deliver: (channelId, entry, traceId, onRecorded) => {
           const connection = clientRef.current;
           const summary = summariesRef.current.get(channelId);
+          // Resolved before the publish starts (its own 5s member read), so the
+          // publish keeps its full timeout.
+          let target: ChannelTarget | null = null;
           return runSend(
             {
               // The ack's server created_at against the device time of the
@@ -686,14 +763,16 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
                 ),
               // An unsynced group fans out once per member (its ids loaded, else
               // one 5s read); no target (read failed, over 50) skips the publish.
+              ...(connection !== null && summary !== undefined
+                ? {
+                    beforePublish: async () => {
+                      target = await resolveLiveTarget(summary, scopeKey.userId, groupMembers);
+                    },
+                  }
+                : {}),
               publishLive:
                 connection !== null && summary !== undefined
                   ? async (input) => {
-                      const target = await resolveLiveTarget(
-                        summary,
-                        scopeKey.userId,
-                        groupMembers,
-                      );
                       if (target === null) throw new Error('no live target');
                       return sendText({
                         connection: connection as ThreadConnection,
@@ -834,22 +913,30 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   );
   useEffect(() => () => debouncedRefresh.cancel(), [debouncedRefresh]);
 
-  // Wait for the next roster re-read when the list is ready; resolves to what
-  // `lookup` finds after it, or undefined when the hold expired or was torn
-  // down (the list not ready yet keeps today's drop).
-  const heldForRoster = <T,>(lookup: () => T | undefined): Promise<T | undefined> =>
-    new Promise((resolve) => {
-      const reloader = reloaderRef.current;
-      if (reloader === null || store.selectLoadStatus(stateRef.current, scope) !== 'ready') {
-        resolve(undefined);
-        return;
-      }
-      reloader.hold(
-        () => resolve(lookup()),
-        () => resolve(undefined),
-      );
-      reloader.request();
+  // A message committed to the list: re-read the badge counts soon, and toast
+  // it unless its chat is open. Name and photo come from the RLS-read roster.
+  afterIncomingRef.current = (row, text) => {
+    debouncedRefresh.schedule(null);
+    const summary = summariesRef.current.get(row.channel_id);
+    if (summary === undefined || row.channel_id === activeRef.current) return;
+    toast.show({
+      title: summary.title,
+      description: text,
+      icon: (
+        <Avatar
+          name={summary.title}
+          size="sm"
+          {...(summary.avatarUrl !== null ? { src: summary.avatarUrl } : {})}
+        />
+      ),
+      // A thread selecting messages exits that first (history.back()).
+      onPress: () =>
+        leaveSelectionThen(() => {
+          requestOpen(row.channel_id);
+          navigate('/chat');
+        }),
     });
+  };
 
   // Latest incoming-message logic, held in a ref so the global subscription
   // below registers exactly once yet always runs the current closure.
@@ -872,14 +959,22 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
         if (!lookup.found) return;
         const row = lookup.row;
         if (row.sender_user_id === forUser) return;
-        const found = summariesRef.current.get(row.channel_id);
-        // A chat not in my list yet (new DM or group, just added): hold the
-        // row for one roster re-read (max 5s); still unknown after it = dropped.
-        const summary =
-          found ?? (await heldForRoster(() => summariesRef.current.get(row.channel_id)));
-        if (summary === undefined) return;
-        // Names first (one batched read for unknown ids), so the line and the
-        // toast read "@Name" from their first paint.
+        const held = heldRef.current;
+        const reloader = reloaderRef.current;
+        // Another workspace's chat (or the list not ready): dropped after the
+        // verify, as before live roster updates.
+        const action = incomingRowAction({
+          known: summariesRef.current.has(row.channel_id),
+          foreignWorkspace: isForeignWorkspace(raw.ext, workspaceId || null),
+          listReady:
+            held !== null &&
+            reloader !== null &&
+            store.selectLoadStatus(stateRef.current, scope) === 'ready',
+        });
+        if (action === 'drop') return;
+        // Names first (one batched read for unknown ids, 5s; on timeout the line
+        // commits without them), so the line and the toast read "@Name" from
+        // their first paint.
         await rememberBodyNames(
           [row.body ?? ''],
           (ids, signal) =>
@@ -898,49 +993,35 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
             (row.shared_brief_ids ?? []).length > 0,
         });
         const ts = Date.parse(row.created_at);
-        setState((prev) =>
-          store.applyIncoming(prev, {
-            channelId: row.channel_id,
-            messageId: row.id,
-            senderIsSelf: false,
-            text,
-            ts: Number.isNaN(ts) ? mapped.message.time : ts,
-          }),
-        );
-        debouncedRefresh.schedule(null);
-
-        if (row.channel_id === activeRef.current) return;
-        toast.show({
-          title: summary.title,
-          description: text,
-          icon: (
-            <Avatar
-              name={summary.title}
-              size="sm"
-              {...(summary.avatarUrl !== null ? { src: summary.avatarUrl } : {})}
-            />
-          ),
-          // A thread selecting messages exits that first (history.back()).
-          onPress: () =>
-            leaveSelectionThen(() => {
-              requestOpen(row.channel_id);
-              navigate('/chat');
-            }),
-        });
+        const incoming: store.IncomingMessage = {
+          channelId: row.channel_id,
+          messageId: row.id,
+          senderIsSelf: false,
+          text,
+          ts: Number.isNaN(ts) ? mapped.message.time : ts,
+        };
+        if (!summariesRef.current.has(row.channel_id)) {
+          // A chat not in my list yet (new DM or group, just added): held for
+          // the next roster re-read that starts after now, committed with it.
+          if (held === null || reloader === null || heldRef.current !== held) return;
+          held.add(row.channel_id, { row, incoming }, reloadsStartedRef.current);
+          reloader.request();
+          return;
+        }
+        setState((prev) => store.applyIncoming(prev, incoming));
+        afterIncomingRef.current(row, text);
       });
   };
 
   useEffect(() => subscribeGlobalMessages((message) => onIncomingRef.current(message)), []);
-  // A roster command, or a command naming a chat not in my list, re-reads the
-  // roster once (debounced). The payload only triggers it: names, photos and
-  // membership come from the re-read under RLS.
+  // Only a roster command re-reads the roster (debounced); typing, read,
+  // reaction, edit, delete and mark commands never do, and neither does one
+  // stamped with another workspace. The payload only triggers it: names,
+  // photos and membership come from the re-read under RLS.
   const onRosterCmdRef = useRef<(message: AgoraChat.CmdMsgBody) => void>(() => {});
   onRosterCmdRef.current = (message) => {
+    if (!rosterCmdTriggersReload(message, workspaceId || null)) return;
     if (store.selectLoadStatus(stateRef.current, scope) !== 'ready') return;
-    if (parseRosterCmd(message) === null) {
-      const named = cmdChannelId(message.ext);
-      if (named === null || summariesRef.current.has(named)) return;
-    }
     reloaderRef.current?.request();
   };
   // A delete signal for any chat, open or not, strips its drafts, queued quotes
@@ -967,7 +1048,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       roster,
       retryLoad,
       reloadRoster,
-      rosterVersion,
+      rosterReload,
       groupMembers,
       totalUnread: store.selectTotalUnread(state),
       setActive,
@@ -985,7 +1066,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       roster,
       retryLoad,
       reloadRoster,
-      rosterVersion,
+      rosterReload,
       groupMembers,
       outbox,
       clearConversation,

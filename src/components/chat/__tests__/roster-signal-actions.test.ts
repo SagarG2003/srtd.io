@@ -16,10 +16,17 @@ vi.mock('agora-chat', () => ({
   default: { connection: vi.fn(), message: { create: vi.fn() } },
 }));
 
-import { groupCreate, groupMemberAdd, groupMemberRemove, groupRename } from '@srtdio/rpc';
+import {
+  groupCreate,
+  groupLeave,
+  groupMemberAdd,
+  groupMemberRemove,
+  groupRename,
+} from '@srtdio/rpc';
 import {
   addGroupMember,
   createGroupChannel,
+  leaveGroupChannel,
   removeGroupMember,
   renameGroupChannel,
   setGroupAvatar,
@@ -280,5 +287,36 @@ describe('L2 actor sends after a successful RPC only', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('J4 group_leave tells the group', () => {
+  it('leave success sends a members cmd to the group (not to self); failure sends nothing', async () => {
+    vi.mocked(groupLeave).mockResolvedValue({ ok: true, data: undefined } as never);
+    const conn = connection();
+    const onLeft = vi.fn();
+    const change: RosterChange = { kind: 'members', removed: [ME] };
+    const ok = await leaveGroupChannel(
+      {} as Client,
+      { groupId: GROUP_ID, traceId: 't' },
+      withRosterSignal(onLeft, signalWith(conn, change, SYNCED), vi.fn()),
+    );
+    await flush();
+    expect(ok).toBeNull();
+    expect(onLeft).toHaveBeenCalledTimes(1);
+    expect(sent(conn).map((m) => [m.to, m.chatType, (m.ext as { kind: string }).kind])).toEqual([
+      ['agora-group-1', 'groupChat', 'members'],
+    ]);
+
+    vi.mocked(groupLeave).mockResolvedValue(fail);
+    const none = connection();
+    const failed = await leaveGroupChannel(
+      {} as Client,
+      { groupId: GROUP_ID, traceId: 't' },
+      withRosterSignal(vi.fn(), signalWith(none, change, SYNCED), vi.fn()),
+    );
+    await flush();
+    expect(failed).not.toBeNull();
+    expect(none.send).not.toHaveBeenCalled();
   });
 });
