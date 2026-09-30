@@ -79,7 +79,6 @@ import {
 } from '@/lib/chat/outbox-files';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
 import { revokeLocalPreviews, type AttachmentUploader } from '@/lib/chat/attachments';
-import type { TranscribeResult } from '@/lib/chat/transcribe';
 import { isImageMime } from '@srtdio/storage';
 import {
   isForeignWorkspace,
@@ -688,13 +687,11 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
   const clockSamplerRef = useRef<store.ClockSampler>(store.createClockSampler());
   // The current sender's file store (IndexedDB); null where there is none.
   const filesRef = useRef<OutboxFileAdapter | null>(null);
-  // Uploads and transcription for sends restored after a reload (their
-  // attachments carry no uploader) and for voice notes; read at call time.
+  // Uploads for sends restored after a reload (their attachments carry no
+  // uploader) and for voice notes; read at call time.
   const chatAttachments = useChatAttachments();
   const uploadRef = useRef<AttachmentUploader | null>(null);
   uploadRef.current = chatAttachments.canAttach ? chatAttachments.uploadFile : null;
-  const transcribeRef = useRef<((blob: Blob) => Promise<TranscribeResult>) | null>(null);
-  transcribeRef.current = chatAttachments.canTranscribe ? chatAttachments.transcribe : null;
   // Stable facade over the current sender, which is replaced per workspace/user.
   const outbox = useMemo<ChannelOutbox>(
     () => ({
@@ -1144,12 +1141,6 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           return upload !== null
             ? upload(file, onProgress)
             : Promise.resolve({ ok: false, message: 'Upload is unavailable.' });
-        },
-        transcribe: (blob) => {
-          const transcribe = transcribeRef.current;
-          return transcribe !== null
-            ? transcribe(blob)
-            : Promise.resolve({ ok: false, message: 'Transcription is unavailable.' });
         },
       },
       persisted,

@@ -180,9 +180,8 @@ describe('runSend', () => {
     expect(recordMessage.mock.calls[1]?.[0].traceId).toBe('trace-2');
   });
 
-  it('persists shared posts, the reply target and attachment meta (shared-posts-only, no body)', async () => {
+  it('persists shared posts, the reply target and attachment meta, never a transcript (shared-posts-only, no body)', async () => {
     const d = deps();
-    const longTranscript = 'x'.repeat(2001);
     await runSend(
       d,
       input({
@@ -198,7 +197,6 @@ describe('runSend', () => {
               durationMs: 4000,
               transcript: 'hello there',
             },
-            { assetId: 'v3', name: 'long.webm', mime: 'audio/webm', transcript: longTranscript },
           ],
           sharedPostIds: ['post-1'],
           reply: { id: 'quoted-1', authorUserId: ME, preview: 'hi' },
@@ -217,10 +215,7 @@ describe('runSend', () => {
             name: 'voice.webm',
             size: 900,
             duration_ms: 4000,
-            transcript: 'hello there',
           },
-          // Over 2000 chars: the transcript is left out of the record.
-          v3: { mime: 'audio/webm', name: 'long.webm', size: 0 },
         },
       }),
     );

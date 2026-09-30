@@ -93,7 +93,7 @@ interface ComposerProps {
   /**
    * Upload one file via the asset pipeline (with progress); absent disables
    * attaching. Picked files and voice notes carry it to the outbox, which
-   * uploads (and transcribes a voice note) in the background.
+   * uploads in the background.
    */
   uploadFile?: AttachmentUploader | undefined;
   /** Called on each keystroke so the parent can broadcast a throttled typing signal. */
@@ -665,7 +665,7 @@ export function draftAttachments(
 /**
  * A recorded voice note as an instant-send attachment: the local file (no
  * version id yet, no preview) plus its recorded length, so the outbox uploads
- * it, transcribes it best-effort and records it like any picked file. Pure.
+ * it and records it like any picked file. Pure.
  */
 export function voiceNoteAttachment(
   file: File,
@@ -1000,7 +1000,7 @@ export function Composer(props: ComposerProps): ReactElement {
 
   // The recording goes to the outbox like a picked file: the bubble shows its
   // clock at once, the blob is kept (IndexedDB) until the row lands, and the
-  // upload and a best-effort transcript run in the background with retries.
+  // upload runs in the background with retries. Never transcribed at send time.
   async function stopSend(): Promise<void> {
     setVoiceBusy(true);
     const durationMs = recorder.seconds * 1000;

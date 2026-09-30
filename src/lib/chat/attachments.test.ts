@@ -270,23 +270,23 @@ describe('classifyAttachment', () => {
   });
 });
 
-describe('voice-note transcript round-trips through the ext', () => {
-  it('carries the transcript in attachment_meta and reads it back', () => {
+describe('voice-note transcripts are never written', () => {
+  it('leaves a transcript out of the ext, and still reads a legacy one back', () => {
     const attachments: MessageAttachment[] = [
       { assetId: 'v1', name: 'note.webm', mime: 'audio/webm', transcript: 'hello there' },
     ];
     const ext = buildAttachmentExt(attachments);
-    expect(ext.attachment_meta).toEqual([
-      { assetId: 'v1', name: 'note.webm', mime: 'audio/webm', transcript: 'hello there' },
-    ]);
-    expect(parseAttachments(ext)).toEqual([
-      { assetId: 'v1', name: 'note.webm', mime: 'audio/webm', transcript: 'hello there' },
-    ]);
-  });
-
-  it('omits the transcript key entirely for a non-audio attachment', () => {
-    const ext = buildAttachmentExt([{ assetId: 'a1', name: 'one.png', mime: 'image/png' }]);
+    expect(ext.attachment_meta).toEqual([{ assetId: 'v1', name: 'note.webm', mime: 'audio/webm' }]);
     expect('transcript' in ext.attachment_meta[0]!).toBe(false);
+    const legacy = {
+      attachment_asset_ids: ['v1'],
+      attachment_meta: [
+        { assetId: 'v1', name: 'note.webm', mime: 'audio/webm', transcript: 'hello there' },
+      ],
+    };
+    expect(parseAttachments(legacy)).toEqual([
+      { assetId: 'v1', name: 'note.webm', mime: 'audio/webm', transcript: 'hello there' },
+    ]);
   });
 });
 
@@ -350,7 +350,7 @@ describe('toMessageAttachment', () => {
 });
 
 describe('buildAttachmentMeta / parseAttachmentMeta', () => {
-  it('round-trips mime, name, size, duration and a transcript up to 2000 chars', () => {
+  it('round-trips mime, name, size and duration; never writes a transcript', () => {
     const meta = buildAttachmentMeta([
       {
         assetId: 'v1',
@@ -360,24 +360,23 @@ describe('buildAttachmentMeta / parseAttachmentMeta', () => {
         durationMs: 1500,
         transcript: 'hi',
       },
-      { assetId: 'v2', name: 'b.webm', mime: 'audio/webm', transcript: 'y'.repeat(2001) },
+      { assetId: 'v2', name: 'b.webm', mime: 'audio/webm' },
     ]);
     expect(meta).toEqual({
-      v1: { mime: 'audio/webm', name: 'a.webm', size: 9, duration_ms: 1500, transcript: 'hi' },
+      v1: { mime: 'audio/webm', name: 'a.webm', size: 9, duration_ms: 1500 },
       v2: { mime: 'audio/webm', name: 'b.webm', size: 0 },
     });
     expect(parseAttachmentMeta(meta, ['v1', 'v2', 'v3'])).toEqual([
-      {
-        assetId: 'v1',
-        name: 'a.webm',
-        mime: 'audio/webm',
-        size: 9,
-        durationMs: 1500,
-        transcript: 'hi',
-      },
+      { assetId: 'v1', name: 'a.webm', mime: 'audio/webm', size: 9, durationMs: 1500 },
       { assetId: 'v2', name: 'b.webm', mime: 'audio/webm', size: 0 },
       { assetId: 'v3', name: '', mime: '' },
     ]);
+    // A legacy row that carries a transcript still reads back.
+    expect(
+      parseAttachmentMeta({ v1: { mime: 'audio/webm', name: 'a', size: 1, transcript: 'hi' } }, [
+        'v1',
+      ]),
+    ).toEqual([{ assetId: 'v1', name: 'a', mime: 'audio/webm', size: 1, transcript: 'hi' }]);
     expect(parseAttachmentMeta(null, ['v1'])).toEqual([{ assetId: 'v1', name: '', mime: '' }]);
   });
 });

@@ -1,6 +1,14 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  AUTO_NEXT_DELAY_MS,
   bindVoiceAudio,
+  nextSpeed,
+  seekFraction,
+  shouldAutoPlayNext,
+  speedLabel,
+  VoiceNote,
+  VOICE_SPEEDS,
   createPlaybackRegistry,
   formatDuration,
   UNKNOWN_DURATION,
@@ -9,6 +17,7 @@ import {
   voiceTotalSeconds,
   type VoiceAudio,
 } from '@/components/chat/VoiceNote';
+import { voiceStore } from '@/lib/chat/transcript-store';
 
 /** A fake audio element: set duration/currentTime, then fire an event. */
 function fakeAudio(): VoiceAudio & { fire: (type: string) => void } {
@@ -129,5 +138,110 @@ describe('one voice note at a time', () => {
     b.fire('ended');
     offA();
     offB();
+  });
+});
+
+describe('seek, speed and the auto-play chain', () => {
+  it('maps a pointer X within the wave to 0..1, clamped; Y plays no part', () => {
+    const rect = { left: 100, width: 200 };
+    expect(seekFraction(100, rect)).toBe(0);
+    expect(seekFraction(200, rect)).toBe(0.5);
+    expect(seekFraction(300, rect)).toBe(1);
+    expect(seekFraction(50, rect)).toBe(0);
+    expect(seekFraction(900, rect)).toBe(1);
+    expect(seekFraction(150, { left: 0, width: 0 })).toBe(0);
+  });
+
+  it('cycles 1x -> 1.5x -> 2x -> 1x', () => {
+    expect(VOICE_SPEEDS).toEqual([1, 1.5, 2]);
+    expect(nextSpeed(1)).toBe(1.5);
+    expect(nextSpeed(1.5)).toBe(2);
+    expect(nextSpeed(2)).toBe(1);
+    expect(nextSpeed(3)).toBe(1);
+    expect([1, 1.5, 2].map(speedLabel)).toEqual(['1×', '1.5×', '2×']);
+  });
+
+  it('hands on 350ms later only to an unplayed next note', () => {
+    expect(AUTO_NEXT_DELAY_MS).toBe(350);
+    expect(shouldAutoPlayNext('m2', undefined)).toBe(true);
+    expect(shouldAutoPlayNext('m2', 123)).toBe(false);
+    expect(shouldAutoPlayNext(null, undefined)).toBe(false);
+    expect(shouldAutoPlayNext(undefined, undefined)).toBe(false);
+  });
+});
+
+describe('first paint', () => {
+  const base = {
+    url: 'https://signed/a',
+    name: 'n.webm',
+    durationMs: 18_000,
+    sender: { name: 'Asha Rao' },
+    nextVoiceId: null,
+  };
+  const ids: string[] = [];
+  const render = (id: string, mine = false): string => {
+    ids.push(id);
+    return renderToStaticMarkup(<VoiceNote {...base} messageId={id} mine={mine} />);
+  };
+  afterEach(() => {
+    for (const id of ids.splice(0))
+      voiceStore.update(id, {
+        transcript: undefined,
+        failedAt: undefined,
+        collapsed: undefined,
+        playedAt: undefined,
+      });
+  });
+
+  it('renders the total length, the 44px wave with the drag guards, and the dot', () => {
+    const html = render('fp-idle');
+    expect(html).toContain('0:18');
+    expect(html).toMatch(
+      /data-voice-wave="[^"]*"[^>]*class="[^"]*h-11[^"]*touch-none[^"]*select-none/,
+    );
+    expect(html).toContain('[-webkit-touch-callout:none]');
+    expect(html).toMatch(/data-voice-dot=""[^>]*class="[^"]*h-3 w-3[^"]*bg-accent\b/);
+    expect(html).toContain('font-mono text-xs');
+    expect(html).not.toContain('data-voice-transcript');
+  });
+
+  it('draws the dot white on an own bubble', () => {
+    expect(render('fp-own', true)).toMatch(/data-voice-dot=""[^>]*class="[^"]*bg-accent-fg/);
+  });
+
+  it('shows the mic badge fg-3 until played, then accent', () => {
+    expect(render('fp-unplayed')).toContain('text-fg-3');
+    voiceStore.update('fp-played', { playedAt: 1 });
+    const html = render('fp-played');
+    expect(html).toContain('data-voice-played=""');
+    expect(html).toMatch(/rounded-full bg-panel-2 text-accent/);
+  });
+
+  it('renders a stored transcript expanded, selectable, with a collapse chevron', () => {
+    voiceStore.update('fp-shown', { transcript: 'नमस्ते, see you at 5' });
+    const html = render('fp-shown');
+    expect(html).toContain('data-voice-transcript="shown"');
+    expect(html).toContain('नमस्ते, see you at 5');
+    expect(html).toMatch(/select-text[^"]*text-\[15px\] leading-5 text-fg/);
+    expect(html).toContain('aria-label="Collapse transcript"');
+    expect(html).toContain('h-7 w-11');
+  });
+
+  it('renders a collapsed transcript as its 44px "Transcript" row on first paint', () => {
+    voiceStore.update('fp-collapsed', { transcript: 'hidden text', collapsed: true });
+    const html = render('fp-collapsed');
+    expect(html).toContain('data-voice-transcript="collapsed"');
+    expect(html).toMatch(/h-11 w-full/);
+    expect(html).not.toContain('hidden text');
+  });
+
+  it('renders "Transcript not available" after a failure and "Transcribing…" while pending', () => {
+    voiceStore.update('fp-failed', { failedAt: 1 });
+    expect(render('fp-failed')).toMatch(/text-\[13px\] text-fg-3">Transcript not available/);
+    voiceStore.setPending('fp-pending', true);
+    const html = render('fp-pending');
+    expect(html).toContain('Transcribing…');
+    expect(html).toContain('text-[13px] text-fg-2');
+    voiceStore.setPending('fp-pending', false);
   });
 });

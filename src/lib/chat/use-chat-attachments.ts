@@ -46,9 +46,9 @@ export interface ChatAttachments {
    * XHR status, and a 401 refreshes the session and retries once.
    */
   uploadFile: AttachmentUploader;
-  /** Transcribe a recorded voice note; never throws (Result contract). */
+  /** Transcribe a voice note's audio on tap; never throws (Result contract). */
   transcribe: (blob: Blob) => Promise<TranscribeResult>;
-  /** Whether transcription is configured (transcribe endpoint set). */
+  /** Whether tap-to-transcribe is configured (transcribe endpoint set). */
   canTranscribe: boolean;
 }
 

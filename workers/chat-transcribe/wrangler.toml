@@ -7,6 +7,14 @@ compatibility_flags = ["nodejs_compat"]
 [ai]
 binding = "AI"
 
+# Daily byte counter (usage:YYYY-MM-DD) that caps Workers AI spend at 240 MB of
+# audio per UTC day. The namespace id is filled in per environment (wrangler kv
+# namespace create chat_transcribe_usage) and supplied via CI/secret config;
+# never commit a real id here.
+[[kv_namespaces]]
+binding = "TRANSCRIBE_USAGE"
+id = "REPLACE_WITH_chat_transcribe_usage_NAMESPACE_ID"
+
 [vars]
 ALLOWED_ORIGINS = "https://srtd.io,https://v2.srtd.io,https://srtdio-app.pages.dev"
 

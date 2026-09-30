@@ -1,13 +1,19 @@
 // Cloudflare Worker: voice-note transcription.
 //
-// POST <audio bytes> (content type audio/* or application/octet-stream)
+// POST <audio bytes> (content type audio/*, at most MAX_AUDIO_BYTES)
 //   -> verifies the caller's Supabase session JWT, runs the bytes through
 //      Workers AI Whisper, and returns the transcript: { ok: true, transcript }.
 //
-// Stateless and idempotent: no database, no R2, no service-role key, no caching,
-// no background work. The same audio yields the same transcript. There is
-// nothing to open or close - the only outbound dependency is env.AI.run, a
-// Cloudflare binding with no connection lifecycle to manage.
+// Called only when a reader taps "Transcribe" on a voice note; the transcript
+// stays on that reader's device. No database, no R2, no service-role key, no
+// caching of transcripts, no background work. The same audio yields the same
+// transcript. The only state is a per-UTC-day byte counter in KV
+// (TRANSCRIBE_USAGE) that caps Workers AI spend at DAILY_CAP_BYTES; when the
+// binding is absent the per-request caps still apply and the daily cap is off.
+//
+// Refusals, in order: 405 non-POST, 401 no valid caller, 415 a non-audio
+// content type, 413 over MAX_AUDIO_BYTES (Content-Length first, then the bytes
+// actually read), 400 an empty body, 429 { ok: false, reason: 'daily_cap' }.
 //
 // Auth is reused verbatim from the asset/chat workers: ES256 JWKS verification
 // of the Bearer token (getSupabaseJwks + verifyCaller), so this worker cannot
@@ -34,6 +40,21 @@ interface WhisperInput {
   audio: string;
 }
 
+/** Largest audio body accepted: 8 MB. */
+export const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
+
+/** Audio bytes transcribed per UTC day across all callers: 240 MB (about 150 minutes). */
+export const DAILY_CAP_BYTES = 240 * 1024 * 1024;
+
+/** A day's counter outlives its day by a little, then KV drops it. */
+const USAGE_TTL_SECONDS = 2 * 24 * 60 * 60;
+
+/** The slice of a Workers KV namespace the daily counter uses. */
+export interface UsageKv {
+  get(key: string): Promise<string | null>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+}
+
 /** Whisper output: the transcript text plus model extras we do not consume. */
 interface WhisperOutput {
   text: string;
@@ -49,6 +70,8 @@ export interface ChatTranscribeEnv {
   SUPABASE_URL: string;
   /** Workers AI binding (declared as [ai] binding = "AI" in wrangler.toml). */
   AI: WorkersAi;
+  /** Daily byte counter (declared as [[kv_namespaces]] binding = "TRANSCRIBE_USAGE"). */
+  TRANSCRIBE_USAGE?: UsageKv;
   /**
    * Comma-separated list of browser origins allowed to call this Worker
    * cross-origin. Operator sets it as a Worker var/secret; when unset the code
@@ -72,12 +95,16 @@ type ChatTranscribeResponseCode =
   | 'bad_request'
   | 'unauthorized'
   | 'method_not_allowed'
+  | 'payload_too_large'
+  | 'unsupported_media_type'
   | 'internal_error';
 
 const STATUS_BY_CODE: Record<ChatTranscribeResponseCode, number> = {
   bad_request: 400,
   unauthorized: 401,
   method_not_allowed: 405,
+  payload_too_large: 413,
+  unsupported_media_type: 415,
   internal_error: 500,
 };
 
@@ -159,6 +186,54 @@ interface TranscribeResult {
   transcript: string;
 }
 
+/**
+ * Read the body, stopping as soon as it passes `max` bytes (a missing or lying
+ * Content-Length never buffers more than the cap). Null when it is too large.
+ */
+async function readCapped(request: Request, max: number): Promise<Uint8Array | null> {
+  const body = request.body;
+  if (body === null) return new Uint8Array(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+/** The KV key for a UTC day's byte count: usage:YYYY-MM-DD. */
+export function usageKey(now: Date): string {
+  return `usage:${now.toISOString().slice(0, 10)}`;
+}
+
+/**
+ * Count `bytes` against today's cap. False (nothing counted) when they would
+ * take the day over DAILY_CAP_BYTES. KV is not transactional, so concurrent
+ * calls can overshoot by a request or two; the cap is a spend guard, not a quota.
+ */
+async function takeDailyBytes(kv: UsageKv, bytes: number, now: Date): Promise<boolean> {
+  const key = usageKey(now);
+  const used = Number.parseInt((await kv.get(key)) ?? '0', 10);
+  const sofar = Number.isFinite(used) && used > 0 ? used : 0;
+  if (sofar + bytes > DAILY_CAP_BYTES) return false;
+  await kv.put(key, String(sofar + bytes), { expirationTtl: USAGE_TTL_SECONDS });
+  return true;
+}
+
 async function handlePost(
   request: Request,
   env: ChatTranscribeEnv,
@@ -172,9 +247,27 @@ async function handlePost(
     return fail('unauthorized', traceId, acao);
   }
 
-  const bytes = new Uint8Array(await request.arrayBuffer());
+  const contentType = (request.headers.get('content-type') ?? '').trim().toLowerCase();
+  if (!contentType.startsWith('audio/')) {
+    return fail('unsupported_media_type', traceId, acao);
+  }
+  const declared = request.headers.get('content-length');
+  if (declared !== null && Number(declared) > MAX_AUDIO_BYTES) {
+    return fail('payload_too_large', traceId, acao);
+  }
+  const bytes = await readCapped(request, MAX_AUDIO_BYTES);
+  if (bytes === null) {
+    return fail('payload_too_large', traceId, acao);
+  }
   if (bytes.length === 0) {
     return fail('bad_request', traceId, acao);
+  }
+  if (
+    env.TRANSCRIBE_USAGE !== undefined &&
+    !(await takeDailyBytes(env.TRANSCRIBE_USAGE, bytes.length, new Date()))
+  ) {
+    logger.warn('voice transcription daily cap reached');
+    return json(429, { ok: false, reason: 'daily_cap' }, traceId, acao);
   }
 
   const output = await env.AI.run(WHISPER_MODEL, { audio: toBase64(bytes) });

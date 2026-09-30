@@ -25,10 +25,7 @@
 // note (attachment.local) whose asset id is still ''. Each attempt first
 // uploads those, in order and one at a time, reporting progress as 'progress'
 // events, and stores every returned version id on the entry; only then does it
-// record once with all the ids. A voice note is transcribed alongside its
-// upload, best-effort: once the file is up the transcript gets
-// TRANSCRIPT_GRACE_MS more (TRANSCRIBE_TIMEOUT_MS overall), then the note
-// records without one. A
+// record once with all the ids. A
 // retry uploads only the files that still have no version id. An entry
 // restored while its files are read back (restoring) holds its place without
 // running; one whose files are gone (filesMissing) never runs and does not
@@ -76,7 +73,6 @@ import {
   uploadFailureStatus,
   type SendErrorClass,
 } from '@/lib/chat/send-errors';
-import { TRANSCRIBE_TIMEOUT_MS, type TranscribeResult } from '@/lib/chat/transcribe';
 import {
   rowToThreadMessage,
   type LocalMessageContent,
@@ -372,9 +368,6 @@ export function watchUploadStall(
   return { stop };
 }
 
-/** A voice note's upload is done: its transcript is awaited at most this much longer. */
-export const TRANSCRIPT_GRACE_MS = 3_000;
-
 /** navigator.onLine where there is one; true elsewhere (and when it is unknown). */
 function deviceOnline(): boolean {
   return typeof navigator === 'undefined' || navigator.onLine !== false;
@@ -451,12 +444,6 @@ export interface OutboxSenderDeps {
   onAttemptFailed: (context: Record<string, unknown>) => void;
   /** Uploads a file whose attachment carries no uploader (restored after a reload). */
   upload?: AttachmentUploader;
-  /** Best-effort voice note transcription; absent sends voice notes without one. */
-  transcribe?: (blob: Blob) => Promise<TranscribeResult>;
-  /** Override for tests; defaults to TRANSCRIBE_TIMEOUT_MS. */
-  transcribeTimeoutMs?: number;
-  /** Override for tests; defaults to TRANSCRIPT_GRACE_MS. */
-  transcriptGraceMs?: number;
   /** Whether the device is online; a backoff attempt is skipped while it is not. */
   isOnline?: () => boolean;
   /** Device clock (the Retry tap re-stamps an entry); defaults to Date.now. */
@@ -506,15 +493,6 @@ function replaceAt(
   return attachments.map((a, i) => (i === index ? next : a));
 }
 
-/** A recorded voice note that has not been transcribed yet. */
-function wantsTranscript(attachment: MessageAttachment): boolean {
-  return (
-    attachment.durationMs !== undefined &&
-    attachment.mime.startsWith('audio/') &&
-    attachment.transcript === undefined
-  );
-}
-
 /** One channel's queue runner. */
 interface Lane {
   busy: boolean;
@@ -535,29 +513,8 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
   let outbox: Outbox = initial;
   let disposed = false;
   const lanes = new Map<string, Lane>();
-  // Voice notes already sent to transcription this session (by local key): a
-  // retry after a failed upload never transcribes again.
-  const transcribed = new Set<string>();
-  // Transcription timeouts and transcript grace waits still armed, cleared on dispose.
-  const transcribeTimers = new Set<unknown>();
   const isOnline = deps.isOnline ?? deviceOnline;
   const now = deps.now ?? ((): number => Date.now());
-
-  /** `promise`'s value, or undefined once `ms` pass first. Never rejects. */
-  const settleWithin = <T>(promise: Promise<T | undefined>, ms: number): Promise<T | undefined> =>
-    new Promise<T | undefined>((resolve) => {
-      let done = false;
-      const finish = (value: T | undefined): void => {
-        if (done) return;
-        done = true;
-        clearTimer(timer);
-        transcribeTimers.delete(timer);
-        resolve(value);
-      };
-      const timer = setTimer(() => finish(undefined), ms);
-      transcribeTimers.add(timer);
-      promise.then(finish, () => finish(undefined));
-    });
 
   const commit = (next: Outbox): void => {
     if (next === outbox) return;
@@ -602,42 +559,8 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
     deps.onEvent({ type: 'state', channelId, id, state: 'failed' });
   };
 
-  /** Transcribe with a timeout; resolves to the transcript or undefined. Never rejects. */
-  const transcribeBounded = (file: File): Promise<string | undefined> => {
-    const transcribe = deps.transcribe;
-    if (transcribe === undefined) return Promise.resolve(undefined);
-    return new Promise<string | undefined>((resolve) => {
-      let done = false;
-      const finish = (value: string | undefined): void => {
-        if (done) return;
-        done = true;
-        clearTimer(timer);
-        transcribeTimers.delete(timer);
-        resolve(value);
-      };
-      const timer = setTimer(
-        () => finish(undefined),
-        deps.transcribeTimeoutMs ?? TRANSCRIBE_TIMEOUT_MS,
-      );
-      transcribeTimers.add(timer);
-      let pending: Promise<TranscribeResult>;
-      try {
-        pending = transcribe(file);
-      } catch {
-        finish(undefined);
-        return;
-      }
-      pending.then(
-        (result) =>
-          finish(result.ok && result.transcript.trim() !== '' ? result.transcript : undefined),
-        () => finish(undefined),
-      );
-    });
-  };
-
   /**
-   * Upload the entry's files that have no version id yet, in order (a voice
-   * note transcribed alongside). Progress ticks update memory only (no
+   * Upload the entry's files that have no version id yet, in order. Progress ticks update memory only (no
    * persistence write per tick); each finished upload is committed, so a
    * retry or a reload keeps its version id. Resolves to the entry ready to
    * record, null when it left the outbox (or the sender stopped, or its files
@@ -676,10 +599,6 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
         else outbox = updated;
         deps.onEvent({ type: 'progress', channelId, id, attachments: list });
       };
-      const transcript =
-        wantsTranscript(target) && !transcribed.has(local.key)
-          ? (transcribed.add(local.key), transcribeBounded(file))
-          : Promise.resolve(undefined);
       let result: ChatAttachmentUpload;
       try {
         result = await upload(file, (fraction) =>
@@ -688,16 +607,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       } catch (error) {
         result = { ok: false, message: String(error) };
       }
-      // The transcript started with the upload; once the file is up it gets
-      // TRANSCRIPT_GRACE_MS more, then the note records without one.
-      const text = await settleWithin(transcript, deps.transcriptGraceMs ?? TRANSCRIPT_GRACE_MS);
-      const withTranscript = text !== undefined ? { transcript: text } : {};
       if (!result.ok) {
-        // Keep a transcript that did arrive, so the retry does not need one.
-        if (text !== undefined) {
-          const latest = current(channelId, id)?.local.attachments[index];
-          if (latest !== undefined) publish({ ...latest, ...withTranscript }, true);
-        }
         return {
           ok: false,
           error: result.message,
@@ -707,7 +617,6 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       publish(
         {
           ...target,
-          ...withTranscript,
           assetId: result.versionId,
           local: { ...local, progress: 1 },
         },
@@ -887,8 +796,6 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       disposed = true;
       for (const lane of lanes.values()) stopTimer(lane);
       lanes.clear();
-      for (const timer of transcribeTimers) clearTimer(timer);
-      transcribeTimers.clear();
     },
   };
 }

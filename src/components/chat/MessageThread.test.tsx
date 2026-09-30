@@ -34,6 +34,8 @@ import {
   isLinkTarget,
   renderMessageBody,
   isVoiceOnly,
+  isTranscribable,
+  nextVoiceIds,
   keyOpensMenu,
   ABOUT_UNAVAILABLE_TOAST,
   aboutQuote,
@@ -989,6 +991,71 @@ describe('voice-only bubble', () => {
     expect(cls).toContain('rounded-[18px]');
     expect(cls).toContain('min-w-[220px]');
     expect(metaOf(root)).toMatchObject({ placement: 'row', meta: { time: T_UTC } });
+  });
+
+  it('hands the voice note its message id, side, sender and the next voice id', () => {
+    const root = renderBubble(voice);
+    let voiceProp: unknown;
+    walk(root, (el) => {
+      const props = el.props as Record<string, unknown>;
+      if (props.voice !== undefined) voiceProp = props.voice;
+    });
+    expect(voiceProp).toMatchObject({ messageId: 'm1', mine: false, nextVoiceId: null });
+  });
+});
+
+describe('voice notes: auto-play chain and Transcribe', () => {
+  const note = (id: string, sender: string, over: Partial<ThreadMessage> = {}): ThreadMessage =>
+    makeMessage({
+      id,
+      senderUserId: sender,
+      body: '',
+      attachments: [{ assetId: `a-${id}`, name: 'n.webm', mime: 'audio/webm' }],
+      ...over,
+    });
+
+  it('links a voice note to the voice note directly below from the same sender only', () => {
+    const next = nextVoiceIds([
+      note('v1', 'peer-1'),
+      note('v2', 'peer-1'),
+      note('v3', 'peer-2'),
+      makeMessage({ id: 't1', senderUserId: 'peer-2' }),
+      note('v4', 'peer-2'),
+      note('v5', 'peer-2', { deleted: true }),
+    ]);
+    expect([...next.entries()]).toEqual([['v1', 'v2']]);
+  });
+
+  it('never links across a text message, and one pass over the list', () => {
+    const next = nextVoiceIds([
+      note('v1', 'peer-1'),
+      makeMessage({ id: 't', senderUserId: 'peer-1' }),
+      note('v2', 'peer-1'),
+    ]);
+    expect(next.size).toBe(0);
+  });
+
+  it('offers Transcribe only for a recorded message whose single attachment is audio', () => {
+    expect(isTranscribable(note('v1', 'peer-1'))).toBe(true);
+    expect(isTranscribable(note('v1', 'peer-1', { state: 'sending' }))).toBe(false);
+    expect(isTranscribable(note('v1', 'peer-1', { deleted: true }))).toBe(false);
+    expect(
+      isTranscribable(
+        note('v1', 'peer-1', {
+          attachments: [
+            { assetId: 'a', name: 'n.webm', mime: 'audio/webm' },
+            { assetId: 'b', name: 'n2.webm', mime: 'audio/webm' },
+          ],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isTranscribable(
+        note('v1', 'peer-1', {
+          attachments: [{ assetId: 'f', name: 'a.pdf', mime: 'application/pdf' }],
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

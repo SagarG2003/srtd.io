@@ -73,7 +73,7 @@ describe('attachmentView render dispatch', () => {
     ).toEqual({ kind: 'file', name: 'brief.pdf', url: 'https://signed/pdf' });
   });
 
-  it('renders an audio attachment as a voice note with its transcript', () => {
+  it('renders an audio attachment as a voice note; a legacy meta transcript is not rendered', () => {
     expect(
       attachmentView({
         attachment: AUDIO,
@@ -85,7 +85,6 @@ describe('attachmentView render dispatch', () => {
       kind: 'audio',
       url: 'https://signed/audio',
       name: 'note.webm',
-      transcript: 'hello there',
     });
   });
 
@@ -103,7 +102,7 @@ describe('attachmentView render dispatch', () => {
   it('keeps the voice note while the presign is still in flight (url null)', () => {
     expect(
       attachmentView({ attachment: AUDIO, presignEnabled: true, url: null, failed: false }),
-    ).toEqual({ kind: 'audio', url: null, name: 'note.webm', transcript: 'hello there' });
+    ).toEqual({ kind: 'audio', url: null, name: 'note.webm' });
   });
 
   it('falls back to a file chip for audio when presign failed or is disabled', () => {
