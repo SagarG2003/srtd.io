@@ -347,6 +347,30 @@ export function editedRows(
   });
 }
 
+/**
+ * What an own edit does once recorded: the list line hears it (whatever chat
+ * is open now), and the open thread shows the returned row when it is still
+ * that chat. Pure wiring, so it is tested without a DOM.
+ */
+export function ownEditApplier(deps: {
+  forChannel: string;
+  openChannel: () => string | null;
+  onEdited: (row: ChatMessageRow) => void;
+  update: (fn: (prev: ThreadMessage[]) => ThreadMessage[]) => void;
+}): (row: ChatMessageRow) => void {
+  return (row) => {
+    deps.onEdited(row);
+    if (deps.openChannel() !== deps.forChannel) return;
+    deps.update((prev) =>
+      applyEdit(prev, {
+        messageId: row.id,
+        body: row.body ?? '',
+        editedAt: row.edited_at ?? new Date().toISOString(),
+      }),
+    );
+  };
+}
+
 /** How a latest-page load ended: the page, or a failure (an error or the 5s timeout). */
 export type LatestLoadOutcome =
   | { kind: 'page'; page: HistoryPage }
@@ -1148,17 +1172,12 @@ export function useChatThread(params: {
       const result = await runEdit(
         {
           client: db,
-          applyLocal: (row) => {
-            onMessageEditedRef.current?.(row);
-            if (channelRef.current !== forChannel) return;
-            setMessages((prev) =>
-              applyEdit(prev, {
-                messageId: row.id,
-                body: row.body ?? '',
-                editedAt: row.edited_at ?? new Date().toISOString(),
-              }),
-            );
-          },
+          applyLocal: ownEditApplier({
+            forChannel,
+            openChannel: () => channelRef.current,
+            onEdited: (row) => onMessageEditedRef.current?.(row),
+            update: (fn) => setMessages(fn),
+          }),
           signal:
             connection !== null && liveTarget !== null
               ? (ext) =>

@@ -425,6 +425,18 @@ export type ChatAttachmentUpload =
  * up asset_versions.id), read off the same worker response; a success without
  * one fails closed.
  */
+/**
+ * The chat's copy for an upload that failed for no named reason. The shared
+ * upload layer's generic line mentions the connection; chat never shows
+ * connection wording, so it is replaced here (still a transient failure).
+ */
+export const CHAT_UPLOAD_FAILED = 'Upload failed. Try again';
+
+/** Chat copy for an upload failure: named reasons stay, the generic one is neutral. */
+export function chatUploadMessage(message: string): string {
+  return message === uploadErrorMessage('network') ? CHAT_UPLOAD_FAILED : message;
+}
+
 export async function uploadChatAttachment(
   params: ChatUploadParams,
 ): Promise<ChatAttachmentUpload> {
@@ -438,10 +450,10 @@ export async function uploadChatAttachment(
     params.file,
     params.xhr !== undefined ? { ...base, xhr: params.xhr } : { ...base, fetcher: params.fetcher },
   );
-  if (!outcome.ok) return outcome;
+  if (!outcome.ok) return { ...outcome, message: chatUploadMessage(outcome.message) };
   const versionId = outcome.assetVersionId ?? '';
   if (versionId === '') {
-    return { ok: false, message: uploadErrorMessage('network') };
+    return { ok: false, message: CHAT_UPLOAD_FAILED };
   }
   return { ok: true, reused: outcome.reused, versionId };
 }

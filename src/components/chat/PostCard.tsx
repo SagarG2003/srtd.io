@@ -47,7 +47,7 @@ import {
   type SharedCardCache,
   type SharedCardReaders,
 } from '@/lib/chat/shared-cards';
-import { formatShortDate, workspaceTimeZone } from '@/lib/chat/time-format';
+import { formatClockTime, formatShortDate, workspaceTimeZone } from '@/lib/chat/time-format';
 import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { cn } from '@/lib/cn';
 import {
@@ -413,6 +413,25 @@ export function SharedPostCards({
   );
 }
 
+/**
+ * An approved card whose approver name is not loaded (none on record, or the
+ * name read failed) reads "Approved · <date time>" from approved_at, never a
+ * blank name. Other footers pass through. Pure.
+ */
+export function approvedWithoutName<F extends { state: string }>(
+  footer: F,
+  post: Pick<PostCardRow, 'stage' | 'approved_at'>,
+  approverName: string | null,
+  timeZone: string,
+): F {
+  if (post.stage !== 'approved' || approverName !== null || post.approved_at === null) {
+    return footer;
+  }
+  const date = formatShortDate(post.approved_at, timeZone);
+  if (date === '') return footer;
+  return { ...footer, state: `Approved · ${date} ${formatClockTime(post.approved_at, timeZone)}` };
+}
+
 /** Everything a card needs besides its view; resolved once per message. */
 export interface CardContext {
   side: ViewerSide;
@@ -567,7 +586,12 @@ export function PostCardItem(
   const { view, side, workspaceKey, timeZone } = props;
   const { post } = view;
   const ref = entityRef(workspaceKey, post.number);
-  const footer = cardFooter(post, view.approverName, side, timeZone);
+  const footer = approvedWithoutName(
+    cardFooter(post, view.approverName, side, timeZone),
+    post,
+    view.approverName,
+    timeZone,
+  );
   const target = post.target_date !== null ? formatShortDate(post.target_date, timeZone) : '';
   // The sheet mounts on first open and stays mounted so its exit can animate.
   const [sheetOpen, setSheetOpen] = useState(false);

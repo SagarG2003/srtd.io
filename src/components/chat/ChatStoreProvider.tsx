@@ -364,6 +364,21 @@ export function heldWithPrefix(
   return next;
 }
 
+/**
+ * A refresh's answer applied to the store: a failed read keeps the current
+ * values, and an answer for a scope the store has moved on from (workspace
+ * switch, sign-out) is dropped. Pure.
+ */
+export function refreshedState<T>(
+  prev: ChatStoreState,
+  scope: string,
+  result: Result<T>,
+  apply: (state: ChatStoreState, data: T) => ChatStoreState,
+): ChatStoreState {
+  if (!result.ok || prev.scope !== scope) return prev;
+  return apply(prev, result.data);
+}
+
 /** A body with @[uuid] tokens as list text: "@Name" (this workspace's registry names). */
 export function previewMentionText(text: string, workspaceId: string | null): string {
   return resolveMentionPreview(text, mentionNamesIn(workspaceId));
@@ -764,11 +779,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     void loadUnreadCounts(supabase, workspaceId).then((result) => {
       if (!result.ok) {
         logger.warn('chat store: unread counts load failed', { error: result.error.message });
-        return;
       }
-      setState((prev) =>
-        prev.scope === scope ? store.applyUnreadCounts(prev, result.data) : prev,
-      );
+      setState((prev) => refreshedState(prev, scope, result, store.applyUnreadCounts));
     });
   }, [scope, workspaceId]);
 
@@ -779,10 +791,11 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     void readPreviews(workspaceId, forUser).then((result) => {
       if (!result.ok) {
         logger.warn('chat store: previews load failed', { error: result.error.message });
-        return;
       }
       setState((prev) =>
-        prev.scope === scope ? store.applyPreviews(prev, result.data, forUser, nameOf) : prev,
+        refreshedState(prev, scope, result, (s, data) =>
+          store.applyPreviews(s, data, forUser, nameOf),
+        ),
       );
     });
   }, [scope, workspaceId, currentUserId]);
