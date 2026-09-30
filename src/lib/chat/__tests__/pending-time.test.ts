@@ -12,9 +12,7 @@ vi.mock('agora-chat', () => ({
   default: { connection: vi.fn(), message: { create: vi.fn() } },
 }));
 import {
-  MAX_SERVER_OFFSET_MS,
   rowToThreadMessage,
-  serverOffsetFrom,
   upsertMessage,
   withOutboxBubbles,
   type ChatMessageRow,
@@ -25,7 +23,10 @@ import { withDaySeparators } from '@/components/chat/day-separators';
 import { bubbleMeta, messageTimeSource } from '@/components/chat/MessageThread';
 import { formatClockTime } from '@/lib/chat/time-format';
 import {
+  applyServerClock,
+  initialState,
   outboxRecorded,
+  serverNowMs,
   readPersistedOutbox,
   stampMissingCreatedMs,
   writePersistedOutbox,
@@ -183,15 +184,19 @@ describe('F3 positions never jump', () => {
 });
 
 describe('F4 clock skew', () => {
-  it('device clock 7 min fast: once the offset is known the label is within a minute of the record', () => {
+  it('device clock 7 min fast: once the offset is sampled the label is within a minute of the record', () => {
     const SKEW = 7 * 60_000;
-    // A first send records: its answer arrives at device time server + 7min + 200ms.
+    // The first send of the session samples: sent at device time server + 7min.
     const firstServer = Date.parse('2026-09-30T09:00:00.000Z');
-    const offset = serverOffsetFrom(new Date(firstServer).toISOString(), firstServer + SKEW + 200);
-    expect(offset).toBe(-(SKEW + 200));
+    const state = applyServerClock(
+      initialState(),
+      new Date(firstServer).toISOString(),
+      firstServer + SKEW,
+    );
+    expect(state.serverClockOffsetMs).toBe(-SKEW);
     // The next tap at device time D is stamped D + offset.
     const deviceTap = firstServer + SKEW + 90_000;
-    const [pending] = withOutboxBubbles([], [send('p1', deviceTap + (offset ?? 0))], ME);
+    const [pending] = withOutboxBubbles([], [send('p1', serverNowMs(state, deviceTap))], ME);
     const serverCreated = firstServer + 90_000 + 300;
     const [recorded] = upsertMessage([pending as ThreadMessage], recordedAt('p1', serverCreated));
     expect(Math.abs(serverCreated - (pending?.time ?? 0))).toBeLessThan(60_000);
@@ -202,13 +207,6 @@ describe('F4 clock skew', () => {
     ).toBeLessThan(60_000);
     // Without the offset the label would read 7 minutes off.
     expect(Math.abs(serverCreated - deviceTap)).toBeGreaterThan(6 * 60_000);
-  });
-
-  it('absurd offsets are 0; an unreadable created_at is null (keep the last)', () => {
-    const now = Date.parse('2026-09-30T09:00:00Z');
-    expect(serverOffsetFrom(new Date(now + MAX_SERVER_OFFSET_MS + 1).toISOString(), now)).toBe(0);
-    expect(serverOffsetFrom(new Date(now - MAX_SERVER_OFFSET_MS - 1).toISOString(), now)).toBe(0);
-    expect(serverOffsetFrom('not a date', now)).toBeNull();
   });
 });
 

@@ -782,12 +782,15 @@ export function useChatThread(params: {
           reply,
         },
         state: 'sending',
-        // The bubble's place, day pill and time: the estimated server time of
-        // the tap (device clock + the offset the last recorded send showed).
-        createdMs: Date.now() + (outboxRef.current.serverOffsetMs?.() ?? 0),
       };
-      setMessages((prev) => withOutboxBubbles(prev, [entry], currentUserId));
+      // The store stamps the tap with its estimated server time (createdMs):
+      // the bubble's place, day pill and time label.
       outboxRef.current.enqueue(forChannel, entry);
+      const queued = outboxRef.current.entries(forChannel).find((e) => e.id === entry.id) ?? {
+        ...entry,
+        createdMs: Date.now(),
+      };
+      setMessages((prev) => withOutboxBubbles(prev, [queued], currentUserId));
     },
     [currentUserId],
   );

@@ -730,21 +730,6 @@ export function setMessageAttachments(
   return messages.map((m) => (m.id === id ? { ...m, attachments: [...attachments] } : m));
 }
 
-/** Server clock offsets beyond this are treated as nonsense (0). */
-export const MAX_SERVER_OFFSET_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Server clock minus device clock from one recorded send: its server
- * created_at against the device time its answer arrived. Beyond a day either
- * way is 0; an unreadable created_at is null (keep the previous one). Pure.
- */
-export function serverOffsetFrom(createdAt: string, receivedMs: number): number | null {
-  const server = Date.parse(createdAt);
-  if (Number.isNaN(server) || !Number.isFinite(receivedMs)) return null;
-  const offset = server - receivedMs;
-  return Math.abs(offset) > MAX_SERVER_OFFSET_MS ? 0 : offset;
-}
-
 /**
  * Build the optimistic own bubble. It is placed, grouped under its day pill
  * and labelled by `estimatedMs`, the estimated server time of its Send tap

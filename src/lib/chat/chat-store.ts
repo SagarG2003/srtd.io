@@ -368,6 +368,18 @@ export function applyServerClock(
 }
 
 /**
+ * The estimated server time at device time `deviceNowMs`: plus the guarded
+ * server clock offset (0 until the first sampled ack). The one clock every
+ * pending send is stamped with (new send, Retry, restored without a time). Pure.
+ */
+export function serverNowMs(
+  state: Pick<ChatStoreState, 'serverClockOffsetMs'>,
+  deviceNowMs: number,
+): number {
+  return deviceNowMs + state.serverClockOffsetMs;
+}
+
+/**
  * Which record attempts may sample the server clock: only the first send
  * attempt of a message id freshly queued in this session. A retry, or a replay
  * of a persisted outbox entry, gets the original created_at back from the
@@ -382,6 +394,30 @@ export interface ClockSampler {
   begin: (id: string) => number | null;
   /** The attempt was acked or failed: the id never samples again. */
   settled: (id: string) => void;
+}
+
+/**
+ * One record attempt under the sampler: it may sample only when its id is
+ * fresh (queued this session, first attempt); ack or failure ends that id.
+ * `onSample` gets the ack's created_at and the device time of the send. A
+ * retry, a lost-ack retry or a replayed persisted send never samples.
+ */
+export async function recordWithClockSample<
+  R extends { ok: true; row: { created_at: string } } | { ok: false },
+>(
+  sampler: ClockSampler,
+  id: string,
+  record: () => Promise<R>,
+  onSample: (createdAt: string, sentAt: number) => void,
+): Promise<R> {
+  const sentAt = sampler.begin(id);
+  try {
+    const result = await record();
+    if (result.ok && sentAt !== null) onSample(result.row.created_at, sentAt);
+    return result;
+  } finally {
+    sampler.settled(id);
+  }
 }
 
 /** Bound on the fresh ids a clock sampler holds. */
@@ -633,7 +669,13 @@ export function outboxRecorded(
   let bump = 0;
   const next = list
     .map((entry, i) => {
-      if (i <= index || entry.createdMs === undefined || !Number.isFinite(recordedMs)) {
+      // Only pending sends move along; a refused one keeps its time and place.
+      if (
+        i <= index ||
+        entry.state !== 'sending' ||
+        entry.createdMs === undefined ||
+        !Number.isFinite(recordedMs)
+      ) {
         return entry;
       }
       if (entry.createdMs > recordedMs) return entry;
@@ -688,7 +730,11 @@ export type OutboxEvent =
  */
 export interface ChannelOutbox {
   entries: (channelId: string) => readonly OutboxEntry[];
-  /** Queue one send; delivery (record, then publish) runs in the background. */
+  /**
+   * Queue one send; delivery (record, then publish) runs in the background.
+   * An entry without createdMs is stamped with the estimated server time now
+   * (serverNowMs), which its bubble then reads back from entries().
+   */
   enqueue: (channelId: string, entry: OutboxEntry) => void;
   /** The Retry tap on a failed bubble: resume the channel's queue, same ids. */
   retry: (channelId: string, id: string) => void;
@@ -698,11 +744,6 @@ export interface ChannelOutbox {
    */
   settle: (channelId: string, id: string) => void;
   subscribe: (listener: (event: OutboxEvent) => void) => () => void;
-  /**
-   * Server clock minus device clock (ms) from the latest recorded send this
-   * session; 0 before the first. A new send stamps Date.now() + this.
-   */
-  serverOffsetMs?: () => number;
   /**
    * Messages became tombstones (by us, or live by their sender): the store
    * strips their text from draft replies and queued sends that quote them, and
