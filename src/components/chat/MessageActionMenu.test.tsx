@@ -611,3 +611,35 @@ describe('F5: picker focus', () => {
     expect(plus.ref).toBe(moreRef);
   });
 });
+
+describe('messageMenuItems: Transcribe', () => {
+  it('shows Transcribe after Forward for a voice note (no Copy row: the body is empty)', () => {
+    expect(menu({ canCopy: false, canTranscribe: true, onTranscribe: () => {} })).toEqual([
+      'Reply',
+      'Forward',
+      'Transcribe',
+      'Mark as',
+      '---',
+      'Select',
+    ]);
+  });
+
+  it('hides Transcribe when not offered (loading, or a transcript exists)', () => {
+    expect(menu({ canCopy: false, canTranscribe: false })).not.toContain('Transcribe');
+    expect(menu({ canCopy: false })).not.toContain('Transcribe');
+  });
+
+  it('runs onTranscribe', () => {
+    const onTranscribe = vi.fn();
+    const item = messageMenuItems({
+      canCopy: false,
+      onReply: () => {},
+      onCopy: () => {},
+      canTranscribe: true,
+      onTranscribe,
+    }).find((i) => i.kind === 'action' && i.key === 'transcribe');
+    expect(item?.kind).toBe('action');
+    if (item?.kind === 'action') item.run();
+    expect(onTranscribe).toHaveBeenCalledOnce();
+  });
+});

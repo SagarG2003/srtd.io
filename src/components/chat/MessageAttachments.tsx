@@ -152,10 +152,21 @@ export type AttachmentView =
       kind: 'audio';
       url: string | null;
       name: string;
-      transcript: string | undefined;
       durationMs: number | undefined;
     }
   | { kind: 'file'; name: string; url: string | null; progress?: number };
+
+/**
+ * A chat voice note's message context: its id (played state and transcript
+ * key), side, sender photo, and the voice note right below it from the same
+ * sender (auto-play next), if any.
+ */
+export interface VoiceContext {
+  messageId: string;
+  mine: boolean;
+  sender: { name: string; src?: string | undefined };
+  nextVoiceId: string | null;
+}
 
 export function attachmentView(args: {
   attachment: MessageAttachment;
@@ -182,7 +193,6 @@ export function attachmentView(args: {
       kind: 'audio',
       url,
       name: attachment.name,
-      transcript: attachment.transcript,
       durationMs: attachment.durationMs,
     };
   }
@@ -195,12 +205,14 @@ function AttachmentItem({
   presignEnabled,
   onImageClick,
   voiceSpacer,
+  voice,
 }: {
   attachment: MessageAttachment;
   cache: PresignCache;
   presignEnabled: boolean;
   onImageClick?: (() => void) | undefined;
   voiceSpacer?: ReactNode;
+  voice?: VoiceContext | undefined;
 }): ReactElement {
   // The render layer presigns the attachment's VERSION id (assetId carries the
   // asset_versions.id) through the shared cache, which dedupes in-flight ids.
@@ -260,9 +272,9 @@ function AttachmentItem({
         <VoiceNote
           url={view.url}
           name={view.name}
-          transcript={view.transcript}
           durationMs={view.durationMs}
           {...(voiceSpacer !== undefined ? { spacer: voiceSpacer } : {})}
+          {...(voice !== undefined ? voice : {})}
         />
       );
     case 'file':
@@ -431,6 +443,7 @@ export function MessageAttachments({
   presignEnabled,
   onImageClick,
   voiceSpacer,
+  voice,
   album,
   caption,
 }: {
@@ -454,6 +467,8 @@ export function MessageAttachments({
    * the list sits flush in the bubble (no top margin, full width).
    */
   voiceSpacer?: ReactNode;
+  /** Chat voice-only bubbles: the recorded message the note belongs to. */
+  voice?: VoiceContext | undefined;
 }): ReactElement | null {
   if (attachments.length === 0) return null;
   if (album === true) {
@@ -505,6 +520,7 @@ export function MessageAttachments({
             onImageClick !== undefined ? () => onImageClick(attachment, index) : undefined
           }
           {...(voiceSpacer !== undefined ? { voiceSpacer } : {})}
+          voice={voice}
         />
       ))}
     </div>

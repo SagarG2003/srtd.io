@@ -6,7 +6,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createOutboxSender,
-  TRANSCRIPT_GRACE_MS,
   UPLOAD_STALL_MS,
   watchUploadStall,
   type OutboxSenderDeps,
@@ -16,7 +15,6 @@ import type { Outbox, OutboxEntry, OutboxEvent } from '@/lib/chat/chat-store';
 import { rowToThreadMessage, type ChatMessageRow } from '@/lib/chat/thread';
 import type { ChatAttachmentUpload, MessageAttachment } from '@/lib/chat/attachments';
 import { uploadErrorMessage, xhrPost } from '@/lib/asset-upload';
-import { TRANSCRIBE_TIMEOUT_MS, type TranscribeResult } from '@/lib/chat/transcribe';
 
 const ME = '11111111-1111-4111-8111-111111111111';
 const CHANNEL = 'group__ws__g1';
@@ -380,99 +378,52 @@ describe('voice notes in the outbox', () => {
     });
   }
 
-  it('enqueued pending at once; transcribed alongside the upload and recorded with it', async () => {
+  it('enqueued pending at once; uploaded and recorded without any transcript', async () => {
     const upload = vi.fn(
       async (): Promise<ChatAttachmentUpload> => ({ ok: true, reused: false, versionId: 'ver-v' }),
     );
-    const transcribe = vi.fn(
-      async (): Promise<TranscribeResult> => ({ ok: true, transcript: 'hello there' }),
-    );
-    const { sender, calls } = harness({ deps: { transcribe } });
+    const { sender, calls } = harness();
     sender.enqueue(CHANNEL, voice(upload));
     expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]?.entry.local.attachments[0]).toMatchObject({
       assetId: 'ver-v',
-      transcript: 'hello there',
       durationMs: 3000,
     });
+    expect(calls[0]?.entry.local.attachments[0]?.transcript).toBeUndefined();
   });
 
-  it('F6 upload done, transcript never returns: records within 3s of the upload, without one', async () => {
+  it('records the moment the upload is done: no transcript wait', async () => {
     vi.useFakeTimers();
     const upload = vi.fn(async (): Promise<ChatAttachmentUpload> => {
       await new Promise<void>((resolve) => setTimeout(resolve, 4_000));
       return { ok: true, reused: false, versionId: 'ver-v' };
     });
-    const transcribe = vi.fn(() => new Promise<TranscribeResult>(() => {}));
-    const { sender, calls } = harness({ deps: { transcribe } });
+    const { sender, calls } = harness();
     sender.enqueue(CHANNEL, voice(upload));
-    expect(transcribe).toHaveBeenCalledOnce();
-    await vi.advanceTimersByTimeAsync(4_000 + TRANSCRIPT_GRACE_MS - 1);
+    await vi.advanceTimersByTimeAsync(3_999);
     expect(calls).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1);
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.entry.local.attachments[0]?.transcript).toBeUndefined();
     expect(calls[0]?.entry.local.attachments[0]?.assetId).toBe('ver-v');
-    // The overall 15s transcription cap still runs out and clears itself.
-    await vi.advanceTimersByTimeAsync(TRANSCRIBE_TIMEOUT_MS);
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('F6 a transcript that arrives within the grace rides along', async () => {
-    vi.useFakeTimers();
-    const upload = vi.fn(
-      async (): Promise<ChatAttachmentUpload> => ({ ok: true, reused: false, versionId: 'ver-v' }),
-    );
-    const transcribe = vi.fn(
-      () =>
-        new Promise<TranscribeResult>((resolve) =>
-          setTimeout(() => resolve({ ok: true, transcript: 'late but in time' }), 2_000),
-        ),
-    );
-    const { sender, calls } = harness({ deps: { transcribe } });
-    sender.enqueue(CHANNEL, voice(upload));
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(calls[0]?.entry.local.attachments[0]?.transcript).toBe('late but in time');
-  });
-
-  it('F6 a slow upload past the 15s cap records at once, without a transcript', async () => {
-    vi.useFakeTimers();
-    const upload = vi.fn(async (): Promise<ChatAttachmentUpload> => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 20_000));
-      return { ok: true, reused: false, versionId: 'ver-v' };
-    });
-    const transcribe = vi.fn(() => new Promise<TranscribeResult>(() => {}));
-    const { sender, calls } = harness({ deps: { transcribe } });
-    sender.enqueue(CHANNEL, voice(upload));
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.entry.local.attachments[0]?.transcript).toBeUndefined();
-  });
-
-  it('a transient upload failure keeps it pending, and transcription is not repeated', async () => {
+  it('a transient upload failure keeps it pending, then records', async () => {
     vi.useFakeTimers();
     const upload = vi
       .fn<(file: File) => Promise<ChatAttachmentUpload>>()
       .mockResolvedValueOnce({ ok: false, message: uploadErrorMessage('network') })
       .mockResolvedValueOnce({ ok: false, message: uploadErrorMessage('network') })
       .mockResolvedValue({ ok: true, reused: false, versionId: 'ver-v' });
-    const transcribe = vi.fn(
-      async (): Promise<TranscribeResult> => ({ ok: true, transcript: 'kept' }),
-    );
-    const { sender, calls, events } = harness({ deps: { transcribe } });
+    const { sender, calls, events } = harness();
     sender.enqueue(CHANNEL, voice(upload));
     await vi.advanceTimersByTimeAsync(0);
     expect(sender.entries(CHANNEL)[0]?.state).toBe('sending');
-    expect(sender.entries(CHANNEL)[0]?.local.attachments[0]?.transcript).toBe('kept');
     await vi.advanceTimersByTimeAsync(2_000 + 4_000);
     expect(failedEvents(events)).toEqual([]);
-    expect(transcribe).toHaveBeenCalledTimes(1);
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.entry.local.attachments[0]).toMatchObject({
-      assetId: 'ver-v',
-      transcript: 'kept',
-    });
+    expect(calls[0]?.entry.local.attachments[0]).toMatchObject({ assetId: 'ver-v' });
   });
 });
 

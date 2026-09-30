@@ -81,6 +81,13 @@ import {
 } from '@/lib/chat/thread';
 import { classifyAttachment, splitAlbum, type ReplyQuote } from '@/lib/chat/attachments';
 import { useChatAttachments } from '@/lib/chat/use-chat-attachments';
+import { fetchWithTrace } from '@/lib/fetch';
+import { fetchAudioBlob } from '@/lib/chat/transcribe';
+import {
+  canOfferTranscribe,
+  transcribeVoiceNote,
+  useVoiceRecord,
+} from '@/lib/chat/transcript-store';
 import { formatClockTime } from '@/lib/chat/time-format';
 import { getDraft, setDraft, strippedReply, type DraftReply } from '@/lib/chat/drafts';
 import {
@@ -392,6 +399,38 @@ export function stripLoops(input: {
     posts: input.openPosts.failed ? null : input.openPosts.count,
     side: input.side.side,
   };
+}
+
+/**
+ * Each voice-only message's auto-play successor: the message directly below it
+ * when that is also a live voice-only note from the same sender. One pass.
+ */
+export function nextVoiceIds(messages: readonly ThreadMessage[]): Map<string, string> {
+  const next = new Map<string, string>();
+  for (let i = 0; i + 1 < messages.length; i += 1) {
+    const here = messages[i];
+    const below = messages[i + 1];
+    if (here === undefined || below === undefined) continue;
+    if (here.deleted === true || below.deleted === true) continue;
+    if (!isVoiceOnly(here) || !isVoiceOnly(below)) continue;
+    if (here.senderUserId === null || here.senderUserId !== below.senderUserId) continue;
+    next.set(here.id, below.id);
+  }
+  return next;
+}
+
+/** Whether the menu may offer "Transcribe": a recorded message whose one attachment is audio. */
+export function isTranscribable(
+  message: Pick<ThreadMessage, 'attachments' | 'state' | 'deleted'>,
+): boolean {
+  const [only] = message.attachments;
+  return (
+    message.state === 'sent' &&
+    message.deleted !== true &&
+    message.attachments.length === 1 &&
+    only !== undefined &&
+    only.mime.startsWith('audio/')
+  );
 }
 
 /** A voice note alone (no text, cards or other files): it takes the text-bubble layout. */
@@ -1423,6 +1462,8 @@ export function MessageBubble(props: {
   onOpenImage?: (index: number) => void;
   /** The KEY chip and the cards' talk-about / filter hooks. */
   postRefs?: BubblePostRefs | undefined;
+  /** A voice-only bubble: the voice note right below from the same sender. */
+  nextVoiceId?: string | null | undefined;
   bubbleRef?: Ref<HTMLDivElement>;
   /** The row; in selection mode its taps and holds are the selection gesture's. */
   rowRef?: Ref<HTMLLIElement>;
@@ -1649,6 +1690,12 @@ export function MessageBubble(props: {
                 attachments={message.attachments}
                 cache={cache}
                 presignEnabled={presignEnabled}
+                voice={{
+                  messageId: message.id,
+                  mine,
+                  sender: { name, ...senderAvatarProps(message, profiles) },
+                  nextVoiceId: props.nextVoiceId ?? null,
+                }}
               />
             ) : album ? (
               <>
@@ -1960,6 +2007,8 @@ function MessageRow(props: {
   onSwipeReply: (message: ThreadMessage) => void;
   onOpenImage: (message: ThreadMessage, index: number) => void;
   postRefs?: BubblePostRefs | undefined;
+  /** A voice-only row: the voice note right below from the same sender. */
+  nextVoiceId?: string | null | undefined;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const iconRef = useRef<HTMLSpanElement>(null);
@@ -2077,6 +2126,7 @@ function MessageRow(props: {
       mentions={props.mentions}
       workspaceId={props.workspaceId}
       meta={props.meta}
+      nextVoiceId={props.nextVoiceId}
       bubbleRef={bubbleRef}
       rowRef={rowRef}
       swipe={{ iconRef }}
@@ -2381,9 +2431,13 @@ function ThreadBody(
     filtering?: boolean;
     /** The filtered post's KEY, for the filtered thread's empty line. */
     filterRef?: string | null;
+    /** Menu "Transcribe" picked on a voice note; absent hides the row. */
+    onTranscribe?: (message: ThreadMessage) => void;
   },
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
+  // Auto-play chain: each voice note's same-sender voice note right below.
+  const voiceNext = useMemo(() => nextVoiceIds(props.messages), [props.messages]);
   // The open menu: its message, anchor, held bubble and the server moment its
   // rows were judged at (the edit and delete windows). While it is open, one
   // timeout for the message's next window boundary re-judges them.
@@ -2395,6 +2449,8 @@ function ThreadBody(
     /** The laptop smiley: just the reactions row. */
     reactionsOnly: boolean;
   } | null>(null);
+  // The open menu's voice-note state: its Transcribe row follows this device's store.
+  const menuVoice = useVoiceRecord(menu?.message.id);
   // The thread's one image viewer: which message's album, at which image.
   const [viewer, setViewer] = useState<{ messageId: string; index: number } | null>(null);
   // A message deleted (live, or by us) while its menu is open closes the menu.
@@ -2833,6 +2889,7 @@ function ThreadBody(
               reducedMotion={reducedMotion}
               onSwipeReply={props.onReply}
               onJumpToMessage={scrollToMessage}
+              nextVoiceId={voiceNext.get(row.message.id) ?? null}
               postRefs={{
                 chip: props.chipFor?.(row.message),
                 onTalkAbout: props.onTalkAbout,
@@ -2885,6 +2942,15 @@ function ThreadBody(
         lockedByMark={menuOwn.lockedByMark}
         currentReaction={menu ? (menu.message.reactions.find((r) => r.mine)?.emoji ?? null) : null}
         canCopy={menu ? menu.message.body.trim() !== '' : false}
+        canTranscribe={
+          menu !== null &&
+          props.onTranscribe !== undefined &&
+          isTranscribable(menu.message) &&
+          canOfferTranscribe(menuVoice.record, menuVoice.pending)
+        }
+        onTranscribe={() => {
+          if (menu) props.onTranscribe?.(menu.message);
+        }}
         markOptions={
           menu && props.onMark !== undefined
             ? markMenuOptions(menu.message, props.marks.get(menu.message.id))
@@ -3396,7 +3462,27 @@ export function resetSelectionHistory(): void {
 
 /** The thread pane: header (+ optional back), message list, and composer. */
 export function MessageThread(props: MessageThreadProps): ReactElement {
-  const { canAttach, presignEnabled, presignCache, uploadFile } = useChatAttachments();
+  const { canAttach, presignEnabled, presignCache, uploadFile, transcribe, canTranscribe } =
+    useChatAttachments();
+  // Transcribe on tap: this device only. The bytes come from the same
+  // presigned URL the player uses; the result lives in the transcript store.
+  const onTranscribe = useCallback(
+    (message: ThreadMessage): void => {
+      const only = message.attachments[0];
+      if (only === undefined) return;
+      void transcribeVoiceNote({
+        messageId: message.id,
+        fetchAudio: async () =>
+          fetchAudioBlob({
+            url: (await presignCache.resolve(only.assetId)).url,
+            mime: only.mime,
+            fetcher: (input, init) => fetchWithTrace(input, init),
+          }),
+        transcribe,
+      });
+    },
+    [presignCache, transcribe],
+  );
   // Everything per chat is keyed on the channel id (the parent also remounts
   // the thread per channel), never the title.
   const channelId = props.channelId;
@@ -3928,6 +4014,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         {...(props.onRetryLoad !== undefined ? { onRetryLoad: props.onRetryLoad } : {})}
         profiles={props.profiles}
         cache={presignCache}
+        {...(canTranscribe ? { onTranscribe } : {})}
         presignEnabled={presignEnabled}
         showTicks={props.showTicks ?? false}
         isGroup={props.isGroup ?? false}

@@ -133,6 +133,12 @@ interface MessageActionMenuProps {
    */
   reactionsOnly?: boolean;
   canCopy: boolean;
+  /**
+   * Offers "Transcribe" (a voice note with no transcript on this device, or
+   * whose last attempt failed; never while one is in flight).
+   */
+  canTranscribe?: boolean;
+  onTranscribe?: () => void;
   onReact: (emoji: string) => void;
   onReply: () => void;
   onCopy: () => void;
@@ -182,6 +188,8 @@ type MenuItemProps = Pick<
   | 'canCopy'
   | 'onReply'
   | 'onCopy'
+  | 'canTranscribe'
+  | 'onTranscribe'
   | 'markOptions'
   | 'onMark'
   | 'markedAs'
@@ -217,8 +225,28 @@ export function BanGlyph(props: { size?: number }): ReactElement {
   );
 }
 
+/** The Transcribe row's glyph: three text lines, drawn like the icon set (stroke 1.7). */
+export function TranscribeGlyph(props: { size?: number }): ReactElement {
+  const size = props.size ?? 18;
+  return (
+    <svg
+      aria-hidden="true"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M5 7h14M5 12h14M5 17h9" />
+    </svg>
+  );
+}
+
 /**
- * The main view in display order: Reply, Forward, Copy, "Mark as" (or the
+ * The main view in display order: Reply, Forward, Copy or Transcribe, "Mark as" (or the
  * static "Marked as <type>"), Edit, Delete (or the locked line), then Select
  * under a divider. Rows that do not apply are not rendered. Pure (no hooks) so
  * the row set is unit-tested without a DOM.
@@ -243,6 +271,15 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
       label: 'Copy',
       icon: <IconCopy />,
       run: props.onCopy,
+    });
+  }
+  if (props.canTranscribe === true) {
+    items.push({
+      kind: 'action',
+      key: 'transcribe',
+      label: 'Transcribe',
+      icon: <TranscribeGlyph />,
+      run: () => props.onTranscribe?.(),
     });
   }
   if (props.markedAs != null) {

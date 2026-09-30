@@ -31,7 +31,10 @@ export interface MessageAttachment {
   assetId: string;
   name: string;
   mime: string;
-  /** Whisper transcript for a voice note; absent for non-audio attachments. */
+  /**
+   * Legacy read-only: a transcript an older client wrote into attachment_meta.
+   * Nothing writes it any more (transcripts are per-device, see transcript-store).
+   */
   transcript?: string;
   /** Byte size of the uploaded file, when known. */
   size?: number;
@@ -154,15 +157,11 @@ export function buildAttachmentExt(attachments: readonly MessageAttachment[]): A
       assetId: a.assetId,
       name: a.name,
       mime: a.mime,
-      ...(a.transcript !== undefined ? { transcript: a.transcript } : {}),
       ...(a.size !== undefined ? { size: a.size } : {}),
       ...(a.durationMs !== undefined ? { durationMs: a.durationMs } : {}),
     })),
   };
 }
-
-/** Longest transcript persisted in chat_messages.attachment_meta; longer ones are dropped. */
-export const TRANSCRIPT_META_LIMIT = 2000;
 
 /** One attachment's render metadata as persisted in chat_messages.attachment_meta. */
 export type AttachmentMetaEntry = {
@@ -179,7 +178,7 @@ export type AttachmentMetaMap = Record<string, AttachmentMetaEntry>;
 /**
  * Build the p_attachment_meta payload for chat_message_send, so a message read
  * back from Postgres renders exactly like the live one (image vs file vs voice
- * note, name, transcript). A transcript over TRANSCRIPT_META_LIMIT is left out.
+ * note, name). Transcripts are never written: they live on the reading device.
  */
 export function buildAttachmentMeta(attachments: readonly MessageAttachment[]): AttachmentMetaMap {
   const meta: AttachmentMetaMap = {};
@@ -189,9 +188,6 @@ export function buildAttachmentMeta(attachments: readonly MessageAttachment[]): 
       name: a.name,
       size: a.size ?? 0,
       ...(a.durationMs !== undefined ? { duration_ms: a.durationMs } : {}),
-      ...(a.transcript !== undefined && a.transcript.length <= TRANSCRIPT_META_LIMIT
-        ? { transcript: a.transcript }
-        : {}),
     };
   }
   return meta;

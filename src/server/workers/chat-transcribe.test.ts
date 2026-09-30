@@ -13,7 +13,13 @@ vi.mock('jose', async (importOriginal) => {
   };
 });
 
-import worker, { type ChatTranscribeEnv } from './chat-transcribe';
+import worker, {
+  DAILY_CAP_BYTES,
+  MAX_AUDIO_BYTES,
+  usageKey,
+  type ChatTranscribeEnv,
+  type UsageKv,
+} from './chat-transcribe';
 
 const USER = '33333333-3333-7333-8333-333333333333';
 const SUPABASE_URL = 'https://test.supabase.co';
@@ -51,8 +57,26 @@ async function mintToken(sub: string, expSecondsFromNow = 3600): Promise<string>
     .sign(signingKey);
 }
 
-function audioRequest(token: string | null, body: BodyInit | null): Request {
-  const headers = new Headers({ 'content-type': 'audio/webm' });
+/** An in-memory KV namespace for the daily byte counter. */
+function memoryKv(initial: Record<string, string> = {}): UsageKv & { data: Map<string, string> } {
+  const data = new Map(Object.entries(initial));
+  return {
+    data,
+    get: vi.fn((key: string) => Promise.resolve(data.get(key) ?? null)),
+    put: vi.fn((key: string, value: string) => {
+      data.set(key, value);
+      return Promise.resolve();
+    }),
+  };
+}
+
+function audioRequest(
+  token: string | null,
+  body: BodyInit | null,
+  contentType = 'audio/webm',
+  extraHeaders: Record<string, string> = {},
+): Request {
+  const headers = new Headers({ 'content-type': contentType, ...extraHeaders });
   if (token !== null) {
     headers.set('Authorization', `Bearer ${token}`);
   }
@@ -122,5 +146,92 @@ describe('chat-transcribe worker.fetch', () => {
     );
     expect(res.status).toBe(405);
     expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('returns 415 for a non-audio content type, before reading or transcribing', async () => {
+    const token = await mintToken(USER);
+    const ai = aiReturning('should not run');
+    const res = await worker.fetch(
+      audioRequest(token, new Uint8Array([1, 2, 3]), 'application/octet-stream'),
+      makeEnv(ai),
+    );
+    expect(res.status).toBe(415);
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(false);
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('accepts any audio/* type with parameters (audio/webm;codecs=opus)', async () => {
+    const token = await mintToken(USER);
+    const ai = aiReturning('ok');
+    const res = await worker.fetch(
+      audioRequest(token, new Uint8Array([1]), 'audio/webm;codecs=opus'),
+      makeEnv(ai),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it('returns 413 from Content-Length alone when it declares more than 8 MB', async () => {
+    const token = await mintToken(USER);
+    const ai = aiReturning('should not run');
+    const res = await worker.fetch(
+      audioRequest(token, new Uint8Array([1, 2, 3]), 'audio/webm', {
+        'content-length': String(MAX_AUDIO_BYTES + 1),
+      }),
+      makeEnv(ai),
+    );
+    expect(res.status).toBe(413);
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('returns 413 when the body read runs past 8 MB', async () => {
+    const token = await mintToken(USER);
+    const ai = aiReturning('should not run');
+    const res = await worker.fetch(
+      audioRequest(token, new Uint8Array(MAX_AUDIO_BYTES + 1)),
+      makeEnv(ai),
+    );
+    expect(res.status).toBe(413);
+    expect(ai.run).not.toHaveBeenCalled();
+  });
+
+  it('accepts a body of exactly 8 MB', async () => {
+    const token = await mintToken(USER);
+    const ai = aiReturning('long note');
+    const res = await worker.fetch(
+      audioRequest(token, new Uint8Array(MAX_AUDIO_BYTES)),
+      makeEnv(ai),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it('counts the bytes against the UTC day in KV on an ok transcription', async () => {
+    const token = await mintToken(USER);
+    const kv = memoryKv();
+    const ai = aiReturning('counted');
+    const res = await worker.fetch(audioRequest(token, new Uint8Array(1_000)), {
+      ...makeEnv(ai),
+      TRANSCRIBE_USAGE: kv,
+    });
+    expect(res.status).toBe(200);
+    expect(kv.data.get(usageKey(new Date()))).toBe('1000');
+  });
+
+  it('returns 429 { ok: false, reason: daily_cap } once the day is over 240 MB', async () => {
+    const token = await mintToken(USER);
+    const kv = memoryKv({ [usageKey(new Date())]: String(DAILY_CAP_BYTES - 10) });
+    const ai = aiReturning('should not run');
+    const res = await worker.fetch(audioRequest(token, new Uint8Array(11)), {
+      ...makeEnv(ai),
+      TRANSCRIBE_USAGE: kv,
+    });
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ ok: false, reason: 'daily_cap' });
+    expect(ai.run).not.toHaveBeenCalled();
+    expect(kv.data.get(usageKey(new Date()))).toBe(String(DAILY_CAP_BYTES - 10));
+  });
+
+  it('keys the counter by UTC day', () => {
+    expect(usageKey(new Date('2026-09-30T23:59:59.000Z'))).toBe('usage:2026-09-30');
+    expect(usageKey(new Date('2026-10-01T00:00:00.000Z'))).toBe('usage:2026-10-01');
   });
 });
