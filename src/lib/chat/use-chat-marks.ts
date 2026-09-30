@@ -15,7 +15,7 @@ import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { generateTraceId } from '@/lib/trace';
 import { createCmdMessage } from '@/lib/chat/message-factory';
-import { withReadTimeout } from '@/lib/chat-reads';
+import { withLinkedSignal, withReadTimeout } from '@/lib/chat-reads';
 import { loadMessagesByIds } from '@/lib/chat/history';
 import {
   applyTransition,
@@ -136,6 +136,8 @@ export function useChatMarks(params: {
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
   // The channel whose marks have been read successfully at least once.
   const [readOkFor, setReadOkFor] = useState<string | null>(null);
+  // Aborts this channel's marks reads on a switch or unmount.
+  const channelAbortRef = useRef(new AbortController());
   const marksRef = useRef(marks);
   marksRef.current = marks;
   const channelRef = useRef(channelId);
@@ -167,7 +169,11 @@ export function useChatMarks(params: {
   const load = useCallback(
     async (forChannel: string): Promise<void> => {
       // Bounded at 5s: a hung read settles as failed, so the strip never holds.
-      const result = await withReadTimeout((signal) => loadChannelMarks(db, forChannel, signal));
+      // A channel switch or unmount aborts it (channelAbortRef).
+      const cancel = channelAbortRef.current.signal;
+      const result = await withReadTimeout((deadline) =>
+        withLinkedSignal(deadline, cancel, (signal) => loadChannelMarks(db, forChannel, signal)),
+      );
       if (channelRef.current !== forChannel) return;
       if (!result.ok) {
         logger.warn('chat: marks load failed', {
@@ -195,8 +201,10 @@ export function useChatMarks(params: {
     setMarkedMessages(new Map());
     setLoadedFor(null);
     setReadOkFor(null);
-    if (channelId === null) return;
-    void load(channelId);
+    const abort = new AbortController();
+    channelAbortRef.current = abort;
+    if (channelId !== null) void load(channelId);
+    return () => abort.abort();
   }, [channelId, load]);
 
   const refetch = useCallback((): void => {
@@ -209,7 +217,10 @@ export function useChatMarks(params: {
     async (messageId: string): Promise<void> => {
       const forChannel = channelRef.current;
       if (forChannel === null) return;
-      const result = await withReadTimeout((signal) => loadMarkByMessageId(db, messageId, signal));
+      const cancel = channelAbortRef.current.signal;
+      const result = await withReadTimeout((deadline) =>
+        withLinkedSignal(deadline, cancel, (signal) => loadMarkByMessageId(db, messageId, signal)),
+      );
       if (channelRef.current !== forChannel) return;
       if (!result.ok) {
         logger.warn('chat: mark load failed', {

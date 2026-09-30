@@ -61,8 +61,8 @@ describe('StrictMode: a disposed-then-resumed card cache still reads', () => {
   });
 });
 
-describe('online/connected revive cards that gave up', () => {
-  it('a plain trigger does not; a recovery trigger does', async () => {
+describe('3 tries per session: triggers never exceed them, the tap does', () => {
+  it('after giving up, a trigger does not re-read; the tap starts a fresh set', async () => {
     vi.useFakeTimers();
     const fail: Result<Post[]> = { ok: false, error: { code: 'unknown', message: 'x' } };
     const readers = readersWith({ readPosts: async () => fail });
@@ -73,7 +73,7 @@ describe('online/connected revive cards that gave up', () => {
     cache.retryFailed();
     await vi.advanceTimersByTimeAsync(0);
     expect(readers.readPosts).toHaveBeenCalledTimes(CARD_READ_TRIES);
-    cache.retryFailed(undefined, { revive: true });
+    cache.retry({ postIds: ['p1'] });
     await vi.advanceTimersByTimeAsync(0);
     expect(readers.readPosts).toHaveBeenCalledTimes(CARD_READ_TRIES + 1);
     cache.dispose();

@@ -2316,7 +2316,9 @@ function paintSwipe(
     bubble.style.transform = moved ? `translate3d(${frame.offset}px,0,0)` : '';
   }
   if (icon !== null) {
-    icon.style.transition = spring !== '' ? `transform ${spring}, opacity ${spring}` : '';
+    // The icon follows the frame with no motion of its own (the bubble's
+    // translateX spring is the only animation).
+    icon.style.transition = '';
     icon.style.opacity = moved ? String(frame.progress) : '';
     icon.style.transform = moved ? `scale(${frame.progress})` : '';
     icon.toggleAttribute('data-armed', frame.armed);
@@ -3849,16 +3851,22 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           workspaceKey={workspaceKey}
           onShowAll={() => setFilterPostId(null)}
         />
+      ) : stripSlot === 'loops' && props.marksFailed === true ? (
+        // Marks never read (failed or timed out): the strip's 44px slot stays,
+        // empty and inert (no layout jump, nothing to open, never "Nothing
+        // open"), until a re-read (visible, online, connected) lands.
+        <div
+          data-loops-strip="unread"
+          aria-hidden="true"
+          className="min-h-[44px] w-full shrink-0 border-b border-border bg-panel-2"
+        />
       ) : stripSlot === 'loops' ? (
         <MarkStrip
           marks={marks}
           loops={stripLoops({
             openPosts,
             side: viewerSide,
-            // Never read (failed or timed out): the strip keeps its 44px slot
-            // with an empty body (no layout jump, never "Nothing open") until a
-            // re-read lands.
-            marksLoaded: props.marksLoaded && props.marksFailed !== true,
+            marksLoaded: props.marksLoaded,
           })}
           onOpen={() => setMarksOpen(true)}
         />

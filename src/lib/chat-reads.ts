@@ -251,14 +251,18 @@ export async function listChannelSummaries(
   params: { workspaceId: string; currentUserId: string },
   signal?: AbortSignal,
   /**
-   * Each round-trip's deadline (default 5s). The first load, whose late
-   * answer still wins (withLateRead), passes its grace instead, so a slow
-   * trip is not cancelled before it can land.
+   * The registry trip's deadline (default 5s). The first load, whose late
+   * answer still wins (withLateRead), passes its grace here so a slow registry
+   * read is not cancelled before it can land. The second stage (groups, users,
+   * roles) always has 5s per read, so a hung name read settles fast.
    */
-  tripTimeoutMs: number = READ_TIMEOUT_MS,
+  registryTimeoutMs: number = READ_TIMEOUT_MS,
 ): Promise<Result<ChannelSummary[]>> {
-  const trip = <T>(run: (tripSignal: AbortSignal) => Promise<Result<T>>): Promise<Result<T>> =>
-    withReadTimeout((tripSignal) => withLinkedSignal(tripSignal, signal, run), tripTimeoutMs);
+  const trip = <T>(
+    run: (tripSignal: AbortSignal) => Promise<Result<T>>,
+    timeoutMs: number = READ_TIMEOUT_MS,
+  ): Promise<Result<T>> =>
+    withReadTimeout((tripSignal) => withLinkedSignal(tripSignal, signal, run), timeoutMs);
   const channelsRes = await trip(async (tripSignal) => {
     const res = await abortable(
       client
@@ -273,7 +277,7 @@ export async function listChannelSummaries(
     if (res.error)
       return fail<ChatChannelRow[]>(`listChannelSummaries channels: ${res.error.message}`);
     return { ok: true, data: (res.data ?? []) as ChatChannelRow[] };
-  });
+  }, registryTimeoutMs);
   if (!channelsRes.ok) return channelsRes;
   const channels = channelsRes.data;
 

@@ -26,8 +26,8 @@ afterEach(() => {
 const SCOPE = loadScope('w1', 'me');
 const ok = <T,>(data: T): Promise<Result<T>> => Promise.resolve({ ok: true, data });
 
-describe('the roster deadline covers its two round-trips', () => {
-  it('a roster answering at 6s paints the list with no error first', async () => {
+describe('the roster reader has its own 5s; a late roster still wins', () => {
+  it('a roster answering at 6s: the error at 5s, then the list replaces it', async () => {
     vi.useFakeTimers();
     const roster: ChannelSummary[] = [
       {
@@ -49,14 +49,15 @@ describe('the roster deadline covers its two round-trips', () => {
     };
     const states: string[] = [];
     let state: ChatStoreState = beginLoad(initialState(), SCOPE);
-    void loadChatList(readers, SCOPE, 'me').then((t) => {
+    const apply = (t: (s: ChatStoreState) => ChatStoreState): void => {
       state = t(state);
       states.push(state.status);
-    });
+    };
+    void loadChatList(readers, SCOPE, 'me', undefined, { onLate: apply }).then(apply);
     await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
-    expect(states).toEqual([]);
+    expect(states).toEqual(['error']);
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(states).toEqual(['ready']);
+    expect(states).toEqual(['error', 'ready']);
     expect(ROSTER_READ_BUDGET_MS).toBe(2 * READ_TIMEOUT_MS);
   });
 });

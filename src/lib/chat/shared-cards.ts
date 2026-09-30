@@ -89,16 +89,7 @@ export interface SharedCardCache<P, B> {
    * view): re-read the ids whose reads failed and still have tries left (all
    * of them when `ids` is absent).
    */
-  retryFailed: (
-    ids?: { postIds?: readonly string[]; briefIds?: readonly string[] },
-    opts?: {
-      /**
-       * A recovery signal (online again, chat connected): ids that already
-       * gave up get a fresh set of tries too, as a tap would.
-       */
-      revive?: boolean;
-    },
-  ) => void;
+  retryFailed: (ids?: { postIds?: readonly string[]; briefIds?: readonly string[] }) => void;
   /** The "Couldn't load" tap: these ids get a fresh set of tries, starting now. */
   retry: (ids: { postIds?: readonly string[]; briefIds?: readonly string[] }) => void;
   posts: (ids: readonly string[]) => PostCardsSnapshot<P>;
@@ -375,17 +366,6 @@ export function createSharedCardCache<P, B>(
     return added;
   }
 
-  /** Give ids that gave up a fresh set of tries; true when any did. */
-  function revive<T>(t: Track<T>, ids: Iterable<string>): boolean {
-    let revived = false;
-    for (const id of ids) {
-      if (!gaveUp(t, id)) continue;
-      t.tries.set(id, 0);
-      revived = true;
-    }
-    return revived;
-  }
-
   function retry(ids: { postIds?: readonly string[]; briefIds?: readonly string[] }): void {
     const a = queueWhere(posts, ids.postIds ?? [], (id) => retriable(posts, id));
     const b = queueWhere(briefs, ids.briefIds ?? [], (id) => retriable(briefs, id));
@@ -401,12 +381,7 @@ export function createSharedCardCache<P, B>(
     refreshPosts(ids) {
       if (queueWhere(posts, ids, () => true)) kick();
     },
-    retryFailed(ids, opts) {
-      if (opts?.revive === true) {
-        const a = revive(posts, ids?.postIds ?? [...posts.tries.keys()]);
-        const b = revive(briefs, ids?.briefIds ?? [...briefs.tries.keys()]);
-        if (a || b) notify();
-      }
+    retryFailed(ids) {
       const a = queueWhere(posts, ids?.postIds ?? [...posts.tries.keys()], (id) =>
         retriable(posts, id),
       );

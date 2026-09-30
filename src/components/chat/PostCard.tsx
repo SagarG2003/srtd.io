@@ -172,13 +172,11 @@ export function SharedCardsProvider(props: {
   // again, or chat (re)connects.
   useEffect(() => {
     if (cache === null) return;
-    return watchCardRetries({ window, document }, (reason) =>
-      cache.retryFailed(undefined, { revive: reason === 'online' }),
-    );
+    return watchCardRetries({ window, document }, () => cache.retryFailed());
   }, [cache]);
   const status = props.status;
   useEffect(() => {
-    if (status === 'connected') cache?.retryFailed(undefined, { revive: true });
+    if (status === 'connected') cache?.retryFailed();
   }, [cache, status]);
   return <SharedCardsContext.Provider value={cache}>{props.children}</SharedCardsContext.Provider>;
 }
@@ -189,10 +187,7 @@ export interface CardRetryTargets {
   document: Pick<Document, 'addEventListener' | 'removeEventListener' | 'visibilityState'>;
 }
 
-/**
- * Call `retry` on tab visible and on online (online is a recovery signal:
- * cards that gave up are tried again too); returns the unsubscribe.
- */
+/** Call `retry` on tab visible and on online; returns the unsubscribe. */
 export function watchCardRetries(
   targets: CardRetryTargets,
   retry: (reason: 'visible' | 'online') => void,
@@ -252,7 +247,7 @@ export function CouldntLoadCard(props: { onRetry: () => void }): ReactElement {
       type="button"
       data-card-failed=""
       onClick={props.onRetry}
-      className={`${SHARED_CARD_BOX} min-w-[44px] bg-panel-2 text-left text-fg-2 transition-colors hover:bg-panel-3`}
+      className={`${SHARED_CARD_BOX} min-w-[44px] bg-panel-2 text-left text-fg-2 hover:bg-panel-3`}
     >
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="truncate text-sm font-medium">{CARD_LOAD_FAILED}</span>

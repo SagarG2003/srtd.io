@@ -304,6 +304,11 @@ export interface GlobalCmdDeps {
   onDeleted: (messageIds: readonly string[]) => void;
   /** A live edit verified against its row (any chat, open or not): the list line may take it. */
   onEdited?: (row: ChatMessageRow) => void;
+  /**
+   * Whether this message is some chat's list line now. An edit of any other
+   * message moves no line, so it is not re-read (the open thread reads its own).
+   */
+  isShownLine?: (messageId: string) => boolean;
 }
 
 /**
@@ -318,6 +323,7 @@ export async function routeGlobalCmd(ext: unknown, deps: GlobalCmdDeps): Promise
   const event = parseLiveEvent(ext);
   if (event.kind === 'edit') {
     if (deps.onEdited === undefined) return;
+    if (deps.isShownLine !== undefined && !deps.isShownLine(event.messageId)) return;
     const result = await deps.loadByIds([event.messageId]);
     if (!result.ok) {
       logger.warn('chat store: edit signal verification failed, ignored', {
@@ -525,7 +531,7 @@ export interface ChatListReaders {
   names?: (previews: ConversationPreview[]) => Promise<ConversationPreview[]>;
 }
 
-/** The first load's roster deadline: its two round-trips, 5s each. */
+/** A roster re-read's deadline: its two round-trips, 5s each (reload, deep link). */
 export const ROSTER_READ_BUDGET_MS = 2 * READ_TIMEOUT_MS;
 
 /** Store transition for a first load. */
@@ -585,13 +591,12 @@ export async function loadChatList(
     ...(opts.cancel !== undefined ? { cancel: opts.cancel } : {}),
   });
   const [roster, clears, previews, counts] = await Promise.all([
-    // The roster is two round-trips (the registry, then groups/users/roles
-    // together), each with its own 5s: its deadline is the sum, so a slow but
-    // healthy list never flashes the error first.
-    withLateRead(readers.roster, {
-      ...lateOpts<ChannelSummary[]>((d) => (slots.roster = d)),
-      timeoutMs: ROSTER_READ_BUDGET_MS,
-    }),
+    // The roster reader has its own 5s like the others; a roster that lands
+    // later (its registry trip runs to the grace) still wins.
+    withLateRead(
+      readers.roster,
+      lateOpts<ChannelSummary[]>((d) => (slots.roster = d)),
+    ),
     withLateRead(
       readers.clears,
       lateOpts<ChannelClear[]>((d) => (slots.clears = d)),
@@ -894,8 +899,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     setState((prev) => store.beginLoad(prev, scope));
     void loadChatList(
       {
-        // Trips run up to the late grace (the load's own abort still cancels
-        // them): a roster that answers after its 10s deadline still wins.
+        // The registry trip runs up to the late grace (the load's own abort
+        // still cancels it) so a slow roster still lands; names stay at 5s.
         roster: (signal) =>
           listChannelSummaries(
             supabase,
@@ -1337,6 +1342,8 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           loadByIds: (ids) => loadMessagesByIds(supabase, ids),
           onDeleted: (ids) => onMessagesDeletedRef.current(ids),
           onEdited: (row) => updateEditedRef.current(row),
+          isShownLine: (id) =>
+            Object.values(stateRef.current.conversations).some((c) => c.lastMessageId === id),
         });
       }),
     [],

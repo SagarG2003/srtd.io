@@ -348,7 +348,9 @@ export type PreviewRow = Pick<
 >;
 
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'avif']);
-const AUDIO_EXTENSIONS = new Set(['webm', 'm4a', 'mp3', 'ogg', 'oga', 'wav', 'aac', 'opus']);
+// No 'webm': a .webm with no mime and no recorded length may be a video; a
+// voice note always carries its length (durationMs), which decides it first.
+const AUDIO_EXTENSIONS = new Set(['m4a', 'mp3', 'ogg', 'oga', 'wav', 'aac', 'opus']);
 
 /**
  * What an attachment is for its list line, from its own kind first: a voice
