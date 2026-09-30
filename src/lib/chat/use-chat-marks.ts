@@ -167,7 +167,7 @@ export function useChatMarks(params: {
   const load = useCallback(
     async (forChannel: string): Promise<void> => {
       // Bounded at 5s: a hung read settles as failed, so the strip never holds.
-      const result = await withReadTimeout(() => loadChannelMarks(db, forChannel));
+      const result = await withReadTimeout((signal) => loadChannelMarks(db, forChannel, signal));
       if (channelRef.current !== forChannel) return;
       if (!result.ok) {
         logger.warn('chat: marks load failed', {
@@ -209,7 +209,7 @@ export function useChatMarks(params: {
     async (messageId: string): Promise<void> => {
       const forChannel = channelRef.current;
       if (forChannel === null) return;
-      const result = await withReadTimeout(() => loadMarkByMessageId(db, messageId));
+      const result = await withReadTimeout((signal) => loadMarkByMessageId(db, messageId, signal));
       if (channelRef.current !== forChannel) return;
       if (!result.ok) {
         logger.warn('chat: mark load failed', {

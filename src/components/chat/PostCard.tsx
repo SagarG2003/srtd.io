@@ -323,9 +323,11 @@ function useSharedPosts(postIds: string[]): {
 
 /**
  * The viewer's side, settled within the read timeout: a side read that never
- * answers stops holding the cards after 5s. `known` stays false then, and the
- * cards paint with no footer (never a footer for an unknown side that flips
- * later). The cap belongs to one workspace: a switch starts it again.
+ * answers stops holding the cards after 5s. `known` is false until a real
+ * side is read (also when the read failed and settled as 'unknown'), and the
+ * cards paint with no footer meanwhile (never a footer for an unknown side
+ * that flips later). Each workspace, a return to one included, starts the cap
+ * again.
  */
 function useSettledViewerSide(workspaceId: string | null): {
   side: ViewerSide;
@@ -333,14 +335,17 @@ function useSettledViewerSide(workspaceId: string | null): {
   known: boolean;
 } {
   const { side, ready } = useViewerSide(workspaceId);
-  const [expiredFor, setExpiredFor] = useState<string | null>(null);
+  const [expired, setExpired] = useState(false);
+  // Every workspace (a return to one included) starts its own 5s cap.
   useEffect(() => {
+    setExpired(false);
     if (ready || workspaceId === null) return;
-    const timer = setTimeout(() => setExpiredFor(workspaceId), READ_TIMEOUT_MS);
+    const timer = setTimeout(() => setExpired(true), READ_TIMEOUT_MS);
     return () => clearTimeout(timer);
   }, [ready, workspaceId]);
-  const expired = workspaceId !== null && expiredFor === workspaceId;
-  return { side, ready: ready || expired, known: ready };
+  // A side read that failed or timed out reads 'unknown': no footer for it,
+  // so the card never paints an unknown side's wording that flips later.
+  return { side, ready: ready || expired, known: ready && side !== 'unknown' };
 }
 
 // One presign cache for every shared card in the session: it bounds concurrency

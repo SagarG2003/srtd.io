@@ -284,15 +284,17 @@ export async function listChannelSummaries(
     trip((s) => readMemberRoles(client, params.workspaceId, peerIds, s)),
   ]);
   if (!groupsRes.ok) return groupsRes;
-  if (!usersRes.ok) return usersRes;
   if (!rolesRes.ok) return rolesRes;
+  // The DM peers' names are a name read: its failure never fails the list
+  // (those rows keep their neutral label until the next re-read).
+  const users = usersRes.ok ? usersRes.data : [];
 
   return {
     ok: true,
     data: shapeChannelSummaries(
       channels,
       indexBy(groupsRes.data, (g) => g.id),
-      indexBy(usersRes.data, (u) => u.id),
+      indexBy(users, (u) => u.id),
       params.currentUserId,
       new Map(rolesRes.data.map((m) => [m.user_id, m.role])),
     ),

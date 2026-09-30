@@ -45,12 +45,14 @@ import {
   readChannelClears,
   readChannelMemberIds,
   readMentionProfiles,
+  READ_TIMEOUT_MS,
   withLateRead,
   withReadTimeout,
   type ChannelSummary,
   type MentionProfile,
 } from '@/lib/chat-reads';
 import {
+  isFormerMember,
   knownMentionName,
   mentionIds,
   mentionNamesIn,
@@ -488,13 +490,21 @@ async function readPreviews(
 
 /**
  * An edited row's list line: its new mentions are named first (one batched
- * read, 5s), so a current member never reads "@Unknown member". Never throws.
+ * read, 5s), so a current member never reads "@Unknown member". When the read
+ * failed and a mention is still unnamed (membership unknown), null: the line
+ * keeps what it shows rather than guess. Never throws.
  */
 export async function editedPreviewLine(
   row: ChatMessageRow,
   readNames: (ids: string[], signal?: AbortSignal) => Promise<Result<MentionProfile[]>>,
-): Promise<string> {
-  await rememberBodyNames([row.body ?? ''], readNames, row.workspace_id);
+): Promise<string | null> {
+  const body = row.body ?? '';
+  await rememberBodyNames([body], readNames, row.workspace_id);
+  const unnamed = mentionIds(body).some(
+    (id) =>
+      knownMentionName(row.workspace_id, id) === undefined && !isFormerMember(row.workspace_id, id),
+  );
+  if (unnamed) return null;
   return previewLineFor(rowPreviewContent(row), row.workspace_id);
 }
 
@@ -513,6 +523,9 @@ export interface ChatListReaders {
   /** Resolve the scanned lines' names (own 5s; a failure keeps the lines, no prefix). */
   names?: (previews: ConversationPreview[]) => Promise<ConversationPreview[]>;
 }
+
+/** The first load's roster deadline: its two round-trips, 5s each. */
+export const ROSTER_READ_BUDGET_MS = 2 * READ_TIMEOUT_MS;
 
 /** Store transition for a first load. */
 type LoadTransition = (prev: ChatStoreState) => ChatStoreState;
@@ -571,10 +584,13 @@ export async function loadChatList(
     ...(opts.cancel !== undefined ? { cancel: opts.cancel } : {}),
   });
   const [roster, clears, previews, counts] = await Promise.all([
-    withLateRead(
-      readers.roster,
-      lateOpts<ChannelSummary[]>((d) => (slots.roster = d)),
-    ),
+    // The roster is two round-trips (the registry, then groups/users/roles
+    // together), each with its own 5s: its deadline is the sum, so a slow but
+    // healthy list never flashes the error first.
+    withLateRead(readers.roster, {
+      ...lateOpts<ChannelSummary[]>((d) => (slots.roster = d)),
+      timeoutMs: ROSTER_READ_BUDGET_MS,
+    }),
     withLateRead(
       readers.clears,
       lateOpts<ChannelClear[]>((d) => (slots.clears = d)),
@@ -737,6 +753,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     [workspaceId],
   );
 
+  const editSeqRef = useRef(new Map<string, number>());
   // An edit's new mentions are named first (one batched read, 5s), so a current
   // member never reads "@Unknown member" on the line. Only the channel's latest
   // message moves the line.
@@ -744,7 +761,13 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     (row: ChatMessageRow) => {
       if (stateRef.current.conversations[row.channel_id]?.lastMessageId !== row.id) return;
       const forScope = scope;
+      // Two quick edits of one message: only the newest one's line lands.
+      const seq = (editSeqRef.current.get(row.id) ?? 0) + 1;
+      editSeqRef.current.set(row.id, seq);
       void editedPreviewLine(row, readListNames(row.workspace_id)).then((text) => {
+        if (editSeqRef.current.get(row.id) !== seq) return;
+        editSeqRef.current.delete(row.id);
+        if (text === null) return;
         setState((prev) =>
           prev.scope === forScope
             ? store.applyEditedPreview(prev, { channelId: row.channel_id, messageId: row.id, text })
@@ -807,7 +830,15 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     refreshPreviews();
     refreshUnreadCounts();
   };
-  useEffect(() => onLiveVerifyGiveUp(() => refreshAfterGiveUpRef.current()), []);
+  // Only a message this workspace's store saw live counts: a give-up for one
+  // from before a switch refreshes nothing.
+  useEffect(
+    () =>
+      onLiveVerifyGiveUp((messageId) => {
+        if (seenRef.current.has(messageId)) refreshAfterGiveUpRef.current();
+      }),
+    [],
+  );
 
   // Messages became tombstones: drafts, the queued outbox and the list lines
   // that showed one. The re-read is one preview scan for every hit channel.
@@ -895,8 +926,10 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     if (scope === null || !workspaceId || currentUserId === null) return null;
     reloadsStartedRef.current += 1;
     const reloadNumber = reloadsStartedRef.current;
-    const result = await withReadTimeout(() =>
-      listChannelSummaries(supabase, { workspaceId, currentUserId }),
+    // Each round-trip has its own 5s and is aborted when it fires.
+    const result = await withReadTimeout(
+      (signal) => listChannelSummaries(supabase, { workspaceId, currentUserId }, signal),
+      ROSTER_READ_BUDGET_MS,
     );
     if (!result.ok) {
       logger.error('chat store: roster reload failed', { error: result.error.message });

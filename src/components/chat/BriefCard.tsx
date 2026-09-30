@@ -1,9 +1,11 @@
 // Renders the briefs shared into one message as cards, mirroring PostCard: the
 // ids resolve through the thread's card cache, so every brief shared across the
 // loaded thread comes back in ONE workspace-scoped RLS read (chunks of 100, 5s
-// each), never one read per bubble. A brief the viewer cannot see, or whose
-// read failed or timed out, renders as an "unavailable" card. Tapping a card
-// opens the brief in the app.
+// each), never one read per bubble. A brief the viewer cannot see (RLS)
+// renders as an "unavailable" card; a read that failed or timed out keeps the
+// skeleton and is re-read (tab visible, online, connected, into view, or on
+// its own after 5s), up to 3 tries, then shows "Couldn't load" with a tap to
+// retry. Tapping a card opens the brief in the app.
 
 import { useEffect, useMemo, useRef } from 'react';
 import type { ReactElement } from 'react';

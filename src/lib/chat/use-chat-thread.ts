@@ -783,8 +783,12 @@ export function useChatThread(params: {
           }
           const fetched = outcome.rows.map((row) => rowToThreadMessage(row, currentUserId));
           if (fetched.length > 0) foldRows(fetched, forChannel);
-          if (outcome.ok && outcome.latestPage !== undefined)
+          if (outcome.ok && outcome.latestPage !== undefined) {
             setHasMore(outcome.latestPage.hasMore);
+            // The latest page landed after all (a first load that failed):
+            // the Retry state goes, the rows are the thread.
+            setLoadFailed(false);
+          }
         } finally {
           catchingUpRef.current = false;
           onCaughtUpRef.current?.();

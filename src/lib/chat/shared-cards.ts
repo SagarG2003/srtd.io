@@ -18,13 +18,20 @@
 // batching is unit-tested without React or a database.
 
 import type { Result } from '@srtdio/rpc';
-import { READ_TIMEOUT_MS, withReadTimeout, type ChatProfile } from '@/lib/chat-reads';
+import { READ_TIMEOUT_MS, anySignal, withReadTimeout, type ChatProfile } from '@/lib/chat-reads';
 
 /** Ids per IN read (PostgREST URL length stays small). */
 export const CARD_READ_CHUNK = 100;
 
 /** Failed reads of one id before its card gives up and offers a tap to retry. */
 export const CARD_READ_TRIES = 3;
+
+/**
+ * A failed read is also retried on its own this long after it failed, so a
+ * card already on screen with no other trigger still reaches its answer or
+ * "Couldn't load" (about 3 x 10s at most), never a skeleton forever.
+ */
+export const CARD_RETRY_DELAY_MS = READ_TIMEOUT_MS;
 
 /** The batched readers the cache runs; the app binds the existing readers. */
 export interface SharedCardReaders<P, B> {
@@ -45,6 +52,8 @@ export interface SharedCardCacheOptions {
   schedule?: (flush: () => void) => void;
   timeoutMs?: number;
   now?: () => number;
+  /** How long after a failed read it is retried on its own (default CARD_RETRY_DELAY_MS). */
+  retryDelayMs?: number;
 }
 
 /** What a card with these post ids shows right now. */
@@ -103,11 +112,15 @@ async function readChunked<T>(
   ids: readonly string[],
   read: (chunk: string[], signal: AbortSignal) => Promise<Result<T[]>>,
   timeoutMs: number,
+  cancel: AbortSignal,
 ): Promise<Array<{ ids: string[]; result: Result<T[]> }>> {
   return Promise.all(
     chunks(ids).map(async (chunk) => ({
       ids: chunk,
-      result: await withReadTimeout((signal) => read(chunk, signal), timeoutMs),
+      result: await withReadTimeout(
+        (deadline) => read(chunk, anySignal(deadline, cancel)),
+        timeoutMs,
+      ),
     })),
   );
 }
@@ -172,6 +185,19 @@ export function createSharedCardCache<P, B>(
   const namesAsked = new Set<string>();
   let scheduled = false;
   let disposed = false;
+  // Dispose aborts every read in flight; the retry timers go with it.
+  const abort = new AbortController();
+  const retryTimers = new Set<ReturnType<typeof setTimeout>>();
+  const retryDelayMs = options.retryDelayMs ?? CARD_RETRY_DELAY_MS;
+  /** Retry this kind's failed ids on their own after a delay. */
+  function retryLater(which: 'posts' | 'briefs', ids: readonly string[]): void {
+    if (ids.length === 0 || disposed) return;
+    const timer = setTimeout(() => {
+      retryTimers.delete(timer);
+      retry(which === 'posts' ? { postIds: ids } : { briefIds: ids });
+    }, retryDelayMs);
+    retryTimers.add(timer);
+  }
   let version = 0;
   const listeners = new Set<() => void>();
 
@@ -240,19 +266,20 @@ export function createSharedCardCache<P, B>(
 
   async function readPostBatch(ids: string[]): Promise<void> {
     for (const id of ids) posts.inFlight.add(id);
-    const results = await readChunked(ids, readers.readPosts, timeoutMs);
+    const results = await readChunked(ids, readers.readPosts, timeoutMs, abort.signal);
     if (disposed) return;
     const found: P[] = [];
     for (const { ids: chunk, result } of results) {
       const rows = settle(posts, chunk, result, readers.postId);
       if (result.ok) for (const id of chunk) postReadAt.set(id, now());
+      else retryLater('posts', chunk);
       found.push(...rows);
     }
     // One profile read for every approver not asked before (chunked, bounded).
     const approvers = [...new Set(readers.approverIds(found))].filter((id) => !namesAsked.has(id));
     if (approvers.length > 0) {
       for (const id of approvers) namesAsked.add(id);
-      const named = await readChunked(approvers, readers.readNames, timeoutMs);
+      const named = await readChunked(approvers, readers.readNames, timeoutMs, abort.signal);
       if (disposed) return;
       for (const { ids: chunk, result } of named) {
         if (!result.ok) {
@@ -268,9 +295,12 @@ export function createSharedCardCache<P, B>(
 
   async function readBriefBatch(ids: string[]): Promise<void> {
     for (const id of ids) briefs.inFlight.add(id);
-    const results = await readChunked(ids, readers.readBriefs, timeoutMs);
+    const results = await readChunked(ids, readers.readBriefs, timeoutMs, abort.signal);
     if (disposed) return;
-    for (const { ids: chunk, result } of results) settle(briefs, chunk, result, readers.briefId);
+    for (const { ids: chunk, result } of results) {
+      settle(briefs, chunk, result, readers.briefId);
+      if (!result.ok) retryLater('briefs', chunk);
+    }
     for (const { ids: chunk } of results) requeueAgain(briefs, chunk);
   }
 
@@ -308,6 +338,12 @@ export function createSharedCardCache<P, B>(
     let added = false;
     for (const id of ids) if (when(id)) added = enqueue(t, id) || added;
     return added;
+  }
+
+  function retry(ids: { postIds?: readonly string[]; briefIds?: readonly string[] }): void {
+    const a = queueWhere(posts, ids.postIds ?? [], (id) => retriable(posts, id));
+    const b = queueWhere(briefs, ids.briefIds ?? [], (id) => retriable(briefs, id));
+    if (a || b) kick();
   }
 
   return {
@@ -358,6 +394,9 @@ export function createSharedCardCache<P, B>(
     version: () => version,
     dispose() {
       disposed = true;
+      abort.abort();
+      for (const timer of retryTimers) clearTimeout(timer);
+      retryTimers.clear();
       listeners.clear();
       posts.queued.clear();
       briefs.queued.clear();
