@@ -559,6 +559,7 @@ export function MessageAttachments({
               const attachment = images[index];
               if (attachment !== undefined) onImageClick?.(attachment, index);
             }}
+            // ONE ring for the whole message: the chips below carry none.
             ring={ringFor(attachments, onCancelUpload)}
             onCancelUpload={onCancelUpload}
           />
@@ -571,7 +572,6 @@ export function MessageAttachments({
                   attachment={attachment}
                   cache={cache}
                   presignEnabled={presignEnabled}
-                  onCancelUpload={onCancelUpload}
                 />
               ))}
             </div>

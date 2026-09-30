@@ -892,6 +892,7 @@ export function createOutboxSender(deps: OutboxSenderDeps, initial: Outbox = {})
       const lane = lanes.get(channelId);
       if (lane !== undefined) stopTimer(lane);
       lanes.delete(channelId);
+      for (const e of selectOutbox(outbox, channelId)) forget(e.id);
       commit(outboxDropChannel(outbox, channelId));
     },
     restoreFiles: (channelId, id, attachments) => {

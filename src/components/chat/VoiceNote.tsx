@@ -722,7 +722,6 @@ export function VoiceNote({
       {...(uploading ? { 'aria-hidden': true, tabIndex: -1 } : {})}
       className={cn(
         'group/play flex h-11 w-11 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-        upload === undefined && received && '-ml-1',
         upload === undefined
           ? 'disabled:opacity-40'
           : cn(
@@ -738,23 +737,24 @@ export function VoiceNote({
   );
   // An own note sent this session: the play spot holds the ring while it
   // uploads (centred, 48px over the 44px spot, so nothing moves), then play.
-  const playButton =
-    upload === undefined ? (
-      playControl
-    ) : (
-      <div
-        data-voice-play-slot={uploading ? 'upload' : 'play'}
-        className={cn('relative h-11 w-11 shrink-0', received && '-ml-1')}
-      >
-        {playControl}
+  // The slot is the same element with or without an upload, so play never
+  // remounts (or loses focus) when the send records and the ring goes.
+  const playButton = (
+    <div
+      data-voice-play-slot={upload === undefined ? undefined : uploading ? 'upload' : 'play'}
+      className={cn('relative h-11 w-11 shrink-0', received && '-ml-1')}
+    >
+      {playControl}
+      {upload !== undefined ? (
         <UploadRing
           progress={upload.progress}
           onCancel={upload.onCancel}
           hidden={!uploading}
           className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2"
         />
-      </div>
-    );
+      ) : null}
+    </div>
+  );
 
   // The 44px photo slot: the sender photo (40px) with the mic badge, or while
   // playing the speed pill.

@@ -590,6 +590,26 @@ describe('album grid', () => {
     );
     expect(html.match(/data-upload-ring/g)).toHaveLength(1);
     expect(html).toContain('data-upload-progress="50"');
+    // A file below the album carries no ring of its own: still ONE for the message.
+    const mixed = renderToStaticMarkup(
+      <MessageAttachments
+        attachments={[
+          ...attachments,
+          {
+            assetId: '',
+            name: 'brief.pdf',
+            mime: 'application/pdf',
+            size: 100,
+            local: { key: 'f', file, previewUrl: null, progress: 0 },
+          },
+        ]}
+        cache={cache}
+        presignEnabled
+        album
+        onCancelUpload={() => {}}
+      />,
+    );
+    expect(mixed.match(/data-upload-ring/g)).toHaveLength(1);
     // Uploading tiles are dimmed; the grid holds the ring.
     expect((html.match(/brightness-75/g) ?? []).length).toBe(2);
     expect(html).toContain('relative w-[320px]');
