@@ -29,12 +29,14 @@ import {
   restoreDraftText,
   attachRejectCopy,
   SEND_FAILED_COPY,
+  sendVoiceRecording,
   shouldShowMic,
+  VOICE_TOO_SHORT_COPY,
   withLinkCards,
 } from '@/components/chat/Composer';
 import { editFailureCopy } from '@/lib/chat/record';
 import { createOutboxSender, runSend, type SendOutcome } from '@/lib/chat/send-flow';
-import { canSendAttachmentMessage } from '@/lib/chat/attachments';
+import { canSendAttachmentMessage, type MessageAttachment } from '@/lib/chat/attachments';
 import { stripHashToken } from '@/lib/chat/post-refs';
 import { IconButton } from '@/components/ui/IconButton';
 import { postRefKey } from '@/components/chat/PostRefChip';
@@ -736,5 +738,59 @@ describe('H2 a failed member read never drops a mention', () => {
       (id) => id === EX,
     );
     expect(mentionIds(serializeMentions(confirmed.text, confirmed.picks))).toEqual([ANA]);
+  });
+});
+
+describe('voice notes under 1 second are discarded', () => {
+  const recording = (durationMs: number, body: string = 'x') => ({
+    blob: new Blob([body], { type: 'audio/webm' }),
+    mime: 'audio/webm',
+    recorderMime: 'audio/webm;codecs=opus',
+    durationMs,
+  });
+
+  it.each([400, 999])('a %i ms recording sends nothing', async (ms) => {
+    const onSend = vi.fn();
+    expect(await sendVoiceRecording(recording(ms), onSend, undefined, null)).toBe('too-short');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(VOICE_TOO_SHORT_COPY).toBe('Voice note too short');
+  });
+
+  it('a null or empty recording sends nothing', async () => {
+    const onSend = vi.fn();
+    expect(await sendVoiceRecording(null, onSend, undefined, null)).toBe('too-short');
+    expect(await sendVoiceRecording(recording(5000, ''), onSend, undefined, null)).toBe(
+      'too-short',
+    );
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it.each([1000, 2300])('a %i ms recording sends with its exact durationMs', async (ms) => {
+    const onSend = vi.fn();
+    expect(await sendVoiceRecording(recording(ms), onSend, undefined, null)).toBe('sent');
+    expect(onSend).toHaveBeenCalledTimes(1);
+    const attachments = onSend.mock.calls[0]?.[1] as MessageAttachment[];
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]?.durationMs).toBe(ms);
+  });
+
+  it('a throwing onSend is refused, not sent', async () => {
+    const onSend = vi.fn(() => {
+      throw new Error('boom');
+    });
+    expect(await sendVoiceRecording(recording(1200), onSend, undefined, null)).toBe('refused');
+  });
+
+  it('stopSend toasts the short copy and always resets voiceBusy in finally', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const source = readFileSync(fileURLToPath(new URL('./Composer.tsx', import.meta.url)), 'utf8');
+    const body = source.slice(source.indexOf('async function stopSend'));
+    const fn = body.slice(0, body.indexOf('\n  }\n') + 4);
+    expect(fn).toContain(
+      "if (outcome === 'too-short') toast.show({ title: VOICE_TOO_SHORT_COPY });",
+    );
+    expect(fn).toMatch(/finally \{\s+setVoiceBusy\(false\);\s+\}/);
+    expect(fn).not.toContain('recorder.seconds');
   });
 });

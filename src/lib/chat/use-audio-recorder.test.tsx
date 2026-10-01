@@ -5,6 +5,7 @@ import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   baseMime,
+  MIN_VOICE_NOTE_MS,
   pickRecorderMimeType,
   recordingFileName,
   useAudioRecorder,
@@ -132,5 +133,88 @@ describe('T1: the recorder attaches nothing to the live stream', () => {
     for (const banned of ['AudioContext', 'createMediaStreamSource', 'createAnalyser']) {
       expect(source).not.toContain(banned);
     }
+  });
+});
+
+describe('durationMs: the exact recorded length', () => {
+  const scope = globalThis as Record<string, unknown>;
+  const saved = ['MediaRecorder', 'navigator'].map(
+    (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+  );
+
+  afterEach(() => {
+    for (const [key, descriptor] of saved) {
+      if (descriptor === undefined) delete scope[key];
+      else Object.defineProperty(globalThis, key, descriptor);
+    }
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function setup(): { recorder: AudioRecorder; trackStop: ReturnType<typeof vi.fn> } {
+    vi.useFakeTimers();
+    const trackStop = vi.fn();
+    const stream = { getTracks: () => [{ stop: trackStop }] } as unknown as MediaStream;
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { mediaDevices: { getUserMedia: vi.fn(async () => stream) } },
+    });
+    class FakeRecorder {
+      static isTypeSupported = (t: string): boolean => t === 'audio/webm';
+      mimeType = 'audio/webm;codecs=opus';
+      state = 'inactive';
+      private listeners = new Map<string, Array<(e: unknown) => void>>();
+      addEventListener(type: string, fn: (e: unknown) => void): void {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+      }
+      start(): void {
+        this.state = 'recording';
+      }
+      stop(): void {
+        this.state = 'inactive';
+        for (const fn of this.listeners.get('dataavailable') ?? []) fn({ data: new Blob(['x']) });
+        for (const fn of this.listeners.get('stop') ?? []) fn({});
+      }
+    }
+    scope.MediaRecorder = FakeRecorder;
+    let hook: AudioRecorder | null = null;
+    function Probe(): ReactElement {
+      hook = useAudioRecorder();
+      return <span />;
+    }
+    renderToStaticMarkup(<Probe />);
+    return { recorder: hook as unknown as AudioRecorder, trackStop };
+  }
+
+  it('is one authoritative second', () => {
+    expect(MIN_VOICE_NOTE_MS).toBe(1000);
+  });
+
+  it.each([400, 999, 1000, 2300])('a %i ms recording resolves durationMs %i', async (ms) => {
+    const { recorder, trackStop } = setup();
+    expect(await recorder.start()).toBe(true);
+    vi.advanceTimersByTime(ms);
+    const rec = await recorder.stop();
+    expect(rec?.durationMs).toBe(ms);
+    expect(rec?.mime).toBe('audio/webm');
+    expect(trackStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('measures from start to the stop event, not a whole-second counter', async () => {
+    const { recorder } = setup();
+    const now = vi.spyOn(performance, 'now');
+    now.mockReturnValueOnce(10_000);
+    await recorder.start();
+    now.mockReturnValueOnce(12_300.4);
+    expect((await recorder.stop())?.durationMs).toBe(2300);
+  });
+
+  it('cancel resolves nothing: the mic stops and a later stop gives null', async () => {
+    const { recorder, trackStop } = setup();
+    await recorder.start();
+    vi.advanceTimersByTime(1500);
+    recorder.cancel();
+    expect(trackStop).toHaveBeenCalledTimes(1);
+    expect(await recorder.stop()).toBeNull();
   });
 });

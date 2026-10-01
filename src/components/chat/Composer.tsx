@@ -15,7 +15,11 @@ import {
   IconX,
 } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
-import { useAudioRecorder } from '@/lib/chat/use-audio-recorder';
+import {
+  MIN_VOICE_NOTE_MS,
+  useAudioRecorder,
+  type RecordingResult,
+} from '@/lib/chat/use-audio-recorder';
 import { readHeader, rememberRecorderMime, voiceFileType } from '@/lib/chat/audio-sniff';
 import { voicePeaks } from '@/lib/chat/voice-peaks';
 import { AttachmentMenu } from '@/components/chat/AttachmentMenu';
@@ -695,6 +699,40 @@ export function voiceNoteAttachment(
   };
 }
 
+/** The toast when a recording is discarded for being under MIN_VOICE_NOTE_MS. */
+export const VOICE_TOO_SHORT_COPY = 'Voice note too short';
+
+/**
+ * Send a finished recording as a voice note. A null, empty or sub-second
+ * recording is 'too-short': no file, no peaks, nothing dispatched. Otherwise
+ * the file is typed from its bytes and handed to the thread with its exact
+ * length: 'sent' when taken, 'refused' when onSend threw.
+ */
+export async function sendVoiceRecording(
+  rec: RecordingResult | null,
+  onSend: ComposerSend,
+  upload: AttachmentUploader | undefined,
+  reply: ReplyQuote | null,
+): Promise<'too-short' | 'sent' | 'refused'> {
+  if (rec === null || rec.blob.size === 0 || rec.durationMs < MIN_VOICE_NOTE_MS) {
+    return 'too-short';
+  }
+  // Type and name from the bytes, not the recorder's say-so.
+  const { type, name } = voiceFileType(await readHeader(rec.blob), rec.recorderMime, rec.mime);
+  const file = new File([rec.blob], name, { type });
+  rememberRecorderMime(file, rec.recorderMime);
+  // Peaks from the finished file, capped at 1s; none on any failure.
+  const peaks = await voicePeaks(file);
+  const taken = dispatchSend(onSend, {
+    text: '',
+    attachments: [voiceNoteAttachment(file, rec.durationMs, upload, peaks)],
+    sharedPostIds: [],
+    reply,
+    sharedBriefIds: [],
+  });
+  return taken ? 'sent' : 'refused';
+}
+
 /** Whether Send is enabled: text, a picked file, or a shared post or brief. Never waits on an upload. */
 export function composerCanSend(input: {
   disabled: boolean;
@@ -1023,29 +1061,24 @@ export function Composer(props: ComposerProps): ReactElement {
   // upload runs in the background with retries. Never transcribed at send time.
   async function stopSend(): Promise<void> {
     setVoiceBusy(true);
-    const durationMs = recorder.seconds * 1000;
-    const rec = await recorder.stop();
-    // No chunks, or chunks with no bytes: nothing to send.
-    if (rec === null || rec.blob.size === 0) {
+    try {
+      // stop() releases the mic before resolving, on every path.
+      const rec = await recorder.stop();
+      const outcome = await sendVoiceRecording(
+        rec,
+        props.onSend,
+        props.uploadFile,
+        props.reply?.quote ?? null,
+      );
+      if (outcome === 'too-short') toast.show({ title: VOICE_TOO_SHORT_COPY });
+      else if (outcome === 'sent') props.onCancelReply?.();
+      else toast.show({ title: 'Could not send the voice note.' });
+    } catch (error) {
+      logger.error('chat composer: voice note send failed', { error: String(error) });
+      toast.show({ title: 'Could not send the voice note.' });
+    } finally {
       setVoiceBusy(false);
-      return;
     }
-    // Type and name from the bytes, not the recorder's say-so.
-    const { type, name } = voiceFileType(await readHeader(rec.blob), rec.recorderMime, rec.mime);
-    const file = new File([rec.blob], name, { type });
-    rememberRecorderMime(file, rec.recorderMime);
-    // Peaks from the finished file, capped at 1s; none on any failure.
-    const peaks = await voicePeaks(file);
-    const taken = dispatchSend(props.onSend, {
-      text: '',
-      attachments: [voiceNoteAttachment(file, durationMs, props.uploadFile, peaks)],
-      sharedPostIds: [],
-      reply: props.reply?.quote ?? null,
-      sharedBriefIds: [],
-    });
-    if (taken) props.onCancelReply?.();
-    else toast.show({ title: 'Could not send the voice note.' });
-    setVoiceBusy(false);
   }
 
   function trackCaret(event: SyntheticEvent<HTMLTextAreaElement>): void {
