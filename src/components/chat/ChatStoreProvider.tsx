@@ -145,6 +145,11 @@ export interface ChatStoreContextValue {
   groupMembers: GroupMemberCache;
   /** Sum of unread across every channel; the Chat-tab badge reads this. */
   totalUnread: number;
+  /**
+   * Hear each verified live message from someone else as the list commits it
+   * (never the initial load); returns the unsubscribe. The tab tone uses it.
+   */
+  subscribeLiveIncoming: (listener: LiveIncomingListener) => () => void;
   /** Mark the viewed channel (its incoming messages stay read), or clear it. */
   setActive: (channelId: string | null) => void;
   /** Zero a channel's unread locally (the thread records the read cursor). */
@@ -169,6 +174,9 @@ export interface ChatStoreContextValue {
    */
   clearConversation: (channelId: string, clearedAtMs: number) => void;
 }
+
+/** One committed live message from someone else: its chat and created_at. */
+export type LiveIncomingListener = (message: { channelId: string; createdAt: string }) => void;
 
 const ChatStoreContext = createContext<ChatStoreContextValue | null>(null);
 
@@ -1246,8 +1254,19 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
 
   // A message committed to the list: re-read the badge counts soon, and toast
   // it unless its chat is open. Name and photo come from the RLS-read roster.
+  const liveListenersRef = useRef(new Set<LiveIncomingListener>());
+  const subscribeLiveIncoming = useCallback((listener: LiveIncomingListener) => {
+    const listeners = liveListenersRef.current;
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  }, []);
   afterIncomingRef.current = (row, text) => {
     debouncedRefresh.schedule(null);
+    for (const listener of liveListenersRef.current) {
+      listener({ channelId: row.channel_id, createdAt: row.created_at });
+    }
     const summary = summariesRef.current.get(row.channel_id);
     if (summary === undefined || row.channel_id === activeRef.current) return;
     toast.show({
@@ -1392,6 +1411,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       rosterReload,
       groupMembers,
       totalUnread: store.selectTotalUnread(state),
+      subscribeLiveIncoming,
       setActive,
       markConversationRead,
       updateOwnMessage,
@@ -1413,6 +1433,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       outbox,
       clearConversation,
       state,
+      subscribeLiveIncoming,
       setActive,
       markConversationRead,
       updateOwnMessage,
