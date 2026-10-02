@@ -114,7 +114,7 @@ describe('first paint final', () => {
 });
 
 describe('T9 token hygiene', () => {
-  it('the new chat files carry no hex or dark: literals', () => {
+  it('the new chat files carry no hex or theme-variant literals', () => {
     for (const name of [
       'ReadingLayer.tsx',
       'ComposerTray.tsx',
