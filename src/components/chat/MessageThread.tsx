@@ -3922,7 +3922,12 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // the chat later never jumps again.
   const initialMessageId = props.initialMessageId ?? null;
   const initialJumpDone = useRef(false);
-  const bodyLoading = props.loading || (filterPostId === null && holdingFirstPage(admitted.gate));
+  // The first page also waits for the channel's read cursors (5s bound), so
+  // the unread divider, Seen and Read by lines paint with it, never after.
+  const bodyLoading =
+    props.loading ||
+    (filterPostId === null &&
+      (holdingFirstPage(admitted.gate) || props.readState?.status === 'loading'));
   const onInitialJumpTaken = props.onInitialJumpTaken;
   useEffect(() => {
     const id = initialMessageId;
@@ -4018,19 +4023,23 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // Who reacted: names from the loaded profiles and members first, the rest in
   // one batched read.
   const [reactionsFor, setReactionsFor] = useState<string | null>(null);
-  const profilesForReactors = props.profiles;
-  const membersForReactors = props.mentionMembers;
+  // Read through refs, so the reader stays the same across renders and an open
+  // sheet is never reloaded by a re-render.
+  const profilesForReactors = useRef(props.profiles);
+  profilesForReactors.current = props.profiles;
+  const membersForReactors = useRef(props.mentionMembers);
+  membersForReactors.current = props.mentionMembers;
   const defaultReactorLoad = useMemo(
     () =>
       defaultWhoReactedLoad(workspaceId, (id) => {
-        const known = profilesForReactors.get(id);
+        const known = profilesForReactors.current.get(id);
         if (known !== undefined) return known;
-        const member = membersForReactors?.find((m) => m.userId === id);
+        const member = membersForReactors.current?.find((m) => m.userId === id);
         return member !== undefined
           ? { userId: member.userId, displayName: member.displayName, avatarUrl: member.avatarUrl }
           : undefined;
       }),
-    [workspaceId, profilesForReactors, membersForReactors],
+    [workspaceId],
   );
   const reactorLoad = props.loadReactors ?? defaultReactorLoad;
   useEffect(() => {
@@ -4356,6 +4365,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           onClose={() => setReadInfoOpen(false)}
           createdAt={readBy.message.createdAt}
           timeZone={props.timeZone}
+          nowMs={serverNow()}
           read={readBy.read}
           unread={readBy.unread}
           members={groupMembers ?? []}

@@ -7,7 +7,7 @@
 // times are JetBrains Mono. Motion: pill and button opacity only; the sheets
 // slide on translateY (the shared Sheet). Tokens only, light and dark at parity.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import type { Result } from '@srtdio/rpc';
 import { supabase } from '@/lib/supabase';
@@ -221,6 +221,8 @@ export function MessageInfoSheet(props: {
   onClose: () => void;
   createdAt: string;
   timeZone: string;
+  /** Server time now, for the Today / Yesterday label. */
+  nowMs: number;
   read: readonly ReadPosition[];
   unread: readonly string[];
   members: readonly MentionMember[];
@@ -234,7 +236,7 @@ export function MessageInfoSheet(props: {
     <Sheet open={props.open} onClose={props.onClose} title="Message info">
       <div className={cn('flex flex-col', NO_TOUCH_SELECT)} data-message-info="">
         <p className="pb-3 text-sm text-fg-2">
-          {sentLine(props.createdAt, props.timeZone, Date.now())}
+          {sentLine(props.createdAt, props.timeZone, props.nowMs)}
         </p>
         <h3 className="py-2 text-xs font-medium text-fg-3">
           Read by <span className="font-mono">{props.read.length}</span>
@@ -292,7 +294,10 @@ export function WhoReactedSheet(props: {
   /** Remove the viewer's reaction (the existing reaction remove path). */
   onRemove: (messageId: string, emoji: string) => void;
 }): ReactElement {
-  const { messageId, load, viewerId } = props;
+  const { messageId, viewerId } = props;
+  // The reader is read through a ref: a new function identity never reloads an open sheet.
+  const loadRef = useRef(props.load);
+  loadRef.current = props.load;
   const [state, setState] = useState<
     { kind: 'loading' } | { kind: 'failed' } | { kind: 'ready'; model: WhoReacted }
   >({ kind: 'loading' });
@@ -304,7 +309,7 @@ export function WhoReactedSheet(props: {
     let cancelled = false;
     setState({ kind: 'loading' });
     setTab(ALL_TAB);
-    void load(messageId).then((result) => {
+    void loadRef.current(messageId).then((result) => {
       if (cancelled) return;
       if (!result.ok) {
         setState({ kind: 'failed' });
@@ -319,7 +324,7 @@ export function WhoReactedSheet(props: {
     return () => {
       cancelled = true;
     };
-  }, [messageId, load, viewerId, attempt]);
+  }, [messageId, viewerId, attempt]);
   const model = state.kind === 'ready' ? state.model : null;
   const rows = model !== null ? rowsForTab(model, tab) : [];
   return (

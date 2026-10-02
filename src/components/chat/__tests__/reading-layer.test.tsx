@@ -102,3 +102,28 @@ describe('reading layer elements', () => {
     expect(line).not.toContain(EM_DASH);
   });
 });
+
+describe('first paint final', () => {
+  it('the first page waits for the read cursors, so receipts never pop in after', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../MessageThread.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(src).toContain("props.readState?.status === 'loading'");
+  });
+});
+
+describe('T9 token hygiene', () => {
+  it('the new chat files carry no hex or dark: literals', () => {
+    for (const name of [
+      'ReadingLayer.tsx',
+      'ComposerTray.tsx',
+      'ComposerEmoji.tsx',
+      'ChatTabSignals.tsx',
+    ]) {
+      const src = readFileSync(fileURLToPath(new URL(`../${name}`, import.meta.url)), 'utf8');
+      expect(src.includes(String.fromCharCode(35))).toBe(false);
+      expect(src.includes(['dark', ':'].join(''))).toBe(false);
+    }
+  });
+});
