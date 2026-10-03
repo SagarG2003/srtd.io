@@ -23,7 +23,7 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { useSession } from '@/lib/session-context';
@@ -58,6 +58,12 @@ export function InboxStoreProvider({ children }: { children: ReactNode }): React
   const { workspaceId } = useWorkspace();
   const toast = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
+  // The chat on screen (if any): its new mentions need no toast.
+  const openChatRef = useRef<string | null>(null);
+  openChatRef.current = location.pathname.startsWith('/chat')
+    ? new URLSearchParams(location.search).get('channel')
+    : null;
   const userId = session?.user.id ?? null;
 
   const [unreadCount, setUnreadCount] = useState(0);
@@ -106,7 +112,8 @@ export function InboxStoreProvider({ children }: { children: ReactNode }): React
       const summary = summarizeNew(sinceRes.data, sinceMs);
       highWaterRef.current = summary.nextHighWaterMs;
       const { activity: newRows, chatMentions } = splitNewRows(summary.newRows);
-      if (chatMentions.length > 0) void toastMentions(chatMentions);
+      const elsewhere = chatMentions.filter((r) => r.entity_id !== openChatRef.current);
+      if (elsewhere.length > 0) void toastMentions(elsewhere);
       if (newRows.length === 0) return;
 
       const enriched = await enrichNewRows(supabase, newRows);

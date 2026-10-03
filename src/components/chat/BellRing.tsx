@@ -88,7 +88,11 @@ export function BellRing(props: { workspaceId: string; userId: string }): null {
     let stopWatch: () => void = () => {};
     let loadSeq = 0;
 
-    /** Stop the chime when the toast titled `title` is dismissed (removed on the next chime). */
+    /**
+     * Stop the chime when the toast titled `title` is dismissed, or when it
+     * leaves on its own (so a chime still waiting for the first tap never
+     * plays minutes later). The listener and timer go with it.
+     */
     const watchDismiss = (title: string): void => {
       stopWatch();
       const onClick = (event: MouseEvent): void => {
@@ -97,8 +101,13 @@ export function BellRing(props: { workspaceId: string; userId: string }): null {
           stopWatch();
         }
       };
+      const expire = setTimeout(() => {
+        chime.stop();
+        stopWatch();
+      }, RING_TOAST_MS);
       document.addEventListener('click', onClick, true);
       stopWatch = () => {
+        clearTimeout(expire);
         document.removeEventListener('click', onClick, true);
         stopWatch = () => {};
       };

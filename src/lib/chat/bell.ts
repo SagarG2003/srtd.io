@@ -29,6 +29,8 @@ type InboxEntryRow = Database['public']['Tables']['inbox_entries']['Row'];
 
 /** One page of bell rows. */
 export const BELL_PAGE_SIZE = 50;
+/** A refetch re-reads at most this many rows (the pages already shown). */
+export const BELL_MAX_ROWS = 200;
 
 /** Fired on window to make every bell surface refetch (the poll tick, a ring, a write). */
 export const BELL_REFRESH_EVENT = 'sorted:bell-refresh';
@@ -281,8 +283,16 @@ function unique(values: readonly (string | null)[]): string[] {
  */
 export async function readBellEntries(
   client: Client,
-  params: { workspaceId: string; userId: string; before?: string; signal?: AbortSignal },
+  params: {
+    workspaceId: string;
+    userId: string;
+    before?: string;
+    /** Rows to read (default one page); a refetch passes what is already shown. */
+    limit?: number;
+    signal?: AbortSignal;
+  },
 ): Promise<Result<{ entries: BellEntry[]; hasMore: boolean }>> {
+  const limit = Math.min(BELL_MAX_ROWS, Math.max(BELL_PAGE_SIZE, params.limit ?? BELL_PAGE_SIZE));
   try {
     const base = onlyBellEntries(
       client
@@ -291,10 +301,12 @@ export async function readBellEntries(
         .eq('workspace_id', params.workspaceId)
         .eq('user_id', params.userId)
         .is('read_at', null)
-        .is('deleted_at', null),
+        .is('deleted_at', null)
+        // Snoozed rows are hidden: never let them fill the page.
+        .or(`snoozed_until.is.null,snoozed_until.lte.${new Date().toISOString()}`),
     );
     const paged = params.before !== undefined ? base.lt('created_at', params.before) : base;
-    const query = paged.order('created_at', { ascending: false }).limit(BELL_PAGE_SIZE);
+    const query = paged.order('created_at', { ascending: false }).limit(limit);
     const { data, error } = await abortable(query, params.signal);
     if (error) return fail(`readBellEntries: ${error.message}`);
     const rows = (data ?? []) as InboxEntryRow[];
@@ -302,7 +314,7 @@ export async function readBellEntries(
       const entry = mapBellEntry(row);
       return entry !== null ? [entry] : [];
     });
-    return { ok: true, data: { entries, hasMore: rows.length >= BELL_PAGE_SIZE } };
+    return { ok: true, data: { entries, hasMore: rows.length >= limit } };
   } catch (error) {
     return fail(`readBellEntries: ${String(error)}`);
   }
@@ -418,13 +430,14 @@ export async function readBellMessages(
  */
 export async function loadBell(
   client: Client,
-  params: { workspaceId: string; userId: string; before?: string },
+  params: { workspaceId: string; userId: string; before?: string; limit?: number },
 ): Promise<Result<BellData>> {
   const [entriesRes, remindersRes, scheduledRes] = await Promise.all([
     readBellEntries(client, {
       workspaceId: params.workspaceId,
       userId: params.userId,
       ...(params.before !== undefined ? { before: params.before } : {}),
+      ...(params.limit !== undefined ? { limit: params.limit } : {}),
     }),
     client
       .from('chat_message_reminders')

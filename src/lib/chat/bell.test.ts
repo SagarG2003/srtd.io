@@ -271,6 +271,20 @@ describe('loadBell: batched, no N+1', () => {
     expect(inCall?.args[1]).toContain('m-up');
   });
 
+  it('a refetch re-reads the rows already shown (capped), and skips snoozed rows server-side', async () => {
+    const { client, reads } = recordingClient({});
+    await loadBell(client, { workspaceId: 'w1', userId: 'u1', limit: 120 });
+    await loadBell(client, { workspaceId: 'w1', userId: 'u1', limit: 5000 });
+    const inbox = reads.filter((r) => r.table === 'inbox_entries');
+    expect(inbox[0]?.calls).toContainEqual({ method: 'limit', args: [120] });
+    expect(inbox[1]?.calls).toContainEqual({ method: 'limit', args: [200] });
+    expect(
+      inbox[0]?.calls.some(
+        (c) => c.method === 'or' && String(c.args[0]).startsWith('snoozed_until.is.null'),
+      ),
+    ).toBe(true);
+  });
+
   it('a failed primary read fails the load', async () => {
     const { client } = recordingClient({});
     const broken = {

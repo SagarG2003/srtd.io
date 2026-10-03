@@ -313,12 +313,17 @@ export function BellProvider(props: {
   const reload = useCallback((): void => {
     seqRef.current += 1;
     const seq = seqRef.current;
-    void loadBell(supabase, { workspaceId, userId: currentUserId }).then((res) => {
+    // Re-read every row already shown, so "Show older" survives a refetch.
+    const limit = dataRef.current.entries.length;
+    void loadBell(supabase, { workspaceId, userId: currentUserId, limit }).then((res) => {
       if (!mountedRef.current || seq !== seqRef.current) return;
       if (res.ok) {
         setData(res.data);
         setStatus('ready');
-        setHiddenIds(new Set());
+        // Rows a write is still removing stay hidden while they are present.
+        const present = new Set(res.data.entries.map((e) => e.id));
+        for (const r of res.data.reminders) present.add(r.id);
+        setHiddenIds((prev) => new Set([...prev].filter((id) => present.has(id))));
         return;
       }
       logger.warn('bell: load failed', { error: res.error.message });
@@ -427,11 +432,16 @@ export function BellProvider(props: {
           toast.show({ title: ACTION_FAILED_COPY });
           return;
         }
+        // Already sent or cancelled elsewhere: nothing to show, refetch quietly.
+        if (res.data.length === 0) {
+          reload();
+          return;
+        }
         setOpenState(false);
         setScheduledSheet({ channelId, rows: res.data });
       });
     },
-    [toast],
+    [toast, reload],
   );
 
   const actions = useMemo(
@@ -496,8 +506,12 @@ export function BellProvider(props: {
           updateScheduledMessage({
             client: supabase,
             id: row.id,
-            // A failed row's time has passed: keep it only while still ahead.
-            sendAt: new Date(Math.max(Date.parse(row.send_at), Date.now() + 2 * 60_000)),
+            // A failed row's time has passed: it goes again in 2 minutes. A
+            // scheduled row keeps its time.
+            sendAt:
+              row.status === 'failed'
+                ? new Date(Math.max(Date.parse(row.send_at), Date.now() + 2 * 60_000))
+                : new Date(row.send_at),
             body,
             mentions: mentionTargets(body, channelType(row.channel_id)),
             traceId,
