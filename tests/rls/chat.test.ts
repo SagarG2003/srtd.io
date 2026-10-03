@@ -61,6 +61,14 @@
 //      collapsed) and fan out one urgent 'mention' inbox_entries row per
 //      mentioned user; edit and delete soft-delete the entries they drop.
 //
+// Thread root (20261003120000_chat_thread_root.sql):
+//
+//  16. The chat_messages_thread_root trigger stamps thread_root_message_id with
+//      the top-level message of the reply's thread (through replies and
+//      tombstones), null for non-replies; chat_message_send has no parameter
+//      for it. chat_thread_reply_counts counts non-deleted replies per root
+//      under the caller's RLS and reads only the first 200 root ids.
+//
 // Seeding goes through the service role (the privileged path), following the
 // rationale in packages/test-utils/rls.ts.
 
@@ -107,6 +115,7 @@ type DeleteArgs = Database['public']['Functions']['chat_message_delete']['Args']
 type EditArgs = Database['public']['Functions']['chat_message_edit']['Args'];
 type ClearArgs = Database['public']['Functions']['chat_channel_clear']['Args'];
 type ResolveArgs = Database['public']['Functions']['chat_mentions_resolve']['Args'];
+type ThreadCountArgs = Database['public']['Functions']['chat_thread_reply_counts']['Args'];
 
 // Proc arguments are built here (not inline at the .rpc() call) so each call
 // carries a fresh trace id the way the app's callRpc() wrapper does.
@@ -1979,6 +1988,136 @@ describe.runIf(RLS_SUITE)('chat record: channel-membership RLS and procs', () =>
         const entries = await mentionEntries(args.p_id);
         expect(entries.filter((e) => e.user_id === q.id)).toHaveLength(0);
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 16. Thread root
+  // -------------------------------------------------------------------------
+
+  describe('chat thread root', () => {
+    interface ReplyCountRow {
+      root_id: string;
+      reply_count: number;
+      last_reply_at: string;
+    }
+
+    /** thread_root_message_id of one row, read through the service role. */
+    async function threadRoot(id: string): Promise<string | null> {
+      const res = await adminGeneric
+        .from('chat_messages')
+        .select('thread_root_message_id')
+        .eq('id', id);
+      if (res.error) throw new Error(`chat_messages read failed: ${res.error.message}`);
+      const rows = (res.data as { thread_root_message_id: string | null }[] | null) ?? [];
+      if (rows.length !== 1) throw new Error(`expected one chat_messages row for ${id}`);
+      return rows[0]?.thread_root_message_id ?? null;
+    }
+
+    /** Send as userB in the group channel and return the new id. */
+    async function send(body: string, replyTo?: string): Promise<string> {
+      const args = sendArgs(ctx.channelId, body, replyTo ? { replyTo } : {});
+      const res = await clientFor(userB.id).rpc('chat_message_send', args);
+      if (res.error) throw new Error(`chat_message_send failed: ${res.error.message}`);
+      return args.p_id;
+    }
+
+    function countArgs(rootIds: string[]): ThreadCountArgs {
+      return { p_trace_id: generateTraceId(), p_channel_id: ctx.channelId, p_root_ids: rootIds };
+    }
+
+    async function replyCounts(userId: string, rootIds: string[]): Promise<ReplyCountRow[]> {
+      const res = await clientFor(userId).rpc('chat_thread_reply_counts', countArgs(rootIds));
+      if (res.error) throw new Error(`chat_thread_reply_counts failed: ${res.error.message}`);
+      return res.data ?? [];
+    }
+
+    it('T1 a reply to a top-level message is rooted at that message', async () => {
+      const top = await send('top');
+      const reply = await send('reply', top);
+      expect(await threadRoot(reply)).toBe(top);
+    });
+
+    it('T2 a reply to a reply is rooted at the top-level message, not the middle', async () => {
+      const top = await send('top');
+      const middle = await send('middle', top);
+      const leaf = await send('leaf', middle);
+      expect(await threadRoot(middle)).toBe(top);
+      expect(await threadRoot(leaf)).toBe(top);
+    });
+
+    it('T3 a non-reply has a null root', async () => {
+      const top = await send('standalone');
+      expect(await threadRoot(top)).toBeNull();
+    });
+
+    it('T4 a reply to a deleted (tombstone) middle message still inherits the top-level root', async () => {
+      const top = await send('top');
+      const middle = await send('middle', top);
+      const del = await clientFor(userB.id).rpc(
+        'chat_message_delete',
+        deleteArgs([middle], ctx.channelId),
+      );
+      expect(del.error).toBeNull();
+      const leaf = await send('leaf', middle);
+      expect(await threadRoot(leaf)).toBe(top);
+    });
+
+    it('T5 chat_thread_reply_counts: member counts, deleted skipped, non-member empty, first 200 ids only', async () => {
+      const top = await send('top');
+      const r1 = await send('r1', top);
+      const r2 = await send('r2', r1);
+      const r3 = await send('r3', top);
+      const del = await clientFor(userB.id).rpc(
+        'chat_message_delete',
+        deleteArgs([r3], ctx.channelId),
+      );
+      expect(del.error).toBeNull();
+      const other = await send('other top');
+      await send('other reply', other);
+
+      const rows = await replyCounts(owner.id, [top, other]);
+      const byRoot = new Map(rows.map((r) => [r.root_id, r]));
+      expect(rows).toHaveLength(2);
+      // r3 is a tombstone: only r1 and r2 count.
+      expect(byRoot.get(top)?.reply_count).toBe(2);
+      expect(byRoot.get(other)?.reply_count).toBe(1);
+      const r2Row = await adminGeneric.from('chat_messages').select('created_at').eq('id', r2);
+      const r2CreatedAt = (r2Row.data as { created_at: string }[] | null)?.[0]?.created_at;
+      expect(Date.parse(byRoot.get(top)?.last_reply_at ?? '')).toBe(Date.parse(r2CreatedAt ?? ''));
+
+      // userC is a workspace member outside the group channel: RLS hides every row.
+      expect(await replyCounts(userC.id, [top, other])).toEqual([]);
+      expect(await replyCounts(outsider.id, [top, other])).toEqual([]);
+
+      // Only the first 200 ids are read: the real root at position 201 is ignored.
+      const filler = Array.from({ length: 200 }, () => crypto.randomUUID());
+      expect(await replyCounts(owner.id, [...filler, top])).toEqual([]);
+      const inside = await replyCounts(owner.id, [...filler.slice(0, 199), top]);
+      expect(inside.map((r) => [r.root_id, r.reply_count])).toEqual([[top, 2]]);
+    });
+
+    it('T6 a client cannot set the root through chat_message_send; a cross-channel reply_to is still refused', async () => {
+      // The generated Args carry no thread root parameter.
+      type HasRootParam = 'p_thread_root_message_id' extends keyof SendArgs ? true : false;
+      const hasRootParam: HasRootParam = false;
+      expect(hasRootParam).toBe(false);
+
+      // Supplying one anyway matches no function signature and inserts nothing.
+      const top = await send('top');
+      const forged = {
+        ...sendArgs(ctx.channelId, 'forged', { replyTo: top }),
+        p_thread_root_message_id: dmMessageId,
+      };
+      const res = await clientFor(userB.id).rpc('chat_message_send', forged);
+      expect(res.error).not.toBeNull();
+      expect(await countWhere(adminGeneric, 'chat_messages', [['id', forged.p_id]])).toBe(0);
+
+      // A reply target in another channel (the DM) is refused by the existing check.
+      const cross = sendArgs(ctx.channelId, 'cross', { replyTo: dmMessageId });
+      const crossRes = await clientFor(userB.id).rpc('chat_message_send', cross);
+      expect(crossRes.error?.message).toBe('reply target not in this chat');
+      expect(await countWhere(adminGeneric, 'chat_messages', [['id', cross.p_id]])).toBe(0);
     });
   });
 });

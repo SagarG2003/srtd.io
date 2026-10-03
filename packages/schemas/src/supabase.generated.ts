@@ -2267,6 +2267,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2285,6 +2286,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2303,6 +2305,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: [
@@ -2339,6 +2342,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2357,6 +2361,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2375,6 +2380,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2396,6 +2402,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2414,6 +2421,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2432,6 +2440,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2453,6 +2462,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2471,6 +2481,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2489,6 +2500,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2510,6 +2522,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2528,6 +2541,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2546,6 +2560,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2567,6 +2582,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2585,6 +2601,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2603,6 +2620,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2624,6 +2642,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2642,6 +2661,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2660,6 +2680,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2681,6 +2702,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2699,6 +2721,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2717,6 +2740,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2738,6 +2762,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2756,6 +2781,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2774,6 +2800,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2795,6 +2822,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2813,6 +2841,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2831,6 +2860,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2852,6 +2882,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2870,6 +2901,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2888,6 +2920,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2909,6 +2942,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2927,6 +2961,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2945,6 +2980,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -2966,6 +3002,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2984,6 +3021,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3002,6 +3040,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3023,6 +3062,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3041,6 +3081,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3059,6 +3100,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3080,6 +3122,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3098,6 +3141,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3116,6 +3160,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3137,6 +3182,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3155,6 +3201,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3173,6 +3220,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3194,6 +3242,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3212,6 +3261,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3230,6 +3280,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3251,6 +3302,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3269,6 +3321,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3287,6 +3340,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3308,6 +3362,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3326,6 +3381,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3344,6 +3400,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3365,6 +3422,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3383,6 +3441,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3401,6 +3460,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3422,6 +3482,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3440,6 +3501,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3458,6 +3520,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3479,6 +3542,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3497,6 +3561,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3515,6 +3580,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3536,6 +3602,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3554,6 +3621,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3572,6 +3640,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3593,6 +3662,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3611,6 +3681,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3629,6 +3700,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3650,6 +3722,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3668,6 +3741,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3686,6 +3760,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3707,6 +3782,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3725,6 +3801,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3743,6 +3820,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3764,6 +3842,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3782,6 +3861,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3800,6 +3880,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3821,6 +3902,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3839,6 +3921,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3857,6 +3940,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3878,6 +3962,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3896,6 +3981,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3914,6 +4000,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3935,6 +4022,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -3953,6 +4041,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -3971,6 +4060,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -3992,6 +4082,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -4010,6 +4101,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -4028,6 +4120,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -4049,6 +4142,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -4067,6 +4161,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -4085,6 +4180,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -4106,6 +4202,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -4124,6 +4221,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -4142,6 +4240,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -4163,6 +4262,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -4181,6 +4281,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -4199,6 +4300,7 @@ export type Database = {
           sender_user_id?: string | null
           shared_brief_ids?: string[] | null
           shared_post_ids?: string[] | null
+          thread_root_message_id?: string | null
           workspace_id?: string
         }
         Relationships: []
@@ -7878,6 +7980,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         SetofOptions: {
@@ -7913,6 +8016,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }[]
         SetofOptions: {
@@ -7952,6 +8056,7 @@ export type Database = {
           sender_user_id: string | null
           shared_brief_ids: string[] | null
           shared_post_ids: string[] | null
+          thread_root_message_id: string | null
           workspace_id: string
         }
         SetofOptions: {
@@ -7982,6 +8087,14 @@ export type Database = {
       chat_read_cursor_set: {
         Args: { p_channel_id: string; p_message_id: string; p_trace_id: string }
         Returns: undefined
+      }
+      chat_thread_reply_counts: {
+        Args: { p_channel_id: string; p_root_ids: string[]; p_trace_id: string }
+        Returns: {
+          last_reply_at: string
+          reply_count: number
+          root_id: string
+        }[]
       }
       chat_unread_counts: {
         Args: { p_workspace_id: string }
