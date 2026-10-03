@@ -7,7 +7,6 @@ import {
   createChipBatch,
   postRefKey,
 } from '@/components/chat/PostRefChip';
-import { FilterStrip } from '@/components/chat/FilterStrip';
 import { aboutState, chipPostIds, parentIndexOf } from '@/lib/chat/post-refs';
 import type { ThreadMessage } from '@/lib/chat/thread';
 
@@ -127,33 +126,6 @@ describe('PostRefChip', () => {
       <PostRefChip post={post} workspaceKey={null} onTap={() => {}} />,
     );
     expect(html).not.toContain('data-post-ref-key');
-  });
-});
-
-describe('FilterStrip', () => {
-  it('reads "Showing" the post with Show all on the right, on accent-soft', () => {
-    const post = { id: 'p1', number: 14, title: 'Launch teaser', thumbnailAssetVersionId: null };
-    const html = renderToStaticMarkup(
-      <FilterStrip post={post} workspaceKey="gbl" onShowAll={() => {}} />,
-    );
-    expect(html).toContain('bg-accent-soft');
-    expect(html).toContain('Showing');
-    expect(html).toContain('GBL-14');
-    expect(html).toContain('Launch teaser');
-    expect(html).toMatch(/min-h-\[44px\][^>]*>Show all</);
-  });
-
-  it('Show all calls back', () => {
-    const onShowAll = vi.fn();
-    const html = renderToStaticMarkup(
-      <FilterStrip post={null} workspaceKey="gbl" onShowAll={onShowAll} />,
-    );
-    expect(html).toContain('Show all');
-    const el = FilterStrip({ post: null, workspaceKey: 'gbl', onShowAll });
-    const children = (el.props as { children: Array<{ props?: { onClick?: () => void } }> })
-      .children;
-    children.find((c) => c.props?.onClick !== undefined)?.props?.onClick?.();
-    expect(onShowAll).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -12,7 +12,6 @@ import {
   rowReady,
   chipPostIds,
   chipTargetFor,
-  filterRows,
   isCardMessage,
   newCardFor,
   newestCardFor,
@@ -281,24 +280,6 @@ describe('aboutState', () => {
     expect(aboutState({ id: 'p1' })).toBe('visible');
     expect(aboutState(undefined)).toBe('pending');
     expect(aboutState(null)).toBe('gone');
-  });
-});
-
-describe('filterRows', () => {
-  it('keeps the post’s cards and the replies to them, in order', () => {
-    const rows = [
-      msg('a'),
-      msg('c1', { sharedPostIds: ['p1'] }),
-      replyTo('r1', 'c1'),
-      msg('c2', { sharedPostIds: ['p2'] }),
-      replyTo('r2', 'c2'),
-      replyTo('r3', 'a'),
-      msg('c3', { sharedPostIds: ['p2', 'p1'] }),
-      replyTo('r4', 'c3'),
-    ];
-    expect(filterRows(rows, 'p1').map((r) => r.id)).toEqual(['c1', 'r1', 'c3', 'r4']);
-    expect(filterRows(rows, 'p2').map((r) => r.id)).toEqual(['c2', 'r2', 'c3', 'r4']);
-    expect(filterRows(rows, 'none')).toEqual([]);
   });
 });
 

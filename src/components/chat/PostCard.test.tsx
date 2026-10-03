@@ -343,21 +343,21 @@ describe('card long-press: talk about the post', () => {
     vi.useRealTimers();
   });
 
-  it('with onShowPost the KEY is a button that shows the post', () => {
+  it('with onOpenThread the KEY is a button that opens the thread', () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <SharedPostCardList
           views={sharedPostViews(['p1'], indexPostsById([cardRow('p1')]))}
           {...CONTEXT}
-          onShowPost={() => {}}
+          onOpenThread={() => {}}
           onTalkAbout={() => {}}
         />
       </MemoryRouter>,
     );
     expect(html).toMatch(/<button[^>]*data-card-ref=""[^>]*>GBL-12<\/button>/);
-    expect(html).toContain('aria-label="Show the conversation about GBL-12"');
-    // Without it the KEY stays plain text.
-    expect(render(['p1'], [cardRow('p1')])).not.toContain('Show the conversation');
+    expect(html).toContain('aria-label="Open the thread about GBL-12"');
+    // Without it (a card that heads no thread) the KEY stays plain text.
+    expect(render(['p1'], [cardRow('p1')])).not.toContain('Open the thread');
   });
 });
 
@@ -400,11 +400,11 @@ describe('F9: a hold that starts on the KEY', () => {
     vi.useFakeTimers();
     const onTalkAbout = vi.fn();
     const openSheet = vi.fn();
-    const onShowPost = vi.fn();
+    const onOpenThread = vi.fn();
     // The KEY sits inside the card: its pointer events reach the card's hold.
     const hold = createLongPressController({ onLongPress: onTalkAbout, ...CARD_HOLD });
     const card = cardTapHandlers(openSheet, hold.consumeClickSuppression);
-    const key = keyTapHandler(onShowPost, hold.consumeClickSuppression);
+    const key = keyTapHandler(onOpenThread, hold.consumeClickSuppression);
     const stop = { stopPropagation: vi.fn() };
 
     hold.handlers.onPointerDown({ clientX: 0, clientY: 0, pointerType: 'touch' });
@@ -412,7 +412,7 @@ describe('F9: a hold that starts on the KEY', () => {
     hold.handlers.onPointerUp();
     key(stop); // the release click lands on the KEY
     expect(onTalkAbout).toHaveBeenCalledTimes(1);
-    expect(onShowPost).not.toHaveBeenCalled();
+    expect(onOpenThread).not.toHaveBeenCalled();
     expect(openSheet).not.toHaveBeenCalled();
     expect(stop.stopPropagation).toHaveBeenCalled();
 
@@ -423,9 +423,9 @@ describe('F9: a hold that starts on the KEY', () => {
     card.onClick();
     expect(openSheet).toHaveBeenCalledTimes(1);
 
-    // And a plain tap on the KEY shows the post.
+    // And a plain tap on the KEY opens the thread.
     key(stop);
-    expect(onShowPost).toHaveBeenCalledTimes(1);
+    expect(onOpenThread).toHaveBeenCalledTimes(1);
     expect(onTalkAbout).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
