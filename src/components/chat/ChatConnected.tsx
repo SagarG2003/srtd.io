@@ -92,7 +92,6 @@ import { SavedFromProvider, type SavedFromWiring } from '@/components/chat/Notes
 import { useNotes } from '@/lib/chat/use-notes';
 import {
   isNotes,
-  isNotesChannelId,
   liveClientFor,
   saveToNotesEntry,
   SAVED_TO_NOTES_TOAST,
@@ -607,7 +606,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   toastRef.current = toast;
   useEffect(() => {
     // Notes never wait on the roster: they open from the session-built id.
-    if (loadStatus !== 'ready' && !isNotesChannelId(searchParams.get('channel'))) return;
+    if (loadStatus !== 'ready' && searchParams.get('channel') !== notesChat.channelId) return;
     const channel = searchParams.get('channel');
     if (channel === null || channel === '') {
       selectedFromParam.current = null;
@@ -1211,13 +1210,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const savedReady = !notesOpen || savedSettledFor === selectedChannelId;
   // Notes whose ensure failed: never the skeleton, the Retry state shows.
   const threadLoading =
-    !notesFailed &&
-    (thread.loading ||
-      !threadCurrent ||
-      !namesReady ||
-      !scheduledSettled ||
-      (notesOpen && notes.status !== 'ready' && notes.status !== 'failed') ||
-      (notesReady && !savedReady));
+    !threadCurrent ||
+    (!notesFailed &&
+      (thread.loading ||
+        !namesReady ||
+        !scheduledSettled ||
+        (notesOpen && notes.status !== 'ready') ||
+        (notesReady && !savedReady)));
   const [scheduledListOpen, setScheduledListOpen] = useState(false);
   useEffect(() => setScheduledListOpen(false), [selectedChannelId]);
   // The last one sent or cancelled: nothing left to show.
