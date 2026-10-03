@@ -7,6 +7,8 @@ import { Field } from '@/components/ui/Field';
 import { Input } from '@/components/ui/Input';
 import { supabase } from '@/lib/supabase';
 
+const MIN_PASSWORD_LENGTH = 6;
+
 /** Runtime-detected IANA timezone; shown prefilled and editable. */
 function detectTimezone(): string {
   try {
@@ -76,6 +78,7 @@ export function SignUpPage() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordVisible, setPasswordVisible] = useState(false);
   const [workspaceName, setWorkspaceName] = useState('');
   const [timezone, setTimezone] = useState(detectTimezone);
   const [error, setError] = useState<string | null>(null);
@@ -151,7 +154,13 @@ export function SignUpPage() {
         </Link>
       }
     >
-      <div className="flex flex-col gap-4">
+      <form
+        className="flex flex-col gap-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void handleSignUp();
+        }}
+      >
         <Field label="Name" htmlFor="signup-name">
           <Input
             id="signup-name"
@@ -172,14 +181,32 @@ export function SignUpPage() {
           />
         </Field>
 
-        <Field label="Password" htmlFor="signup-password">
-          <Input
-            id="signup-password"
-            type="password"
-            autoComplete="new-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-          />
+        <Field label="Password" htmlFor="signup-password" required>
+          <div className="relative">
+            <Input
+              id="signup-password"
+              type={passwordVisible ? 'text' : 'password'}
+              autoComplete="new-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+              minLength={MIN_PASSWORD_LENGTH}
+              aria-describedby="signup-password-hint"
+              className="pr-16"
+            />
+            <button
+              type="button"
+              aria-label={passwordVisible ? 'Hide password' : 'Show password'}
+              aria-pressed={passwordVisible}
+              onClick={() => setPasswordVisible((visible) => !visible)}
+              className="absolute right-0 top-0 min-h-[44px] min-w-[44px] px-3 text-xs font-medium text-accent hover:underline"
+            >
+              {passwordVisible ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          <p id="signup-password-hint" className="mt-1.5 text-[11px] text-fg-3">
+            Use at least {MIN_PASSWORD_LENGTH} characters with a mix of Uppercase and lowercase letters, numbers, and symbols for a strong password.
+          </p>
         </Field>
 
         <Field label="Workspace name" htmlFor="signup-workspace">
@@ -210,12 +237,12 @@ export function SignUpPage() {
           variant="primary"
           size="lg"
           className="w-full"
-          onClick={handleSignUp}
+          type="submit"
           disabled={submitting}
         >
           {submitting ? 'Creating account' : 'Create account'}
         </Button>
-      </div>
+      </form>
     </AuthShell>
   );
 }
