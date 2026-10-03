@@ -19,6 +19,8 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // action, so there is nothing to audit.
   'chat_channel_mark_synced',
   'chat_thread_reply_counts', // Read-only STABLE invoker count: writes nothing, so nothing to log.
+  // Read-only STABLE invoker search (20261003170000): writes nothing, so nothing to log.
+  'chat_message_search',
 ]);
 
 /** Public functions whose arguments include p_trace_id but whose body never mentions it. */
