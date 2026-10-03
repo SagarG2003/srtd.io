@@ -270,6 +270,13 @@ export interface UseChatThread {
   readState: ThreadReadState;
   /** The newest message is on screen: advance the read cursor (debounced). */
   markNewestVisible: () => void;
+  /**
+   * Show an own row recorded outside the outbox (a scheduled message sent now)
+   * the way a normal send's recorded row lands, then publish it live with the
+   * normal send's publish. A publish failure is only logged (the row is in the
+   * record; receivers catch up from Postgres).
+   */
+  addSentRow: (row: ChatMessageRow, traceId: string) => Promise<void>;
 }
 
 /** In-flight guard key for a forward run (message ids are uuids, never this). */
@@ -1122,6 +1129,59 @@ export function useChatThread(params: {
     [currentUserId],
   );
 
+  const addSentRow = useCallback<UseChatThread['addSentRow']>(
+    async (row, traceId) => {
+      const message = rowToThreadMessage(row, currentUserId);
+      const forChannel = row.channel_id;
+      if (channelRef.current === forChannel) {
+        const behind = outboxRef.current.entries(forChannel);
+        setMessages((prev) =>
+          withOutboxBubbles(upsertMessage(prev, message), behind, currentUserId),
+        );
+      }
+      onOwnMessageRef.current?.(
+        forChannel,
+        previewText(messagePreviewContent(message)),
+        message.time,
+        message.id,
+      );
+      const connection = clientRef.current;
+      const liveTarget = targetRef.current;
+      if (connection === null || liveTarget === null || channelRef.current !== forChannel) {
+        logger.warn('chat: live publish did not complete', {
+          trace_id: traceId,
+          message_id: message.id,
+          skipped: 'no connection',
+        });
+        return;
+      }
+      let publish: Promise<unknown>;
+      try {
+        publish = sendText({
+          connection: asThreadConnection(connection),
+          target: liveTarget,
+          text: message.body,
+          attachments: message.attachments,
+          sharedPostIds: message.sharedPostIds,
+          reply: message.reply,
+          createMessage: createTextMessage,
+          liveIds: { sorted_message_id: message.id, sorted_channel_id: forChannel },
+        });
+      } catch (error) {
+        publish = Promise.reject(error);
+      }
+      const published = await publishWithTimeout(publish, LIVE_PUBLISH_TIMEOUT_MS);
+      if (!published.ok) {
+        logger.warn('chat: live publish did not complete', {
+          trace_id: traceId,
+          message_id: message.id,
+          error: published.error,
+        });
+      }
+    },
+    [currentUserId],
+  );
+
   const forward = useCallback<UseChatThread['forward']>(
     async (messages, targets) => {
       const sources = forwardableInOrder(messages);
@@ -1460,5 +1520,6 @@ export function useChatThread(params: {
     toggleReaction,
     readState,
     markNewestVisible,
+    addSentRow,
   };
 }

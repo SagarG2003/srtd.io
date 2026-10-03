@@ -471,6 +471,18 @@ export function IconCalendar(props: IconProps) {
   );
 }
 
+/** Calendar outline with a small clock at the bottom-right: scheduled sends (never reminders). */
+export function IconCalendarClock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M20 10.5V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4.5" />
+      <path d="M4 9h16M8 3v4M16 3v4" />
+      <circle cx={17} cy={17} r={4.5} />
+      <path d="M17 15v2l1.4 1" />
+    </Svg>
+  );
+}
+
 export function IconAt(props: IconProps) {
   return (
     <Svg {...props}>
