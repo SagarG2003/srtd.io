@@ -2101,6 +2101,8 @@ export function threadListItems(
   loadOlder?: () => void,
   /** The size table the day pills are drawn with. */
   layout: ChatLayout = 'touch',
+  /** A touch-first pointer: Load older suppresses the native callout menu. */
+  coarse = false,
 ): ReactElement[] {
   const items: ReactElement[] = [
     <li key="thread-spacer" aria-hidden="true" data-thread-spacer="" className="mt-auto" />,
@@ -2112,7 +2114,7 @@ export function threadListItems(
           type="button"
           data-load-older=""
           onClick={loadOlder}
-          onContextMenu={preventDefault}
+          {...(coarse ? { onContextMenu: preventDefault } : {})}
           className={cn(
             'flex min-h-[44px] items-center rounded-md px-4 text-xs font-medium text-accent hover:bg-panel-2',
             NO_TOUCH_SELECT,
@@ -3359,6 +3361,7 @@ function ThreadBody(
                 }
               : undefined,
             props.layout,
+            coarsePointer,
           )}
         </ul>
         {unread !== undefined && unread !== null && pill !== 'unknown' ? (
@@ -4248,7 +4251,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       nowMs,
     );
     gateRef.current = next.gate;
-    return next;
+    // The cut's own moment: a deadline at or before it was judged by this cut.
+    return { ...next, nowMs };
     // hydrationTick re-runs the cut once a hydration wait has run out;
     // countsVersion once a page's counts read is in.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4418,13 +4422,14 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   );
   const reactorLoad = props.loadReactors ?? defaultReactorLoad;
   useEffect(() => {
-    // A deadline already passed was handled by the cut it re-ran: no timer again.
+    // A deadline the cut already judged (at or before its moment) needs no
+    // timer again; one after it always gets one, however late this effect runs.
     const deadline = hydrationDeadline(
       admitted.gate,
       props.messages,
       parentIndex,
       loadedIds,
-      Date.now(),
+      admitted.nowMs,
     );
     if (deadline === null) return;
     const handle = setTimeout(

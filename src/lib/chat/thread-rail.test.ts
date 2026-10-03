@@ -268,6 +268,11 @@ describe('counts batching', () => {
     expect(counts.requested('r220')).toBe(false);
     expect(counts.request(['r0'], () => 0)).toBeNull();
     expect(load).toHaveBeenCalledTimes(1);
+    // The next page's read takes the roots left over, in one more call.
+    await counts.request(roots, () => 1);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(load.mock.calls[1]?.[0]).toHaveLength(50);
+    expect(counts.get('r220')).toEqual({ count: 3, base: 1 });
   });
 
   it('a row whose root read ran out of time no longer holds the page read back', () => {
