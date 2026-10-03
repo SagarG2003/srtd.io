@@ -18,6 +18,7 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // and the Agora group id. EXECUTE is service_role only; it is not a person's
   // action, so there is nothing to audit.
   'chat_channel_mark_synced',
+  'chat_thread_reply_counts', // Read-only STABLE invoker count: writes nothing, so nothing to log.
 ]);
 
 /** Public functions whose arguments include p_trace_id but whose body never mentions it. */
