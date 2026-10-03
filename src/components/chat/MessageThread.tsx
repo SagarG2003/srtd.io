@@ -4470,8 +4470,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         />
       ) : null}
       {canOpenContact && props.channelId !== undefined ? (
+        // Namespaced: the Composer above is keyed by the same channel id, and
+        // two siblings sharing a key make React leak a Composer copy whenever a
+        // slot before them changes (the DM "composer repeated" bug).
         <ContactSheet
-          key={props.channelId}
+          key={`contact:${props.channelId}`}
           open={contactOpen}
           onClose={() => setContactOpen(false)}
           channelId={props.channelId}
