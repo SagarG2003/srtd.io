@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
+import { ApproveConfirm, approveRef, approveTargetDate } from '@/components/ui/ApproveConfirm';
+import { Sheet } from '@/components/ui/Sheet';
 import { IconButton } from '@/components/ui/IconButton';
 import { Avatar } from '@/components/ui/Avatar';
 import { Textarea } from '@/components/ui/Textarea';
@@ -43,7 +45,13 @@ import {
 } from '@/lib/post-versions';
 import { usePostMembers } from '@/components/pages/pcs/use-post-members';
 import { isAgencySide, isClient, isOwnerOrAdmin } from '@/components/pages/pcs/roles';
-import { visibleStageActions } from '@/components/pages/pcs/stage-actions';
+import { visibleStageActions, type StageAction } from '@/components/pages/pcs/stage-actions';
+import { sheetTitle } from '@/components/chat/post-sheet';
+import {
+  useApproveGate,
+  type ApproveGate,
+  type GateState,
+} from '@/components/pages/pipeline/approve-gate';
 import { IconPencil, IconMoreVertical } from '@/components/pages/pcs/post-icons';
 import { PostActionSheet } from '@/components/pages/pcs/PostActionSheet';
 import {
@@ -146,6 +154,81 @@ function formatTargetDate(value: string): string {
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+/**
+ * The stage rail buttons. Hookless so the tree is unit tested by walking it.
+ * The Approve target gets a green success fill from the `good` token (there is
+ * no on-good token, so its text is white, as the danger variant does); cn here
+ * is a plain join, but Tailwind emits bg-good/text-white/hover:bg-good after
+ * the primary variant's classes, so they deterministically win the override.
+ */
+export function StageButtons(props: {
+  actions: StageAction[];
+  transitioning: boolean;
+  onPick: (to: Stage) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {props.actions.map((action) => (
+        <Button
+          key={action.to}
+          size="lg"
+          variant={action.variant}
+          disabled={props.transitioning}
+          onClick={() => props.onPick(action.to)}
+          className={action.to === 'approved' ? 'bg-good text-white hover:bg-good' : undefined}
+        >
+          {action.label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The approve confirm (decision 22): the shared Sheet (translateY axis) with the
+ * post's title and the chat-matching confirm in its footer, as the pipeline
+ * board shows it. Open while the approve waits on a confirm or is in flight;
+ * a failure keeps it open with the error and Confirm re-armed. Back, the close
+ * button, the backdrop and Escape send nothing. Hookless, so it is unit tested
+ * by walking the tree.
+ */
+export function PcsApproveConfirm(props: {
+  gate: ApproveGate;
+  gateState: GateState;
+  refLabel: string;
+  format: string;
+  title: string;
+  /** Slides in the loaded gallery; null leaves the clause out. */
+  mediaCount: number | null;
+  targetDate: string;
+  busy: boolean;
+  error: string | null;
+}) {
+  const { gate, gateState } = props;
+  return (
+    <Sheet
+      open={gateState.pendingId !== null}
+      onClose={gate.cancel}
+      title={sheetTitle(props.refLabel, props.format)}
+      footer={
+        <ApproveConfirm
+          refLabel={props.refLabel}
+          mediaCount={props.mediaCount}
+          targetDate={props.targetDate}
+          error={props.error}
+          busy={props.busy || gateState.sent}
+          onBack={gate.cancel}
+          onConfirm={gate.confirm}
+        />
+      }
+    >
+      <p data-approve-title="" className="truncate text-sm font-medium text-fg">
+        {props.title}
+      </p>
+    </Sheet>
+  );
+}
+
 export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {}) {
   const params = useParams();
   // The pretty-link resolver (/p/:ref) passes the resolved id as a prop; the
@@ -154,7 +237,7 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
   const postId = postIdProp ?? params.postId;
   const navigate = useNavigate();
   const newTrace = useNewTrace();
-  const { workspaceId, workspaceKey } = useWorkspace();
+  const { workspaceId, workspaceKey, workspaces } = useWorkspace();
 
   // Email deep-link: ?comment={commentId} focuses that comment row. Captured into
   // state so it survives the immediate strip below, then handed to Comments which
@@ -682,8 +765,9 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
     setCommentsRefresh((n) => n + 1);
   }
 
-  async function handleTransition(to: Stage): Promise<void> {
-    if (postId === undefined) return;
+  /** Resolves true once the move landed, false on a failure (the error is set). */
+  async function handleTransition(to: Stage): Promise<boolean> {
+    if (postId === undefined) return false;
     setTransitioning(true);
     setActionError(null);
     const result = await stageTransition(supabase, {
@@ -694,12 +778,24 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
     if (!result.ok) {
       setTransitioning(false);
       setActionError(friendlyTransitionError(result.error));
-      return;
+      return false;
     }
     // Re-fetch so the stage badge and the set of available buttons update.
     await load(true);
     setTransitioning(false);
+    return true;
   }
+
+  // Approve asks first; every other target moves at once through the same
+  // handleTransition. A landed approve closes the confirm; a failed one keeps it
+  // open with the error and re-arms Confirm.
+  const { gate: approveGate, state: approveState } = useApproveGate((_postId, to) => {
+    void handleTransition(to).then((ok) => {
+      if (to !== 'approved') return;
+      if (ok) approveGate.cancel();
+      else approveGate.settle();
+    });
+  });
 
   // Soft-delete the whole post (owner/admin only; the proc re-checks the
   // capability). On success leave PCS for the pipeline; a failure stays put with
@@ -964,26 +1060,18 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
   const { head: titleHead, last: titleLast } = splitLastWord(post.title);
 
   // The stage rail buttons, shared by the review helpers and the default branch.
-  // The Approve target gets a green success fill from the `good` token (there is
-  // no on-good token, so its text is white, as the danger variant does); cn here
-  // is a plain join, but Tailwind emits bg-good/text-white/hover:bg-good after
-  // the primary variant's classes, so they deterministically win the override.
+  // Opening the approve confirm clears a stale error, as the chat sheet does.
   const stageButtons = (
-    <div className="flex flex-col gap-2">
-      {stageActions.map((action) => (
-        <Button
-          key={action.to}
-          size="lg"
-          variant={action.variant}
-          disabled={transitioning}
-          onClick={() => void handleTransition(action.to)}
-          className={action.to === 'approved' ? 'bg-good text-white hover:bg-good' : undefined}
-        >
-          {action.label}
-        </Button>
-      ))}
-    </div>
+    <StageButtons
+      actions={stageActions}
+      transitioning={transitioning}
+      onPick={(to) => {
+        if (to === 'approved') setActionError(null);
+        approveGate.request(post.id, to);
+      }}
+    />
   );
+  const approveTimeZone = workspaces.find((w) => w.id === workspaceId)?.timezone ?? 'UTC';
 
   // The stage-actions card. Rendered twice, one instance per breakpoint: in the
   // desktop aside (hidden md:block) and at the bottom of the mobile Post tab
@@ -1422,6 +1510,18 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
         onChangeBucket={(bucketId) => void applyPostUpdate({ bucketId })}
         onChangeOwner={(ownerUserId) => void applyPostUpdate({ ownerUserId })}
         onChangeTargetDate={(targetDate) => void applyPostUpdate({ targetDate })}
+      />
+
+      <PcsApproveConfirm
+        gate={approveGate}
+        gateState={approveState}
+        refLabel={approveRef(workspaceKey, post.number)}
+        format={post.format}
+        title={post.title}
+        mediaCount={gallery.length > 0 ? gallery.length : null}
+        targetDate={approveTargetDate(post.target_date, approveTimeZone)}
+        busy={transitioning}
+        error={actionError}
       />
 
       <SlideActionsSheet

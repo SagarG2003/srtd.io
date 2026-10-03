@@ -1,8 +1,18 @@
+import { useEffect, useState } from 'react';
 import type { DragEvent, ReactElement } from 'react';
 import { Button } from '@/components/ui/Button';
+import { ApproveConfirm, approveRef, approveTargetDate } from '@/components/ui/ApproveConfirm';
+import { Sheet } from '@/components/ui/Sheet';
+import { sheetTitle } from '@/components/chat/post-sheet';
 import { PostCard } from '@/components/pages/PostCard';
 import { StageDot, stageLabel } from '@/components/pages/pipeline/stage-meta';
+import {
+  useApproveGate,
+  type ApproveGate,
+  type GateState,
+} from '@/components/pages/pipeline/approve-gate';
 import type { PresignCache } from '@/lib/asset-presign';
+import { useWorkspace } from '@/lib/workspace-context';
 import { canTransition } from '@srtdio/posts';
 import type { PipelinePost, Stage } from '@srtdio/posts';
 
@@ -78,6 +88,92 @@ function onColumnDrop(
 }
 
 /**
+ * The board with its approve gate: a legal drop into Approved opens the shared
+ * approve confirm and only Confirm calls the page's move handler; every other
+ * legal drop moves at once, as before. The confirm's KEY-N and target date come
+ * from the dropped post's row already in `grouped` and the workspace context;
+ * no read of its own, and slide count (not loaded here) is left out.
+ */
+export function PipelineBoard(props: PipelineBoardProps): ReactElement {
+  const { gate, state } = useApproveGate(props.onMovePost);
+  const { workspaces, workspaceId } = useWorkspace();
+  const timeZone = workspaces.find((w) => w.id === workspaceId)?.timezone ?? 'UTC';
+  const pending = pendingPost(props.grouped, state.pendingId);
+  // The last confirmed-or-cancelled post stays rendered so the sheet plays its
+  // exit instead of vanishing.
+  const [shown, setShown] = useState<PipelinePost | null>(null);
+  useEffect(() => {
+    if (pending !== null) setShown(pending);
+  }, [pending]);
+  return (
+    <>
+      <PipelineBoardView {...props} onMovePost={gate.request} />
+      <BoardApproveConfirm
+        post={pending ?? shown}
+        gate={gate}
+        gateState={state}
+        workspaceKey={props.workspaceKey ?? null}
+        timeZone={timeZone}
+      />
+    </>
+  );
+}
+
+/** The post a pending approve names, found in the rows the board already holds. */
+export function pendingPost(
+  grouped: Record<Stage, PipelinePost[]>,
+  postId: string | null,
+): PipelinePost | null {
+  if (postId === null) return null;
+  for (const posts of Object.values(grouped)) {
+    const hit = posts.find((post) => post.id === postId);
+    if (hit !== undefined) return hit;
+  }
+  return null;
+}
+
+/**
+ * The drop's approve confirm: the shared Sheet (translateY axis) with the post's
+ * title and the chat-matching confirm in its footer. Open while a post waits on
+ * a confirm; Confirm sends once and closes (the page toasts the result, as for
+ * any drop); Back, the close button, the backdrop and Escape send nothing.
+ * Hookless, so the tree is unit tested by walking it.
+ */
+export function BoardApproveConfirm(props: {
+  /** The post to name: the pending one, or the last one while the sheet exits. */
+  post: PipelinePost | null;
+  gate: ApproveGate;
+  gateState: GateState;
+  workspaceKey: string | null;
+  timeZone: string;
+}): ReactElement | null {
+  const { post, gate, gateState } = props;
+  if (post === null) return null;
+  const refLabel = approveRef(props.workspaceKey, post.number);
+  return (
+    <Sheet
+      open={gateState.pendingId !== null && !gateState.sent}
+      onClose={gate.cancel}
+      title={sheetTitle(refLabel, post.format)}
+      footer={
+        <ApproveConfirm
+          refLabel={refLabel}
+          mediaCount={null}
+          targetDate={approveTargetDate(post.target_date, props.timeZone)}
+          busy={gateState.sent}
+          onBack={gate.cancel}
+          onConfirm={gate.confirm}
+        />
+      }
+    >
+      <p data-approve-title="" className="truncate text-sm font-medium text-fg">
+        {post.title}
+      </p>
+    </Sheet>
+  );
+}
+
+/**
  * Desktop kanban: one fixed-width column per stage in the locked STAGE order,
  * horizontally scrolled. Cards are native-draggable items and columns are drop
  * targets; a drop onto a legal target (canTransition) calls up to the page's move
@@ -87,7 +183,7 @@ function onColumnDrop(
  * payload rides dataTransfer) so the structure stays unit-testable by walking the
  * returned tree.
  */
-export function PipelineBoard({
+export function PipelineBoardView({
   stages,
   grouped,
   cap,
