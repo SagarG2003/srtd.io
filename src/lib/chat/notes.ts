@@ -48,12 +48,17 @@ export function isNotes(channel: Pick<ChannelSummary, 'channelType'> | null | un
  * The notes chat as a roster row, built from the session user and the open
  * workspace (never read), so it exists before notes_channel_ensure answers. Pure.
  */
-export function notesSummary(workspaceId: string, userId: string): ChannelSummary {
+export function notesSummary(
+  workspaceId: string,
+  userId: string,
+  /** The user's own users.avatar_url (the notes avatar's photo); null shows the notebook. */
+  avatarUrl: string | null = null,
+): ChannelSummary {
   return {
     channelId: notesChannelId(workspaceId, userId),
     channelType: 'notes',
     title: NOTES_TITLE,
-    avatarUrl: null,
+    avatarUrl,
     createdBy: null,
     agoraGroupId: null,
     groupId: null,

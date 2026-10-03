@@ -177,7 +177,7 @@ import {
   useSavedFrom,
   type SavedFromWiring,
 } from '@/components/chat/NotesBits';
-import { canSaveToNotes, NOTES_PLACEHOLDER } from '@/lib/chat/notes';
+import { canSaveToNotes, NOTES_PLACEHOLDER, NOTES_TILE_LINE } from '@/lib/chat/notes';
 import {
   FORWARDED_LABEL,
   canForward,
@@ -727,6 +727,17 @@ export function dmHeaderLine(input: {
 }
 
 /**
+ * The thread header's second line: in notes the static "Only you can see
+ * this" (never role, typing or online), else the DM line (groups: none). Pure.
+ */
+export function threadHeaderLine(
+  input: Parameters<typeof dmHeaderLine>[0] & { notes: boolean },
+): string | null {
+  if (input.notes) return NOTES_TILE_LINE;
+  return dmHeaderLine(input);
+}
+
+/**
  * The DM header photo's presence: 'online' draws the 10px good dot (panel ring)
  * at its bottom-right while the peer is present and presence is known.
  */
@@ -796,12 +807,12 @@ export function ThreadHeaderIdentity(props: {
   headerLine: string | null;
   layout: ChatLayout;
   onOpenContact?: () => void;
-  /** Personal notes: the notebook square in place of a photo. */
+  /** Personal notes: the notes avatar (own photo + badge, or the notebook) in place of a photo. */
   notes?: boolean;
 }): ReactElement {
   const photo =
     props.notes === true ? (
-      <NotesAvatar size="header" />
+      <NotesAvatar size="header" src={props.avatarUrl} surface="panel" />
     ) : props.isGroup ? (
       <Avatar
         name={props.title}
@@ -4273,15 +4284,13 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     }
   }, [replyQuoteDeleted, channelId]);
   const notes = props.notes === true;
-  // Notes: no second line (no role, typing or online) and nothing to open.
-  const headerLine = notes
-    ? null
-    : dmHeaderLine({
-        isGroup: props.isGroup === true,
-        peerTyping: props.typingUserIds.length > 0,
-        role: props.role ?? null,
-        workspaceName: props.subtitle,
-      });
+  const headerLine = threadHeaderLine({
+    notes,
+    isGroup: props.isGroup === true,
+    peerTyping: props.typingUserIds.length > 0,
+    role: props.role ?? null,
+    workspaceName: props.subtitle,
+  });
   const canOpenContact = !notes && props.isGroup !== true && props.channelId !== undefined;
   // The Contact sheet's role line is the header's resting line: never typing,
   // so it reads "role · workspace" from the same source.

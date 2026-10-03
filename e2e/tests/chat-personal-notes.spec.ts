@@ -1,7 +1,13 @@
 import { expect, test, type Page, type Request } from '@playwright/test';
 import { installHarnessNetwork } from '../fixtures/harness-routes';
 import { PEER_NAME } from '../fixtures/chat-data';
-import { NOTES_TITLE, NOTE_PHOTO_BODY, seedNotes } from '../fixtures/notes-data';
+import {
+  NOTES_TITLE,
+  NOTE_PHOTO_BODY,
+  OWN_PHOTO_URL,
+  seedNotes,
+  setOwnAvatar,
+} from '../fixtures/notes-data';
 import { checkStep } from '../fixtures/thread-checks';
 
 // Personal notes: the tile pinned above Groups from the first paint, the notes
@@ -99,7 +105,7 @@ test('personal notes: phone', async ({ page }, testInfo) => {
   });
   expect(report.failures, report.failures.join('; ')).toEqual([]);
   await expect(page.locator('[data-notes-avatar]').first()).toBeVisible();
-  await expect(page.locator('[data-header-line]')).toHaveCount(0);
+  await expect(page.locator('[data-header-line]')).toHaveText('Only you can see this');
   await expect(page.locator('[data-contact-open]')).toHaveCount(0);
   await expect(page.locator('[data-loops-strip]')).toHaveCount(0);
   const savedLine = page.locator('[data-saved-from="source"]').first();
@@ -228,5 +234,53 @@ test('personal notes: a failed ensure shows the Retry state, not a skeleton', as
   await page.locator('[data-notes-tile]').click();
   await expect(page.getByText("Couldn't load messages")).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+  expect(network.blocked, 'blocked non-fixture requests').toEqual([]);
+});
+
+for (const photo of [true, false]) {
+  const name = photo ? 'with photo' : 'without photo';
+  test(`notes avatar: ${name}`, async ({ page }, testInfo) => {
+    const network = await installHarnessNetwork(page);
+    seedNotes(network.world);
+    setOwnAvatar(network.world, photo ? OWN_PHOTO_URL : null);
+    const tag = photo ? 'photo' : 'nophoto';
+    await page.goto('/chat');
+    const tile = page.locator('[data-notes-tile]');
+    await tile.waitFor({ state: 'visible', timeout: 30_000 });
+    const avatar = tile.locator('[data-notes-avatar]');
+    await expect(avatar).toHaveAttribute('data-notes-avatar', photo ? 'photo' : 'notebook');
+    await expect(tile.locator('[data-notes-badge]')).toHaveCount(photo ? 1 : 0);
+    await expect(avatar).toHaveAttribute('aria-label', 'Personal notes');
+    const box = await avatar.boundingBox();
+    expect(Math.round(box?.width ?? 0)).toBe(76);
+    await page.screenshot({ path: testInfo.outputPath(`notes-avatar-${tag}-1-tile.png`) });
+
+    await tile.click();
+    const header = page.locator('[data-header-line]');
+    await expect(header).toHaveText('Only you can see this');
+    const headAvatar = page.locator('[data-notes-avatar]').first();
+    await expect(headAvatar).toHaveAttribute('data-notes-avatar', photo ? 'photo' : 'notebook');
+    expect(Math.round((await headAvatar.boundingBox())?.width ?? 0)).toBe(40);
+    await expect(page.locator('[data-contact-open]')).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath(`notes-avatar-${tag}-2-header.png`) });
+    expect(network.blocked, 'blocked non-fixture requests').toEqual([]);
+  });
+}
+
+test('notes avatar: a photo that fails to load falls back to the notebook', async ({ page }) => {
+  const network = await installHarnessNetwork(page);
+  setOwnAvatar(network.world, OWN_PHOTO_URL);
+  await page.route(OWN_PHOTO_URL, (route) =>
+    route.fulfill({ status: 404, headers: { 'access-control-allow-origin': '*' }, body: '' }),
+  );
+  await page.goto('/chat');
+  const tile = page.locator('[data-notes-tile]');
+  await tile.waitFor({ state: 'visible', timeout: 30_000 });
+  await expect(tile.locator('[data-notes-avatar]')).toHaveAttribute(
+    'data-notes-avatar',
+    'notebook',
+  );
+  await expect(tile.locator('img')).toHaveCount(0);
+  await expect(tile.locator('[data-notes-badge]')).toHaveCount(0);
   expect(network.blocked, 'blocked non-fixture requests').toEqual([]);
 });

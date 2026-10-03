@@ -35,14 +35,17 @@ export interface UseNotes {
 export function useNotes(params: {
   workspaceId: string;
   currentUserId: string;
+  /** The user's own photo, already in app state (useCurrentProfile); null: the notebook. */
+  avatarUrl?: string | null;
   /** Injected in tests; the app uses the session's ensurer. */
   ensurer?: NotesEnsurer;
 }): UseNotes {
   const { workspaceId, currentUserId } = params;
   const ensurer = params.ensurer ?? notesEnsurer;
+  const avatarUrl = params.avatarUrl ?? null;
   const summary = useMemo(
-    () => notesSummary(workspaceId, currentUserId),
-    [workspaceId, currentUserId],
+    () => notesSummary(workspaceId, currentUserId, avatarUrl),
+    [workspaceId, currentUserId, avatarUrl],
   );
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<{ key: string; status: EnsureState }>(() => ({

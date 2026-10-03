@@ -38,6 +38,29 @@ interface ForwardPickerProps {
   onSent: () => void;
 }
 
+/**
+ * A picker row's avatar: the notes avatar (own photo + badge, or the
+ * notebook) for Personal notes, else the chat's photo or initials. Hook-free.
+ */
+export function forwardRowAvatar(channel: ChannelSummary, selected: boolean): ReactElement {
+  if (channel.channelType === 'notes') {
+    return (
+      <NotesAvatar
+        size="small"
+        src={channel.avatarUrl}
+        surface={selected ? 'accent-soft' : 'panel'}
+      />
+    );
+  }
+  return (
+    <Avatar
+      name={channel.title}
+      {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
+      size="md"
+    />
+  );
+}
+
 export function ForwardPicker(props: ForwardPickerProps): ReactElement {
   const { state } = useChatStore();
   const toast = useToast();
@@ -117,15 +140,7 @@ export function ForwardPicker(props: ForwardPickerProps): ReactElement {
                     isSelected ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-panel-2',
                   )}
                 >
-                  {channel.channelType === 'notes' ? (
-                    <NotesAvatar size="picker" />
-                  ) : (
-                    <Avatar
-                      name={channel.title}
-                      {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
-                      size="md"
-                    />
-                  )}
+                  {forwardRowAvatar(channel, isSelected)}
                   <span className="min-w-0 flex-1 truncate text-sm font-medium">
                     {channel.title}
                   </span>

@@ -100,3 +100,12 @@ export function seedNotes(world: ChatWorld, now: number = Date.now()): { savedSo
 }
 
 export { DM_CHANNEL };
+
+/** A profile photo the asset-read fixture host serves (a solid PNG). */
+export const OWN_PHOTO_URL = 'https://asset-read.harness.test/blob/profile/me.png';
+
+/** Give the signed-in user a profile photo (users.avatar_url). */
+export function setOwnAvatar(world: ChatWorld, url: string | null): void {
+  const me = (world.tables.users ?? []).find((u) => u.id === ME);
+  if (me !== undefined) me.avatar_url = url;
+}

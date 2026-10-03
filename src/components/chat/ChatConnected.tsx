@@ -90,6 +90,7 @@ import { BellProvider } from '@/components/chat/BellContext';
 import { NotificationsSheets } from '@/components/chat/NotificationsPanel';
 import { SavedFromProvider, type SavedFromWiring } from '@/components/chat/NotesBits';
 import { useNotes } from '@/lib/chat/use-notes';
+import { useCurrentProfile } from '@/lib/use-current-profile';
 import {
   isNotes,
   liveClientFor,
@@ -519,7 +520,14 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const layout = useChatLayout();
   // Personal notes: built from the session (never waits on a read), ensured
   // once per workspace per session in the background.
-  const notes = useNotes({ workspaceId, currentUserId });
+  // The notes avatar is the user's own photo: the profile AppLayout already
+  // reads (one shared store), so no read here and none per row.
+  const { profile: ownProfile } = useCurrentProfile();
+  const notes = useNotes({
+    workspaceId,
+    currentUserId,
+    avatarUrl: ownProfile?.avatar_url ?? null,
+  });
   const notesChat = notes.summary;
   // Every chat the page resolves against: notes first (forward picker, deep
   // links, search hit names, the bell), then the roster.

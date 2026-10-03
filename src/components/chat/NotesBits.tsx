@@ -1,9 +1,10 @@
-// Personal notes' small pieces: the notebook glyph, its accent-soft rounded
-// square (chat home tile, thread header, search rows), and the "Saved from"
+// Personal notes' small pieces: the notebook glyph, the notes avatar (your
+// photo with a notebook badge, or the accent-soft notebook square: chat home
+// tile, thread header, forward picker, search rows), and the "Saved from"
 // line a saved copy shows in place of "Forwarded". Tokens only, no motion.
 
-import { createContext, useContext } from 'react';
-import type { ReactElement } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
+import type { ReactElement, RefObject } from 'react';
 import { cn } from '@/lib/cn';
 import type { ThreadMessage } from '@/lib/chat/thread';
 import type { SavedFromLine } from '@/lib/chat/saved-from';
@@ -30,27 +31,136 @@ export function NotesGlyph(props: { size?: number }): ReactElement {
   );
 }
 
-/** The notes photo slot's sizes: the 76px tile, the 48px search row, the 40px header. */
+/** The notes photo slot: 76px tile (radius 18), 40px header and 44px picker/search (radius 12). */
 const NOTES_AVATAR_BOX = {
   tile: 'h-[76px] w-[76px] rounded-[18px]',
-  row: 'h-12 w-12 rounded-[12px]',
   header: 'h-10 w-10 rounded-[12px]',
-  picker: 'h-[26px] w-[26px] rounded-[8px]',
+  small: 'h-11 w-11 rounded-[12px]',
 } as const;
 
-const NOTES_GLYPH_SIZE = { tile: 34, row: 24, header: 22, picker: 16 } as const;
+export type NotesAvatarSize = keyof typeof NOTES_AVATAR_BOX;
 
-/** The accent-soft rounded square with the notebook, in place of a photo. */
-export function NotesAvatar(props: { size: keyof typeof NOTES_AVATAR_BOX }): ReactElement {
+const NOTES_GLYPH_SIZE: Record<NotesAvatarSize, number> = { tile: 34, header: 22, small: 24 };
+
+/** The badge: 30px, -5px, 3px ring on the tile; 20px, -4px, 2px ring on small sizes. */
+const NOTES_BADGE: Record<NotesAvatarSize, { box: string; glyph: number }> = {
+  tile: { box: 'h-[30px] w-[30px] -bottom-[5px] -right-[5px] border-[3px]', glyph: 14 },
+  header: { box: 'h-5 w-5 -bottom-1 -right-1 border-2', glyph: 10 },
+  small: { box: 'h-5 w-5 -bottom-1 -right-1 border-2', glyph: 10 },
+};
+
+/** The surface behind the avatar: the badge ring takes it, so it cuts out cleanly. */
+export type NotesAvatarSurface = 'panel' | 'panel-2' | 'bg' | 'accent-soft';
+
+const RING: Record<NotesAvatarSurface, string> = {
+  panel: 'border-panel',
+  'panel-2': 'border-panel-2',
+  bg: 'border-bg',
+  'accent-soft': 'border-accent-soft',
+};
+
+/** The accessible name the notes avatar keeps everywhere. */
+export const NOTES_AVATAR_LABEL = 'Personal notes';
+
+/**
+ * The notes avatar: the signed-in user's own photo in the notes rounded
+ * square with an accent notebook badge, or, with no photo (none set, still
+ * loading, or failed), the accent-soft notebook square with no badge. The
+ * photo is laid over the fallback in the same box and shows once loaded, so
+ * nothing moves when it arrives; a failed photo stays on the fallback (never
+ * a broken image, never initials). One component for the tile, the header,
+ * the forward picker and search rows. No motion.
+ */
+export function NotesAvatar(props: {
+  size: NotesAvatarSize;
+  /** The user's own users.avatar_url; null or absent shows the notebook. */
+  src?: string | null;
+  surface?: NotesAvatarSurface;
+}): ReactElement {
+  const src = props.src ?? null;
+  // Keyed by URL: a new photo starts unloaded, a failed one never retries.
+  const [loaded, setLoaded] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  // A cached photo can finish before React wires onLoad: read it once.
+  useEffect(() => {
+    const img = imgRef.current;
+    if (img === null || src === null || !img.complete) return;
+    if (img.naturalWidth > 0) setLoaded(src);
+  }, [src]);
+  return notesAvatarView({
+    size: props.size,
+    src,
+    loaded: src !== null && loaded === src,
+    failed: src !== null && failed === src,
+    surface: props.surface ?? 'panel',
+    imgRef,
+    onLoad: () => setLoaded(src),
+    onError: () => setFailed(src),
+  });
+}
+
+/**
+ * The notes avatar for one photo state. Hook-free, so every state (no photo,
+ * loading, loaded, failed) is unit tested: the photo sits over the notebook
+ * in the same box and shows (with its badge) only once loaded.
+ */
+export function notesAvatarView(input: {
+  size: NotesAvatarSize;
+  src: string | null;
+  loaded: boolean;
+  failed: boolean;
+  surface: NotesAvatarSurface;
+  imgRef?: RefObject<HTMLImageElement>;
+  onLoad?: () => void;
+  onError?: () => void;
+}): ReactElement {
+  const usable = input.src !== null && input.src !== '' && !input.failed;
+  const shown = usable && input.loaded;
+  const box = NOTES_AVATAR_BOX[input.size];
+  const badge = NOTES_BADGE[input.size];
   return (
     <span
-      data-notes-avatar=""
-      className={cn(
-        'flex shrink-0 items-center justify-center bg-accent-soft text-accent',
-        NOTES_AVATAR_BOX[props.size],
-      )}
+      role="img"
+      aria-label={NOTES_AVATAR_LABEL}
+      data-notes-avatar={shown ? 'photo' : 'notebook'}
+      className={cn('relative flex shrink-0', box)}
     >
-      <NotesGlyph size={NOTES_GLYPH_SIZE[props.size]} />
+      <span
+        className={cn(
+          'flex h-full w-full items-center justify-center overflow-hidden bg-accent-soft text-accent',
+          box,
+        )}
+      >
+        {shown ? null : <NotesGlyph size={NOTES_GLYPH_SIZE[input.size]} />}
+        {usable && input.src !== null ? (
+          <img
+            ref={input.imgRef}
+            src={input.src}
+            alt=""
+            onLoad={input.onLoad}
+            onError={input.onError}
+            className={cn(
+              'absolute inset-0 h-full w-full object-cover',
+              box,
+              shown ? 'opacity-100' : 'opacity-0',
+            )}
+          />
+        ) : null}
+      </span>
+      {shown ? (
+        <span
+          aria-hidden="true"
+          data-notes-badge=""
+          className={cn(
+            'absolute flex items-center justify-center rounded-full bg-accent text-accent-fg',
+            badge.box,
+            RING[input.surface],
+          )}
+        >
+          <NotesGlyph size={badge.glyph} />
+        </span>
+      ) : null}
     </span>
   );
 }

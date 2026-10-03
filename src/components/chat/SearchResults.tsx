@@ -100,7 +100,9 @@ const RESULT_ROW = cn(
 
 /** The 48px result avatar: a group's rounded square, a person's circle, the notes notebook. */
 function resultAvatar(channel: ChannelSummary): ReactElement {
-  if (channel.channelType === 'notes') return <NotesAvatar size="row" />;
+  if (channel.channelType === 'notes') {
+    return <NotesAvatar size="small" src={channel.avatarUrl} surface="bg" />;
+  }
   return (
     <span
       className={cn('flex shrink-0', channel.channelType === 'group' && '[&>*]:!rounded-[12px]')}

@@ -767,7 +767,11 @@ export function notesTile(props: {
           !props.selecting && 'hover:bg-panel-2',
         )}
       >
-        <NotesAvatar size="tile" />
+        <NotesAvatar
+          size="tile"
+          src={notes.avatarUrl}
+          surface={props.selected && !props.selecting ? 'panel-2' : 'panel'}
+        />
         <span className="flex min-w-0 flex-1 flex-col gap-1">
           <span className={cn('min-w-0 truncate text-fg', GROUP_NAME_TYPE)}>{notes.title}</span>
           <span className={cn('min-w-0 truncate text-fg-2', GROUP_PREVIEW_TYPE)}>
