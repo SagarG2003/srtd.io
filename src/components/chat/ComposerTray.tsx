@@ -1,15 +1,22 @@
 // The composer's plus button and its tray (replaces the paperclip). The button
 // is a 44x44 circle on the panel; while the tray is open it turns accent and
 // its plus rotates 45deg into an X (rotate only). The tray sits above the
-// composer: a 4-column grid of tiles (Photos, Camera on touch only, File,
-// Post) that slides on translateY and fades, 180ms, no X and no scale. A tap
-// outside, Escape, or picking a tile closes it. Photos / File / Post run the
-// composer's existing attach paths; Camera opens the device camera through
-// the same image check. Tokens only, so light and dark stay at parity.
+// composer: a 4-column grid of tiles (Photos, File, Post, Schedule on touch
+// and laptop alike) that slides on translateY and fades, 180ms, no X and no
+// scale. A tap outside, Escape, or picking a tile closes it. Photos / File /
+// Post run the composer's existing attach paths (the Photos picker still
+// offers Take Photo on phones); Schedule opens the Schedule sheet. Tokens
+// only, so light and dark stay at parity.
 
 import { useEffect, useRef, useState } from 'react';
 import type { ComponentType, ReactElement } from 'react';
-import { IconCamera, IconFile, IconImage, IconPipeline, IconPlus } from '@/components/ui/icons';
+import {
+  IconCalendarClock,
+  IconFile,
+  IconImage,
+  IconPipeline,
+  IconPlus,
+} from '@/components/ui/icons';
 import { cn } from '@/lib/cn';
 import { NO_TOUCH_SELECT, type ChatLayout } from '@/components/chat/chat-type';
 
@@ -20,18 +27,19 @@ type TileIcon = ComponentType<{ size?: number; className?: string }>;
 
 /** One tray tile. */
 export interface TrayTile {
-  id: 'photos' | 'camera' | 'file' | 'post';
+  id: 'photos' | 'file' | 'post' | 'schedule';
   label: string;
   Icon: TileIcon;
 }
 
-/** The tiles for a layout: Camera only on touch (coarse pointer). Pure. */
+/** The tiles: the same four on touch and laptop, Schedule last. Pure. */
 export function trayTiles(layout: ChatLayout): TrayTile[] {
+  void layout;
   return [
     { id: 'photos', label: 'Photos', Icon: IconImage },
-    ...(layout === 'touch' ? [{ id: 'camera' as const, label: 'Camera', Icon: IconCamera }] : []),
     { id: 'file', label: 'File', Icon: IconFile },
     { id: 'post', label: 'Post', Icon: IconPipeline },
+    { id: 'schedule', label: 'Schedule', Icon: IconCalendarClock },
   ];
 }
 

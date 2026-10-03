@@ -50,9 +50,28 @@ import { IconChat } from '@/components/ui/icons';
 import { ChannelList } from '@/components/chat/ChannelList';
 import {
   MessageThread,
+  profileNameOf,
   threadCardIds,
   threadOpeningSkeleton,
 } from '@/components/chat/MessageThread';
+import {
+  ChatScheduleProvider,
+  type ChatSchedule,
+  type ScheduleOutcome,
+} from '@/components/chat/ScheduleContext';
+import { ScheduledListSheet } from '@/components/chat/ScheduledListSheet';
+import {
+  cancelScheduledMessage,
+  mapScheduleError,
+  readScheduledMessages,
+  rowMentions,
+  scheduleMessage,
+  sendScheduledNow,
+  updateScheduledMessage,
+  type ScheduledRow,
+  type ScheduleWriteResult,
+} from '@/lib/chat/scheduled';
+import { newMessageId } from '@/lib/chat/message-id';
 import { SharedCardsProvider } from '@/components/chat/PostCard';
 import { useChatLayout } from '@/components/chat/chat-type';
 import { NewChatSheet } from '@/components/chat/NewChatSheet';
@@ -60,7 +79,12 @@ import { GroupInfoSheet, type GroupInfoTabsWiring } from '@/components/chat/Grou
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import { startDmChannel } from '@/components/chat/chat-actions';
 import { mentionGone, useChannelMembersState } from '@/components/chat/use-channel-members';
-import { knownMentionName, mentionIds, rememberMentionProfiles } from '@/lib/chat/mentions';
+import {
+  knownMentionName,
+  mentionIds,
+  mentionTargets,
+  rememberMentionProfiles,
+} from '@/lib/chat/mentions';
 import { useToast } from '@/components/ui/toast';
 import type { Result } from '@srtdio/rpc';
 
@@ -74,6 +98,8 @@ interface ChatConnectedProps {
 const DESKTOP_QUERY = '(min-width: 768px)';
 
 const NO_MESSAGES: ThreadMessage[] = [];
+
+const NO_SCHEDULED: ScheduledRow[] = [];
 
 /** The toast when opening a DM from a mention fails; the raw error is only logged. */
 export const MENTION_DM_FAILED = "Couldn't open that chat, try again";
@@ -967,6 +993,170 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     return rows;
   }, [thread.messages, profiles, nameReads, workspaceId]);
   const namesReady = namesSettled === selectedChannelId;
+
+  // The viewer's scheduled messages in the open chat (RLS: own rows only).
+  // Read in parallel with the thread's first page; the thread keeps its
+  // skeleton until this read settles too, so the strip paints in the same
+  // frame as the messages and never pops in after. A failed or timed-out read
+  // settles with what was known. Re-read on chat open, every schedule action
+  // and the tab becoming visible.
+  const [scheduled, setScheduled] = useState<{
+    channelId: string | null;
+    rows: ScheduledRow[];
+    settled: boolean;
+  }>({ channelId: null, rows: NO_SCHEDULED, settled: false });
+  const scheduledSeq = useRef(0);
+  const refetchScheduled = useCallback((channelId: string): void => {
+    scheduledSeq.current += 1;
+    const seq = scheduledSeq.current;
+    void withReadTimeout((signal) => readScheduledMessages(supabase, { channelId, signal })).then(
+      (result) => {
+        if (!mountedRef.current || seq !== scheduledSeq.current) return;
+        if (!result.ok) {
+          logger.warn('chat: scheduled read failed', {
+            channel_id: channelId,
+            error: result.error.message,
+          });
+        }
+        setScheduled((prev) => ({
+          channelId,
+          rows: result.ok ? result.data : prev.channelId === channelId ? prev.rows : NO_SCHEDULED,
+          settled: true,
+        }));
+      },
+    );
+  }, []);
+  useEffect(() => {
+    if (selectedChannelId !== null) refetchScheduled(selectedChannelId);
+  }, [selectedChannelId, refetchScheduled]);
+  useEffect(() => {
+    if (selectedChannelId === null) return;
+    const channelId = selectedChannelId;
+    function onVisible(): void {
+      if (document.visibilityState === 'visible') refetchScheduled(channelId);
+    }
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [selectedChannelId, refetchScheduled]);
+  const scheduledSettled = scheduled.settled && scheduled.channelId === selectedChannelId;
+  const scheduledRows = scheduledSettled ? scheduled.rows : NO_SCHEDULED;
+  const threadLoading = thread.loading || !threadCurrent || !namesReady || !scheduledSettled;
+  const [scheduledListOpen, setScheduledListOpen] = useState(false);
+  useEffect(() => setScheduledListOpen(false), [selectedChannelId]);
+  // The last one sent or cancelled: nothing left to show.
+  useEffect(() => {
+    if (scheduledSettled && scheduledRows.length === 0) setScheduledListOpen(false);
+  }, [scheduledSettled, scheduledRows.length]);
+  const selectedChannelType = selected?.channelType ?? undefined;
+
+  /** A schedule write's failure: logged, refetched, and mapped (null: silent). */
+  const scheduleFailure = useCallback(
+    (channelId: string, traceId: string, what: string, message: string): string | null => {
+      logger.warn(`chat: ${what} failed`, {
+        trace_id: traceId,
+        channel_id: channelId,
+        error: message,
+      });
+      return mapScheduleError(message);
+    },
+    [],
+  );
+  const runScheduledWrite = useCallback(
+    async <T,>(
+      channelId: string,
+      what: string,
+      write: (traceId: string) => Promise<ScheduleWriteResult<T>>,
+    ): Promise<{ ok: true; row: T; traceId: string } | { ok: false; copy: string | null }> => {
+      const traceId = generateTraceId();
+      const result = await write(traceId);
+      refetchScheduled(channelId);
+      if (result.ok) return { ok: true, row: result.row, traceId };
+      return { ok: false, copy: scheduleFailure(channelId, traceId, what, result.message) };
+    },
+    [refetchScheduled, scheduleFailure],
+  );
+
+  const scheduleDraft = useCallback<ChatSchedule['schedule']>(
+    async (draft, sendAt): Promise<ScheduleOutcome> => {
+      const channelId = selectedRef.current?.channelId;
+      if (channelId === undefined) return { ok: false, copy: mapScheduleError('no chat') };
+      const result = await runScheduledWrite(channelId, 'schedule', (traceId) =>
+        scheduleMessage({
+          client: supabase,
+          id: newMessageId(),
+          channelId,
+          sendAt,
+          traceId,
+          body: draft.body,
+          mentions: mentionTargets(draft.body, selectedRef.current?.channelType),
+          attachmentAssetIds: [],
+          sharedPostIds: draft.sharedPostIds,
+          sharedBriefIds: draft.sharedBriefIds,
+          replyToMessageId: draft.replyToMessageId,
+        }),
+      );
+      return result.ok ? { ok: true } : { ok: false, copy: result.copy };
+    },
+    [runScheduledWrite],
+  );
+
+  const showScheduleError = useCallback(
+    (copy: string | null): void => {
+      if (copy !== null) toast.show({ title: copy });
+    },
+    [toast],
+  );
+  const addSentRow = thread.addSentRow;
+  const scheduledActions = useMemo(
+    () => ({
+      onSendNow: async (row: ScheduledRow): Promise<void> => {
+        const result = await runScheduledWrite(row.channel_id, 'scheduled send now', (traceId) =>
+          sendScheduledNow({ client: supabase, id: row.id, traceId }),
+        );
+        if (!result.ok) {
+          showScheduleError(result.copy);
+          return;
+        }
+        await addSentRow(result.row, result.traceId);
+      },
+      onSaveBody: async (row: ScheduledRow, body: string): Promise<boolean> => {
+        const result = await runScheduledWrite(row.channel_id, 'scheduled edit', (traceId) =>
+          updateScheduledMessage({
+            client: supabase,
+            id: row.id,
+            sendAt: new Date(row.send_at),
+            body,
+            mentions: mentionTargets(body, selectedChannelType),
+            traceId,
+          }),
+        );
+        if (!result.ok) showScheduleError(result.copy);
+        return result.ok;
+      },
+      onRetime: async (row: ScheduledRow, sendAt: Date): Promise<boolean> => {
+        const result = await runScheduledWrite(row.channel_id, 'scheduled retime', (traceId) =>
+          updateScheduledMessage({
+            client: supabase,
+            id: row.id,
+            sendAt,
+            body: row.body ?? '',
+            mentions: rowMentions(row),
+            traceId,
+          }),
+        );
+        if (!result.ok) showScheduleError(result.copy);
+        return result.ok;
+      },
+      onCancel: async (row: ScheduledRow): Promise<boolean> => {
+        const result = await runScheduledWrite(row.channel_id, 'scheduled cancel', (traceId) =>
+          cancelScheduledMessage({ client: supabase, id: row.id, traceId }),
+        );
+        if (!result.ok) showScheduleError(result.copy);
+        return result.ok;
+      },
+    }),
+    [runScheduledWrite, showScheduleError, addSentRow, selectedChannelType],
+  );
   // Every shared post and brief across the loaded messages: the thread's cards
   // read them in one batch per kind and share the results.
   const cardIds = useMemo(() => threadCardIds(threadMessages), [threadMessages]);
@@ -998,6 +1188,28 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   );
 
   const onBack = closeChannel;
+
+  const chatName = selected !== null ? (shown ?? selected).title : '';
+  const readsLoading = thread.readState.status === 'loading';
+  const scheduleWiring = useMemo<ChatSchedule | null>(
+    () =>
+      selectedChannelId === null
+        ? null
+        : {
+            channelId: selectedChannelId,
+            chatName,
+            rows: scheduledRows,
+            // The strip paints with the thread's first page, never after it.
+            stripVisible: !threadLoading && !readsLoading,
+            schedule: scheduleDraft,
+            openList: () => setScheduledListOpen(true),
+          },
+    [selectedChannelId, chatName, scheduledRows, threadLoading, readsLoading, scheduleDraft],
+  );
+  const scheduleNameOf = useMemo(
+    () => profileNameOf(profiles, workspaceId),
+    [profiles, workspaceId],
+  );
 
   const opening = openingChannelId({
     selectedChannelId: selected?.channelId ?? null,
@@ -1045,85 +1257,95 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               briefIds={cardIds.briefIds}
               status={status}
             >
-              <MessageThread
-                key={selected.channelId}
-                title={(shown ?? selected).title}
-                channelId={selected.channelId}
-                avatarUrl={(shown ?? selected).avatarUrl}
-                {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
-                {...(!isGroup ? { role: (shown ?? selected).role ?? null } : {})}
-                isGroup={isGroup}
-                profiles={profiles}
-                messages={threadCurrent ? threadMessages : NO_MESSAGES}
-                loading={thread.loading || !threadCurrent || !namesReady}
-                loadFailed={threadCurrent && thread.loadFailed}
-                onRetryLoad={thread.retryLoad}
-                loadingOlder={thread.loadingOlder}
-                hasMore={thread.hasMore}
-                onLoadOlder={thread.loadOlder}
-                onNewestVisible={thread.markNewestVisible}
-                timeZone={timeZone}
-                canSend
-                onSend={thread.send}
-                onRetry={thread.retry}
-                typingUserIds={typingUserIds}
-                onTyping={typing.notifyTyping}
-                onToggleReaction={thread.toggleReaction}
-                marks={marks.marks}
-                marksLoaded={marks.loaded}
-                marksFailed={marks.failed}
-                markedMessages={marks.markedMessages}
-                onSetMark={marks.setMark}
-                onResolveMark={marks.resolve}
-                onReopenMark={marks.reopen}
-                currentUserId={currentUserId}
-                onDeleteMessages={thread.deleteMessages}
-                onEditMessage={thread.editMessage}
-                forwardChannels={roster}
-                onForward={thread.forward}
-                onEnsureLoaded={thread.ensureLoaded}
-                mentionMembers={mentionMembers}
-                mentionGone={mentionGone(membersLoad, currentUserId, workspaceId)}
-                mentions={{
-                  peerUserId: selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
-                  onOpen: onOpenMention,
-                }}
-                initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
-                onInitialJumpTaken={() => setPendingJump(null)}
-                showTicks={selected.channelType === 'dm'}
-                {...(threadCurrent ? { readState: thread.readState } : {})}
-                peerUserId={selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null}
-                unreadAtOpen={
-                  unreadAtOpen.channelId === selected.channelId ? unreadAtOpen.unread : 0
-                }
-                {...(selected.peerUserId != null ? { presence } : {})}
-                {...(isDesktop ? {} : { onBack })}
-                {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
-                {...(infoGroupId !== null
-                  ? {
-                      renderGroupInfo: (tabs: GroupInfoTabsWiring) => (
-                        <GroupInfoSheet
-                          open={groupInfoOpen}
-                          onClose={() => setGroupInfoOpen(false)}
-                          workspaceId={workspaceId}
-                          workspaceName={workspace?.name}
-                          groupId={infoGroupId}
-                          groupName={(shown ?? selected).title}
-                          avatarUrl={(shown ?? selected).avatarUrl}
-                          createdBy={(shown ?? selected).createdBy ?? null}
-                          viewerRole={
-                            mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null
-                          }
-                          currentUserId={currentUserId}
-                          onChanged={onGroupChanged}
-                          signalRoster={(change) => signalRoster(shown ?? selected, change)}
-                          membersVersion={rosterVersion}
-                          onLeft={onGroupLeft}
-                          tabs={tabs}
-                        />
-                      ),
-                    }
-                  : {})}
+              <ChatScheduleProvider value={scheduleWiring}>
+                <MessageThread
+                  key={selected.channelId}
+                  title={(shown ?? selected).title}
+                  channelId={selected.channelId}
+                  avatarUrl={(shown ?? selected).avatarUrl}
+                  {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
+                  {...(!isGroup ? { role: (shown ?? selected).role ?? null } : {})}
+                  isGroup={isGroup}
+                  profiles={profiles}
+                  messages={threadCurrent ? threadMessages : NO_MESSAGES}
+                  loading={threadLoading}
+                  loadFailed={threadCurrent && thread.loadFailed}
+                  onRetryLoad={thread.retryLoad}
+                  loadingOlder={thread.loadingOlder}
+                  hasMore={thread.hasMore}
+                  onLoadOlder={thread.loadOlder}
+                  onNewestVisible={thread.markNewestVisible}
+                  timeZone={timeZone}
+                  canSend
+                  onSend={thread.send}
+                  onRetry={thread.retry}
+                  typingUserIds={typingUserIds}
+                  onTyping={typing.notifyTyping}
+                  onToggleReaction={thread.toggleReaction}
+                  marks={marks.marks}
+                  marksLoaded={marks.loaded}
+                  marksFailed={marks.failed}
+                  markedMessages={marks.markedMessages}
+                  onSetMark={marks.setMark}
+                  onResolveMark={marks.resolve}
+                  onReopenMark={marks.reopen}
+                  currentUserId={currentUserId}
+                  onDeleteMessages={thread.deleteMessages}
+                  onEditMessage={thread.editMessage}
+                  forwardChannels={roster}
+                  onForward={thread.forward}
+                  onEnsureLoaded={thread.ensureLoaded}
+                  mentionMembers={mentionMembers}
+                  mentionGone={mentionGone(membersLoad, currentUserId, workspaceId)}
+                  mentions={{
+                    peerUserId:
+                      selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
+                    onOpen: onOpenMention,
+                  }}
+                  initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
+                  onInitialJumpTaken={() => setPendingJump(null)}
+                  showTicks={selected.channelType === 'dm'}
+                  {...(threadCurrent ? { readState: thread.readState } : {})}
+                  peerUserId={selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null}
+                  unreadAtOpen={
+                    unreadAtOpen.channelId === selected.channelId ? unreadAtOpen.unread : 0
+                  }
+                  {...(selected.peerUserId != null ? { presence } : {})}
+                  {...(isDesktop ? {} : { onBack })}
+                  {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
+                  {...(infoGroupId !== null
+                    ? {
+                        renderGroupInfo: (tabs: GroupInfoTabsWiring) => (
+                          <GroupInfoSheet
+                            open={groupInfoOpen}
+                            onClose={() => setGroupInfoOpen(false)}
+                            workspaceId={workspaceId}
+                            workspaceName={workspace?.name}
+                            groupId={infoGroupId}
+                            groupName={(shown ?? selected).title}
+                            avatarUrl={(shown ?? selected).avatarUrl}
+                            createdBy={(shown ?? selected).createdBy ?? null}
+                            viewerRole={
+                              mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null
+                            }
+                            currentUserId={currentUserId}
+                            onChanged={onGroupChanged}
+                            signalRoster={(change) => signalRoster(shown ?? selected, change)}
+                            membersVersion={rosterVersion}
+                            onLeft={onGroupLeft}
+                            tabs={tabs}
+                          />
+                        ),
+                      }
+                    : {})}
+                />
+              </ChatScheduleProvider>
+              <ScheduledListSheet
+                open={scheduledListOpen}
+                onClose={() => setScheduledListOpen(false)}
+                rows={scheduledRows}
+                nameOf={scheduleNameOf}
+                {...scheduledActions}
               />
             </SharedCardsProvider>
           ) : (

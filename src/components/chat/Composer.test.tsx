@@ -539,8 +539,9 @@ describe('D7/F10: only the textarea and search inputs stay selectable', () => {
     );
     expect(textarea).not.toContain('select-none');
     expect(textarea).not.toContain('NO_TOUCH_SELECT');
-    // The no-select class: its import plus the About and reply bars, nothing else.
-    expect(source.split('NO_TOUCH_SELECT').length - 1).toBe(3);
+    // The no-select class: its import, the About and reply bars, and the Send
+    // button while a hold schedules (no iOS selection or callout), nothing else.
+    expect(source.split('NO_TOUCH_SELECT').length - 1).toBe(4);
     expect(source).not.toContain('select-none');
     expect(source).not.toContain('removeAllRanges');
   });

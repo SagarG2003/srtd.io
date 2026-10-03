@@ -22,11 +22,12 @@ import { chatLayout } from '@/components/chat/chat-type';
 const EM_DASH = String.fromCharCode(0x2014);
 
 describe('T8 tray and emoji button by pointer', () => {
-  it('Camera is hidden on a fine pointer (laptop) and shown on touch', () => {
+  it('Schedule replaces Camera and shows last on touch and laptop', () => {
     const laptop = chatLayout({ finePointer: true, widthPx: 1280 });
     const touch = chatLayout({ finePointer: false, widthPx: 390 });
-    expect(trayTiles(laptop).map((t) => t.id)).toEqual(['photos', 'file', 'post']);
-    expect(trayTiles(touch).map((t) => t.id)).toEqual(['photos', 'camera', 'file', 'post']);
+    expect(trayTiles(laptop).map((t) => t.id)).toEqual(['photos', 'file', 'post', 'schedule']);
+    expect(trayTiles(touch).map((t) => t.id)).toEqual(['photos', 'file', 'post', 'schedule']);
+    expect(trayTiles(touch).map((t) => t.label)).toEqual(['Photos', 'File', 'Post', 'Schedule']);
   });
 
   it('the emoji button is hidden on a coarse pointer (touch, any width)', () => {

@@ -6,6 +6,8 @@ import { IconButton } from '@/components/ui/IconButton';
 import { Textarea } from '@/components/ui/Textarea';
 import {
   IconBriefs,
+  IconCalendarClock,
+  IconChevronDown,
   IconFile,
   IconMic,
   IconPipeline,
@@ -14,6 +16,11 @@ import {
   IconX,
 } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
+import { useLongPress } from '@/components/ui/useLongPress';
+import { useChatSchedule, type ScheduleOutcome } from '@/components/chat/ScheduleContext';
+import { ScheduleMenu, ScheduleSheet, schedulePreview } from '@/components/chat/ScheduleSheet';
+import { ScheduledStrip, ScheduleModeStrip } from '@/components/chat/ScheduledStrip';
+import { formatSendLabel, inSentence, SCHEDULE_FAILED_COPY } from '@/lib/chat/scheduled';
 import {
   MIN_VOICE_NOTE_MS,
   useAudioRecorder,
@@ -757,6 +764,54 @@ export function composerCanSend(input: {
 }
 
 /**
+ * Whether the draft may be scheduled from the hold, the chevron or the tray
+ * with its preview: it can be sent and holds no picked file (those upload only
+ * after Send, so a scheduled message cannot carry them yet). Never while
+ * editing. Pure.
+ */
+export function canScheduleDraft(input: {
+  scheduling: boolean;
+  editing: boolean;
+  canSend: boolean;
+  fileCount: number;
+}): boolean {
+  return input.scheduling && !input.editing && input.canSend && input.fileCount === 0;
+}
+
+/** The toast after a draft was scheduled: "Scheduled for tomorrow 9:00 AM". Pure. */
+export function scheduledToast(sendAt: Date, now: Date): string {
+  return `Scheduled for ${inSentence(formatSendLabel(sendAt, now))}`;
+}
+
+/**
+ * Swallow the click that trails a long-press (it lands on the Send button, or
+ * on the sheet's backdrop that opened under the finger): neither may submit or
+ * close anything. Armed until shortly after the finger lifts.
+ */
+function swallowTrailingClick(): void {
+  if (typeof window === 'undefined') return;
+  let fallback: ReturnType<typeof setTimeout> | undefined;
+  const swallow = (event: Event): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    done();
+  };
+  const afterUp = (): void => {
+    window.removeEventListener('pointerup', afterUp, true);
+    if (fallback !== undefined) clearTimeout(fallback);
+    fallback = setTimeout(done, 400);
+  };
+  function done(): void {
+    window.removeEventListener('click', swallow, true);
+    window.removeEventListener('pointerup', afterUp, true);
+    if (fallback !== undefined) clearTimeout(fallback);
+  }
+  window.addEventListener('click', swallow, true);
+  window.addEventListener('pointerup', afterUp, true);
+  fallback = setTimeout(done, 10_000);
+}
+
+/**
  * Composer with text + an extensible attach menu (Photo / File). Files are
  * pre-checked client-side (a rejected one is refused with a toast) and shown as
  * removable chips; nothing uploads here. Send hands the picked files over as
@@ -808,19 +863,38 @@ export function Composer(props: ComposerProps): ReactElement {
   const formRef = useRef<HTMLFormElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const cameraInputRef = useRef<HTMLInputElement>(null);
+
+  // Scheduling: the open chat's wiring (absent in the thread view), schedule
+  // mode's send time, which surface is open and what a pick does there.
+  const schedule = useChatSchedule(channelId);
+  const [scheduleAt, setScheduleAt] = useState<Date | null>(null);
+  const [scheduleOpen, setScheduleOpen] = useState<{
+    purpose: 'draft' | 'mode';
+    preview: string | null;
+  } | null>(null);
+  const [scheduleBusy, setScheduleBusy] = useState(false);
+  const chevronRef = useRef<HTMLSpanElement>(null);
 
   const canAttach = props.uploadFile !== undefined && !props.disabled && editing === undefined;
   const canSend =
     editing !== undefined
       ? !props.disabled && !editBusy
       : composerCanSend({
-          disabled: props.disabled || resolvingLinks,
+          disabled: props.disabled || resolvingLinks || scheduleBusy,
           text,
           fileCount: pending.length,
           sharedPostCount: sharedPosts.length,
           sharedBriefCount: sharedBriefs.length,
         });
+  const schedulable = canScheduleDraft({
+    scheduling: schedule !== null,
+    editing: editing !== undefined,
+    canSend,
+    fileCount: pending.length,
+  });
+  const scheduling = scheduleAt !== null && schedule !== null && editing === undefined;
+  const schedulableRef = useRef(schedulable);
+  schedulableRef.current = schedulable;
 
   // Write the draft back as it changes (not while editing: the map keeps the
   // draft typed before the edit, which is what leaving the edit restores).
@@ -1015,6 +1089,10 @@ export function Composer(props: ComposerProps): ReactElement {
       submitEdit(editing);
       return;
     }
+    if (scheduling) {
+      if (schedulable) void scheduleDraft(scheduleAt);
+      return;
+    }
     const body = serializeMentions(text, picks);
     const draft: LinkCardDraft = {
       text: body,
@@ -1069,6 +1147,88 @@ export function Composer(props: ComposerProps): ReactElement {
     setSharedBriefs([]);
     props.onCancelReply?.();
   }
+
+  /** Open the Schedule sheet (phone) or menu (laptop): a draft schedules at once on a pick. */
+  function openSchedule(): void {
+    if (schedule === null) return;
+    setScheduleOpen(
+      schedulableRef.current
+        ? { purpose: 'draft', preview: schedulePreview(schedule.chatName, text) }
+        : { purpose: 'mode', preview: null },
+    );
+  }
+
+  function pickSchedule(sendAt: Date): void {
+    const purpose = scheduleOpen?.purpose;
+    setScheduleOpen(null);
+    if (purpose === 'draft' && schedulableRef.current) void scheduleDraft(sendAt);
+    else setScheduleAt(sendAt);
+  }
+
+  // Schedule the draft with the same parts the normal send carries (pasted
+  // links resolved to cards the same way). Success clears the draft, the reply
+  // and schedule mode; a failure keeps everything and says why.
+  async function scheduleDraft(sendAt: Date): Promise<void> {
+    if (schedule === null || scheduleBusy) return;
+    const body = serializeMentions(text, picks);
+    const base: LinkCardDraft = {
+      text: body,
+      sharedPostIds: sharedPosts.map((post) => post.id),
+      sharedBriefIds: sharedBriefs.map((brief) => brief.id),
+    };
+    setScheduleBusy(true);
+    const origin = currentOrigin();
+    const draft =
+      workspaceId === null || !hasLinkCards(body, workspaceKey, origin)
+        ? base
+        : await withLinkCards(
+            base,
+            { workspaceKey, origin },
+            {
+              postIds: (numbers) => readPostIdsByNumbers(supabase, { workspaceId, numbers }),
+              briefIds: (numbers) => readBriefIdsByNumbers(supabase, { workspaceId, numbers }),
+            },
+          ).catch(() => base);
+    const outcome: ScheduleOutcome = await schedule
+      .schedule(
+        {
+          body: draft.text,
+          sharedPostIds: draft.sharedPostIds,
+          sharedBriefIds: draft.sharedBriefIds,
+          replyToMessageId: props.reply?.quote.id ?? null,
+        },
+        sendAt,
+      )
+      .catch((error: unknown) => {
+        logger.error('chat composer: schedule threw', { error: String(error) });
+        return { ok: false as const, copy: SCHEDULE_FAILED_COPY };
+      });
+    setScheduleBusy(false);
+    if (!outcome.ok) {
+      if (outcome.copy !== null) toast.show({ title: outcome.copy });
+      return;
+    }
+    if (channelId !== undefined) clearDraft(channelId);
+    setText('');
+    setPicks([]);
+    setCaret(0);
+    setSharedPosts([]);
+    setSharedBriefs([]);
+    setScheduleAt(null);
+    props.onCancelReply?.();
+    toast.show({ title: scheduledToast(sendAt, new Date()) });
+  }
+
+  // Phone: a hold on Send opens the sheet; a tap still sends. The trailing
+  // click is swallowed so the hold never also submits.
+  const sendHold = useLongPress(() => {
+    sendHold.clearClickSuppression();
+    if (!schedulableRef.current) return;
+    swallowTrailingClick();
+    openSchedule();
+  });
+  const holdToSchedule = layout === 'touch' && schedulable;
+  const showChevron = layout === 'laptop' && schedulable;
 
   async function start(): Promise<void> {
     const ok = await recorder.start();
@@ -1204,265 +1364,329 @@ export function Composer(props: ComposerProps): ReactElement {
     about: props.about !== undefined,
   });
 
-  const showMic = shouldShowMic({
-    hasUpload: props.uploadFile !== undefined && editing === undefined,
-    disabled: props.disabled,
-    text,
-    attachmentCount: pending.length,
-    sharedPostCount: sharedPosts.length + sharedBriefs.length,
-    recording: recorder.recording,
-    voiceBusy,
-  });
+  const showMic =
+    !scheduling &&
+    shouldShowMic({
+      hasUpload: props.uploadFile !== undefined && editing === undefined,
+      disabled: props.disabled,
+      text,
+      attachmentCount: pending.length,
+      sharedPostCount: sharedPosts.length + sharedBriefs.length,
+      recording: recorder.recording,
+      voiceBusy,
+    });
+
+  const scheduleSurface =
+    scheduleOpen !== null && layout === 'laptop' ? (
+      <ScheduleMenu
+        open
+        onClose={() => setScheduleOpen(null)}
+        preview={scheduleOpen.preview}
+        onPick={pickSchedule}
+        anchorRef={chevronRef}
+      />
+    ) : schedule !== null && layout === 'touch' ? (
+      <ScheduleSheet
+        open={scheduleOpen !== null}
+        onClose={() => setScheduleOpen(null)}
+        preview={scheduleOpen?.preview ?? null}
+        onPick={pickSchedule}
+      />
+    ) : null;
 
   return (
-    <form
-      ref={formRef}
-      onSubmit={submit}
-      className="relative flex flex-col gap-2 border-t border-border bg-panel px-3 py-2.5"
-    >
-      {mentionRows.length > 0 ? (
-        <div data-mention-anchor="" className="absolute inset-x-3 bottom-full z-20 mb-2">
-          <MentionPicker members={mentionRows} active={activeRow} onPick={pickMention} />
-        </div>
+    <>
+      {schedule !== null && schedule.stripVisible && schedule.rows.length > 0 ? (
+        <ScheduledStrip rows={schedule.rows} onOpen={schedule.openList} />
       ) : null}
-
-      {hashQuery !== null && mentionRows.length === 0 ? (
-        <div data-hash-picker="" className="absolute inset-x-3 bottom-full z-20 mb-2">
-          <PostPicker
-            inline
-            open
-            query={hashQuery}
-            onClose={() => setHashDismissed(true)}
-            selected={[]}
-            onToggle={pickHashPost}
-            selectedBriefs={[]}
-            onToggleBrief={() => undefined}
-            sharedPostIds={props.sharedPostIds}
-          />
-        </div>
-      ) : null}
-
-      {bars.editing && editing !== undefined ? (
-        <EditingBar
-          text={resolveMentionText(editing.initialText, nameOf)}
-          onCancel={() => props.onCancelEdit?.()}
-        />
-      ) : null}
-
-      {bars.about && props.about !== undefined ? (
-        <AboutBar post={props.about} refLabel={aboutRef} onCancel={() => props.onCancelAbout?.()} />
-      ) : null}
-
-      {bars.reply && props.reply != null ? (
-        <ReplyBar
-          reply={{
-            ...props.reply,
-            quote: {
-              ...props.reply.quote,
-              preview: resolveMentionText(props.reply.quote.preview, nameOf),
-            },
-          }}
-          viewerUserId={props.viewerUserId}
-          onCancel={() => props.onCancelReply?.()}
-          media={props.replyMedia}
-          thumbSource={props.replyThumbSource}
-        />
-      ) : null}
-
-      {editing === undefined &&
-      (pending.length > 0 || sharedPosts.length > 0 || sharedBriefs.length > 0) ? (
-        <ul className="flex flex-wrap gap-2">
-          {pending.map((item) => (
-            <PendingChip
-              key={item.id}
-              thumb={
-                item.previewUrl !== null ? (
-                  <img src={item.previewUrl} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  <IconFile size={16} />
-                )
-              }
-              title={item.file.name}
-              meta={fileExtension(item.file.name)}
-              onRemove={() => removePending(item.id)}
-            />
-          ))}
-          {sharedPosts.map((post) => (
-            <PendingChip
-              key={post.id}
-              thumb={<IconPipeline size={16} />}
-              title={post.title}
-              meta={stageLabel(post.stage)}
-              onRemove={() => toggleSharedPost(post)}
-            />
-          ))}
-          {sharedBriefs.map((brief) => (
-            <PendingChip
-              key={brief.id}
-              thumb={<IconBriefs size={16} />}
-              title={brief.title}
-              meta={briefStatusLabel(brief.status)}
-              onRemove={() => toggleSharedBrief(brief)}
-            />
-          ))}
-        </ul>
-      ) : null}
-
-      <div className="flex items-end gap-2">
-        {recorder.recording ? (
-          <>
-            <IconButton
-              label="Cancel recording"
-              className="shrink-0 text-bad hover:bg-bad-soft hover:text-bad"
-              onClick={cancel}
-            >
-              <IconTrash size={20} />
-            </IconButton>
-            <div className="flex h-11 flex-1 items-center gap-2 rounded-md border border-border bg-panel-2 px-3">
-              <span
-                aria-hidden="true"
-                className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-bad"
-              />
-              <span className="text-sm text-fg-2">Recording</span>
-              <span className="ml-auto font-mono text-xs tabular-nums text-fg-2">
-                {formatMmSs(recorder.seconds)}
-              </span>
-            </div>
-            <Button
-              type="button"
-              variant="primary"
-              size="lg"
-              aria-label="Stop and send voice note"
-              className="w-11 shrink-0 px-0"
-              onClick={() => void stopSend()}
-            >
-              <IconSend size={18} />
-            </Button>
-          </>
-        ) : voiceBusy ? (
-          <div className="flex h-11 flex-1 items-center gap-2 px-1">
-            <span
-              aria-hidden="true"
-              className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-border border-t-accent"
-            />
-            <span className="text-sm text-fg-2">Sending voice note…</span>
+      <form
+        ref={formRef}
+        onSubmit={submit}
+        className="relative flex flex-col gap-2 border-t border-border bg-panel px-3 py-2.5"
+      >
+        {mentionRows.length > 0 ? (
+          <div data-mention-anchor="" className="absolute inset-x-3 bottom-full z-20 mb-2">
+            <MentionPicker members={mentionRows} active={activeRow} onPick={pickMention} />
           </div>
-        ) : (
-          <>
-            {canAttach ? (
-              <ComposerTray
-                layout={layout}
-                onPick={(id) => {
-                  if (id === 'photos') photoInputRef.current?.click();
-                  else if (id === 'camera') cameraInputRef.current?.click();
-                  else if (id === 'file') fileInputRef.current?.click();
-                  else setPickerOpen(true);
-                }}
-              />
-            ) : null}
+        ) : null}
 
-            <Textarea
-              ref={textareaRef}
-              value={held ? resolveMentionText(text, nameOf) : text}
-              readOnly={held}
-              onChange={(event) => {
-                setText(event.target.value);
-                setMentionActive(0);
-                trackCaret(event);
-                props.onTyping?.();
-              }}
-              onSelect={trackCaret}
-              onKeyDown={handleKeyDown}
-              placeholder={
-                props.placeholder !== undefined && editing === undefined
-                  ? props.placeholder
-                  : composerPlaceholder(aboutRef, props.reply != null, editing !== undefined)
-              }
-              rows={1}
-              compact
-              className={sized(COMPOSER_INPUT_TYPE, layout)}
+        {hashQuery !== null && mentionRows.length === 0 ? (
+          <div data-hash-picker="" className="absolute inset-x-3 bottom-full z-20 mb-2">
+            <PostPicker
+              inline
+              open
+              query={hashQuery}
+              onClose={() => setHashDismissed(true)}
+              selected={[]}
+              onToggle={pickHashPost}
+              selectedBriefs={[]}
+              onToggleBrief={() => undefined}
+              sharedPostIds={props.sharedPostIds}
             />
-            {showsEmojiButton(layout) && !held ? <ComposerEmoji onPick={insertEmoji} /> : null}
-            {showMic ? (
+          </div>
+        ) : null}
+
+        {bars.editing && editing !== undefined ? (
+          <EditingBar
+            text={resolveMentionText(editing.initialText, nameOf)}
+            onCancel={() => props.onCancelEdit?.()}
+          />
+        ) : null}
+
+        {bars.about && props.about !== undefined ? (
+          <AboutBar
+            post={props.about}
+            refLabel={aboutRef}
+            onCancel={() => props.onCancelAbout?.()}
+          />
+        ) : null}
+
+        {bars.reply && props.reply != null ? (
+          <ReplyBar
+            reply={{
+              ...props.reply,
+              quote: {
+                ...props.reply.quote,
+                preview: resolveMentionText(props.reply.quote.preview, nameOf),
+              },
+            }}
+            viewerUserId={props.viewerUserId}
+            onCancel={() => props.onCancelReply?.()}
+            media={props.replyMedia}
+            thumbSource={props.replyThumbSource}
+          />
+        ) : null}
+
+        {editing === undefined &&
+        (pending.length > 0 || sharedPosts.length > 0 || sharedBriefs.length > 0) ? (
+          <ul className="flex flex-wrap gap-2">
+            {pending.map((item) => (
+              <PendingChip
+                key={item.id}
+                thumb={
+                  item.previewUrl !== null ? (
+                    <img src={item.previewUrl} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <IconFile size={16} />
+                  )
+                }
+                title={item.file.name}
+                meta={fileExtension(item.file.name)}
+                onRemove={() => removePending(item.id)}
+              />
+            ))}
+            {sharedPosts.map((post) => (
+              <PendingChip
+                key={post.id}
+                thumb={<IconPipeline size={16} />}
+                title={post.title}
+                meta={stageLabel(post.stage)}
+                onRemove={() => toggleSharedPost(post)}
+              />
+            ))}
+            {sharedBriefs.map((brief) => (
+              <PendingChip
+                key={brief.id}
+                thumb={<IconBriefs size={16} />}
+                title={brief.title}
+                meta={briefStatusLabel(brief.status)}
+                onRemove={() => toggleSharedBrief(brief)}
+              />
+            ))}
+          </ul>
+        ) : null}
+
+        {scheduling ? (
+          <ScheduleModeStrip
+            label={inSentence(formatSendLabel(scheduleAt, new Date()))}
+            onStop={() => setScheduleAt(null)}
+          />
+        ) : null}
+
+        <div className="flex items-end gap-2">
+          {recorder.recording ? (
+            <>
+              <IconButton
+                label="Cancel recording"
+                className="shrink-0 text-bad hover:bg-bad-soft hover:text-bad"
+                onClick={cancel}
+              >
+                <IconTrash size={20} />
+              </IconButton>
+              <div className="flex h-11 flex-1 items-center gap-2 rounded-md border border-border bg-panel-2 px-3">
+                <span
+                  aria-hidden="true"
+                  className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-bad"
+                />
+                <span className="text-sm text-fg-2">Recording</span>
+                <span className="ml-auto font-mono text-xs tabular-nums text-fg-2">
+                  {formatMmSs(recorder.seconds)}
+                </span>
+              </div>
               <Button
                 type="button"
                 variant="primary"
                 size="lg"
-                aria-label="Record voice note"
+                aria-label="Stop and send voice note"
                 className="w-11 shrink-0 px-0"
-                onClick={() => void start()}
+                onClick={() => void stopSend()}
               >
-                <IconMic size={18} />
+                <IconSend size={18} />
               </Button>
-            ) : (
-              <Button
-                type="submit"
-                variant="primary"
-                size="lg"
-                aria-label={editing !== undefined ? 'Save edit' : 'Send'}
-                aria-busy={editBusy || undefined}
-                className="w-11 shrink-0 px-0"
-                disabled={!canSend}
-              >
-                {editBusy ? (
-                  <span
-                    aria-hidden="true"
-                    data-edit-spinner=""
-                    className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"
-                  />
-                ) : (
-                  <IconSend size={18} />
-                )}
-              </Button>
-            )}
-          </>
-        )}
-      </div>
+            </>
+          ) : voiceBusy ? (
+            <div className="flex h-11 flex-1 items-center gap-2 px-1">
+              <span
+                aria-hidden="true"
+                className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-border border-t-accent"
+              />
+              <span className="text-sm text-fg-2">Sending voice note…</span>
+            </div>
+          ) : (
+            <>
+              {canAttach ? (
+                <ComposerTray
+                  layout={layout}
+                  onPick={(id) => {
+                    if (id === 'photos') photoInputRef.current?.click();
+                    else if (id === 'file') fileInputRef.current?.click();
+                    else if (id === 'schedule') openSchedule();
+                    else setPickerOpen(true);
+                  }}
+                />
+              ) : null}
 
-      <input
-        ref={photoInputRef}
-        type="file"
-        multiple
-        accept={menuItems.find((item) => item.id === 'photo')?.accept}
-        className="sr-only"
-        onChange={(event) => {
-          addFiles(event.target.files, true);
-          event.target.value = '';
-        }}
-      />
-      <input
-        ref={cameraInputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        className="sr-only"
-        onChange={(event) => {
-          addFiles(event.target.files, true);
-          event.target.value = '';
-        }}
-      />
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        accept={menuItems.find((item) => item.id === 'file')?.accept}
-        className="sr-only"
-        onChange={(event) => {
-          addFiles(event.target.files, false);
-          event.target.value = '';
-        }}
-      />
+              <Textarea
+                ref={textareaRef}
+                value={held ? resolveMentionText(text, nameOf) : text}
+                readOnly={held}
+                onChange={(event) => {
+                  setText(event.target.value);
+                  setMentionActive(0);
+                  trackCaret(event);
+                  props.onTyping?.();
+                }}
+                onSelect={trackCaret}
+                onKeyDown={handleKeyDown}
+                placeholder={
+                  props.placeholder !== undefined && editing === undefined
+                    ? props.placeholder
+                    : composerPlaceholder(aboutRef, props.reply != null, editing !== undefined)
+                }
+                rows={1}
+                compact
+                className={sized(COMPOSER_INPUT_TYPE, layout)}
+              />
+              {showsEmojiButton(layout) && !held ? <ComposerEmoji onPick={insertEmoji} /> : null}
+              {showMic ? (
+                <Button
+                  type="button"
+                  variant="primary"
+                  size="lg"
+                  aria-label="Record voice note"
+                  className="w-11 shrink-0 px-0"
+                  onClick={() => void start()}
+                >
+                  <IconMic size={18} />
+                </Button>
+              ) : (
+                <div className="flex shrink-0">
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    size="lg"
+                    aria-label={
+                      editing !== undefined ? 'Save edit' : scheduling ? 'Schedule message' : 'Send'
+                    }
+                    aria-busy={editBusy || scheduleBusy || undefined}
+                    className={cn(
+                      'w-11 shrink-0 px-0',
+                      showChevron && 'rounded-r-none',
+                      holdToSchedule && NO_TOUCH_SELECT,
+                    )}
+                    disabled={!canSend || (scheduling && !schedulable)}
+                    {...(holdToSchedule ? sendHold.handlers : {})}
+                    onClick={(event) => {
+                      if (sendHold.consumeClickSuppression()) event.preventDefault();
+                    }}
+                    onContextMenu={holdToSchedule ? (event) => event.preventDefault() : undefined}
+                  >
+                    {editBusy ? (
+                      <span
+                        aria-hidden="true"
+                        data-edit-spinner=""
+                        className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"
+                      />
+                    ) : scheduling ? (
+                      <IconCalendarClock size={18} />
+                    ) : (
+                      <IconSend size={18} />
+                    )}
+                  </Button>
+                  {showChevron ? (
+                    <>
+                      <span aria-hidden="true" className="w-px shrink-0 self-stretch bg-panel" />
+                      <span ref={chevronRef} className="flex">
+                        <Button
+                          type="button"
+                          variant="primary"
+                          size="lg"
+                          aria-label="Schedule options"
+                          aria-haspopup="dialog"
+                          aria-expanded={scheduleOpen !== null}
+                          data-schedule-chevron=""
+                          className="w-11 shrink-0 rounded-l-none px-0"
+                          disabled={scheduleBusy}
+                          onClick={() =>
+                            scheduleOpen !== null ? setScheduleOpen(null) : openSchedule()
+                          }
+                        >
+                          <IconChevronDown size={16} />
+                        </Button>
+                      </span>
+                    </>
+                  ) : null}
+                </div>
+              )}
+            </>
+          )}
+        </div>
 
-      <PostPicker
-        open={pickerOpen}
-        onClose={() => setPickerOpen(false)}
-        selected={sharedPosts}
-        onToggle={toggleSharedPost}
-        selectedBriefs={sharedBriefs}
-        onToggleBrief={toggleSharedBrief}
-        sharedPostIds={props.sharedPostIds}
-      />
-    </form>
+        <input
+          ref={photoInputRef}
+          type="file"
+          multiple
+          accept={menuItems.find((item) => item.id === 'photo')?.accept}
+          className="sr-only"
+          onChange={(event) => {
+            addFiles(event.target.files, true);
+            event.target.value = '';
+          }}
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept={menuItems.find((item) => item.id === 'file')?.accept}
+          className="sr-only"
+          onChange={(event) => {
+            addFiles(event.target.files, false);
+            event.target.value = '';
+          }}
+        />
+
+        <PostPicker
+          open={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          selected={sharedPosts}
+          onToggle={toggleSharedPost}
+          selectedBriefs={sharedBriefs}
+          onToggleBrief={toggleSharedBrief}
+          sharedPostIds={props.sharedPostIds}
+        />
+        {scheduleSurface}
+      </form>
+    </>
   );
 }
 

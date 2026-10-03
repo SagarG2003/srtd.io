@@ -189,6 +189,67 @@ const RPC: Record<string, RpcHandler> = {
     rows.push(row);
     return row;
   },
+  // Scheduled sends: the four procs over the chat_scheduled_messages fixture.
+  chat_message_schedule: (args, tables) => {
+    const rows = (tables.chat_scheduled_messages ??= []);
+    const now = new Date().toISOString();
+    const row: Row = {
+      id: args.p_id,
+      channel_id: args.p_channel_id,
+      workspace_id: WORKSPACE_ID,
+      sender_user_id: ME,
+      body: typeof args.p_body === 'string' ? args.p_body : null,
+      mentions: Array.isArray(args.p_mentions) ? args.p_mentions : null,
+      attachment_asset_ids: null,
+      attachment_meta: null,
+      shared_post_ids: Array.isArray(args.p_shared_post_ids) ? args.p_shared_post_ids : null,
+      shared_brief_ids: Array.isArray(args.p_shared_brief_ids) ? args.p_shared_brief_ids : null,
+      reply_to_message_id:
+        typeof args.p_reply_to_message_id === 'string' ? args.p_reply_to_message_id : null,
+      send_at: args.p_send_at,
+      status: 'scheduled',
+      failure_reason: null,
+      sent_at: null,
+      created_at: now,
+      updated_at: now,
+    };
+    rows.push(row);
+    return row;
+  },
+  chat_scheduled_update: (args, tables) => {
+    const row = (tables.chat_scheduled_messages ?? []).find((r) => r.id === args.p_id);
+    if (row === undefined) return null;
+    row.send_at = args.p_send_at;
+    row.body = args.p_body;
+    row.mentions = args.p_mentions;
+    row.updated_at = new Date().toISOString();
+    return row;
+  },
+  chat_scheduled_cancel: (args, tables) => {
+    const row = (tables.chat_scheduled_messages ?? []).find((r) => r.id === args.p_id);
+    if (row !== undefined) row.status = 'cancelled';
+    return null;
+  },
+  chat_scheduled_send_now: (args, tables) => {
+    const row = (tables.chat_scheduled_messages ?? []).find((r) => r.id === args.p_id);
+    if (row === undefined) return null;
+    row.status = 'sent';
+    row.sent_at = new Date().toISOString();
+    const send = RPC.chat_message_send;
+    return send === undefined
+      ? null
+      : send(
+          {
+            p_id: row.id,
+            p_channel_id: row.channel_id,
+            p_body: row.body,
+            p_mentions: row.mentions,
+            p_shared_post_ids: row.shared_post_ids,
+            p_reply_to_message_id: row.reply_to_message_id,
+          },
+          tables,
+        );
+  },
 };
 
 /** A refused record write (the proc raised): the send shows "Not sent" with its alert. */
