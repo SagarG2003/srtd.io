@@ -2,7 +2,17 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DragEvent, ReactElement, ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
-import { PipelineBoard } from '@/components/pages/pipeline/PipelineBoard';
+import {
+  BoardApproveConfirm,
+  PipelineBoardView,
+  pendingPost,
+} from '@/components/pages/pipeline/PipelineBoard';
+import {
+  GATE_IDLE,
+  createApproveGate,
+  type GateState,
+} from '@/components/pages/pipeline/approve-gate';
+import { ApproveConfirm } from '@/components/ui/ApproveConfirm';
 import { PipelineFeed } from '@/components/pages/pipeline/PipelineFeed';
 import { BOARD_CAP, emptyStageMessage } from '@/components/pages/pipeline/stage-meta';
 import { groupByStage } from '@/lib/post-board';
@@ -154,7 +164,7 @@ describe('PipelineFeed', () => {
 describe('PipelineBoard', () => {
   it('renders one column per stage in the locked order', () => {
     const grouped = groupByStage([], STAGES);
-    const tree = PipelineBoard({
+    const tree = PipelineBoardView({
       stages: STAGES,
       grouped,
       cap: BOARD_CAP,
@@ -171,7 +181,7 @@ describe('PipelineBoard', () => {
 
   it('(structural) the horizontal scroll container locks the vertical axis to the page', () => {
     const grouped = groupByStage([], STAGES);
-    const tree = PipelineBoard({
+    const tree = PipelineBoardView({
       stages: STAGES,
       grouped,
       cap: BOARD_CAP,
@@ -194,7 +204,7 @@ describe('PipelineBoard', () => {
   it('a drop onto a legal target calls the move handler with the post + target stage', () => {
     const onMovePost = vi.fn();
     const grouped = groupByStage([makePost('p1', 'draft')], STAGES);
-    const tree = PipelineBoard({
+    const tree = PipelineBoardView({
       stages: STAGES,
       grouped,
       cap: BOARD_CAP,
@@ -214,7 +224,7 @@ describe('PipelineBoard', () => {
   it('a drop onto an invalid target does NOT call the move handler', () => {
     const onMovePost = vi.fn();
     const grouped = groupByStage([makePost('p1', 'approved')], STAGES);
-    const tree = PipelineBoard({
+    const tree = PipelineBoardView({
       stages: STAGES,
       grouped,
       cap: BOARD_CAP,
@@ -229,5 +239,122 @@ describe('PipelineBoard', () => {
       dropEvent('approved:p1'),
     );
     expect(onMovePost).not.toHaveBeenCalled();
+  });
+});
+
+function harness(): {
+  gate: ReturnType<typeof createApproveGate>;
+  move: ReturnType<typeof vi.fn<(postId: string, toStage: Stage) => void>>;
+  state: () => GateState;
+} {
+  let state = GATE_IDLE;
+  const move = vi.fn<(postId: string, toStage: Stage) => void>();
+  const gate = createApproveGate({
+    move,
+    read: () => state,
+    write: (next) => {
+      state = next;
+    },
+  });
+  return { gate, move, state: () => state };
+}
+
+type ConfirmProps = Parameters<typeof ApproveConfirm>[0];
+
+/** The board wired as PipelineBoard wires it: drops go through the gate. */
+function board(h: ReturnType<typeof harness>, posts: PipelinePost[]): ReactNode {
+  return PipelineBoardView({
+    stages: STAGES,
+    grouped: groupByStage(posts, STAGES),
+    cap: BOARD_CAP,
+    cache,
+    presignEnabled: false,
+    onViewAll: () => {},
+    onMovePost: h.gate.request,
+  });
+}
+
+function drop(tree: ReactNode, stage: Stage, payload: string): void {
+  const column = findAll(tree, (el) => dataStage(el) === stage && 'onDrop' in el.props)[0]!;
+  (column.props as { onDrop: (e: DragEvent<HTMLDivElement>) => void }).onDrop(dropEvent(payload));
+}
+
+/** The confirm sheet for the current gate state, as PipelineBoard renders it. */
+function sheet(h: ReturnType<typeof harness>, posts: PipelinePost[]): ReactElement | null {
+  return BoardApproveConfirm({
+    post: pendingPost(groupByStage(posts, STAGES), h.state().pendingId),
+    gate: h.gate,
+    gateState: h.state(),
+    workspaceKey: 'gbl',
+    timeZone: 'UTC',
+  });
+}
+
+function confirmOf(el: ReactElement | null): ConfirmProps {
+  const footer = (el?.props as { footer: ReactElement }).footer;
+  expect(footer.type).toBe(ApproveConfirm);
+  return footer.props as ConfirmProps;
+}
+
+describe('PipelineBoard approve confirm (drop)', () => {
+  const review = makePost('p1', 'review');
+
+  it('T1: a drop into Approved opens the confirm and does not move', () => {
+    const h = harness();
+    expect(sheet(h, [review])).toBeNull();
+    drop(board(h, [review]), 'approved', 'review:p1');
+    expect(h.move).not.toHaveBeenCalled();
+    expect((sheet(h, [review])?.props as { open: boolean }).open).toBe(true);
+  });
+
+  it('T2: Back and the Sheet close (button, backdrop, Escape) send nothing', () => {
+    const h = harness();
+    drop(board(h, [review]), 'approved', 'review:p1');
+    confirmOf(sheet(h, [review])).onBack();
+    expect(h.state()).toEqual(GATE_IDLE);
+    drop(board(h, [review]), 'approved', 'review:p1');
+    (sheet(h, [review])?.props as { onClose: () => void }).onClose();
+    expect(h.state()).toEqual(GATE_IDLE);
+    expect(h.move).not.toHaveBeenCalled();
+  });
+
+  it('T3: Confirm moves once with the drop args and closes the sheet', () => {
+    const h = harness();
+    drop(board(h, [review]), 'approved', 'review:p1');
+    confirmOf(sheet(h, [review])).onConfirm();
+    expect(h.move).toHaveBeenCalledOnce();
+    expect(h.move).toHaveBeenCalledWith('p1', 'approved');
+    expect((sheet(h, [review])?.props as { open: boolean }).open).toBe(false);
+  });
+
+  it('T4: a double tap on Confirm moves once; Confirm disables once sent', () => {
+    const h = harness();
+    drop(board(h, [review]), 'approved', 'review:p1');
+    const props = confirmOf(sheet(h, [review]));
+    props.onConfirm();
+    props.onConfirm();
+    expect(h.move).toHaveBeenCalledOnce();
+    expect(confirmOf(sheet(h, [review])).busy).toBe(true);
+  });
+
+  it('T5: drops into Rejected and Parked move at once with no confirm', () => {
+    for (const stage of ['rejected', 'parked'] as const) {
+      const h = harness();
+      drop(board(h, [review]), stage, 'review:p1');
+      expect(h.move).toHaveBeenCalledWith('p1', stage);
+      expect(sheet(h, [review])).toBeNull();
+    }
+  });
+
+  it('T6: the confirm names KEY-N and the target date when set, never slides', () => {
+    const h = harness();
+    const dated = { ...review, number: 9, target_date: '2026-10-02T06:30:00Z' };
+    drop(board(h, [dated]), 'approved', 'review:p1');
+    expect(confirmOf(sheet(h, [dated]))).toMatchObject({
+      refLabel: 'GBL-9',
+      mediaCount: null,
+      targetDate: 'Oct 2',
+    });
+    expect(confirmOf(sheet(h, [review])).targetDate).toBe('');
   });
 });

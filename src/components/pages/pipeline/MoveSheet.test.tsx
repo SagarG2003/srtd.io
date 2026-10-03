@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ReactElement, ReactNode } from 'react';
-import { MoveSheet } from '@/components/pages/pipeline/MoveSheet';
+import { MoveSheetView } from '@/components/pages/pipeline/MoveSheet';
+import { ApproveConfirm } from '@/components/ui/ApproveConfirm';
+import {
+  GATE_IDLE,
+  createApproveGate,
+  type GateState,
+} from '@/components/pages/pipeline/approve-gate';
 import { stageLabel } from '@/components/pages/pipeline/stage-meta';
 import { STAGE_TRANSITIONS, canTransition } from '@srtdio/posts';
 import type { PipelinePost, Stage } from '@srtdio/posts';
@@ -35,6 +41,33 @@ function makePost(stage: Stage): PipelinePost {
   };
 }
 
+/** A real gate over a local state, with a spy as the page's move handler. */
+function harness(): {
+  gate: ReturnType<typeof createApproveGate>;
+  move: ReturnType<typeof vi.fn<(postId: string, toStage: Stage) => void>>;
+  state: () => GateState;
+} {
+  let state = GATE_IDLE;
+  const move = vi.fn<(postId: string, toStage: Stage) => void>();
+  const gate = createApproveGate({
+    move,
+    read: () => state,
+    write: (next) => {
+      state = next;
+    },
+  });
+  return { gate, move, state: () => state };
+}
+
+function view(h: ReturnType<typeof harness>): {
+  gate: ReturnType<typeof createApproveGate>;
+  gateState: GateState;
+  refLabel: string;
+  targetDate: string;
+} {
+  return { gate: h.gate, gateState: h.state(), refLabel: 'GBL-1', targetDate: 'Oct 2' };
+}
+
 function isElement(node: ReactNode): node is ReactElement {
   return typeof node === 'object' && node !== null && 'props' in node;
 }
@@ -63,12 +96,12 @@ function labelOf(button: ReactElement): string | undefined {
 }
 
 function targetRows(source: Stage, busy = false): { label: string; disabled: boolean }[] {
-  const tree = MoveSheet({
+  const tree = MoveSheetView({
     open: true,
     post: makePost(source),
     onClose: () => {},
-    onMove: () => {},
     busy,
+    ...view(harness()),
   });
   const all: ReactElement[] = [];
   collect(tree, all);
@@ -131,12 +164,13 @@ describe('MoveSheet', () => {
   });
 
   it('a legal row calls onMove with the post id and target stage', () => {
-    const onMove = vi.fn();
-    const tree = MoveSheet({
+    const h = harness();
+    const onMove = h.move;
+    const tree = MoveSheetView({
       open: true,
       post: makePost('draft'),
       onClose: () => {},
-      onMove,
+      ...view(h),
     });
     const all: ReactElement[] = [];
     collect(tree, all);
@@ -161,6 +195,120 @@ describe('MoveSheet', () => {
   });
 
   it('renders nothing when there is no post', () => {
-    expect(MoveSheet({ open: false, post: null, onClose: () => {}, onMove: () => {} })).toBeNull();
+    expect(
+      MoveSheetView({ open: false, post: null, onClose: () => {}, ...view(harness()) }),
+    ).toBeNull();
+  });
+});
+
+type ConfirmProps = Parameters<typeof ApproveConfirm>[0];
+
+function render(h: ReturnType<typeof harness>, post: PipelinePost, busy = false): ReactElement {
+  const tree = MoveSheetView({
+    open: true,
+    post,
+    onClose: () => {},
+    busy,
+    ...view(h),
+    targetDate: post.target_date === null ? '' : 'Oct 2',
+  });
+  expect(tree).not.toBeNull();
+  return tree as ReactElement;
+}
+
+function row(tree: ReactElement, stage: Stage): ReactElement | undefined {
+  const all: ReactElement[] = [];
+  collect(tree, all);
+  return all.find((el) => el.type === 'button' && labelOf(el) === stageLabel(stage));
+}
+
+function click(el: ReactElement | undefined): void {
+  expect(el).toBeDefined();
+  (el?.props as { onClick: () => void }).onClick();
+}
+
+/** The footer's approve confirm props, or null when the footer is the Cancel button. */
+function confirmOf(tree: ReactElement): ConfirmProps | null {
+  const footer = (tree.props as { footer: ReactElement }).footer;
+  return footer.type === ApproveConfirm ? (footer.props as ConfirmProps) : null;
+}
+
+/** Every text node the confirm block renders. */
+function confirmText(props: ConfirmProps): string[] {
+  const all: ReactElement[] = [];
+  collect(ApproveConfirm(props), all);
+  return all
+    .map((el) => (el.props as { children?: ReactNode }).children)
+    .filter((child): child is string => typeof child === 'string');
+}
+
+describe('MoveSheet approve confirm', () => {
+  it('T1: picking Approved opens the confirm and does not move', () => {
+    const h = harness();
+    click(row(render(h, makePost('review')), 'approved'));
+    expect(h.move).not.toHaveBeenCalled();
+    const tree = render(h, makePost('review'));
+    expect(confirmOf(tree)).not.toBeNull();
+    // The rows give way to the confirm, as the chat sheet swaps its footer.
+    expect(row(tree, 'rejected')).toBeUndefined();
+  });
+
+  it('T2: Back, Cancel, backdrop and Escape (Sheet onClose) send nothing', () => {
+    const h = harness();
+    const onClose = vi.fn();
+    click(row(render(h, makePost('review')), 'approved'));
+    const tree = MoveSheetView({ open: true, post: makePost('review'), onClose, ...view(h) });
+    confirmOf(tree as ReactElement)?.onBack();
+    expect(h.state()).toEqual(GATE_IDLE);
+    expect(confirmOf(render(h, makePost('review')))).toBeNull();
+    // Cancel, backdrop and Escape all route to the Sheet's onClose: the page's close.
+    click(row(render(h, makePost('review')), 'approved'));
+    const open = MoveSheetView({ open: true, post: makePost('review'), onClose, ...view(h) });
+    (open as ReactElement).props.onClose();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(h.move).not.toHaveBeenCalled();
+  });
+
+  it('T3: Confirm moves exactly once with the same args as a direct move', () => {
+    const h = harness();
+    click(row(render(h, makePost('review')), 'approved'));
+    confirmOf(render(h, makePost('review')))?.onConfirm();
+    expect(h.move).toHaveBeenCalledOnce();
+    expect(h.move).toHaveBeenCalledWith('p1', 'approved');
+  });
+
+  it('T4: a double tap on Confirm moves once, and Confirm disables while in flight', () => {
+    const h = harness();
+    click(row(render(h, makePost('review')), 'approved'));
+    const first = confirmOf(render(h, makePost('review')));
+    first?.onConfirm();
+    first?.onConfirm();
+    expect(h.move).toHaveBeenCalledOnce();
+    expect(confirmOf(render(h, makePost('review')))?.busy).toBe(true);
+    // A failed move (sheet still open) re-arms Confirm for one retry.
+    h.gate.settle();
+    expect(confirmOf(render(h, makePost('review')))?.busy).toBe(false);
+  });
+
+  it('T5: Rejected and Parked move at once with no confirm', () => {
+    for (const stage of ['rejected', 'parked'] as const) {
+      const h = harness();
+      const tree = render(h, makePost('review'));
+      click(row(tree, stage));
+      expect(h.move).toHaveBeenCalledWith('p1', stage);
+      expect(confirmOf(render(h, makePost('review')))).toBeNull();
+    }
+  });
+
+  it('T6: the confirm names KEY-N and the target date when set, and omits slides', () => {
+    const h = harness();
+    const dated = { ...makePost('review'), target_date: '2026-10-02T06:30:00Z' };
+    click(row(render(h, dated), 'approved'));
+    const withDate = confirmOf(render(h, dated));
+    expect(withDate).toMatchObject({ refLabel: 'GBL-1', mediaCount: null, targetDate: 'Oct 2' });
+    expect(confirmText(withDate as ConfirmProps)).toContain('Approve GBL-1, for Oct 2?');
+    const undated = confirmOf(render(h, makePost('review')));
+    expect(undated?.targetDate).toBe('');
+    expect(confirmText(undated as ConfirmProps)).toContain('Approve GBL-1?');
   });
 });
