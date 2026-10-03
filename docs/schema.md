@@ -364,6 +364,23 @@ Known: the member trigger inserts a row that references the workspace, so a hard
 
 Retired: chat_message_save and chat_webhook_ingest are removed (dropped in 20260923094800_chat_drop_retired_procs.sql).
 
+### chat_scheduled_messages
+
+PK id uuid (client-generated). Fields: channel_id text FK chat_channels ON DELETE CASCADE, workspace_id FK workspaces ON DELETE CASCADE, sender_user_id FK auth.users.id ON DELETE CASCADE, body nullable (CHECK chat_scheduled_messages_body_check: null or at most 5000 chars), mentions jsonb nullable, attachment_asset_ids / shared_post_ids / shared_brief_ids uuid[] nullable, reply_to_message_id text nullable, attachment_meta jsonb nullable, send_at timestamptz, status text default 'scheduled' (CHECK chat_scheduled_messages_status_check: scheduled / sent / cancelled / failed), failure_reason nullable, sent_at nullable, created_at / updated_at default now(). Indexes: chat_scheduled_due_idx (send_at) WHERE status = 'scheduled', chat_scheduled_sender_idx (sender_user_id, channel_id, send_at), chat_scheduled_channel_idx (channel_id), chat_scheduled_workspace_idx (workspace_id).
+
+RLS: chat_scheduled_select_own (SELECT to authenticated) USING sender_user_id = auth.uid(). No write policies. Table grants: authenticated SELECT only; anon none; service_role only REFERENCES / TRIGGER / TRUNCATE / MAINTAIN (no CRUD); srtdio_readonly SELECT. All writes go through the SECURITY DEFINER procs below (all search_path='').
+
+- chat_message_schedule(p_id uuid, p_channel_id text, p_send_at timestamptz, p_trace_id uuid, p_body text default null, p_mentions jsonb default null, p_attachment_asset_ids uuid[] default null, p_shared_post_ids uuid[] default null, p_shared_brief_ids uuid[] default null, p_reply_to_message_id text default null, p_attachment_meta jsonb default null) RETURNS chat_scheduled_messages (EXECUTE to authenticated only). Requires auth.uid(), p_id and p_trace_id. An existing row with p_id is returned unchanged for its sender ('not found' for anyone else). Raises on empty content, body over 5000, send_at outside [now() + 1 minute, now() + 365 days] ('send time must be between 1 minute and 1 year from now'), non-member ('not a member of this chat'), 100 or more of the caller's rows in status scheduled ('too many scheduled messages'), an attachment version not in the channel's workspace and neither library-origin nor chat_attachment_readable ('attachment not available'), and a reply target outside the channel. Resolves mentions via chat_mentions_resolve. Audits chat_message_schedule.
+- chat_scheduled_update(p_id uuid, p_send_at timestamptz, p_body text, p_mentions jsonb, p_trace_id uuid) RETURNS chat_scheduled_messages (EXECUTE to authenticated only). Caller's own row in status scheduled or failed only ('scheduled message not found'); same send_at window, body cap and content checks; the 100 cap applies when reviving a failed row. Sets send_at, body, mentions, status scheduled, failure_reason null; clears the failed inbox entry. Audits chat_scheduled_update.
+- chat_scheduled_cancel(p_id uuid, p_trace_id uuid) RETURNS void (EXECUTE to authenticated only). Caller's own scheduled or failed row to cancelled ('scheduled message not found' otherwise); clears the failed inbox entry. Audits chat_scheduled_cancel.
+- chat_scheduled_send_now(p_id uuid, p_trace_id uuid) RETURNS chat_messages (EXECUTE to authenticated only). Caller's own scheduled or failed row; sends via chat_message_send with id = the scheduled id, marks sent, clears the failed inbox entry. Audits chat_scheduled_send_now.
+- chat_scheduled_due(p_limit integer) RETURNS SETOF uuid, SQL STABLE (EXECUTE to service_role only): ids with status scheduled and send_at <= now(), ordered by send_at, limit clamped to 1..500 (default 100).
+- chat_scheduled_dispatch(p_id uuid, p_trace_id uuid) RETURNS SETOF chat_messages (EXECUTE to service_role only): locks a due scheduled row (FOR UPDATE SKIP LOCKED), sets the JWT claims to the sender, calls chat_message_send. On success marks sent and writes a scheduled_sent inbox entry (payload scheduled_id, message_id); on failure marks failed with failure_reason (first 200 chars) and writes a scheduled_failed entry (payload scheduled_id). Audits chat_scheduled_dispatch success / failure.
+- chat_scheduled_outcome_entry(s chat_scheduled_messages, p_event text, p_payload jsonb) RETURNS void (no grants; internal): inserts the sender's inbox_entries row, entity chat_channel, scope groups for a group channel else people, scope_key channel_id, tier urgent for scheduled_failed else active, actor_user_id null.
+- chat_scheduled_clear_failed(p_user_id uuid, p_scheduled_id uuid) RETURNS void, SQL (no grants; internal): marks the user's unread scheduled_failed entries for that scheduled_id read.
+
+Recorded in 20261003130000_chat_scheduled_send.sql.
+
 ## 8. Inbox and delivery
 
 Inbox is the only permanent in-app event surface. Email is out-of-app catch-up, bundled 9am to 9pm workspace TZ.
@@ -387,6 +404,8 @@ Inbox is the only permanent in-app event surface. Email is out-of-app catch-up, 
 | created_at | timestamptz | PK part, default now() |
 
 PK (id, created_at). Partitions: 2026_05, 2026_06, 2026_07. actor_user_id is set by the seven procs that fan out into inbox_entries (checkpoint_ask, checkpoint_send_back, comment_batch_create, comment_create, comment_resolve, post_ready_notify, stage_transition); it is permanently null on stage_change and post_ready rows written before this change, because the actor was never recorded at the time.
+
+inbox_mark_read_events(p_workspace_id uuid, p_event_types text[], p_trace_id uuid) RETURNS void, SECURITY DEFINER (search_path=''; EXECUTE to authenticated only): requires is_active_workspace_member ('workspace_member_only') and p_trace_id; marks the caller's unread, non-deleted entries in the workspace whose event_type is in p_event_types read; no-op for an empty list; audits inbox_mark_read_events with the count when any row changed. Recorded in 20261003130000_chat_scheduled_send.sql.
 
 ### email_threads
 
@@ -441,7 +460,7 @@ PK id. Fields: operator_user_id FK, flow_type (billing_override / sentry_inspect
 - workspace.subscription_state: trial, active, read_only, grace, soft_pause, full_pause, soft_delete
 - brief.status: open, closed
 - approval (table removed): n/a, approval is now a post.stage value
-- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas)
+- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas)
 - inbox_entries.scope: everything, posts, briefs, people, groups, clients
 - inbox_entries.tier: urgent, active, ambient
 - chat_channels.channel_type: dm, group
