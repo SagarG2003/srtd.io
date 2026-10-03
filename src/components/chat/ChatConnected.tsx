@@ -1222,6 +1222,14 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   );
 
   const onBack = closeChannel;
+  // A hit's jump belongs to its chat: any route that leaves or switches the
+  // chat (browser back, a toast, a deep link) drops it before it can fire later.
+  const selectedChannelForSearch = selected?.channelId ?? null;
+  useEffect(() => {
+    setSearchRequest((prev) =>
+      prev !== null && prev.channelId !== selectedChannelForSearch ? null : prev,
+    );
+  }, [selectedChannelForSearch]);
 
   const chatName = selected !== null ? (shown ?? selected).title : '';
   const readsLoading = thread.readState.status === 'loading';
