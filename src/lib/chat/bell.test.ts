@@ -298,6 +298,32 @@ describe('loadBell: batched, no N+1', () => {
     expect(reads.filter((r) => r.table === 'chat_messages')).toHaveLength(2);
   });
 
+  it('a failed failed-rows read is flagged, never mistaken for resolved rows', async () => {
+    const { client } = recordingClient({
+      inbox_entries: [inbox({ event_type: 'scheduled_failed', payload: { scheduled_id: 's1' } })],
+    });
+    const flaky = {
+      ...client,
+      from: (table: string) => {
+        const q = client.from(table as 'inbox_entries') as unknown as Record<string, unknown>;
+        if (table !== 'chat_scheduled_messages') return q;
+        const inner = q.in as (...a: unknown[]) => Record<string, unknown>;
+        q.in = (...a: unknown[]) => {
+          const r = inner(...a);
+          r.then = (ok: (v: Result) => unknown) =>
+            Promise.resolve({ data: null, error: { message: 'timeout' } }).then(ok);
+          return r;
+        };
+        return q;
+      },
+    } as unknown as Parameters<typeof loadBell>[0];
+    const res = await loadBell(flaky, { workspaceId: 'w1', userId: 'u1' });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.data.failedReadOk).toBe(false);
+    const good = await loadBell(client, { workspaceId: 'w1', userId: 'u1' });
+    if (good.ok) expect(good.data.failedReadOk).toBe(true);
+  });
+
   it('a failed primary read fails the load', async () => {
     const { client } = recordingClient({});
     const broken = {
@@ -324,6 +350,7 @@ describe('loadBell: batched, no N+1', () => {
       reminders: [],
       scheduled: [],
       failed: new Map(),
+      failedReadOk: true,
       messages: new Map(),
       names: new Map(),
     };

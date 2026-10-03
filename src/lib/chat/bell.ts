@@ -122,6 +122,11 @@ export interface BellData {
   scheduled: ScheduledRow[];
   /** Failed scheduled rows behind scheduled_failed entries, by id. */
   failed: Map<string, ScheduledRow>;
+  /**
+   * Every failed-rows read succeeded: a row missing from `failed` (or no
+   * longer 'failed') was really sent, cancelled or edited elsewhere.
+   */
+  failedReadOk: boolean;
   messages: Map<string, BellMessage>;
   names: Map<string, string>;
 }
@@ -132,6 +137,7 @@ export const EMPTY_BELL: BellData = {
   reminders: [],
   scheduled: [],
   failed: new Map(),
+  failedReadOk: false,
   messages: new Map(),
   names: new Map(),
 };
@@ -485,15 +491,22 @@ export async function loadBell(
   const failedIds = unique(
     entries.map((e) => (e.eventType === 'scheduled_failed' ? e.scheduledId : null)),
   );
-  const [messages, failedRes] = await Promise.all([
+  const [messages, failedResults] = await Promise.all([
     readBellMessages(client, messageIds),
-    failedIds.length > 0
-      ? client.from('chat_scheduled_messages').select('*').in('id', failedIds)
-      : Promise.resolve(null),
+    Promise.all(
+      chunked(failedIds).map((ids) =>
+        client.from('chat_scheduled_messages').select('*').in('id', ids),
+      ),
+    ),
   ]);
   const failed = new Map<string, ScheduledRow>();
-  if (failedRes !== null && failedRes.error === null) {
-    for (const r of (failedRes.data ?? []) as ScheduledRow[]) failed.set(r.id, r);
+  let failedReadOk = true;
+  for (const res of failedResults) {
+    if (res.error !== null) {
+      failedReadOk = false;
+      continue;
+    }
+    for (const r of (res.data ?? []) as ScheduledRow[]) failed.set(r.id, r);
   }
 
   const bodies = [
@@ -520,6 +533,7 @@ export async function loadBell(
       reminders: remindersRes.data,
       scheduled: scheduledRes.data,
       failed,
+      failedReadOk,
       messages,
       names,
     },
@@ -534,6 +548,7 @@ export function mergeOlder(current: BellData, older: BellData): BellData {
     entries: [...current.entries, ...older.entries.filter((e) => !seen.has(e.id))],
     hasMore: older.hasMore,
     failed: new Map([...current.failed, ...older.failed]),
+    failedReadOk: current.failedReadOk && older.failedReadOk,
     messages: new Map([...current.messages, ...older.messages]),
     names: new Map([...current.names, ...older.names]),
   };

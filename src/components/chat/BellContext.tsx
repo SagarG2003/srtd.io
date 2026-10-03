@@ -144,8 +144,11 @@ export interface BellActionDeps {
   notify: (title: string) => void;
   goToMessage: (channelId: string | null, messageId: string | null) => void;
   openChannelSheet: (channelId: string) => void;
-  /** The scheduled row behind a scheduled_failed entry, when loaded. */
-  failedRow: (scheduledId: string) => ScheduledRow | undefined;
+  /**
+   * True only when the failed-rows read succeeded and this scheduled row is
+   * gone or no longer 'failed' (resolved elsewhere). A failed read is never stale.
+   */
+  isStaleFailed: (scheduledId: string) => boolean;
   remindersChanged: () => void;
 }
 
@@ -227,7 +230,7 @@ export function createBellActions(deps: BellActionDeps): BellActions {
     async retryFailed(entry) {
       if (entry.scheduledId === null) return;
       // Sent, cancelled or edited elsewhere: the entry is stale, clear it.
-      if (deps.failedRow(entry.scheduledId)?.status !== 'failed') {
+      if (deps.isStaleFailed(entry.scheduledId)) {
         await markRead(entry, 'stale failed read');
         return;
       }
@@ -240,7 +243,7 @@ export function createBellActions(deps: BellActionDeps): BellActions {
       deps.reload();
     },
     editFailed(entry) {
-      if (entry.scheduledId !== null && deps.failedRow(entry.scheduledId)?.status !== 'failed') {
+      if (entry.scheduledId !== null && deps.isStaleFailed(entry.scheduledId)) {
         void markRead(entry, 'stale failed read');
         return;
       }
@@ -472,7 +475,8 @@ export function BellProvider(props: {
         notify: (title) => toast.show({ title }),
         goToMessage,
         openChannelSheet,
-        failedRow: (id) => dataRef.current.failed.get(id),
+        isStaleFailed: (id) =>
+          dataRef.current.failedReadOk && dataRef.current.failed.get(id)?.status !== 'failed',
         remindersChanged: announceRemindersChanged,
       }),
     [workspaceId, reload, failed, toast, goToMessage, openChannelSheet],

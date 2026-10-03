@@ -380,7 +380,7 @@ function harness(error: { message: string } | null = null) {
     notify: (title) => toasts.push(title),
     goToMessage: (channelId, messageId) => events.push(`go:${channelId}:${messageId}`),
     openChannelSheet: (channelId) => events.push(`sheet:${channelId}`),
-    failedRow: (id) => (id === 'gone' ? undefined : scheduledRow({ id, status: 'failed' })),
+    isStaleFailed: (id) => id === 'gone',
     remindersChanged: () => events.push('reminders-changed'),
   };
   return { actions: createBellActions(deps), rpcs, events, toasts };
@@ -456,6 +456,14 @@ describe('actions', () => {
     );
     expect(h.rpcs.map((r) => r.name)).toEqual(['inbox_mark_read', 'inbox_mark_read']);
     expect(h.events).not.toContain('sheet:c1');
+  });
+
+  it('when the failed-rows read failed, Retry still calls the proc (never clears)', async () => {
+    const h = harness();
+    await h.actions.retryFailed(
+      entry({ event_type: 'scheduled_failed', payload: { scheduled_id: 'unknown' } }),
+    );
+    expect(h.rpcs.map((r) => r.name)).toEqual(['chat_scheduled_send_now']);
   });
 
   it("Edit opens that chat's scheduled sheet", () => {
