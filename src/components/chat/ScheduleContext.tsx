@@ -5,6 +5,7 @@
 
 import { createContext, useContext } from 'react';
 import type { ScheduledRow } from '@/lib/chat/scheduled';
+import type { AttachmentMetaMap } from '@/lib/chat/attachments';
 
 /** One draft as the scheduler takes it: the same parts the normal send carries. */
 export interface ScheduleDraft {
@@ -13,6 +14,10 @@ export interface ScheduleDraft {
   sharedPostIds: string[];
   sharedBriefIds: string[];
   replyToMessageId: string | null;
+  /** The picked files' asset version ids, uploaded before the schedule write. */
+  attachmentAssetIds: string[];
+  /** Their render metadata, built exactly as the normal send builds it. */
+  attachmentMeta: AttachmentMetaMap;
 }
 
 /** A schedule write's outcome: ok, or the mapped copy (null: refetched silently). */
@@ -29,6 +34,8 @@ export interface ChatSchedule {
   schedule: (draft: ScheduleDraft, sendAt: Date) => Promise<ScheduleOutcome>;
   /** Open "Scheduled in this chat". */
   openList: () => void;
+  /** Re-read this chat's rows (the strip calls it on SCHEDULED_CHANGED_EVENT). */
+  refetch: () => void;
 }
 
 const ChatScheduleContext = createContext<ChatSchedule | null>(null);

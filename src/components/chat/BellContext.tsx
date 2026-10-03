@@ -3,6 +3,10 @@
 // (Remind me from a message, Change time from Upcoming), the cancel confirm
 // and the "Scheduled in this chat" sheet the bell opens for one chat.
 //
+// The message menu reads a message's pending reminder from the already-loaded
+// list (pendingReminderFor, no per-message read). A set or cancel shows there
+// at once: the write's outcome is held locally until the refetch lands.
+//
 // Data: one load on mount (so the dot is right before the bell opens), then a
 // refetch on open, after every action, when the tab becomes visible and on the
 // shell's inbox poll tick (BELL_REFRESH_EVENT). Until the first load settles
@@ -67,6 +71,9 @@ import { useToast } from '@/components/ui/toast';
 
 export type BellStatus = 'loading' | 'ready' | 'error';
 
+/** The toast after "Cancel reminder" in the change-mode sheet. */
+export const REMINDER_CANCELLED_COPY = 'Reminder cancelled';
+
 /** What the reminder sheet is for: a new reminder on a message, or a new time for one. */
 export type ReminderTarget =
   | { mode: 'new'; messageId: string; channelId: string; preview: string }
@@ -99,7 +106,12 @@ export interface BellContextValue {
   openScheduledChat: (channelId: string) => void;
   // From a message's action menu
   canRemind: (messageId: string) => boolean;
+  /** Opens the sheet: a new reminder, or change mode when one is pending on the message. */
   openReminderFor: (messageId: string) => void;
+  /** The viewer's pending reminder on a message, from the loaded list; null when none. */
+  pendingReminderFor: (messageId: string) => ReminderRow | null;
+  /** The change-mode sheet's "Cancel reminder": cancels the target, toasts "Reminder cancelled". */
+  cancelReminderFromSheet: () => Promise<void>;
   // Sheets the bell owns (rendered by NotificationsSheets)
   reminderTarget: ReminderTarget | null;
   closeReminder: () => void;
@@ -150,6 +162,14 @@ export interface BellActionDeps {
    */
   isStaleFailed: (scheduledId: string) => boolean;
   remindersChanged: () => void;
+  /**
+   * A reminder write landed: the message's pending reminder is now `next`
+   * (null: none), shown at once until the refetch brings the stored rows.
+   */
+  reminderChanged?: (
+    messageId: string,
+    next: { id: string; channelId: string; remindAt: Date } | null,
+  ) => void;
 }
 
 export interface BellActions {
@@ -160,7 +180,8 @@ export interface BellActions {
   retryFailed: (entry: BellEntry) => Promise<void>;
   editFailed: (entry: BellEntry) => void;
   setReminderAt: (target: { messageId: string; channelId: string }, at: Date) => Promise<void>;
-  cancelReminder: (reminder: ReminderRow) => Promise<void>;
+  /** Resolves true when the reminder was cancelled. */
+  cancelReminder: (reminder: ReminderRow) => Promise<boolean>;
 }
 
 /**
@@ -253,16 +274,19 @@ export function createBellActions(deps: BellActionDeps): BellActions {
       const traceId = deps.newTraceId();
       // A new id every time: the proc ignores an id it already holds and
       // replaces the pending reminder on the same message (Change time).
+      const id = deps.newId();
       const res = await setReminder({
         client: deps.client,
-        id: deps.newId(),
+        id,
         messageId: target.messageId,
         channelId: target.channelId,
         remindAt: at,
         traceId,
       });
-      if (res.ok) deps.notify(reminderSetCopy(at, new Date()));
-      else deps.failed('reminder set', traceId, res.message, mapReminderError(res.message));
+      if (res.ok) {
+        deps.reminderChanged?.(target.messageId, { id, channelId: target.channelId, remindAt: at });
+        deps.notify(reminderSetCopy(at, new Date()));
+      } else deps.failed('reminder set', traceId, res.message, mapReminderError(res.message));
       deps.remindersChanged();
       deps.reload();
     },
@@ -273,9 +297,10 @@ export function createBellActions(deps: BellActionDeps): BellActions {
       if (!res.ok) {
         deps.unhide([reminder.id]);
         deps.failed('reminder cancel', traceId, res.message);
-      }
+      } else deps.reminderChanged?.(reminder.message_id, null);
       deps.remindersChanged();
       deps.reload();
+      return res.ok;
     },
   };
 }
@@ -305,6 +330,10 @@ export function BellProvider(props: {
     channelId: string;
     rows: ScheduledRow[];
   } | null>(null);
+  // Reminder writes not yet in a refetch, by message id (null: cancelled).
+  const [localReminders, setLocalReminders] = useState<ReadonlyMap<string, ReminderRow | null>>(
+    new Map(),
+  );
 
   const mountedRef = useRef(true);
   const seqRef = useRef(0);
@@ -333,6 +362,7 @@ export function BellProvider(props: {
       if (!mountedRef.current || seq !== seqRef.current) return;
       if (res.ok) {
         setData(res.data);
+        setLocalReminders(new Map());
         setStatus('ready');
         // Rows a write is still removing stay hidden while they are present.
         const present = new Set(res.data.entries.map((e) => e.id));
@@ -478,8 +508,27 @@ export function BellProvider(props: {
         isStaleFailed: (id) =>
           dataRef.current.failedReadOk && dataRef.current.failed.get(id)?.status !== 'failed',
         remindersChanged: announceRemindersChanged,
+        reminderChanged: (messageId, next) =>
+          setLocalReminders((prev) =>
+            new Map(prev).set(
+              messageId,
+              next === null
+                ? null
+                : {
+                    id: next.id,
+                    user_id: currentUserId,
+                    message_id: messageId,
+                    channel_id: next.channelId,
+                    workspace_id: workspaceId,
+                    remind_at: next.remindAt.toISOString(),
+                    fired_at: null,
+                    cancelled_at: null,
+                    created_at: new Date().toISOString(),
+                  },
+            ),
+          ),
       }),
-    [workspaceId, reload, failed, toast, goToMessage, openChannelSheet],
+    [workspaceId, currentUserId, reload, failed, toast, goToMessage, openChannelSheet],
   );
 
   const refreshSheet = useCallback((channelId: string): void => {
@@ -547,7 +596,12 @@ export function BellProvider(props: {
         ),
       onCancel: (row: ScheduledRow): Promise<boolean> =>
         write(row, 'scheduled cancel', (traceId) =>
-          cancelScheduledMessage({ client: supabase, id: row.id, traceId }),
+          cancelScheduledMessage({
+            client: supabase,
+            id: row.id,
+            channelId: row.channel_id,
+            traceId,
+          }),
         ),
     };
   }, [props.roster, failed, reload, refreshSheet]);
@@ -586,18 +640,36 @@ export function BellProvider(props: {
     );
   }, []);
 
+  const pendingReminderFor = useCallback(
+    (messageId: string): ReminderRow | null => {
+      const local = localReminders.get(messageId);
+      if (local !== undefined) return local;
+      return (
+        data.reminders.find(
+          (r) =>
+            r.message_id === messageId &&
+            r.fired_at === null &&
+            r.cancelled_at === null &&
+            !hiddenIds.has(r.id),
+        ) ?? null
+      );
+    },
+    [data.reminders, hiddenIds, localReminders],
+  );
+
   const openReminderFor = useCallback(
     (messageId: string): void => {
       const channelId = openChannelRef.current;
       if (channelId === null) return;
-      setReminderTarget({
-        mode: 'new',
-        messageId,
-        channelId,
-        preview: previewOfMessage(messageId) ?? 'Message',
-      });
+      const preview = previewOfMessage(messageId) ?? 'Message';
+      const pending = pendingReminderFor(messageId);
+      setReminderTarget(
+        pending !== null
+          ? { mode: 'change', reminder: pending, preview }
+          : { mode: 'new', messageId, channelId, preview },
+      );
     },
-    [previewOfMessage],
+    [previewOfMessage, pendingReminderFor],
   );
 
   const changeReminderTime = useCallback(
@@ -626,6 +698,14 @@ export function BellProvider(props: {
     },
     [reminderTarget, actions],
   );
+
+  const cancelReminderFromSheet = useCallback(async (): Promise<void> => {
+    const target = reminderTarget;
+    setReminderTarget(null);
+    if (target === null || target.mode !== 'change') return;
+    if (await actions.cancelReminder(target.reminder))
+      toast.show({ title: REMINDER_CANCELLED_COPY });
+  }, [reminderTarget, actions, toast]);
 
   const askCancelReminder = useCallback((reminder: ReminderRow): void => {
     setOpenState(false);
@@ -671,6 +751,8 @@ export function BellProvider(props: {
       openScheduledChat: openChannelSheet,
       canRemind,
       openReminderFor,
+      pendingReminderFor,
+      cancelReminderFromSheet,
       reminderTarget,
       closeReminder: () => setReminderTarget(null),
       pickReminderTime,
@@ -699,6 +781,8 @@ export function BellProvider(props: {
       openChannelSheet,
       canRemind,
       openReminderFor,
+      pendingReminderFor,
+      cancelReminderFromSheet,
       reminderTarget,
       pickReminderTime,
       cancelTarget,

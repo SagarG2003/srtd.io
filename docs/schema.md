@@ -424,6 +424,7 @@ Where inbox entries are shown:
 
 - Chat bell only, never Activity: mention with entity_type chat_channel, scheduled_sent, scheduled_failed, reminder.
 - Activity: everything else, including mentions on posts and briefs.
+- inbox_mark_all_read (Activity Mark all read) skips bell types.
 
 Decision 3 Oct 2026 (Shubham): Activity is posts only; chat notifications live in the chat bell.
 

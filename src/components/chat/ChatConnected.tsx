@@ -1091,7 +1091,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
           traceId,
           body: draft.body,
           mentions: mentionTargets(draft.body, selectedRef.current?.channelType),
-          attachmentAssetIds: [],
+          attachmentAssetIds: draft.attachmentAssetIds,
+          attachmentMeta: draft.attachmentMeta,
           sharedPostIds: draft.sharedPostIds,
           sharedBriefIds: draft.sharedBriefIds,
           replyToMessageId: draft.replyToMessageId,
@@ -1151,7 +1152,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       },
       onCancel: async (row: ScheduledRow): Promise<boolean> => {
         const result = await runScheduledWrite(row.channel_id, 'scheduled cancel', (traceId) =>
-          cancelScheduledMessage({ client: supabase, id: row.id, traceId }),
+          cancelScheduledMessage({
+            client: supabase,
+            id: row.id,
+            channelId: row.channel_id,
+            traceId,
+          }),
         );
         if (!result.ok) showScheduleError(result.copy);
         return result.ok;
@@ -1205,8 +1211,17 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
             stripVisible: !threadLoading && !readsLoading,
             schedule: scheduleDraft,
             openList: () => setScheduledListOpen(true),
+            refetch: () => refetchScheduled(selectedChannelId),
           },
-    [selectedChannelId, chatName, scheduledRows, threadLoading, readsLoading, scheduleDraft],
+    [
+      selectedChannelId,
+      chatName,
+      scheduledRows,
+      threadLoading,
+      readsLoading,
+      scheduleDraft,
+      refetchScheduled,
+    ],
   );
   const scheduleNameOf = useMemo(
     () => profileNameOf(profiles, workspaceId),

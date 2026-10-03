@@ -1,7 +1,9 @@
 // "Scheduled in this chat": one card per scheduled row, soonest first. Each
-// card has the calendar-clock and the send time (mono), the message in the
-// own-bubble style, and four equal 44px actions: Send now, Edit (body only, in
-// place), Time (the Schedule sheet) and Cancel (a confirm sheet). The writes
+// card has the calendar-clock and the send time (mono), its photos and files
+// (ScheduledAttachments: up to four thumbnails, files by icon and name), the
+// message in the own-bubble style, and four equal 44px actions: Send now, Edit
+// (text only, in place; files stay read-only), Time (the Schedule sheet) and
+// Cancel (a confirm sheet). The writes
 // and their errors are the caller's; this only collects the user's intent.
 // Tokens only; sheets move on translateY only.
 
@@ -21,7 +23,12 @@ import {
   type MentionPick,
   type NameOf,
 } from '@/lib/chat/mentions';
-import { formatSendLabel, type ScheduledRow } from '@/lib/chat/scheduled';
+import {
+  formatSendLabel,
+  SCHEDULED_FILES_READONLY_COPY,
+  type ScheduledRow,
+} from '@/lib/chat/scheduled';
+import { ScheduledAttachments } from '@/components/chat/ScheduledStrip';
 
 export const SCHEDULED_LIST_TITLE = 'Scheduled in this chat';
 export const CANCEL_CONFIRM_TITLE = 'Cancel this scheduled message?';
@@ -35,6 +42,25 @@ export function scheduledPreviewText(row: ScheduledRow, nameOf: NameOf): string 
     return 'Shared brief';
   }
   return 'Shared post';
+}
+
+/** Whether a row carries photos or files. Pure. */
+export function rowHasAttachments(row: Pick<ScheduledRow, 'attachment_asset_ids'>): boolean {
+  return (row.attachment_asset_ids ?? []).length > 0;
+}
+
+/**
+ * Whether a card shows the text bubble: a body, or nothing else to show (a
+ * shared post or brief label). Photos and files alone show only their
+ * thumbnails. Pure.
+ */
+export function showsPreviewBubble(row: ScheduledRow): boolean {
+  return (row.body ?? '').trim() !== '' || !rowHasAttachments(row);
+}
+
+/** Edit is offered for a row with text, or with files (a caption can be added). Pure. */
+export function canEditScheduled(row: ScheduledRow): boolean {
+  return (row.body ?? '').trim() !== '' || rowHasAttachments(row);
 }
 
 export interface ScheduledListActions {
@@ -105,14 +131,17 @@ export function ScheduledListSheet(
                 />
               ) : (
                 <>
-                  <div className="flex justify-end">
-                    <p
-                      data-scheduled-preview=""
-                      className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-[4px] bg-bubble-own px-3 py-2 text-[15px] leading-snug text-accent-fg"
-                    >
-                      {scheduledPreviewText(row, props.nameOf)}
-                    </p>
-                  </div>
+                  <ScheduledAttachments row={row} size="card" />
+                  {showsPreviewBubble(row) ? (
+                    <div className="flex justify-end">
+                      <p
+                        data-scheduled-preview=""
+                        className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-[4px] bg-bubble-own px-3 py-2 text-[15px] leading-snug text-accent-fg"
+                      >
+                        {scheduledPreviewText(row, props.nameOf)}
+                      </p>
+                    </div>
+                  ) : null}
                   <div className={cn('grid grid-cols-4 gap-2', NO_TOUCH_SELECT)}>
                     <CardAction
                       tone="primary"
@@ -122,7 +151,7 @@ export function ScheduledListSheet(
                       Send now
                     </CardAction>
                     <CardAction
-                      disabled={busyId !== null || (row.body ?? '').trim() === ''}
+                      disabled={busyId !== null || !canEditScheduled(row)}
                       onClick={() => setEditingId(row.id)}
                     >
                       Edit
@@ -221,9 +250,11 @@ function CardAction(props: {
 
 /**
  * Edit a scheduled body in place: mentions stay tokens underneath and show as
- * "@Name", the way the composer shows them.
+ * "@Name", the way the composer shows them. Photos and files are read-only
+ * here (chat_scheduled_update keeps them): they show above the text with a
+ * line saying how to change them. With files the text may go empty.
  */
-function BodyEditor(props: {
+export function BodyEditor(props: {
   row: ScheduledRow;
   nameOf: NameOf;
   busy: boolean;
@@ -237,8 +268,15 @@ function BodyEditor(props: {
   const [text, setText] = useState(initial.text);
   const [picks] = useState<MentionPick[]>(initial.picks);
   const body = serializeMentions(text, picks);
+  const hasFiles = rowHasAttachments(props.row);
   return (
     <div data-scheduled-editor="" className="flex flex-col gap-2">
+      {hasFiles ? (
+        <div data-scheduled-files-readonly="" className="flex flex-col gap-1.5">
+          <ScheduledAttachments row={props.row} size="card" />
+          <p className="text-xs text-fg-3">{SCHEDULED_FILES_READONLY_COPY}</p>
+        </div>
+      ) : null}
       <Textarea
         aria-label="Message"
         value={text}
@@ -254,7 +292,7 @@ function BodyEditor(props: {
           type="button"
           size="lg"
           variant="primary"
-          disabled={props.busy || body.trim() === ''}
+          disabled={props.busy || (body.trim() === '' && !hasFiles)}
           onClick={() => props.onSave(body)}
         >
           Save

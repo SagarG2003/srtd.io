@@ -7,16 +7,37 @@ vi.mock('@/lib/logger', () => ({
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { canScheduleDraft, scheduledToast } from '@/components/chat/Composer';
 import {
+  canScheduleDraft,
+  pendingCounts,
+  scheduledToast,
+  scheduleFilesFor,
+  SCHEDULING_LABEL,
+  withScheduleUpload,
+  type Pending,
+} from '@/components/chat/Composer';
+import {
+  filesLabel,
   ScheduleMenu,
   ScheduleOptions,
   schedulePreview,
   SCHEDULE_HELPER,
   zoneLine,
 } from '@/components/chat/ScheduleSheet';
-import { ScheduledStrip, ScheduleModeStrip } from '@/components/chat/ScheduledStrip';
-import { scheduledPreviewText } from '@/components/chat/ScheduledListSheet';
+import {
+  ScheduledAttachments,
+  ScheduledStrip,
+  ScheduleModeStrip,
+  thumbTiles,
+} from '@/components/chat/ScheduledStrip';
+import {
+  BodyEditor,
+  canEditScheduled,
+  scheduledPreviewText,
+  showsPreviewBubble,
+} from '@/components/chat/ScheduledListSheet';
+import { SCHEDULED_FILES_READONLY_COPY, SCHEDULE_UPLOAD_FAILED_COPY } from '@/lib/chat/scheduled';
+import type { MessageAttachment } from '@/lib/chat/attachments';
 import { IconCalendarClock } from '@/components/ui/icons';
 import type { ScheduledRow } from '@/lib/chat/scheduled';
 
@@ -53,13 +74,12 @@ function row(partial: Partial<ScheduledRow>): ScheduledRow {
 }
 
 describe('S2: when a draft may be scheduled', () => {
-  it('only with the wiring, a sendable draft, no files, not editing', () => {
-    const ok = { scheduling: true, editing: false, canSend: true, fileCount: 0 };
+  it('only with the wiring, a sendable draft (files allowed), not editing', () => {
+    const ok = { scheduling: true, editing: false, canSend: true };
     expect(canScheduleDraft(ok)).toBe(true);
     expect(canScheduleDraft({ ...ok, scheduling: false })).toBe(false);
     expect(canScheduleDraft({ ...ok, editing: true })).toBe(false);
     expect(canScheduleDraft({ ...ok, canSend: false })).toBe(false);
-    expect(canScheduleDraft({ ...ok, fileCount: 1 })).toBe(false);
   });
 });
 
@@ -88,7 +108,7 @@ describe('S2: phone hold and laptop chevron wiring', () => {
   });
 
   it('schedule mode swaps the Send icon and label', () => {
-    expect(composer).toContain("scheduling ? 'Schedule message' : 'Send'");
+    expect(composer).toMatch(/scheduling\s+\? 'Schedule message'\s+: 'Send'/);
     expect(composer).toContain('<IconCalendarClock size={18} />');
   });
 });
@@ -219,6 +239,176 @@ describe('S10: tokens only, no em-dash', () => {
     const src = source(file);
     expect(src).not.toMatch(HEX);
     expect(src).not.toMatch(DARK);
+    expect(src).not.toContain(EM_DASH);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UI-3: photos and files
+// ---------------------------------------------------------------------------
+
+const PHOTO_META = {
+  v1: { mime: 'image/jpeg', name: 'one.jpg', size: 1 },
+  v2: { mime: 'image/jpeg', name: 'two.jpg', size: 1 },
+  v3: { mime: 'image/jpeg', name: 'three.jpg', size: 1 },
+  v4: { mime: 'image/jpeg', name: 'four.jpg', size: 1 },
+  v5: { mime: 'image/jpeg', name: 'five.jpg', size: 1 },
+  v6: { mime: 'image/jpeg', name: 'six.jpg', size: 1 },
+  f1: { mime: 'application/pdf', name: 'brief.pdf', size: 1 },
+};
+
+function pendingFile(id: string, name: string, type: string): Pending {
+  return { id, file: new File([new Uint8Array(1)], name, { type }), previewUrl: null };
+}
+
+describe('UI-3 S1: picked files no longer block scheduling', () => {
+  const composer = source('../Composer.tsx');
+  it('the hold, the chevron and the tray tile do not look at the file count', () => {
+    expect(composer).not.toMatch(/fileCount: pending\.length,\s*\}\);\s*const scheduling/);
+    expect(canScheduleDraft({ scheduling: true, editing: false, canSend: true })).toBe(true);
+  });
+  it('voice notes still send only (the recorder never schedules)', () => {
+    const stop = composer.slice(composer.indexOf('async function stopSend'));
+    expect(stop.slice(0, stop.indexOf('\n  }\n'))).not.toMatch(/schedule/i);
+  });
+  it('the preview names the files when there is no text', () => {
+    expect(filesLabel({ photos: 1, others: 0 })).toBe('1 photo');
+    expect(filesLabel({ photos: 3, others: 2 })).toBe('3 photos, 2 files');
+    expect(schedulePreview('Ops', '', { photos: 2, others: 0 })).toBe('To Ops: 2 photos');
+    expect(schedulePreview('Ops', 'hi', { photos: 2, others: 0 })).toBe('To Ops: hi');
+    expect(
+      pendingCounts([
+        pendingFile('a', 'a.jpg', 'image/jpeg'),
+        pendingFile('b', 'b.pdf', 'application/pdf'),
+      ]),
+    ).toEqual({ photos: 1, others: 1 });
+  });
+});
+
+describe('UI-3 S2 / S3: upload first, all or nothing', () => {
+  const composer = source('../Composer.tsx');
+  it('uploads through the normal uploader, then writes with the ids and meta', () => {
+    expect(composer).toContain('upload: props.uploadFile,');
+    expect(composer).toContain('...attachmentArgs,');
+    expect(composer).toContain('scheduleWithFiles<');
+  });
+  it('the composer locks and Send reads "Scheduling..."', () => {
+    expect(SCHEDULING_LABEL).toBe('Scheduling...');
+    expect(composer).toContain('readOnly={held || scheduleBusy}');
+    expect(composer).toMatch(/function removePending[\s\S]{0,120}if \(scheduleBusy\) return;/);
+  });
+  it('a chip dims and shows a thin progress bar while it uploads', () => {
+    const thumb = composer.slice(composer.indexOf('function PendingThumb'));
+    expect(thumb).toContain("uploading && 'opacity-50'");
+    expect(thumb).toContain('absolute inset-x-0 bottom-0 h-[3px]');
+    expect(thumb).toContain('bg-accent');
+  });
+  it('a failed upload: the chip takes the failed state, the toast copy is fixed', () => {
+    expect(SCHEDULE_UPLOAD_FAILED_COPY).toBe("Couldn't upload. Try again.");
+    expect(composer).toContain('scheduleUploads[item.id]?.failed === true');
+    expect(composer).toContain('error={scheduleUploads[item.id]?.failed === true}');
+  });
+  it('a retry keeps the version ids already uploaded', () => {
+    const pending = [
+      pendingFile('a', 'a.jpg', 'image/jpeg'),
+      pendingFile('b', 'b.jpg', 'image/jpeg'),
+    ];
+    let uploads = withScheduleUpload({}, 'a', { versionId: 'v-a', progress: 1 });
+    uploads = withScheduleUpload(uploads, 'b', { failed: true });
+    expect(scheduleFilesFor(pending, uploads).map((f) => [f.key, f.versionId])).toEqual([
+      ['a', 'v-a'],
+      ['b', null],
+    ]);
+  });
+  it('leaving the chat aborts the run (cleanup on unmount and chat switch)', () => {
+    expect(composer).toMatch(
+      /useEffect\(\s*\(\) => \(\) => \{\s*scheduleRunRef\.current\?\.abort\(\);[\s\S]{0,80}\[channelId\]/,
+    );
+  });
+  it('the normal tap-send path is unchanged', () => {
+    const send = composer.slice(composer.indexOf('  function send(draft: LinkCardDraft)'));
+    expect(send.slice(0, send.indexOf('\n  }\n'))).toContain(
+      'attachments: draftAttachments(pending, props.uploadFile),',
+    );
+  });
+});
+
+describe('UI-3 S4: strip and card thumbnails', () => {
+  it('up to four photo thumbnails, "+N" on the fourth', () => {
+    const images = ['a', 'b', 'c', 'd', 'e', 'f'].map(
+      (n): MessageAttachment => ({ assetId: n, name: n, mime: 'image/png' }),
+    );
+    expect(thumbTiles(images).map((t) => t.more)).toEqual([0, 0, 0, 2]);
+    expect(thumbTiles(images.slice(0, 2)).map((t) => t.more)).toEqual([0, 0]);
+  });
+
+  it('a card shows photos and files by icon and name; text-only rows are unchanged', () => {
+    const r = row({
+      attachment_asset_ids: ['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'f1'],
+      attachment_meta: PHOTO_META,
+    });
+    const html = renderToStaticMarkup(<ScheduledAttachments row={r} size="card" />);
+    expect(html.match(/data-scheduled-thumb=""/g)).toHaveLength(4);
+    expect(html).toContain('+2');
+    expect(html).toContain('brief.pdf');
+    expect(html).toContain('bg-overlay');
+    const plain = row({ body: 'hello' });
+    expect(renderToStaticMarkup(<ScheduledAttachments row={plain} size="card" />)).toBe('');
+    expect(showsPreviewBubble(plain)).toBe(true);
+    expect(showsPreviewBubble(r)).toBe(false);
+  });
+
+  it('the strip shows the next message thumbnails', () => {
+    const html = renderToStaticMarkup(
+      <ScheduledStrip
+        rows={[row({ attachment_asset_ids: ['v1'], attachment_meta: PHOTO_META })]}
+        onOpen={() => undefined}
+      />,
+    );
+    expect(html).toContain('data-scheduled-thumb');
+    expect(html).toContain('h-7 w-7');
+  });
+});
+
+describe('UI-3 S5: Edit with files is text only', () => {
+  it('files are read-only with the line; empty text may save', () => {
+    const r = row({ body: '', attachment_asset_ids: ['v1'], attachment_meta: PHOTO_META });
+    expect(canEditScheduled(r)).toBe(true);
+    expect(canEditScheduled(row({ body: '' }))).toBe(false);
+    const html = renderToStaticMarkup(
+      <BodyEditor
+        row={r}
+        nameOf={() => undefined}
+        busy={false}
+        onDone={() => undefined}
+        onSave={() => undefined}
+      />,
+    );
+    expect(html).toContain(SCHEDULED_FILES_READONLY_COPY);
+    expect(SCHEDULED_FILES_READONLY_COPY).toBe('To change files, cancel and schedule again.');
+    expect(html).toContain('data-scheduled-thumb');
+    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>Save/);
+  });
+});
+
+describe('UI-3 S8: the strip refetches on its chat changing', () => {
+  const strip = source('../ScheduledStrip.tsx');
+  it('subscribes in an effect and returns the unsubscribe', () => {
+    expect(strip).toContain(
+      'return onScheduledChanged(channelId, () => onChangedRef.current?.());',
+    );
+  });
+  it('stays mounted while empty so a first row still lands', () => {
+    const composer = source('../Composer.tsx');
+    expect(composer).toContain('rows={schedule.stripVisible ? schedule.rows : NO_SCHEDULED_ROWS}');
+    expect(composer).toContain('onChanged={schedule.refetch}');
+  });
+});
+
+describe('UI-3: no connection wording, no blur', () => {
+  it.each(['../Composer.tsx', '../ScheduledStrip.tsx', '../ScheduledListSheet.tsx'])('%s', (f) => {
+    const src = source(f);
+    expect(src).not.toMatch(/Reconnecting|Offline|backdrop-/);
     expect(src).not.toContain(EM_DASH);
   });
 });

@@ -20,7 +20,15 @@ import { useLongPress } from '@/components/ui/useLongPress';
 import { useChatSchedule, type ScheduleOutcome } from '@/components/chat/ScheduleContext';
 import { ScheduleMenu, ScheduleSheet, schedulePreview } from '@/components/chat/ScheduleSheet';
 import { ScheduledStrip, ScheduleModeStrip } from '@/components/chat/ScheduledStrip';
-import { formatSendLabel, inSentence, SCHEDULE_FAILED_COPY } from '@/lib/chat/scheduled';
+import {
+  formatSendLabel,
+  inSentence,
+  SCHEDULE_FAILED_COPY,
+  SCHEDULE_UPLOAD_FAILED_COPY,
+  scheduleWithFiles,
+  type ScheduleFile,
+  type ScheduledRow,
+} from '@/lib/chat/scheduled';
 import {
   MIN_VOICE_NOTE_MS,
   useAudioRecorder,
@@ -765,18 +773,104 @@ export function composerCanSend(input: {
 
 /**
  * Whether the draft may be scheduled from the hold, the chevron or the tray
- * with its preview: it can be sent and holds no picked file (those upload only
- * after Send, so a scheduled message cannot carry them yet). Never while
- * editing. Pure.
+ * with its preview: it can be sent, picked photos and files included (they
+ * upload first, then the schedule write carries them). Never while editing;
+ * voice notes are never scheduled (they send from the recorder). Pure.
  */
 export function canScheduleDraft(input: {
   scheduling: boolean;
   editing: boolean;
   canSend: boolean;
-  fileCount: number;
 }): boolean {
-  return input.scheduling && !input.editing && input.canSend && input.fileCount === 0;
+  return input.scheduling && !input.editing && input.canSend;
 }
+
+/** One picked file's upload while its draft is being scheduled. */
+export interface ScheduleUpload {
+  /** 0..1 while it uploads. */
+  progress: number;
+  /** Set once uploaded; a retry never uploads it again. */
+  versionId: string | null;
+  uploading: boolean;
+  failed: boolean;
+}
+
+export type ScheduleUploads = Readonly<Record<string, ScheduleUpload>>;
+
+const IDLE_UPLOAD: ScheduleUpload = {
+  progress: 0,
+  versionId: null,
+  uploading: false,
+  failed: false,
+};
+
+/** The picked files as the schedule upload takes them, with any version id already known. Pure. */
+export function scheduleFilesFor(
+  pending: readonly Pending[],
+  uploads: ScheduleUploads,
+): ScheduleFile[] {
+  return pending.map((item) => ({
+    key: item.id,
+    file: item.file,
+    versionId: uploads[item.id]?.versionId ?? null,
+  }));
+}
+
+/** One chip's upload state with `patch` applied. Pure. */
+export function withScheduleUpload(
+  uploads: ScheduleUploads,
+  key: string,
+  patch: Partial<ScheduleUpload>,
+): ScheduleUploads {
+  return { ...uploads, [key]: { ...(uploads[key] ?? IDLE_UPLOAD), ...patch } };
+}
+
+/** Counts of picked photos and other files (the schedule preview's "2 photos"). Pure. */
+export function pendingCounts(pending: readonly Pending[]): { photos: number; others: number } {
+  const photos = pending.filter((item) => item.file.type.startsWith('image/')).length;
+  return { photos, others: pending.length - photos };
+}
+
+/** The scheduled strip's rows before the thread paints: none. */
+const NO_SCHEDULED_ROWS: readonly ScheduledRow[] = [];
+
+/**
+ * A picked file's chip thumbnail: its preview (or the file glyph), dimmed with
+ * a thin progress bar along the bottom while it uploads for a schedule, the
+ * same treatment as a sending bubble's tile.
+ */
+function PendingThumb(props: {
+  previewUrl: string | null;
+  upload: ScheduleUpload | undefined;
+}): ReactElement {
+  const uploading = props.upload?.uploading === true;
+  const progress = Math.round(Math.min(Math.max(props.upload?.progress ?? 0, 0), 1) * 100);
+  return (
+    <span className="relative flex h-full w-full items-center justify-center">
+      {props.previewUrl !== null ? (
+        <img
+          src={props.previewUrl}
+          alt=""
+          className={cn('h-full w-full object-cover', uploading && 'opacity-50')}
+        />
+      ) : (
+        <IconFile size={16} className={cn(uploading && 'opacity-50')} />
+      )}
+      {uploading ? (
+        <span
+          data-schedule-upload-bar={progress}
+          aria-hidden="true"
+          className="absolute inset-x-0 bottom-0 h-[3px] bg-panel-3"
+        >
+          <span className="block h-full bg-accent" style={{ width: `${progress}%` }} />
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/** The Send button while a schedule uploads and writes. */
+export const SCHEDULING_LABEL = 'Scheduling...';
 
 /** The toast after a draft was scheduled: "Scheduled for tomorrow 9:00 AM". Pure. */
 export function scheduledToast(sendAt: Date, now: Date): string {
@@ -874,6 +968,18 @@ export function Composer(props: ComposerProps): ReactElement {
   } | null>(null);
   const [scheduleBusy, setScheduleBusy] = useState(false);
   const chevronRef = useRef<HTMLSpanElement>(null);
+  // Picked files upload before a schedule write: each chip's progress, its
+  // version id once uploaded (a retry skips it) and its failure. One run at a
+  // time; leaving the chat (or unmounting) aborts it, and nothing is scheduled.
+  const [scheduleUploads, setScheduleUploads] = useState<ScheduleUploads>({});
+  const scheduleRunRef = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      scheduleRunRef.current?.abort();
+      scheduleRunRef.current = null;
+    },
+    [channelId],
+  );
 
   const canAttach = props.uploadFile !== undefined && !props.disabled && editing === undefined;
   const canSend =
@@ -890,7 +996,6 @@ export function Composer(props: ComposerProps): ReactElement {
     scheduling: schedule !== null,
     editing: editing !== undefined,
     canSend,
-    fileCount: pending.length,
   });
   const scheduling = scheduleAt !== null && schedule !== null && editing === undefined;
   const schedulableRef = useRef(schedulable);
@@ -967,6 +1072,7 @@ export function Composer(props: ComposerProps): ReactElement {
 
   function addFiles(list: FileList | null, imageOnly: boolean): void {
     if (list === null || list.length === 0 || props.uploadFile === undefined) return;
+    if (scheduleBusy) return;
     const accepted: Pending[] = [];
     for (const file of Array.from(list)) {
       // The Photo path is image-only; the File path takes the full allowlist.
@@ -984,6 +1090,7 @@ export function Composer(props: ComposerProps): ReactElement {
   // Laptop emoji: inserted at the caret (a selection is replaced), which then
   // sits right after it.
   function insertEmoji(emoji: string): void {
+    if (scheduleBusy) return;
     const el = textareaRef.current;
     const at =
       el !== null
@@ -1002,6 +1109,14 @@ export function Composer(props: ComposerProps): ReactElement {
   }
 
   function removePending(id: string): void {
+    // Locked while a schedule uploads.
+    if (scheduleBusy) return;
+    setScheduleUploads((prev) => {
+      if (prev[id] === undefined) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     setPending((prev) => {
       const target = prev.find((item) => item.id === id);
       if (target?.previewUrl != null) URL.revokeObjectURL(target.previewUrl);
@@ -1153,7 +1268,10 @@ export function Composer(props: ComposerProps): ReactElement {
     if (schedule === null) return;
     setScheduleOpen(
       schedulableRef.current
-        ? { purpose: 'draft', preview: schedulePreview(schedule.chatName, text) }
+        ? {
+            purpose: 'draft',
+            preview: schedulePreview(schedule.chatName, text, pendingCounts(pending)),
+          }
         : { purpose: 'mode', preview: null },
     );
   }
@@ -1166,52 +1284,114 @@ export function Composer(props: ComposerProps): ReactElement {
   }
 
   // Schedule the draft with the same parts the normal send carries (pasted
-  // links resolved to cards the same way). Success clears the draft, the reply
-  // and schedule mode; a failure keeps everything and says why.
+  // links resolved to cards the same way). Picked files upload first, all in
+  // parallel through the normal send's uploader; only when every one is up does
+  // chat_message_schedule run, carrying their version ids and attachment_meta
+  // built as the normal send builds it. Any failed upload schedules nothing:
+  // the files stay, the failed chips say so, and a retry uploads only those.
+  // Success clears the draft, the reply and schedule mode; a failure keeps
+  // everything and says why. Leaving the chat mid-run aborts the uploads and
+  // schedules nothing.
   async function scheduleDraft(sendAt: Date): Promise<void> {
-    if (schedule === null || scheduleBusy) return;
+    if (schedule === null || scheduleBusy || scheduleRunRef.current !== null) return;
+    const run = new AbortController();
+    scheduleRunRef.current = run;
+    setScheduleBusy(true);
+    const picked = pending;
+    const files = scheduleFilesFor(picked, scheduleUploads);
+    setScheduleUploads((prev) =>
+      files.reduce(
+        (next, item) =>
+          item.versionId !== null
+            ? next
+            : withScheduleUpload(next, item.key, { progress: 0, uploading: true, failed: false }),
+        prev,
+      ),
+    );
     const body = serializeMentions(text, picks);
     const base: LinkCardDraft = {
       text: body,
       sharedPostIds: sharedPosts.map((post) => post.id),
       sharedBriefIds: sharedBriefs.map((brief) => brief.id),
     };
-    setScheduleBusy(true);
-    const origin = currentOrigin();
-    const draft =
-      workspaceId === null || !hasLinkCards(body, workspaceKey, origin)
-        ? base
-        : await withLinkCards(
-            base,
-            { workspaceKey, origin },
+    const replyToMessageId = props.reply?.quote.id ?? null;
+    const result = await scheduleWithFiles<ScheduleOutcome | null>({
+      files,
+      upload: props.uploadFile,
+      signal: run.signal,
+      onProgress: (key, fraction) =>
+        setScheduleUploads((prev) => withScheduleUpload(prev, key, { progress: fraction })),
+      onUploaded: (key, versionId) =>
+        setScheduleUploads((prev) =>
+          withScheduleUpload(prev, key, { versionId, progress: 1, uploading: false }),
+        ),
+      write: async (attachmentArgs) => {
+        const origin = currentOrigin();
+        const draft =
+          workspaceId === null || !hasLinkCards(body, workspaceKey, origin)
+            ? base
+            : await withLinkCards(
+                base,
+                { workspaceKey, origin },
+                {
+                  postIds: (numbers) => readPostIdsByNumbers(supabase, { workspaceId, numbers }),
+                  briefIds: (numbers) => readBriefIdsByNumbers(supabase, { workspaceId, numbers }),
+                },
+              ).catch(() => base);
+        // Left the chat while the links resolved: schedule nothing.
+        if (run.signal.aborted) return null;
+        return schedule
+          .schedule(
             {
-              postIds: (numbers) => readPostIdsByNumbers(supabase, { workspaceId, numbers }),
-              briefIds: (numbers) => readBriefIdsByNumbers(supabase, { workspaceId, numbers }),
+              body: draft.text,
+              sharedPostIds: draft.sharedPostIds,
+              sharedBriefIds: draft.sharedBriefIds,
+              replyToMessageId,
+              ...attachmentArgs,
             },
-          ).catch(() => base);
-    const outcome: ScheduleOutcome = await schedule
-      .schedule(
-        {
-          body: draft.text,
-          sharedPostIds: draft.sharedPostIds,
-          sharedBriefIds: draft.sharedBriefIds,
-          replyToMessageId: props.reply?.quote.id ?? null,
-        },
-        sendAt,
-      )
-      .catch((error: unknown) => {
-        logger.error('chat composer: schedule threw', { error: String(error) });
-        return { ok: false as const, copy: SCHEDULE_FAILED_COPY };
-      });
+            sendAt,
+          )
+          .catch((error: unknown) => {
+            logger.error('chat composer: schedule threw', { error: String(error) });
+            return { ok: false as const, copy: SCHEDULE_FAILED_COPY };
+          });
+      },
+    });
+    if (scheduleRunRef.current === run) scheduleRunRef.current = null;
     setScheduleBusy(false);
+    if (result.kind === 'aborted') return;
+    if (result.kind === 'upload-failed') {
+      logger.warn('chat composer: schedule upload failed', {
+        failed: result.failedKeys.length,
+        files: files.length,
+      });
+      setScheduleUploads((prev) =>
+        result.failedKeys.reduce(
+          (next, key) => withScheduleUpload(next, key, { uploading: false, failed: true }),
+          prev,
+        ),
+      );
+      toast.show({ title: SCHEDULE_UPLOAD_FAILED_COPY });
+      return;
+    }
+    const outcome = result.result;
+    if (outcome === null) return;
+    if (outcome.ok && channelId !== undefined) clearDraft(channelId);
+    // Left the chat while the write ran: this composer is gone.
+    if (run.signal.aborted) return;
     if (!outcome.ok) {
       if (outcome.copy !== null) toast.show({ title: outcome.copy });
       return;
     }
-    if (channelId !== undefined) clearDraft(channelId);
+    // The previews belong to no bubble: the message sends later from storage.
+    for (const item of picked) {
+      if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
+    }
     setText('');
     setPicks([]);
     setCaret(0);
+    setPending([]);
+    setScheduleUploads({});
     setSharedPosts([]);
     setSharedBriefs([]);
     setScheduleAt(null);
@@ -1396,8 +1576,13 @@ export function Composer(props: ComposerProps): ReactElement {
 
   return (
     <>
-      {schedule !== null && schedule.stripVisible && schedule.rows.length > 0 ? (
-        <ScheduledStrip rows={schedule.rows} onOpen={schedule.openList} />
+      {schedule !== null ? (
+        <ScheduledStrip
+          rows={schedule.stripVisible ? schedule.rows : NO_SCHEDULED_ROWS}
+          onOpen={schedule.openList}
+          channelId={schedule.channelId}
+          onChanged={schedule.refetch}
+        />
       ) : null}
       <form
         ref={formRef}
@@ -1464,14 +1649,15 @@ export function Composer(props: ComposerProps): ReactElement {
               <PendingChip
                 key={item.id}
                 thumb={
-                  item.previewUrl !== null ? (
-                    <img src={item.previewUrl} alt="" className="h-full w-full object-cover" />
-                  ) : (
-                    <IconFile size={16} />
-                  )
+                  <PendingThumb previewUrl={item.previewUrl} upload={scheduleUploads[item.id]} />
                 }
                 title={item.file.name}
-                meta={fileExtension(item.file.name)}
+                meta={
+                  scheduleUploads[item.id]?.failed === true
+                    ? 'Upload failed'
+                    : fileExtension(item.file.name)
+                }
+                error={scheduleUploads[item.id]?.failed === true}
                 onRemove={() => removePending(item.id)}
               />
             ))}
@@ -1548,6 +1734,7 @@ export function Composer(props: ComposerProps): ReactElement {
                 <ComposerTray
                   layout={layout}
                   onPick={(id) => {
+                    if (scheduleBusy) return;
                     if (id === 'photos') photoInputRef.current?.click();
                     else if (id === 'file') fileInputRef.current?.click();
                     else if (id === 'schedule') openSchedule();
@@ -1559,7 +1746,7 @@ export function Composer(props: ComposerProps): ReactElement {
               <Textarea
                 ref={textareaRef}
                 value={held ? resolveMentionText(text, nameOf) : text}
-                readOnly={held}
+                readOnly={held || scheduleBusy}
                 onChange={(event) => {
                   setText(event.target.value);
                   setMentionActive(0);
@@ -1569,9 +1756,12 @@ export function Composer(props: ComposerProps): ReactElement {
                 onSelect={trackCaret}
                 onKeyDown={handleKeyDown}
                 placeholder={
-                  props.placeholder !== undefined && editing === undefined
-                    ? props.placeholder
-                    : composerPlaceholder(aboutRef, props.reply != null, editing !== undefined)
+                  // Locked while scheduling: the wider "Scheduling..." never wraps it.
+                  scheduleBusy
+                    ? ''
+                    : props.placeholder !== undefined && editing === undefined
+                      ? props.placeholder
+                      : composerPlaceholder(aboutRef, props.reply != null, editing !== undefined)
                 }
                 rows={1}
                 compact
@@ -1596,11 +1786,17 @@ export function Composer(props: ComposerProps): ReactElement {
                     variant="primary"
                     size="lg"
                     aria-label={
-                      editing !== undefined ? 'Save edit' : scheduling ? 'Schedule message' : 'Send'
+                      editing !== undefined
+                        ? 'Save edit'
+                        : scheduleBusy
+                          ? 'Scheduling'
+                          : scheduling
+                            ? 'Schedule message'
+                            : 'Send'
                     }
                     aria-busy={editBusy || scheduleBusy || undefined}
                     className={cn(
-                      'w-11 shrink-0 px-0',
+                      scheduleBusy ? 'shrink-0 whitespace-nowrap px-3' : 'w-11 shrink-0 px-0',
                       showChevron && 'rounded-r-none',
                       holdToSchedule && NO_TOUCH_SELECT,
                     )}
@@ -1617,6 +1813,10 @@ export function Composer(props: ComposerProps): ReactElement {
                         data-edit-spinner=""
                         className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"
                       />
+                    ) : scheduleBusy ? (
+                      <span data-scheduling="" className="text-sm font-medium">
+                        {SCHEDULING_LABEL}
+                      </span>
                     ) : scheduling ? (
                       <IconCalendarClock size={18} />
                     ) : (

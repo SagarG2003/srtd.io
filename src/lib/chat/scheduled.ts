@@ -8,6 +8,10 @@
 // and nothing throws (a failure resolves to RecordFailed with the raw message,
 // which mapScheduleError turns into user copy).
 //
+// Every successful write announces SCHEDULED_CHANGED_EVENT for its chat, so the
+// open chat's strip refetches whichever surface made the change (the chat, the
+// bell's Retry, the bell's "Scheduled in this chat").
+//
 // Every time here is the device's local time zone: presets land on 9:00 AM
 // local and labels read local wall-clock time. Pure helpers take `now`.
 
@@ -15,7 +19,13 @@ import type { Client, Result } from '@srtdio/rpc';
 import type { Database } from '@srtdio/schemas';
 import { abortable } from '@/lib/chat-reads';
 import type { ChatMessageRow } from '@/lib/chat/thread';
-import type { AttachmentMetaMap } from '@/lib/chat/attachments';
+import {
+  buildAttachmentMeta,
+  toMessageAttachment,
+  type AttachmentMetaMap,
+  type AttachmentUploader,
+  type MessageAttachment,
+} from '@/lib/chat/attachments';
 import { SEND_TIMEOUT_MS, type RecordFailed } from '@/lib/chat/record';
 
 type Functions = Database['public']['Functions'];
@@ -158,6 +168,10 @@ export function shortZoneName(now: Date, locale?: string): string {
 export const SCHEDULE_RANGE_COPY = 'Pick a time at least 1 minute from now';
 export const SCHEDULE_LIMIT_COPY = 'You already have 100 scheduled messages';
 export const SCHEDULE_FAILED_COPY = "Couldn't schedule. Try again.";
+/** A picked file did not upload: nothing was scheduled. */
+export const SCHEDULE_UPLOAD_FAILED_COPY = "Couldn't upload. Try again.";
+/** The Edit card's line under read-only files. */
+export const SCHEDULED_FILES_READONLY_COPY = 'To change files, cancel and schedule again.';
 
 /**
  * User copy for a failed schedule write, from the proc's exception text. Null
@@ -188,6 +202,173 @@ export function soonestFirst(rows: readonly ScheduledRow[]): ScheduledRow[] {
   return rows
     .filter((r) => r.status === 'scheduled')
     .sort((a, b) => Date.parse(a.send_at) - Date.parse(b.send_at));
+}
+
+// ---------------------------------------------------------------------------
+// The changed event
+// ---------------------------------------------------------------------------
+
+/** Window event after any successful scheduled write; detail names the chat. */
+export const SCHEDULED_CHANGED_EVENT = 'sorted:scheduled-changed';
+
+export interface ScheduledChangedDetail {
+  channelId: string;
+}
+
+/** Tell listeners (the open chat's strip) that a chat's scheduled rows changed. */
+export function announceScheduledChanged(channelId: string): void {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+  window.dispatchEvent(
+    new CustomEvent<ScheduledChangedDetail>(SCHEDULED_CHANGED_EVENT, { detail: { channelId } }),
+  );
+}
+
+/**
+ * Run `listener` whenever SCHEDULED_CHANGED_EVENT names `channelId` (any other
+ * chat is ignored). Returns the unsubscribe; call it on unmount.
+ */
+export function onScheduledChanged(channelId: string, listener: () => void): () => void {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') {
+    return () => undefined;
+  }
+  const handler = (event: Event): void => {
+    const detail = (event as CustomEvent<Partial<ScheduledChangedDetail> | null>).detail;
+    if (detail?.channelId === channelId) listener();
+  };
+  window.addEventListener(SCHEDULED_CHANGED_EVENT, handler);
+  return () => window.removeEventListener(SCHEDULED_CHANGED_EVENT, handler);
+}
+
+function announceOnSuccess<T>(
+  result: Promise<ScheduleWriteResult<T>>,
+  channelOf: (row: T) => string | null,
+): Promise<ScheduleWriteResult<T>> {
+  return result.then((res) => {
+    if (res.ok) {
+      const channelId = channelOf(res.row);
+      if (channelId !== null && channelId !== '') announceScheduledChanged(channelId);
+    }
+    return res;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Picked files: uploaded before chat_message_schedule, all or nothing
+// ---------------------------------------------------------------------------
+
+/** One picked file on its way into a scheduled message. */
+export interface ScheduleFile {
+  /** The composer chip's id. */
+  key: string;
+  file: File;
+  /** Set once this file uploaded (an earlier attempt): never uploaded again. */
+  versionId: string | null;
+}
+
+export type ScheduleUploadOutcome =
+  | { ok: true; attachments: MessageAttachment[] }
+  | { ok: false; aborted: true }
+  | { ok: false; aborted: false; failedKeys: string[] };
+
+/**
+ * Upload every picked file not uploaded yet, in parallel, through the normal
+ * send's uploader (stall watch, response wait and the one 401 refresh are in
+ * it). All or nothing: any failure (or an aborted `signal`, a chat switch)
+ * resolves without attachments, so the caller schedules nothing. Each success
+ * is reported at once, so a retry uploads only the failed files. The
+ * attachments come back in chip order, shaped exactly as the normal send
+ * records them (asset version id, name, mime, size). Never throws.
+ */
+export async function uploadScheduleFiles(input: {
+  files: readonly ScheduleFile[];
+  upload: AttachmentUploader;
+  signal: AbortSignal;
+  onProgress?: (key: string, fraction: number) => void;
+  onUploaded?: (key: string, versionId: string) => void;
+}): Promise<ScheduleUploadOutcome> {
+  if (input.signal.aborted) return { ok: false, aborted: true };
+  const results = await Promise.all(
+    input.files.map(async (item): Promise<{ key: string; versionId: string | null }> => {
+      if (item.versionId !== null) return { key: item.key, versionId: item.versionId };
+      try {
+        const res = await input.upload(
+          item.file,
+          (fraction) => {
+            if (!input.signal.aborted) input.onProgress?.(item.key, fraction);
+          },
+          input.signal,
+        );
+        if (!res.ok || input.signal.aborted) return { key: item.key, versionId: null };
+        input.onUploaded?.(item.key, res.versionId);
+        return { key: item.key, versionId: res.versionId };
+      } catch {
+        return { key: item.key, versionId: null };
+      }
+    }),
+  );
+  if (input.signal.aborted) return { ok: false, aborted: true };
+  const failedKeys = results.filter((r) => r.versionId === null).map((r) => r.key);
+  if (failedKeys.length > 0) return { ok: false, aborted: false, failedKeys };
+  return {
+    ok: true,
+    attachments: input.files.map((item, i) =>
+      toMessageAttachment(item.file, results[i]?.versionId ?? ''),
+    ),
+  };
+}
+
+export type ScheduleWithFilesOutcome<T> =
+  | { kind: 'written'; result: T }
+  | { kind: 'aborted' }
+  | { kind: 'upload-failed'; failedKeys: string[] };
+
+/**
+ * Upload the picked files (uploadScheduleFiles), then run `write` with their
+ * attachment args. `write` runs only when every file is up and the run was not
+ * aborted: a failed upload or a chat switch never reaches the schedule proc,
+ * so there is no partial schedule. No files: `write` runs at once with empty
+ * args. Without an uploader every file counts as failed.
+ */
+export async function scheduleWithFiles<T>(input: {
+  files: readonly ScheduleFile[];
+  upload: AttachmentUploader | undefined;
+  signal: AbortSignal;
+  onProgress?: (key: string, fraction: number) => void;
+  onUploaded?: (key: string, versionId: string) => void;
+  write: (args: { attachmentAssetIds: string[]; attachmentMeta: AttachmentMetaMap }) => Promise<T>;
+}): Promise<ScheduleWithFilesOutcome<T>> {
+  let attachments: MessageAttachment[] = [];
+  if (input.files.length > 0) {
+    if (input.upload === undefined) {
+      return { kind: 'upload-failed', failedKeys: input.files.map((f) => f.key) };
+    }
+    const uploaded = await uploadScheduleFiles({
+      files: input.files,
+      upload: input.upload,
+      signal: input.signal,
+      ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
+      ...(input.onUploaded !== undefined ? { onUploaded: input.onUploaded } : {}),
+    });
+    if (!uploaded.ok) {
+      return uploaded.aborted
+        ? { kind: 'aborted' }
+        : { kind: 'upload-failed', failedKeys: uploaded.failedKeys };
+    }
+    attachments = uploaded.attachments;
+  }
+  if (input.signal.aborted) return { kind: 'aborted' };
+  return { kind: 'written', result: await input.write(scheduleAttachmentArgs(attachments)) };
+}
+
+/** The schedule proc's attachment args for uploaded files, built like the normal send's. Pure. */
+export function scheduleAttachmentArgs(attachments: readonly MessageAttachment[]): {
+  attachmentAssetIds: string[];
+  attachmentMeta: AttachmentMetaMap;
+} {
+  return {
+    attachmentAssetIds: attachments.map((a) => a.assetId),
+    attachmentMeta: buildAttachmentMeta(attachments),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -299,11 +480,14 @@ export function scheduleMessage(
       ? { p_reply_to_message_id: params.replyToMessageId }
       : {}),
   };
-  return runProc<ScheduledRow>(
-    params.timeoutMs,
-    'chat_message_schedule',
-    (signal) => params.client.rpc('chat_message_schedule', args).abortSignal(signal),
-    true,
+  return announceOnSuccess(
+    runProc<ScheduledRow>(
+      params.timeoutMs,
+      'chat_message_schedule',
+      (signal) => params.client.rpc('chat_message_schedule', args).abortSignal(signal),
+      true,
+    ),
+    () => params.channelId,
   );
 }
 
@@ -329,11 +513,14 @@ export function updateScheduledMessage(
     p_mentions: [...params.mentions],
     p_trace_id: params.traceId,
   };
-  return runProc<ScheduledRow>(
-    params.timeoutMs,
-    'chat_scheduled_update',
-    (signal) => params.client.rpc('chat_scheduled_update', args).abortSignal(signal),
-    true,
+  return announceOnSuccess(
+    runProc<ScheduledRow>(
+      params.timeoutMs,
+      'chat_scheduled_update',
+      (signal) => params.client.rpc('chat_scheduled_update', args).abortSignal(signal),
+      true,
+    ),
+    (row) => row.channel_id,
   );
 }
 
@@ -344,19 +531,22 @@ export interface ScheduledIdParams {
   timeoutMs?: number;
 }
 
-/** Cancel a scheduled message via chat_scheduled_cancel. */
+/** Cancel a scheduled message via chat_scheduled_cancel. `channelId` is the row's chat (announced). */
 export function cancelScheduledMessage(
-  params: ScheduledIdParams,
+  params: ScheduledIdParams & { channelId: string },
 ): Promise<ScheduleWriteResult<null>> {
   const args: Functions['chat_scheduled_cancel']['Args'] = {
     p_id: params.id,
     p_trace_id: params.traceId,
   };
-  return runProc<null>(
-    params.timeoutMs,
-    'chat_scheduled_cancel',
-    (signal) => params.client.rpc('chat_scheduled_cancel', args).abortSignal(signal),
-    false,
+  return announceOnSuccess(
+    runProc<null>(
+      params.timeoutMs,
+      'chat_scheduled_cancel',
+      (signal) => params.client.rpc('chat_scheduled_cancel', args).abortSignal(signal),
+      false,
+    ),
+    () => params.channelId,
   );
 }
 
@@ -371,10 +561,13 @@ export function sendScheduledNow(
     p_id: params.id,
     p_trace_id: params.traceId,
   };
-  return runProc<ChatMessageRow>(
-    params.timeoutMs,
-    'chat_scheduled_send_now',
-    (signal) => params.client.rpc('chat_scheduled_send_now', args).abortSignal(signal),
-    true,
+  return announceOnSuccess(
+    runProc<ChatMessageRow>(
+      params.timeoutMs,
+      'chat_scheduled_send_now',
+      (signal) => params.client.rpc('chat_scheduled_send_now', args).abortSignal(signal),
+      true,
+    ),
+    (row) => row.channel_id,
   );
 }
