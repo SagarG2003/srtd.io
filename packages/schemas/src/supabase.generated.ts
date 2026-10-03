@@ -2250,6 +2250,57 @@ export type Database = {
           },
         ]
       }
+      chat_message_reminders: {
+        Row: {
+          cancelled_at: string | null
+          channel_id: string
+          created_at: string
+          fired_at: string | null
+          id: string
+          message_id: string
+          remind_at: string
+          user_id: string
+          workspace_id: string
+        }
+        Insert: {
+          cancelled_at?: string | null
+          channel_id: string
+          created_at?: string
+          fired_at?: string | null
+          id: string
+          message_id: string
+          remind_at: string
+          user_id: string
+          workspace_id: string
+        }
+        Update: {
+          cancelled_at?: string | null
+          channel_id?: string
+          created_at?: string
+          fired_at?: string | null
+          id?: string
+          message_id?: string
+          remind_at?: string
+          user_id?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chat_message_reminders_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "chat_channels"
+            referencedColumns: ["channel_id"]
+          },
+          {
+            foreignKeyName: "chat_message_reminders_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       chat_messages: {
         Row: {
           agora_event_id: string | null
@@ -8203,6 +8254,21 @@ export type Database = {
         Args: { p_channel_id: string; p_message_id: string; p_trace_id: string }
         Returns: undefined
       }
+      chat_reminder_cancel: {
+        Args: { p_id: string; p_trace_id: string }
+        Returns: undefined
+      }
+      chat_reminder_set: {
+        Args: {
+          p_channel_id: string
+          p_id: string
+          p_message_id: string
+          p_remind_at: string
+          p_trace_id: string
+        }
+        Returns: undefined
+      }
+      chat_reminders_fire: { Args: { p_limit?: number }; Returns: number }
       chat_scheduled_cancel: {
         Args: { p_id: string; p_trace_id: string }
         Returns: undefined
