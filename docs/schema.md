@@ -312,6 +312,8 @@ Marks: chat_message_marks, one per message, types commitment/decision (commitmen
 
 chat_message_edit(p_message_id text, p_channel_id text, p_body text, p_trace_id uuid, p_mentions jsonb default null): own message only, body and mentions only, 15 min window from created_at, blocked when marked or deleted; sets edited_at.
 chat_message_delete: own messages only, 30 min window from created_at, blocked when marked.
+Notes channels (20261003170000_notes_channel_and_search_kind.sql): chat_message_delete has no time window for messages in a notes channel; DM and group messages keep the 30 minute window. Own-only and the marked block still apply.
+chat_message_search(p_workspace_id uuid, p_query text, p_trace_id uuid, p_channel_id text default null, p_before_created_at timestamptz default null, p_before_id text default null, p_limit integer default 30, p_kind text default null) RETURNS SETOF chat_messages, SQL STABLE SECURITY INVOKER (search_path public, pg_temp; EXECUTE to authenticated only), 8 args (the old 7-arg version is dropped). New p_kind filter: photo = an attachment_meta entry with mime image/*, voice = audio/*, file = any other attachment, link = body matches http(s)://. An empty query is allowed only together with p_kind; no query and no kind returns no rows. An unknown p_kind returns no rows. Rows stay limited by chat_messages RLS, so notes rows reach only their owner.
 Tombstone: delete sets deleted_at, wipes every content column (body, mentions, attachment_asset_ids, attachment_meta, shared_post_ids, shared_brief_ids set to null) and keeps the row, so members still read it and render "Message deleted". Existing deleted rows were wiped the same way. Recorded in 20260929120000_chat_delete_tombstone.sql.
 
 Forward: forwarded_from_message_id, same workspace only, source must be readable by the sender. Clear for me: chat_channel_clears(channel_id, user_id, cleared_at); the chat_messages read policy hides rows at or before the caller's cleared_at; other members unaffected.
@@ -324,7 +326,11 @@ Applied to live 2026-09-22 and recorded in 20260922200000_chat_postgres_record.s
 
 PK channel_id (text, ^(dm|group)__[a-f0-9-]{36}__.+$). Fields: workspace_id FK, channel_type (dm / group), entity_id uuid nullable (the group id for group channels), dm_user_a / dm_user_b nullable FK auth.users.id (dm_user_a < dm_user_b), agora_group_id nullable (unique where not null), last_synced_at nullable, created_at. Channel ids: dm__W__min(A,B)__max(A,B); group__W__G.
 
-chat_channel_member(p_channel_id text, p_user_id uuid) RETURNS boolean, SQL STABLE SECURITY DEFINER (search_path='', EXECUTE to authenticated only): true when p_user_id is an active workspace_members row of the channel's workspace AND, for a dm channel, is dm_user_a or dm_user_b, or, for a group channel, has a group_members row for entity_id. Every chat SELECT policy and every chat proc below gates on it.
+Notes (20261003170000_notes_channel_and_search_kind.sql): channel_type adds 'notes' (channel_id regex now ^(dm|group|notes)__...). New column owner_user_id uuid nullable FK auth.users.id, set only for notes rows (chat_channels_shape requires it null for dm / group / plan_period and non-null for notes). Notes channel_id = notes__<workspace_id>__<owner_user_id>, enforced by chat_channels_shape: one personal notes channel per person per workspace. Notes channels have no Agora group (no agora_group_id, no chat_sync_events).
+
+notes_channel_ensure(p_workspace_id uuid, p_trace_id uuid) RETURNS text (the channel_id), SECURITY DEFINER (search_path='', EXECUTE to authenticated only; revoked from PUBLIC and anon): requires auth.uid(), p_trace_id and an active workspace member ('workspace_member_only'). Idempotent (ON CONFLICT DO NOTHING); writes one audit_log row (action notes_channel_ensure, entity chat_channel) only when the row is created.
+
+chat_channel_member(p_channel_id text, p_user_id uuid) RETURNS boolean, SQL STABLE SECURITY DEFINER (search_path='', EXECUTE to authenticated only): true when p_user_id is an active workspace_members row of the channel's workspace AND, for a dm channel, is dm_user_a or dm_user_b, or, for a group channel, has a group_members row for entity_id, or, for a notes channel, is owner_user_id (owner only). Every chat SELECT policy and every chat proc below gates on it.
 
 ### chat_messages (partitioned by created_at, monthly)
 
@@ -484,7 +490,7 @@ PK id. Fields: operator_user_id FK, flow_type (billing_override / sentry_inspect
 - inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent), reminder (tier urgent) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas)
 - inbox_entries.scope: everything, posts, briefs, people, groups, clients
 - inbox_entries.tier: urgent, active, ambient
-- chat_channels.channel_type: dm, group
+- chat_channels.channel_type: dm, group, notes
 - chat_sync_events.event_type: member_add, member_remove, group_rename
 - audit_log.outcome: success, failure
 
