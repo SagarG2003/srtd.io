@@ -1,0 +1,95 @@
+import { describe, expect, it } from 'vitest';
+import {
+  BELL_ONLY_EVENT_TYPES,
+  NOT_CHAT_MENTION_OR,
+  ONLY_BELL_OR,
+  chatMessageHref,
+  isBellEntry,
+  isBellRow,
+  onlyBellEntries,
+  withoutBellEntries,
+} from '@/lib/inbox/bell-types';
+import { INBOX_EVENT_TYPES } from '@srtdio/schemas';
+
+describe('isBellEntry: the one bell / Activity split', () => {
+  it('a chat mention is a bell row', () => {
+    expect(isBellEntry({ eventType: 'mention', entityType: 'chat_channel' })).toBe(true);
+  });
+
+  it('post and brief mentions stay in Activity', () => {
+    expect(isBellEntry({ eventType: 'mention', entityType: 'post' })).toBe(false);
+    expect(isBellEntry({ eventType: 'mention', entityType: 'brief' })).toBe(false);
+    expect(isBellEntry({ eventType: 'mention', entityType: null })).toBe(false);
+  });
+
+  it('reminder and scheduled outcomes are bell rows whatever the entity', () => {
+    for (const eventType of BELL_ONLY_EVENT_TYPES) {
+      expect(isBellEntry({ eventType, entityType: 'chat_channel' })).toBe(true);
+      expect(isBellEntry({ eventType, entityType: null })).toBe(true);
+    }
+  });
+
+  it('every other event type stays in Activity', () => {
+    const others = INBOX_EVENT_TYPES.filter(
+      (t) => t !== 'mention' && !(BELL_ONLY_EVENT_TYPES as readonly string[]).includes(t),
+    );
+    expect(others.length).toBeGreaterThan(5);
+    for (const eventType of others) {
+      expect(isBellEntry({ eventType, entityType: 'post' })).toBe(false);
+    }
+  });
+
+  it('every bell type is a canonical inbox event type', () => {
+    for (const t of BELL_ONLY_EVENT_TYPES) expect(INBOX_EVENT_TYPES).toContain(t);
+  });
+
+  it('reads raw snake_case rows the same way', () => {
+    expect(isBellRow({ event_type: 'reminder', entity_type: 'chat_channel' })).toBe(true);
+    expect(isBellRow({ event_type: 'comment', entity_type: 'post' })).toBe(false);
+  });
+});
+
+describe('query helpers', () => {
+  function recorder() {
+    const calls: { method: string; args: unknown[] }[] = [];
+    const q = {
+      not(...args: unknown[]) {
+        calls.push({ method: 'not', args });
+        return q;
+      },
+      or(...args: unknown[]) {
+        calls.push({ method: 'or', args });
+        return q;
+      },
+    };
+    return { q, calls };
+  }
+
+  it('withoutBellEntries drops the bell-only types and chat mentions (null entity kept)', () => {
+    const { q, calls } = recorder();
+    withoutBellEntries(q);
+    expect(calls).toEqual([
+      { method: 'not', args: ['event_type', 'in', '(reminder,scheduled_sent,scheduled_failed)'] },
+      { method: 'or', args: [NOT_CHAT_MENTION_OR] },
+    ]);
+    expect(NOT_CHAT_MENTION_OR).toContain('entity_type.is.null');
+  });
+
+  it('onlyBellEntries keeps exactly the bell rows', () => {
+    const { q, calls } = recorder();
+    onlyBellEntries(q);
+    expect(calls).toEqual([{ method: 'or', args: [ONLY_BELL_OR] }]);
+    expect(ONLY_BELL_OR).toBe(
+      'event_type.in.(reminder,scheduled_sent,scheduled_failed),and(event_type.eq.mention,entity_type.eq.chat_channel)',
+    );
+  });
+});
+
+describe('chatMessageHref: the Activity chat-mention deep link', () => {
+  it('opens a chat at a message', () => {
+    expect(chatMessageHref('dm__a', 'm 1')).toBe('/chat?channel=dm__a&message=m%201');
+  });
+  it('opens the chat alone without a message', () => {
+    expect(chatMessageHref('group__g', null)).toBe('/chat?channel=group__g');
+  });
+});

@@ -86,6 +86,8 @@ import {
   rememberMentionProfiles,
 } from '@/lib/chat/mentions';
 import { useToast } from '@/components/ui/toast';
+import { BellProvider } from '@/components/chat/BellContext';
+import { NotificationsSheets } from '@/components/chat/NotificationsPanel';
 import type { Result } from '@srtdio/rpc';
 
 interface ChatConnectedProps {
@@ -1228,7 +1230,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const isGroup = selected?.channelType === 'group';
   const infoGroupId = isGroup ? (selected?.groupId ?? null) : null;
 
-  return (
+  const surface = (
     <div className="flex h-full min-h-0">
       {showList ? (
         <div className="h-full w-full border-border md:w-72 md:border-r">
@@ -1365,5 +1367,20 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
         onGroupCreated={onGroupCreated}
       />
     </div>
+  );
+
+  // The chat bell (Chat home), its sheets and the message menu's Remind me.
+  return (
+    <BellProvider
+      workspaceId={workspaceId}
+      currentUserId={currentUserId}
+      roster={roster}
+      openChannelId={selected?.channelId ?? null}
+      messages={threadCurrent ? threadMessages : NO_MESSAGES}
+      nameOf={scheduleNameOf}
+    >
+      {surface}
+      <NotificationsSheets />
+    </BellProvider>
   );
 }

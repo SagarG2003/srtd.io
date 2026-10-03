@@ -15,6 +15,7 @@ import { entityUrlPath } from '@/lib/entityRef';
 import { logger } from '@/lib/logger';
 import { EX_MEMBER_LABEL } from '@/components/comments/commentProfiles';
 import { resolveMentionPreview } from '@/lib/chat/mentions';
+import { chatMessageHref, withoutBellEntries } from '@/lib/inbox/bell-types';
 
 type InboxEntryRow = Database['public']['Tables']['inbox_entries']['Row'];
 
@@ -373,10 +374,7 @@ export function cardBodyLine(item: ActivityItem): string {
 export function entityHref(item: ActivityItem, workspaceKey: string | null = null): string | null {
   if (isChatMention(item)) {
     if (item.entityId === null) return null;
-    const channel = `/chat?channel=${encodeURIComponent(item.entityId)}`;
-    return item.messageId !== null
-      ? `${channel}&message=${encodeURIComponent(item.messageId)}`
-      : channel;
+    return chatMessageHref(item.entityId, item.messageId);
   }
   if (item.eventType === 'asset_uploaded' || item.eventType === 'asset_version_added') {
     return item.assetId !== null ? `/assets?asset=${item.assetId}` : null;
@@ -697,11 +695,16 @@ export async function fetchActivityEntries(
   workspaceId: string,
   input: { before?: string; eventType?: string | undefined } = {},
 ): Promise<LoadResult> {
-  const base = client
-    .from('inbox_entries')
-    .select(SELECT_COLS)
-    .eq('workspace_id', workspaceId)
-    .is('deleted_at', null);
+  // Activity is posts only: the chat bell's rows (chat mentions, reminders,
+  // scheduled sent / failed) are filtered out server-side, so paging and the
+  // Mentions chip never count them.
+  const base = withoutBellEntries(
+    client
+      .from('inbox_entries')
+      .select(SELECT_COLS)
+      .eq('workspace_id', workspaceId)
+      .is('deleted_at', null),
+  );
   const typed = input.eventType !== undefined ? base.eq('event_type', input.eventType) : base;
   const scoped = input.before !== undefined ? typed.lt('created_at', input.before) : typed;
   const res = await scoped.order('created_at', { ascending: false }).limit(ACTIVITY_PAGE_SIZE);

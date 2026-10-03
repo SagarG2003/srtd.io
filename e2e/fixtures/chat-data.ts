@@ -519,6 +519,8 @@ export function buildWorld(now: number = Date.now()): ChatWorld {
     chat_message_marks: [],
     // The viewer's scheduled messages (RLS: own rows only); specs seed rows.
     chat_scheduled_messages: [],
+    // The viewer's message reminders (RLS: own rows only); specs seed rows.
+    chat_message_reminders: [],
     posts,
     briefs: [],
     inbox_entries: [

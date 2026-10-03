@@ -1,0 +1,192 @@
+// The "Remind me" sheet: the message preview, then the presets (20 minutes,
+// 1 hour, 3 hours, Tomorrow 9:00 AM, Next week on Monday 9:00 AM) and Custom,
+// the same Custom step as the Schedule sheet (native date and time inputs, 1
+// minute to 365 days ahead). Device-local times in mono, the zone named in the
+// footer from Intl. Used for a new reminder and for Change time. Tokens only;
+// the Sheet moves on translateY only.
+
+import { useEffect, useState } from 'react';
+import type { ReactElement } from 'react';
+import { Sheet } from '@/components/ui/Sheet';
+import { Button } from '@/components/ui/Button';
+import { IconAlarmClock, IconChevronRight } from '@/components/ui/icons';
+import { cn } from '@/lib/cn';
+import { NO_TOUCH_SELECT } from '@/components/chat/chat-type';
+import { zoneLine } from '@/components/chat/ScheduleSheet';
+import {
+  dateInputValue,
+  formatDayTime,
+  fromInputs,
+  MAX_LEAD_MS,
+  timeInputValue,
+} from '@/lib/chat/scheduled';
+import {
+  isWithinReminderWindow,
+  reminderPresets,
+  reminderSummary,
+  type ReminderPreset,
+} from '@/lib/chat/reminders';
+
+export const REMINDER_SHEET_TITLE = 'Remind me';
+export const REMINDER_HELPER = 'Any time from 1 minute to 1 year ahead.';
+
+/** A preset row's right text: "3:20 PM" today, else "Sun 4 Oct, 9:00 AM". Pure. */
+export function presetDetail(preset: ReminderPreset, now: Date): string {
+  const sameDay =
+    preset.at.getFullYear() === now.getFullYear() &&
+    preset.at.getMonth() === now.getMonth() &&
+    preset.at.getDate() === now.getDate();
+  const full = formatDayTime(preset.at, now);
+  return sameDay ? (full.split(', ')[1] ?? full) : full;
+}
+
+/** The rows and the Custom step. */
+export function ReminderOptions(props: {
+  preview: string | null;
+  onPick: (at: Date) => void;
+}): ReactElement {
+  const [step, setStep] = useState<'presets' | 'custom'>('presets');
+  const now = new Date();
+  const presets = reminderPresets(now);
+  const tomorrow = presets.find((p) => p.id === 'tomorrow')?.at ?? now;
+  const [date, setDate] = useState(() => dateInputValue(tomorrow));
+  const [time, setTime] = useState(() => timeInputValue(tomorrow));
+  const chosen = fromInputs(date, time);
+  const valid = chosen !== null && isWithinReminderWindow(chosen, now);
+
+  return (
+    <div data-reminder-options={step} className={cn('flex flex-col', NO_TOUCH_SELECT)}>
+      {props.preview !== null ? (
+        <p
+          data-reminder-preview=""
+          className="mb-2 truncate rounded-md bg-panel-2 px-3 py-2 text-sm text-fg-2"
+        >
+          {props.preview}
+        </p>
+      ) : null}
+      {step === 'presets' ? (
+        <ul className="flex flex-col">
+          {presets.map((preset) => (
+            <PresetRow
+              key={preset.id}
+              id={preset.id}
+              label={preset.label}
+              detail={presetDetail(preset, now)}
+              onClick={() =>
+                props.onPick(
+                  reminderPresets(new Date()).find((p) => p.id === preset.id)?.at ?? preset.at,
+                )
+              }
+            />
+          ))}
+          <PresetRow id="custom" label="Custom" onClick={() => setStep('custom')} />
+        </ul>
+      ) : (
+        <div data-reminder-custom="" className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-2">
+            <label className="flex flex-col gap-1 text-xs font-medium text-fg-2">
+              Date
+              <input
+                type="date"
+                aria-label="Date"
+                value={date}
+                min={dateInputValue(now)}
+                max={dateInputValue(new Date(now.getTime() + MAX_LEAD_MS))}
+                onChange={(event) => setDate(event.target.value)}
+                className="h-11 min-w-0 rounded-md border border-border bg-panel-2 px-3 font-mono text-base text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-medium text-fg-2">
+              Time
+              <input
+                type="time"
+                aria-label="Time"
+                value={time}
+                onChange={(event) => setTime(event.target.value)}
+                className="h-11 min-w-0 rounded-md border border-border bg-panel-2 px-3 font-mono text-base text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              />
+            </label>
+          </div>
+          <p data-reminder-summary="" className="min-h-5 text-sm font-medium text-fg">
+            {chosen !== null ? reminderSummary(chosen, now) : ''}
+          </p>
+          <p className="text-xs text-fg-3">{REMINDER_HELPER}</p>
+          <Button
+            type="button"
+            variant="primary"
+            size="lg"
+            data-reminder-confirm=""
+            disabled={!valid}
+            onClick={() => {
+              if (chosen !== null && isWithinReminderWindow(chosen, new Date()))
+                props.onPick(chosen);
+            }}
+          >
+            Set reminder
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PresetRow(props: {
+  id: string;
+  label: string;
+  detail?: string;
+  onClick: () => void;
+}): ReactElement {
+  return (
+    <li>
+      <button
+        type="button"
+        data-reminder-row={props.id}
+        onClick={props.onClick}
+        className="flex min-h-[56px] w-full items-center gap-3 rounded-md px-2 text-left text-fg hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-panel-2 text-fg-2">
+          <IconAlarmClock size={20} />
+        </span>
+        <span className="flex-1 text-[15px] font-medium">{props.label}</span>
+        {props.detail !== undefined ? (
+          <span className="font-mono text-xs tabular-nums text-fg-2">{props.detail}</span>
+        ) : (
+          <IconChevronRight size={16} className="text-fg-3" />
+        )}
+      </button>
+    </li>
+  );
+}
+
+/** The Remind me sheet (both layouts; the Sheet centres on wide screens). */
+export function ReminderSheet(props: {
+  open: boolean;
+  onClose: () => void;
+  preview: string | null;
+  onPick: (at: Date) => void;
+}): ReactElement {
+  // A fresh options state (presets step, default custom values) per opening.
+  const [openings, setOpenings] = useState(0);
+  useEffect(() => {
+    if (props.open) setOpenings((n) => n + 1);
+  }, [props.open]);
+  return (
+    <Sheet
+      open={props.open}
+      onClose={props.onClose}
+      title={REMINDER_SHEET_TITLE}
+      footer={
+        <>
+          <span data-reminder-zone="" className="flex-1 text-xs text-fg-2">
+            {zoneLine(new Date())}
+          </span>
+          <Button type="button" size="lg" variant="ghost" onClick={props.onClose}>
+            Cancel
+          </Button>
+        </>
+      }
+    >
+      <ReminderOptions key={openings} preview={props.preview} onPick={props.onPick} />
+    </Sheet>
+  );
+}

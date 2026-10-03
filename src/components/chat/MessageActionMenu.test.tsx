@@ -177,6 +177,23 @@ describe('ownMessageActions: the edit and delete windows', () => {
   });
 });
 
+describe('messageMenuItems: Remind me', () => {
+  it('sits directly after "Mark as"', () => {
+    const rows = menu({ canRemind: true, onRemind: () => {} });
+    expect(rows.indexOf('Remind me')).toBe(rows.indexOf('Mark as') + 1);
+  });
+
+  it('sits directly after "Marked as <type>" on a marked message', () => {
+    const rows = menu({ markedAs: 'decision', canRemind: true, onRemind: () => {} });
+    const marked = rows.findIndex((r) => r.startsWith('Marked as'));
+    expect(rows[marked + 1]).toBe('Remind me');
+  });
+
+  it('is absent without the wiring', () => {
+    expect(menu()).not.toContain('Remind me');
+  });
+});
+
 describe('messageMenuItems: row set per case', () => {
   it('own within 15 min', () => {
     expect(rowsFor(msg(ago(5)))).toEqual([

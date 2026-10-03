@@ -48,6 +48,7 @@ interface FakeBuilder extends PromiseLike<QueryResult> {
   eq(col: string, val: unknown): FakeBuilder;
   is(col: string, val: unknown): FakeBuilder;
   or(filter: string): FakeBuilder;
+  not(col: string, op: string, val: unknown): FakeBuilder;
   gt(col: string, val: unknown): FakeBuilder;
   order(col: string, opts?: unknown): FakeBuilder;
   limit(n: number): FakeBuilder;
@@ -60,6 +61,7 @@ function builder(result: QueryResult): FakeBuilder {
     eq: () => self,
     is: () => self,
     or: () => self,
+    not: () => self,
     gt: () => self,
     order: () => self,
     limit: () => self,
@@ -227,5 +229,49 @@ describe('enrichNewRows', () => {
   it('returns a null lead for an empty batch', async () => {
     const res = await enrichNewRows(fakeClient({}), []);
     expect(res).toEqual({ count: 0, lead: null });
+  });
+});
+
+describe('bell rows stay out of the Activity counts', () => {
+  function recording(): {
+    client: Parameters<typeof fetchInboxUnreadCount>[0];
+    calls: { method: string; args: unknown[] }[];
+  } {
+    const calls: { method: string; args: unknown[] }[] = [];
+    const self: Record<string, unknown> = {};
+    for (const method of ['select', 'eq', 'is', 'or', 'not', 'gt', 'order', 'limit', 'in']) {
+      self[method] = (...args: unknown[]) => {
+        calls.push({ method, args });
+        return self;
+      };
+    }
+    self.then = (onfulfilled: (v: QueryResult) => unknown) =>
+      Promise.resolve({ count: 0, error: null }).then(onfulfilled);
+    const client = { from: () => self };
+    return { client: client as unknown as Parameters<typeof fetchInboxUnreadCount>[0], calls };
+  }
+  const params = { workspaceId: 'w1', userId: 'u1', nowIso: '2026-10-03T00:00:00.000Z' };
+
+  it('the Activity badge excludes reminder, scheduled and chat mention rows', async () => {
+    const { client, calls } = recording();
+    await fetchInboxUnreadCount(client, params);
+    expect(calls).toContainEqual({
+      method: 'not',
+      args: ['event_type', 'in', '(reminder,scheduled_sent,scheduled_failed)'],
+    });
+    expect(calls).toContainEqual({
+      method: 'or',
+      args: ['event_type.neq.mention,entity_type.is.null,entity_type.neq.chat_channel'],
+    });
+  });
+
+  it('the Mentions count keeps post and brief mentions only', async () => {
+    const { client, calls } = recording();
+    await fetchUnreadMentionCount(client, params);
+    expect(calls).toContainEqual({ method: 'eq', args: ['event_type', 'mention'] });
+    expect(calls).toContainEqual({
+      method: 'or',
+      args: ['event_type.neq.mention,entity_type.is.null,entity_type.neq.chat_channel'],
+    });
   });
 });

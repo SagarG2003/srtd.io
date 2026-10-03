@@ -11,13 +11,19 @@
 // backgrounded tab does no work (the tick is skipped while document.hidden and runs
 // immediately on the return to visible).
 //
+// BELL: the chat bell's rows (bell-types.ts) never count or toast as Activity. A
+// new chat mention toasts "<name> mentioned you" with Open instead (the bell's
+// toast), and every tick asks the mounted bell to refetch. BellRing (the
+// reminder ring, chime and missed-on-open toast) is mounted here so it runs on
+// every page from app start.
+//
 // ASSUMPTION: the inbox writer does not fan an entry out to the actor's own action,
 // so a toast never reflects the current user's own activity and no self-filter is
 // applied here.
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { useSession } from '@/lib/session-context';
@@ -25,8 +31,17 @@ import { useWorkspace } from '@/lib/workspace-context';
 import { useToast } from '@/components/ui/toast';
 import { Avatar } from '@/components/ui/Avatar';
 import { entityHref, mapEntry } from '@/components/pages/activity/data';
-import { pickNewest, summarizeNew, toastFromEnriched } from '@/lib/inbox/inbox-live';
+import {
+  mentionToastFrom,
+  pickNewest,
+  splitNewRows,
+  summarizeNew,
+  toastFromEnriched,
+} from '@/lib/inbox/inbox-live';
 import { enrichNewRows, fetchInboxSince, fetchInboxUnreadCount } from '@/lib/inbox/inbox-reads';
+import { readProfiles } from '@/lib/chat-reads';
+import { requestBellRefresh } from '@/lib/chat/bell';
+import { BellRing } from '@/components/chat/BellRing';
 
 /** The slice the nav reads: the actionable unread count for the active workspace. */
 export interface InboxStoreContextValue {
@@ -43,6 +58,12 @@ export function InboxStoreProvider({ children }: { children: ReactNode }): React
   const { workspaceId } = useWorkspace();
   const toast = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
+  // The chat on screen (if any): its new mentions need no toast.
+  const openChatRef = useRef<string | null>(null);
+  openChatRef.current = location.pathname.startsWith('/chat')
+    ? new URLSearchParams(location.search).get('channel')
+    : null;
   const userId = session?.user.id ?? null;
 
   const [unreadCount, setUnreadCount] = useState(0);
@@ -75,6 +96,7 @@ export function InboxStoreProvider({ children }: { children: ReactNode }): React
     const uid = userIdRef.current;
     if (ws === null || uid === null) return;
     refreshCount(ws, uid);
+    requestBellRefresh();
     void (async () => {
       const sinceMs = highWaterRef.current;
       const sinceIso = new Date(sinceMs).toISOString();
@@ -87,8 +109,11 @@ export function InboxStoreProvider({ children }: { children: ReactNode }): React
         logger.warn('inbox store: since fetch failed', { error: sinceRes.error.message });
         return;
       }
-      const { newRows, nextHighWaterMs } = summarizeNew(sinceRes.data, sinceMs);
-      highWaterRef.current = nextHighWaterMs;
+      const summary = summarizeNew(sinceRes.data, sinceMs);
+      highWaterRef.current = summary.nextHighWaterMs;
+      const { activity: newRows, chatMentions } = splitNewRows(summary.newRows);
+      const elsewhere = chatMentions.filter((r) => r.entity_id !== openChatRef.current);
+      if (elsewhere.length > 0) void toastMentions(elsewhere);
       if (newRows.length === 0) return;
 
       const enriched = await enrichNewRows(supabase, newRows);
@@ -113,6 +138,38 @@ export function InboxStoreProvider({ children }: { children: ReactNode }): React
         onPress: () => navigate(href),
       });
     })();
+  };
+
+  // The bell's toast for new chat mentions: one batched name read, one toast.
+  const toastMentions = async (rows: Parameters<typeof mentionToastFrom>[0]): Promise<void> => {
+    const ids = [
+      ...new Set(rows.flatMap((r) => (r.actor_user_id != null ? [r.actor_user_id] : []))),
+    ];
+    const names = new Map<string, { name: string; avatar: string | null }>();
+    if (ids.length > 0) {
+      const profiles = await readProfiles(supabase, ids);
+      if (profiles.ok) {
+        for (const p of profiles.data)
+          names.set(p.userId, { name: p.displayName, avatar: p.avatarUrl });
+      } else {
+        logger.warn('inbox store: mention names failed', { error: profiles.error.message });
+      }
+    }
+    const spec = mentionToastFrom(rows, (id) => names.get(id)?.name ?? null);
+    if (spec === null) return;
+    const actor = spec.actorId !== null ? names.get(spec.actorId) : undefined;
+    toast.show({
+      title: spec.title,
+      description: spec.description,
+      icon: (
+        <Avatar
+          {...(actor !== undefined ? { name: actor.name } : {})}
+          {...(actor?.avatar != null ? { src: actor.avatar } : {})}
+          size="sm"
+        />
+      ),
+      onPress: () => navigate(spec.href),
+    });
   };
 
   // Mount + workspace/user switch: reset the high-water mark to now (the backlog
@@ -156,7 +213,14 @@ export function InboxStoreProvider({ children }: { children: ReactNode }): React
 
   const value = useMemo<InboxStoreContextValue>(() => ({ unreadCount }), [unreadCount]);
 
-  return <InboxStoreContext.Provider value={value}>{children}</InboxStoreContext.Provider>;
+  return (
+    <InboxStoreContext.Provider value={value}>
+      {children}
+      {workspaceId !== null && userId !== null ? (
+        <BellRing key={`${workspaceId}:${userId}`} workspaceId={workspaceId} userId={userId} />
+      ) : null}
+    </InboxStoreContext.Provider>
+  );
 }
 
 export function useInboxStore(): InboxStoreContextValue {

@@ -9,9 +9,10 @@ import type { Client, Result } from '@srtdio/rpc';
 import { MENTION_EVENT_TYPE, mapEntry } from '@/components/pages/activity/data';
 import { readProfiles } from '@/lib/chat-reads';
 import { pickNewest, type EnrichedNew, type InboxRow } from '@/lib/inbox/inbox-live';
+import { withoutBellEntries } from '@/lib/inbox/bell-types';
 
 const SELECT_COLS =
-  'id, workspace_id, user_id, event_type, entity_type, entity_id, scope, tier, created_at, read_at, snoozed_until, payload';
+  'id, workspace_id, user_id, actor_user_id, event_type, entity_type, entity_id, scope, tier, created_at, read_at, snoozed_until, payload';
 
 function fail<T>(message: string): Result<T> {
   return { ok: false, error: { code: 'unknown', message } };
@@ -23,14 +24,15 @@ function unique(values: string[]): string[] {
 
 /**
  * HEAD count of the caller's actionable unread: unread, not soft-deleted, and not
- * currently snoozed (no snooze, or a snooze that has already elapsed). One round
- * trip, no rows transferred.
+ * currently snoozed (no snooze, or a snooze that has already elapsed). The chat
+ * bell's rows (bell-types.ts) are left out: they never show in Activity. One
+ * round trip, no rows transferred.
  */
 export async function fetchInboxUnreadCount(
   client: Client,
   params: { workspaceId: string; userId: string; nowIso: string },
 ): Promise<Result<number>> {
-  const res = await client
+  const query = client
     .from('inbox_entries')
     .select('id', { count: 'exact', head: true })
     .eq('workspace_id', params.workspaceId)
@@ -38,21 +40,23 @@ export async function fetchInboxUnreadCount(
     .is('read_at', null)
     .is('deleted_at', null)
     .or(`snoozed_until.is.null,snoozed_until.lte.${params.nowIso}`);
+  const res = await withoutBellEntries(query);
   if (res.error) return fail(`fetchInboxUnreadCount: ${res.error.message}`);
   return { ok: true, data: res.count ?? 0 };
 }
 
 /**
  * HEAD count of the caller's actionable unread mentions: identical to
- * fetchInboxUnreadCount (unread, not soft-deleted, not currently snoozed) but
- * narrowed to event_type='mention'. Drives the Mentions chip count. One round
- * trip, no rows transferred.
+ * fetchInboxUnreadCount (unread, not soft-deleted, not currently snoozed, no
+ * bell rows, so chat mentions are left out) but narrowed to
+ * event_type='mention': post and brief mentions only. Drives the Mentions chip
+ * count. One round trip, no rows transferred.
  */
 export async function fetchUnreadMentionCount(
   client: Client,
   params: { workspaceId: string; userId: string; nowIso: string },
 ): Promise<Result<number>> {
-  const res = await client
+  const query = client
     .from('inbox_entries')
     .select('id', { count: 'exact', head: true })
     .eq('workspace_id', params.workspaceId)
@@ -61,6 +65,7 @@ export async function fetchUnreadMentionCount(
     .is('read_at', null)
     .is('deleted_at', null)
     .or(`snoozed_until.is.null,snoozed_until.lte.${params.nowIso}`);
+  const res = await withoutBellEntries(query);
   if (res.error) return fail(`fetchUnreadMentionCount: ${res.error.message}`);
   return { ok: true, data: res.count ?? 0 };
 }

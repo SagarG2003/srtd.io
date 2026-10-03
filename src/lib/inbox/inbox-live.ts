@@ -4,6 +4,12 @@
 // every decision the live layer makes is unit-tested in isolation here.
 
 import type { Database } from '@srtdio/schemas';
+import {
+  BELL_MENTION_EVENT,
+  BELL_OPEN_HREF,
+  chatMessageHref,
+  isBellRow,
+} from '@/lib/inbox/bell-types';
 
 /** The raw inbox_entries row, reused from the generated schema (never redefined). */
 export type InboxRow = Database['public']['Tables']['inbox_entries']['Row'];
@@ -154,4 +160,73 @@ export function toastFromEnriched(enriched: EnrichedNew): ToastSpec | null {
     actorAvatarUrl: lead.actorAvatarUrl,
   };
   return description !== undefined ? { ...base, description } : base;
+}
+
+/** A batch of new rows split between the two surfaces. */
+export interface NewRowsSplit {
+  /** Rows Activity shows (and toasts for). */
+  activity: InboxRow[];
+  /** New chat mentions: the bell's toast, never Activity's. */
+  chatMentions: InboxRow[];
+}
+
+/**
+ * Split new rows: Activity's own, and the chat mentions the bell toasts for.
+ * Reminders and scheduled outcomes get no live toast here (the ring and the
+ * bell own them). Pure.
+ */
+export function splitNewRows(rows: readonly InboxRow[]): NewRowsSplit {
+  return {
+    activity: rows.filter((row) => !isBellRow(row)),
+    chatMentions: rows.filter((row) => isBellRow(row) && row.event_type === BELL_MENTION_EVENT),
+  };
+}
+
+/** The bell's live toast for new chat mentions. */
+export interface MentionToastSpec {
+  title: string;
+  description: string;
+  /** Where Open goes: the message for one mention, the bell for several. */
+  href: string;
+  actorId: string | null;
+}
+
+/** Copy on the mention toast's open affordance. */
+export const MENTION_TOAST_ACTION = 'Open';
+
+/**
+ * "<name> mentioned you" (Open goes to the message) for one new chat mention;
+ * "N new mentions" (Open goes to the bell) for several. Null for none. Pure.
+ */
+export function mentionToastFrom(
+  rows: readonly InboxRow[],
+  nameOf: (userId: string) => string | null,
+): MentionToastSpec | null {
+  if (rows.length === 0) return null;
+  if (rows.length > 1) {
+    return {
+      title: `${spellCount(rows.length)} new mentions`,
+      description: MENTION_TOAST_ACTION,
+      href: BELL_OPEN_HREF,
+      actorId: null,
+    };
+  }
+  const row = rows[0];
+  if (row === undefined) return null;
+  const actorId = row.actor_user_id ?? null;
+  const name = actorId !== null ? nameOf(actorId) : null;
+  const payload: unknown = row.payload;
+  const messageId =
+    typeof payload === 'object' && payload !== null
+      ? (payload as Record<string, unknown>).message_id
+      : null;
+  return {
+    title: `${name ?? 'Someone'} mentioned you`,
+    description: MENTION_TOAST_ACTION,
+    href:
+      row.entity_id !== null
+        ? chatMessageHref(row.entity_id, typeof messageId === 'string' ? messageId : null)
+        : BELL_OPEN_HREF,
+    actorId,
+  };
 }

@@ -586,6 +586,8 @@ describe('fetchActivityEntries enrichment', () => {
     lt(col: string, val: unknown): FakeBuilder;
     like(col: string, pattern: string): FakeBuilder;
     in(col: string, vals: readonly unknown[]): FakeBuilder;
+    not(col: string, op: string, val: unknown): FakeBuilder;
+    or(filters: string): FakeBuilder;
   }
 
   function builder(result: QueryResult): FakeBuilder {
@@ -598,6 +600,8 @@ describe('fetchActivityEntries enrichment', () => {
       lt: () => self,
       like: () => self,
       in: () => self,
+      not: () => self,
+      or: () => self,
       then(onfulfilled, onrejected) {
         return Promise.resolve(result).then(onfulfilled, onrejected);
       },
@@ -973,7 +977,18 @@ describe('fetchActivityEntries query composition', () => {
     const calls: Call[] = [];
     function builder(result: QueryResult, record: boolean): Record<string, unknown> {
       const self: Record<string, unknown> = {};
-      for (const method of ['select', 'eq', 'is', 'order', 'limit', 'lt', 'like', 'in']) {
+      for (const method of [
+        'select',
+        'eq',
+        'is',
+        'order',
+        'limit',
+        'lt',
+        'like',
+        'in',
+        'not',
+        'or',
+      ]) {
         self[method] = (...args: unknown[]) => {
           if (record) calls.push({ method, args });
           return self;
@@ -1011,6 +1026,19 @@ describe('fetchActivityEntries query composition', () => {
     expect(hasCall(calls, 'eq', ['workspace_id', 'w1'])).toBe(true);
     expect(hasCall(calls, 'order', ['created_at', { ascending: false }])).toBe(true);
     expect(hasCall(calls, 'limit', [50])).toBe(true);
+  });
+
+  it('filters the chat bell rows out server-side (Activity is posts only)', async () => {
+    const { client, calls } = recordingClient([]);
+    await fetchActivityEntries(client, 'w1');
+    expect(
+      hasCall(calls, 'not', ['event_type', 'in', '(reminder,scheduled_sent,scheduled_failed)']),
+    ).toBe(true);
+    expect(
+      hasCall(calls, 'or', [
+        'event_type.neq.mention,entity_type.is.null,entity_type.neq.chat_channel',
+      ]),
+    ).toBe(true);
   });
 
   it('omits the event_type filter when eventType is absent', async () => {
