@@ -4549,7 +4549,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     if (loadedIds.has(view.rootId) || counts.get(view.rootId) !== undefined) {
       return countOf(view.rootId);
     }
-    return view.hasMore ? null : viewParts.replies.filter((m) => m.deleted !== true).length;
+    return view.hasMore ? null : (localReplyCounts(viewParts.replies).get(view.rootId) ?? 0);
   })();
   const viewThreads: ThreadBodyThreads | undefined =
     view !== null

@@ -215,14 +215,18 @@ export function railPlans<T extends RailFields>(
   return plans;
 }
 
-/** Live (non-deleted) replies per thread root among the loaded rows. One pass. */
+/**
+ * Live replies per thread root among the loaded rows: deleted ones and own
+ * sends the record refused (they never land) are left out; a send still on
+ * its way counts at once. One pass.
+ */
 export function localReplyCounts(
-  rows: readonly Pick<ThreadMessage, 'threadRootId' | 'deleted'>[],
+  rows: readonly Pick<ThreadMessage, 'threadRootId' | 'deleted' | 'state'>[],
 ): Map<string, number> {
   const counts = new Map<string, number>();
   for (const row of rows) {
     const root = row.threadRootId;
-    if (typeof root !== 'string' || row.deleted === true) continue;
+    if (typeof root !== 'string' || row.deleted === true || row.state === 'failed') continue;
     counts.set(root, (counts.get(root) ?? 0) + 1);
   }
   return counts;

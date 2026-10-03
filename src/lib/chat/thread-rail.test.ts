@@ -192,15 +192,17 @@ describe('railPlans (run builder)', () => {
 });
 
 describe('counts', () => {
-  it('counts live replies per root; deleted ones are left out', () => {
+  it('counts live replies per root; deleted and refused ones are left out, a sending one counts', () => {
     const rows = [
       reply('a', 'c', 'c'),
       { ...reply('b', 'c', 'c'), deleted: true },
       reply('d', 'a', 'c'),
       reply('x', 'o', 'o'),
+      { ...reply('f', 'c', 'c'), state: 'failed' as const },
+      { ...reply('s', 'c', 'c'), state: 'sending' as const },
     ];
     const counts = localReplyCounts(rows);
-    expect(counts.get('c')).toBe(2);
+    expect(counts.get('c')).toBe(3);
     expect(counts.get('o')).toBe(1);
   });
 

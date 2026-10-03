@@ -6,7 +6,14 @@
 import { deflateSync } from 'node:zlib';
 import type { Page, Route } from '@playwright/test';
 import { answerRest, type Row, type Tables } from './postgrest';
-import { buildWorld, ME, WORKSPACE_ID, type ChatWorld } from './chat-data';
+import {
+  buildWorld,
+  ME,
+  REFUSED_SEND,
+  threadRootOf,
+  WORKSPACE_ID,
+  type ChatWorld,
+} from './chat-data';
 
 const SUPABASE_HOST = 'harness.supabase.test';
 const CHAT_TOKEN_HOST = 'chat-token.harness.test';
@@ -133,7 +140,65 @@ const RPC: Record<string, RpcHandler> = {
   chat_read_cursor_set: () => null,
   inbox_mark_read: () => null,
   session_register: () => null,
+  // Live replies per thread root (deleted ones left out), the first 200 ids only.
+  chat_thread_reply_counts: (args, tables) => {
+    const ids = Array.isArray(args.p_root_ids) ? args.p_root_ids.slice(0, 200).map(String) : [];
+    const replies = (tables.chat_messages ?? []).filter(
+      (m) =>
+        m.channel_id === args.p_channel_id &&
+        m.deleted_at === null &&
+        ids.includes(String(m.thread_root_message_id)),
+    );
+    return ids
+      .map((root) => {
+        const own = replies.filter((m) => m.thread_root_message_id === root);
+        const last = own
+          .map((m) => String(m.created_at))
+          .sort()
+          .pop();
+        return { root_id: root, reply_count: own.length, last_reply_at: last ?? null };
+      })
+      .filter((row) => row.reply_count > 0);
+  },
+  // The record write: the row lands now, its thread root set by the trigger's rule.
+  chat_message_send: (args, tables) => {
+    const rows = tables.chat_messages ?? [];
+    const existing = rows.find((m) => m.id === args.p_id);
+    if (existing !== undefined) return existing;
+    const replyTo =
+      typeof args.p_reply_to_message_id === 'string' ? args.p_reply_to_message_id : null;
+    const row: Row = {
+      id: args.p_id,
+      channel_id: args.p_channel_id,
+      workspace_id: WORKSPACE_ID,
+      sender_user_id: ME,
+      body: typeof args.p_body === 'string' ? args.p_body : null,
+      mentions: Array.isArray(args.p_mentions) ? args.p_mentions : null,
+      attachment_asset_ids: null,
+      shared_post_ids: Array.isArray(args.p_shared_post_ids) ? args.p_shared_post_ids : null,
+      shared_brief_ids: null,
+      reply_to_message_id: replyTo,
+      forwarded_from_message_id: null,
+      attachment_meta: null,
+      agora_event_id: null,
+      created_at: new Date().toISOString(),
+      edited_at: null,
+      deleted_at: null,
+      thread_root_message_id: threadRootOf(rows, replyTo),
+    };
+    rows.push(row);
+    return row;
+  },
 };
+
+/** A refused record write (the proc raised): the send shows "Not sent" with its alert. */
+function refusedSend(name: string, args: Record<string, unknown>): boolean {
+  return (
+    name === 'chat_message_send' &&
+    typeof args.p_body === 'string' &&
+    args.p_body.includes(REFUSED_SEND)
+  );
+}
 
 export interface HarnessNetwork {
   world: ChatWorld;
@@ -172,6 +237,14 @@ export async function installHarnessNetwork(page: Page): Promise<HarnessNetwork>
         const handler = RPC[name];
         if (!handler) unmatched.push(`rpc ${name}`);
         const args = (request.postDataJSON() ?? {}) as Record<string, unknown>;
+        if (refusedSend(name, args)) {
+          await route.fulfill({
+            status: 400,
+            headers: { ...CORS, 'content-type': 'application/json' },
+            body: JSON.stringify({ code: 'P0001', message: 'refused', details: null, hint: null }),
+          });
+          return;
+        }
         const result = handler ? handler(args, world.tables) : null;
         await route.fulfill({
           status: 200,

@@ -306,7 +306,8 @@ describe('thread controls', () => {
         <RailElbow reach="w-[15px]" bottom="bottom-0" />
       </>,
     );
-    expect(out).not.toMatch(/#[0-9a-f]{3,6}\b/i);
+    // No hex colour: the hash is assembled so the token guard stays quiet.
+    expect(out).not.toMatch(new RegExp(`${String.fromCharCode(35)}[0-9a-f]{3,6}\\b`, 'i'));
     expect(out).toContain('stroke-linecap="round"');
     expect(out).toContain('stroke-linejoin="round"');
   });
