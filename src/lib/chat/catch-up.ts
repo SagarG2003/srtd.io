@@ -9,11 +9,13 @@
 
 import type { Result } from '@srtdio/rpc';
 import { CATCH_UP_LIMIT, type HistoryPage } from '@/lib/chat/history';
-import type {
-  ChatMessageRow,
-  MessageCursor,
-  MessageReaction,
-  ThreadMessage,
+import {
+  compareCursors,
+  rowCursor,
+  type ChatMessageRow,
+  type MessageCursor,
+  type MessageReaction,
+  type ThreadMessage,
 } from '@/lib/chat/thread';
 import { READ_TIMEOUT_MS, withReadTimeout } from '@/lib/chat-reads';
 
@@ -28,16 +30,30 @@ export interface CatchUpLoaders {
   loadNewer: (cursor: MessageCursor) => Promise<Result<ChatMessageRow[]>>;
 }
 
-/** What one catch-up read: every row found (oldest-first) and the latest-page hasMore. */
+/**
+ * What one catch-up read: every row found (oldest-first), the cursor of the
+ * last page read (`through`: the record is contiguous up to it), whether the
+ * run stopped at CATCH_UP_MAX_PAGES with more possibly waiting (`capped`), and
+ * the latest-page hasMore when the latest page was read instead.
+ */
 export type CatchUpOutcome =
-  | { ok: true; rows: ChatMessageRow[]; latestPage: { hasMore: boolean } | undefined }
-  | { ok: false; error: string; rows: ChatMessageRow[] };
+  | {
+      ok: true;
+      rows: ChatMessageRow[];
+      through: MessageCursor | undefined;
+      capped: boolean;
+      latestPage: { hasMore: boolean } | undefined;
+    }
+  | { ok: false; error: string; rows: ChatMessageRow[]; through: MessageCursor | undefined };
 
 /**
- * Read everything newer than `cursor`. With no cursor (the thread holds no
- * recorded message yet) the latest page is loaded instead of skipping. A page
- * that hits CATCH_UP_LIMIT means more may follow, so the next page is read from
- * the newest row until one comes back under the cap.
+ * Read everything newer than `cursor` (the thread's contiguousThrough). With
+ * no cursor (nothing contiguous is loaded yet) the latest page is loaded
+ * instead of skipping. A page that hits CATCH_UP_LIMIT means more may follow,
+ * so the next page is read from the newest row until one comes back under the
+ * cap. After CATCH_UP_MAX_PAGES the run stops `capped`; the next run resumes
+ * from `through`, so no row is skipped across runs. A failed page keeps the
+ * rows (and `through`) of the pages before it.
  */
 export async function catchUpRows(
   loaders: CatchUpLoaders,
@@ -45,20 +61,99 @@ export async function catchUpRows(
 ): Promise<CatchUpOutcome> {
   if (cursor === undefined) {
     const page = await loaders.loadLatest();
-    if (!page.ok) return { ok: false, error: page.error.message, rows: [] };
-    return { ok: true, rows: page.data.rows, latestPage: { hasMore: page.data.hasMore } };
+    if (!page.ok) return { ok: false, error: page.error.message, rows: [], through: undefined };
+    const newest = page.data.rows[page.data.rows.length - 1];
+    return {
+      ok: true,
+      rows: page.data.rows,
+      through: newest === undefined ? undefined : rowCursor(newest),
+      capped: false,
+      latestPage: { hasMore: page.data.hasMore },
+    };
   }
   const rows: ChatMessageRow[] = [];
   let from = cursor;
   for (let pageIndex = 0; pageIndex < CATCH_UP_MAX_PAGES; pageIndex += 1) {
     const page = await loaders.loadNewer(from);
-    if (!page.ok) return { ok: false, error: page.error.message, rows };
+    if (!page.ok) return { ok: false, error: page.error.message, rows, through: from };
     rows.push(...page.data);
     const last = page.data[page.data.length - 1];
-    if (page.data.length < CATCH_UP_LIMIT || last === undefined) break;
-    from = { createdAt: last.created_at, id: last.id };
+    if (last !== undefined) from = rowCursor(last);
+    if (page.data.length < CATCH_UP_LIMIT || last === undefined) {
+      return { ok: true, rows, through: from, capped: false, latestPage: undefined };
+    }
   }
-  return { ok: true, rows, latestPage: undefined };
+  return { ok: true, rows, through: from, capped: true, latestPage: undefined };
+}
+
+/**
+ * The thread's contiguousThrough: the newest row up to which every recorded
+ * row of the open chat is loaded. Only the latest-page load and catch-up pages
+ * move it (forward only); live folds, own recorded sends, older pages and
+ * by-id hydration never do, so a live row that skipped past a dropped one
+ * cannot hide the dropped row from the next catch-up. Each reset (thread
+ * switch, reopen, Retry) starts a new epoch: a read begun before it can no
+ * longer move the cursor. Framework-free.
+ */
+export interface ContiguityTracker {
+  /** Forget the cursor with the rows; returns the new epoch. */
+  reset: () => number;
+  /** The current epoch, taken when a read starts. */
+  epoch: () => number;
+  /** Where the next catch-up reads from; undefined until a latest page or catch-up lands. */
+  through: () => MessageCursor | undefined;
+  /** The latest page (readLatestMessages) was applied: contiguous through its newest row. */
+  latestPageApplied: (epoch: number, rows: readonly ChatMessageRow[]) => void;
+  /** A catch-up run's pages were applied: contiguous through its last page. */
+  catchUpApplied: (epoch: number, through: MessageCursor | undefined) => void;
+}
+
+export function createContiguityTracker(): ContiguityTracker {
+  let epoch = 0;
+  let cursor: MessageCursor | undefined;
+  const advance = (forEpoch: number, next: MessageCursor | undefined): void => {
+    if (forEpoch !== epoch || next === undefined) return;
+    if (cursor === undefined || compareCursors(next, cursor) > 0) cursor = next;
+  };
+  return {
+    reset: () => {
+      epoch += 1;
+      cursor = undefined;
+      return epoch;
+    },
+    epoch: () => epoch,
+    through: () => cursor,
+    latestPageApplied: (forEpoch, rows) => {
+      const newest = rows[rows.length - 1];
+      advance(forEpoch, newest === undefined ? undefined : rowCursor(newest));
+    },
+    catchUpApplied: advance,
+  };
+}
+
+/**
+ * Whether `next` holds an id that was not in `previous` and sits between two
+ * rows that were (a row filled into a gap, e.g. a dropped live row a catch-up
+ * read back), as opposed to an older page on top or new rows at the bottom.
+ * Pure.
+ */
+export function insertedInside(
+  previous: readonly string[],
+  next: readonly { id: string }[],
+): boolean {
+  const known = new Set(previous);
+  let seenKnown = false;
+  let pendingNew = false;
+  for (const m of next) {
+    if (known.has(m.id)) {
+      if (pendingNew && seenKnown) return true;
+      seenKnown = true;
+      pendingNew = false;
+    } else {
+      pendingNew = true;
+    }
+  }
+  return false;
 }
 
 /** What started a catch-up; the caller decides what each one reads. */

@@ -29,6 +29,7 @@ import {
   type NameOf,
 } from '@/lib/chat/mentions';
 import { logger } from '@/lib/logger';
+import { insertedInside } from '@/lib/chat/catch-up';
 import {
   distanceFromBottom,
   anchorAfterOlderLoad,
@@ -2587,6 +2588,11 @@ function ThreadBody(
   const lastIdRef = useRef<string | null>(null);
   // A jump target waiting for its older page to render.
   const pendingJumpRef = useRef<string | null>(null);
+  // The ids at the last new-rows pass, and the first row on screen (its Y)
+  // while the reader is away from the bottom: a row filled into a gap above
+  // (catch-up reading back a dropped live row) keeps that row where it was.
+  const shownIdsRef = useRef<readonly string[]>(props.messages.map((m) => m.id));
+  const viewAnchorRef = useRef<RowAnchor | null>(null);
   // One observer over the list and every row: any height change re-pins.
   const observerRef = useRef<ResizeObserver | null>(null);
   const observedRef = useRef<Set<Element>>(new Set());
@@ -2740,6 +2746,12 @@ function ThreadBody(
     const first = props.messages[0]?.id ?? null;
     const prepended = first !== firstIdRef.current;
     firstIdRef.current = first;
+    const filledGap = insertedInside(shownIdsRef.current, props.messages);
+    shownIdsRef.current = props.messages.map((m) => m.id);
+    const viewAnchor = viewAnchorRef.current;
+    if (filledGap && !stickRef.current && viewAnchor !== null) {
+      programScroll((list) => void restoreRowAnchor(list, viewAnchor));
+    }
     if (pendingJumpRef.current !== null) {
       anchorHeightRef.current = null;
       if (reveal(pendingJumpRef.current, JUMP_HIGHLIGHT_MS)) pendingJumpRef.current = null;
@@ -2794,6 +2806,12 @@ function ThreadBody(
       onNewestVisible?.();
     }
   }, [props.messages, onNewestVisible, reveal, pin, programScroll, scheduleSettle]);
+  // After every commit (and on scroll), the first row on screen while away from
+  // the bottom; pinned threads need none.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    viewAnchorRef.current = list !== null && !stickRef.current ? firstVisibleRow(list) : null;
+  });
   // Pin on any size change: every row and the list itself are observed (rows
   // as they mount and unmount), so late growth (cards, marks, badges, the
   // typing row, the composer, a font swap) re-pins before paint while the
@@ -2985,6 +3003,7 @@ function ThreadBody(
           }}
           onScroll={(e) => {
             const el = e.currentTarget;
+            viewAnchorRef.current = stickRef.current ? null : firstVisibleRow(el);
             if (touchingRef.current || touchScrollAtRef.current !== null) {
               touchScrollAtRef.current = Date.now();
               if (!touchingRef.current) scheduleSettle();
@@ -3408,6 +3427,32 @@ export interface RowAnchor {
 
 function rowSelector(id: string): string {
   return `[data-msg-id="${id.replace(/["\\]/g, '\\$&')}"]`;
+}
+
+/**
+ * The first message row whose bottom is below the list's top edge, and its
+ * screen Y (rows are in order, so a binary search over their bottoms); null
+ * when no row is rendered.
+ */
+export function firstVisibleRow(list: HTMLElement): RowAnchor | null {
+  const rows = list.querySelectorAll<HTMLElement>('[data-msg-id]');
+  const top = list.getBoundingClientRect().top;
+  let lo = 0;
+  let hi = rows.length - 1;
+  let found: HTMLElement | null = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const row = rows[mid];
+    if (row === undefined) break;
+    if (row.getBoundingClientRect().bottom > top) {
+      found = row;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  const id = found?.dataset.msgId;
+  return found === null || id === undefined ? null : { id, top: found.getBoundingClientRect().top };
 }
 
 /** The row's current screen Y, or null when it is not rendered. */

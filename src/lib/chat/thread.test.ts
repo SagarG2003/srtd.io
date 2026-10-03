@@ -20,7 +20,6 @@ import {
   markReadUpToMessage,
   mergeFetched,
   mergeReactions,
-  newestCursor,
   oldestCursor,
   parseLiveEvent,
   parseLiveIds,
@@ -554,7 +553,7 @@ describe('list transitions', () => {
 });
 
 describe('cursors', () => {
-  it('read the oldest / newest RECORDED (created_at, id) and skip provisional entries', () => {
+  it('read the oldest RECORDED (created_at, id) and skip provisional entries', () => {
     const list = [
       mine({ id: 'a', createdAt: '2026-09-22T09:00:00+00:00', time: 1 }),
       mine({ id: 'b', createdAt: '2026-09-22T10:00:00+00:00', time: 2 }),
@@ -562,7 +561,6 @@ describe('cursors', () => {
       mine({ id: 'pending', state: 'sending', provisionalTime: true, createdAt: '', time: 4 }),
     ];
     expect(oldestCursor(list)).toEqual({ createdAt: '2026-09-22T09:00:00+00:00', id: 'a' });
-    expect(newestCursor(list)).toEqual({ createdAt: '2026-09-22T10:00:00+00:00', id: 'b' });
     expect(oldestCursor([])).toBeUndefined();
   });
 });
