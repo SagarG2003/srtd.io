@@ -1032,11 +1032,23 @@ export function oldestCursor(messages: ThreadMessage[]): MessageCursor | undefin
   return first === undefined ? undefined : { createdAt: first.createdAt, id: first.id };
 }
 
-/** The newest recorded message's cursor, for catch-up; undefined when none. */
-export function newestCursor(messages: ThreadMessage[]): MessageCursor | undefined {
-  const list = recorded(messages);
-  const last = list[list.length - 1];
-  return last === undefined ? undefined : { createdAt: last.createdAt, id: last.id };
+/** A row's keyset position. */
+export function rowCursor(row: Pick<ChatMessageRow, 'created_at' | 'id'>): MessageCursor {
+  return { createdAt: row.created_at, id: row.id };
+}
+
+/**
+ * Keyset order of two cursors (created_at, then id), as the history reads
+ * order them: negative when `a` is older. Timestamps compare by instant; two
+ * stamps in the same millisecond fall back to their text (same server format).
+ */
+export function compareCursors(a: MessageCursor, b: MessageCursor): number {
+  const at = Date.parse(a.createdAt);
+  const bt = Date.parse(b.createdAt);
+  if (at !== bt) return at - bt;
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? -1 : 1;
 }
 
 /** Apply a live reaction add/remove optimistically; Postgres is truth on next load. */

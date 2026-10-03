@@ -37,6 +37,7 @@ import {
 import {
   browserCatchUpTriggers,
   catchUpRows,
+  createContiguityTracker,
   reactionRecheckIds,
   reactionRecheckWanted,
   rereadReactions,
@@ -81,7 +82,6 @@ import {
   mergeFetched,
   mergeReactions,
   replaceReactions,
-  newestCursor,
   oldestCursor,
   reactionEventExt,
   readEventExt,
@@ -510,6 +510,9 @@ export function useChatThread(params: {
   }, []);
   const inFlight = useMemo(() => createInFlightGuard(), []);
   const catchingUpRef = useRef(false);
+  // contiguousThrough: catch-up reads from here, never from the newest row on
+  // screen (a live row or an own send can sit past a row live delivery dropped).
+  const contiguity = useMemo(() => createContiguityTracker(), []);
   const loadingOlderRef = useRef(false);
   const lastCursorRef = useRef<string | null>(null);
   // The reading layer's cursors: the raw read, its status, and the viewer's
@@ -592,9 +595,15 @@ export function useChatThread(params: {
     [db, currentUserId],
   );
 
-  /** Fold fetched rows in: merge, lay the outbox back on top, then reactions + quotes. */
+  /**
+   * Fold fetched rows in: merge, lay the outbox back on top, then reactions +
+   * quotes. `newOnly` (catch-up, which re-reads rows already folded live):
+   * reactions and quotes are read for ids not loaded yet only, so a row
+   * already on screen keeps its object.
+   */
   const foldRows = useCallback(
-    (fetched: ThreadMessage[], forChannel: string): void => {
+    (fetched: ThreadMessage[], forChannel: string, newOnly = false): void => {
+      const loaded = newOnly ? new Set(messagesRef.current.map((m) => m.id)) : null;
       for (const m of fetched) {
         // A queued send whose row landed anyway (timeout after commit) is done.
         if (outboxRef.current.entries(forChannel).some((e) => e.id === m.id)) {
@@ -608,12 +617,13 @@ export function useChatThread(params: {
         channelRef.current === forChannel ? newlyTombstoned(messagesRef.current, fetched) : [];
       setMessages((prev) => withOutboxBubbles(mergeFetched(prev, fetched), entries, currentUserId));
       if (turned.length > 0) reportDeleted(forChannel, turned);
-      if (fetched.length === 0) return;
+      const fresh = loaded === null ? fetched : fetched.filter((m) => !loaded.has(m.id));
+      if (fresh.length === 0) return;
       void attachReactions(
-        fetched.map((m) => m.id),
+        fresh.map((m) => m.id),
         forChannel,
       );
-      void resolveReplies(fetched, forChannel);
+      void resolveReplies(fresh, forChannel);
     },
     [currentUserId, attachReactions, resolveReplies, reportDeleted],
   );
@@ -626,6 +636,7 @@ export function useChatThread(params: {
   // aborts it.
   useEffect(() => {
     lastCursorRef.current = null;
+    const epoch = contiguity.reset();
     setHasMore(false);
     setLoadFailed(false);
     if (channelId === null) {
@@ -640,6 +651,7 @@ export function useChatThread(params: {
     const applyPage = (page: HistoryPage): void => {
       const fetched = page.rows.map((row) => rowToThreadMessage(row, currentUserId));
       foldRows(fetched, channelId);
+      contiguity.latestPageApplied(epoch, page.rows);
       setHasMore(page.hasMore);
       setLoadFailed(false);
       setLoading(false);
@@ -670,7 +682,16 @@ export function useChatThread(params: {
       cancelled = true;
       abort.abort();
     };
-  }, [db, channelId, currentUserId, peerUserId, foldRows, attachPeerCursor, loadAttempt]);
+  }, [
+    db,
+    channelId,
+    currentUserId,
+    peerUserId,
+    foldRows,
+    attachPeerCursor,
+    loadAttempt,
+    contiguity,
+  ]);
 
   // The channel's cursors, read once on open (in parallel with the latest
   // page) and again after a peer's live read signal or a catch-up. Only the
@@ -810,9 +831,10 @@ export function useChatThread(params: {
     return unsubscribe;
   }, [db, client, channelId, currentUserId, verifier, foldRows, reportDeleted, rereadDebounced]);
 
-  // Catch-up from Postgres, never gated on the Agora state: rows newer than the
-  // newest recorded message (paging past the 200 cap), or the latest page when
-  // nothing is recorded yet, plus one batched re-read of loaded rows from the
+  // Catch-up from Postgres, never gated on the Agora state: rows newer than
+  // contiguousThrough (paging past the 200 cap; a run capped at 20 pages
+  // resumes there next time), or the latest page when nothing contiguous is
+  // loaded yet, plus one batched re-read of loaded rows from the
   // last 30 min (a delete or edit signal missed on them; on 'connected' and
   // the foreground triggers only, never the interval), then the unread
   // refresh. One run at a time.
@@ -825,7 +847,8 @@ export function useChatThread(params: {
         return;
       }
       catchingUpRef.current = true;
-      const cursor = newestCursor(messagesRef.current);
+      const epoch = contiguity.epoch();
+      const cursor = contiguity.through();
       // Loaded rows a missed delete or edit can still touch: one batched re-read.
       const recheck = recheckLoaded(
         (ids) => loadMessagesByIds(db, ids),
@@ -898,7 +921,9 @@ export function useChatThread(params: {
             });
           }
           const fetched = outcome.rows.map((row) => rowToThreadMessage(row, currentUserId));
-          if (fetched.length > 0) foldRows(fetched, forChannel);
+          // Rows already folded live keep their objects; a dropped row lands in order.
+          if (fetched.length > 0) foldRows(fetched, forChannel, true);
+          contiguity.catchUpApplied(epoch, outcome.through);
           if (outcome.ok && outcome.latestPage !== undefined) {
             setHasMore(outcome.latestPage.hasMore);
             // The latest page landed after all (a first load that failed):
@@ -913,7 +938,7 @@ export function useChatThread(params: {
         }
       })();
     },
-    [db, currentUserId, foldRows, reportDeleted, rereadDebounced],
+    [db, currentUserId, foldRows, reportDeleted, rereadDebounced, contiguity],
   );
 
   const catchUpRef = useRef(catchUp);
