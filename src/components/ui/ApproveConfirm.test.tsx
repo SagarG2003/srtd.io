@@ -60,6 +60,21 @@ describe('ApproveConfirm', () => {
     expect(texts(base({ targetDate: '' }))[0]).toBe('Approve GBL-7, all 4 slides?');
   });
 
+  it('shows a failed approve above the buttons as the chat sheet does, none by default', () => {
+    expect(texts(base({ error: 'Could not approve.' }))).toEqual([
+      'Approve GBL-7, all 4 slides, for Oct 2?',
+      'This is logged as your approval and the agency is notified.',
+      'Could not approve.',
+      'Back',
+      'Approve GBL-7',
+    ]);
+    const alert = elements(base({ error: 'x' })).find(
+      (el) => (el.props as { role?: string }).role === 'alert',
+    );
+    expect((alert?.props as { className: string }).className).toBe('text-sm text-bad');
+    expect(texts(base({ error: null }))).toHaveLength(4);
+  });
+
   it('wires Back and Confirm, both disabled while busy', () => {
     const props = base();
     const buttons = elements(props).filter((el) => el.type === 'button');

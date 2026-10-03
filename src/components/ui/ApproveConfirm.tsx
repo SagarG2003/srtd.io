@@ -40,6 +40,8 @@ export interface ApproveConfirmProps {
   mediaCount: number | null;
   /** Short target date; empty when not set or not loaded (the clause is left out). */
   targetDate: string;
+  /** A failed approve's copy, shown above the buttons as the chat sheet does; absent shows none. */
+  error?: string | null;
   /** True while the approve is in flight: both buttons disable, so a double tap sends once. */
   busy: boolean;
   onBack: () => void;
@@ -57,6 +59,11 @@ export function ApproveConfirm(props: ApproveConfirmProps): ReactElement {
     <div data-approve-confirm="" className="flex w-full flex-col gap-2">
       <p className="text-sm font-medium text-fg">{copy.question}</p>
       <p className="text-sm text-fg-2">{copy.detail}</p>
+      {props.error !== undefined && props.error !== null ? (
+        <p role="alert" data-approve-error="" className="text-sm text-bad">
+          {props.error}
+        </p>
+      ) : null}
       <div className="mt-1 flex gap-2">
         <button
           type="button"
