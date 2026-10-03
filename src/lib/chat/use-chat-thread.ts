@@ -882,7 +882,8 @@ export function useChatThread(params: {
             recheck,
             reactionsRead,
           ]);
-          if (channelRef.current !== forChannel) return;
+          // A switch, reopen or Retry since the run began: its rows belong to the old list.
+          if (channelRef.current !== forChannel || contiguity.epoch() !== epoch) return;
           if (reread !== null && !reread.ok) {
             logger.warn('chat: catch-up reactions re-read failed', {
               channel_id: forChannel,
