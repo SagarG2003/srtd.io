@@ -2165,6 +2165,7 @@ export type Database = {
           dm_user_b: string | null
           entity_id: string | null
           last_synced_at: string | null
+          owner_user_id: string | null
           workspace_id: string
         }
         Insert: {
@@ -2176,6 +2177,7 @@ export type Database = {
           dm_user_b?: string | null
           entity_id?: string | null
           last_synced_at?: string | null
+          owner_user_id?: string | null
           workspace_id: string
         }
         Update: {
@@ -2187,6 +2189,7 @@ export type Database = {
           dm_user_b?: string | null
           entity_id?: string | null
           last_synced_at?: string | null
+          owner_user_id?: string | null
           workspace_id?: string
         }
         Relationships: [
@@ -8161,6 +8164,7 @@ export type Database = {
           p_before_created_at?: string
           p_before_id?: string
           p_channel_id?: string
+          p_kind?: string
           p_limit?: number
           p_query: string
           p_trace_id: string
@@ -8564,6 +8568,10 @@ export type Database = {
       }
       member_remove: {
         Args: { p_member_id: string; p_trace_id: string }
+        Returns: string
+      }
+      notes_channel_ensure: {
+        Args: { p_trace_id: string; p_workspace_id: string }
         Returns: string
       }
       post_caption_update: {
