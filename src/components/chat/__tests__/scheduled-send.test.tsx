@@ -308,6 +308,14 @@ describe('UI-3 S2 / S3: upload first, all or nothing', () => {
     expect(composer).toContain('scheduleUploads[item.id]?.failed === true');
     expect(composer).toContain('error={scheduleUploads[item.id]?.failed === true}');
   });
+  it('the run always unlocks, a failed upload keeps the time, previews go only on success', () => {
+    expect(composer).toMatch(/finally \{[\s\S]{0,200}setScheduleBusy\(false\)/);
+    expect(composer).toMatch(/'upload-failed'[\s\S]{0,700}setScheduleAt\(sendAt\)/);
+    expect(composer).toMatch(
+      /if \(outcome\.ok\) \{[\s\S]{0,400}if \(!run\.signal\.aborted\) \{[\s\S]{0,200}revokeObjectURL/,
+    );
+  });
+
   it('a retry keeps the version ids already uploaded', () => {
     const pending = [
       pendingFile('a', 'a.jpg', 'image/jpeg'),
@@ -356,6 +364,14 @@ describe('UI-3 S4: strip and card thumbnails', () => {
     expect(renderToStaticMarkup(<ScheduledAttachments row={plain} size="card" />)).toBe('');
     expect(showsPreviewBubble(plain)).toBe(true);
     expect(showsPreviewBubble(r)).toBe(false);
+  });
+
+  it('the strip shows the first file next to the photos', () => {
+    const r = row({ attachment_asset_ids: ['v1', 'f1'], attachment_meta: PHOTO_META });
+    const html = renderToStaticMarkup(<ScheduledAttachments row={r} size="strip" />);
+    expect(html.match(/data-scheduled-thumb=""/g)).toHaveLength(1);
+    expect(html.match(/data-scheduled-file=""/g)).toHaveLength(1);
+    expect(html).toContain('brief.pdf');
   });
 
   it('the strip shows the next message thumbnails', () => {

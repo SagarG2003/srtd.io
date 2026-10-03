@@ -1390,8 +1390,12 @@ export function Composer(props: ComposerProps): ReactElement {
     if (outcome.ok) {
       if (channelId !== undefined) clearDraft(channelId);
       // The previews belong to no bubble: the message sends later from storage.
-      for (const item of picked) {
-        if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
+      // After leaving the chat they are left alone: a composer that came back
+      // may already show them again from the draft.
+      if (!run.signal.aborted) {
+        for (const item of picked) {
+          if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
+        }
       }
     }
     // Left the chat while the write ran: this composer is gone.
