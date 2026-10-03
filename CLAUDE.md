@@ -20,6 +20,8 @@ Node 22 (`.nvmrc`), pnpm. Run `pnpm install` first.
 
 Single unit test: `pnpm exec vitest run src/lib/foo.test.ts`.
 
+iPhone/WebKit visual checks: `pnpm test:e2e` (e2e/harness)
+
 Domain/DB suites live in `tests/<domain>/` and are NOT run by `pnpm test`. Each has its own config and CI workflow:
 
 - `pnpm exec vitest run --config tests/<domain>/vitest.config.ts` (domains: rls, auth, posts, briefs, comments, inbox, rpc, workspace, flags, etl)

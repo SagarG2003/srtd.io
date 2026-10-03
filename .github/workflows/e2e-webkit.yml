@@ -1,0 +1,45 @@
+name: E2E WebKit
+
+# Renders the e2e/harness Vite entry in Playwright WebKit with iPhone 13
+# emulation (dark and light) and uploads screenshots. Linux WebKit is close to,
+# not identical to, iOS Safari. No database, no secrets.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  e2e-webkit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright WebKit
+        run: pnpm exec playwright install --with-deps webkit
+
+      - name: Type-check the e2e workspace
+        run: pnpm exec tsc -p e2e/tsconfig.json --noEmit
+
+      - name: Run WebKit e2e suite
+        run: pnpm test:e2e
+
+      - name: Upload screenshots and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-webkit-results
+          path: |
+            e2e/results
+            playwright-report
+          if-no-files-found: warn
+          retention-days: 14
