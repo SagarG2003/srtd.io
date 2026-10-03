@@ -17,9 +17,13 @@ export default defineConfig({
   envPrefix: 'HARNESS_',
   plugins: [react()],
   resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('../../src', import.meta.url)),
-    },
+    // Harness-only fixture aliases. Order matters: the exact-match stubs come
+    // before the '@' prefix alias. Never mirrored in vitest.
+    alias: [
+      { find: /^@\/lib\/env$/, replacement: `${harnessRoot}stubs/env.ts` },
+      { find: /^agora-chat$/, replacement: `${harnessRoot}stubs/agora-chat.ts` },
+      { find: '@', replacement: fileURLToPath(new URL('../../src', import.meta.url)) },
+    ],
   },
   css: {
     postcss: {
