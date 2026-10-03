@@ -7,6 +7,7 @@ import type {
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  IconAlarmClock,
   IconCheck,
   IconChevronLeft,
   IconChevronRight,
@@ -24,6 +25,7 @@ import { IconButton } from '@/components/ui/IconButton';
 import { POPOVER_PANEL } from '@/components/ui/popover-classes';
 import { MARK_TONE } from '@/components/chat/MarkBits';
 import { useChatLayout, type ChatLayout } from '@/components/chat/chat-type';
+import { useBellOptional } from '@/components/chat/BellContext';
 import { logger } from '@/lib/logger';
 import { DELETE_SELECTION_WINDOW_MS } from '@/lib/chat/forward';
 import { TYPE_LABEL, type ChatMark, type MarkType } from '@/lib/chat/marks';
@@ -161,6 +163,12 @@ interface MessageActionMenuProps {
   /** Offers "Select" (multi-select forward and delete). */
   canSelect?: boolean;
   onSelect?: () => void;
+  /**
+   * Offers "Remind me" (a recorded message). When absent, the menu offers it
+   * itself for the held bubble's message inside a BellProvider.
+   */
+  canRemind?: boolean;
+  onRemind?: () => void;
 }
 
 /** One entry of the message action menu. */
@@ -202,6 +210,8 @@ type MenuItemProps = Pick<
   | 'lockedByMark'
   | 'canSelect'
   | 'onSelect'
+  | 'canRemind'
+  | 'onRemind'
 >;
 
 /** The ban glyph (circle with a slash) for tombstones and the locked line. */
@@ -247,7 +257,7 @@ export function TranscribeGlyph(props: { size?: number }): ReactElement {
 
 /**
  * The main view in display order: Reply, Forward, Copy or Transcribe, "Mark as" (or the
- * static "Marked as <type>"), Edit, Delete (or the locked line), then Select
+ * static "Marked as <type>"), "Remind me", Edit, Delete (or the locked line), then Select
  * under a divider. Rows that do not apply are not rendered. Pure (no hooks) so
  * the row set is unit-tested without a DOM.
  */
@@ -297,6 +307,15 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
       icon: <IconPin />,
       run: () => {},
       submenu: true,
+    });
+  }
+  if (props.canRemind === true) {
+    items.push({
+      kind: 'action',
+      key: 'remind',
+      label: 'Remind me',
+      icon: <IconAlarmClock />,
+      run: () => props.onRemind?.(),
     });
   }
   if (props.lockedByMark === true) {
@@ -898,6 +917,24 @@ export function EmojiPickerShell(props: {
  * picker is open). Motion is opacity + scale only. All colours
  * are design tokens, so light and dark stay at parity.
  */
+/**
+ * "Remind me" for the menu: the caller's own wiring when given, else the
+ * bell's for the held bubble's row (its data-msg-id). Pure but for the lookup.
+ */
+export function remindProps(
+  props: Pick<MessageActionMenuProps, 'canRemind' | 'onRemind'>,
+  bell: Pick<
+    NonNullable<ReturnType<typeof useBellOptional>>,
+    'canRemind' | 'openReminderFor'
+  > | null,
+  held: HTMLElement | null | undefined,
+): Pick<MessageActionMenuProps, 'canRemind' | 'onRemind'> {
+  if (props.canRemind !== undefined) return props;
+  const messageId = held?.closest('[data-msg-id]')?.getAttribute('data-msg-id') ?? null;
+  if (bell === null || messageId === null || !bell.canRemind(messageId)) return {};
+  return { canRemind: true, onRemind: () => bell.openReminderFor(messageId) };
+}
+
 export function MessageActionMenu(props: MessageActionMenuProps): ReactElement | null {
   const { open, onClose, anchor, mine, currentReaction, onReact, held } = props;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -911,6 +948,7 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
   pickingRef.current = picking;
   const moreRef = useRef<HTMLButtonElement>(null);
   const layout = useChatLayout();
+  const bell = useBellOptional();
 
   // The picker's chunk starts loading as the menu opens, so "+" opens it ready.
   useEffect(() => {
@@ -1028,7 +1066,7 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     ? []
     : view === 'mark'
       ? markSubmenuItems(props, () => setView('main'))
-      : messageMenuItems(props);
+      : messageMenuItems({ ...props, ...remindProps(props, bell, held) });
   const run = (item: MessageMenuItem): void => {
     if (item.kind !== 'action') return;
     if (item.key === 'mark') {

@@ -44,6 +44,7 @@ import { mentionNamesIn, resolveMentionPreview, splitAllMentions } from '@/lib/c
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import { summaryIconOfLine } from '@/lib/chat/thread';
 import { SummaryGlyph } from '@/components/chat/ReplyQuote';
+import { BellButton } from '@/components/chat/BellButton';
 import {
   COARSE_POINTER_QUERY,
   DRAFT_PREFIX_TYPE,
@@ -720,6 +721,8 @@ interface ChannelListContentProps extends ChannelListProps {
   nowMs?: number;
   /** Hidden-chat lookup; absent in pure tests (nothing is hidden). */
   isHidden?: HiddenLookup;
+  /** The chat bell, between Select and "+" (absent outside a BellProvider). */
+  bell?: ReactNode;
   /** Select mode controls; absent hides the Select control. */
   select?: ChannelSelectMode;
   /** Row long-press; absent disables the row menu. */
@@ -832,6 +835,7 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
                       Select
                     </Button>
                   ) : null}
+                  {props.bell}
                   <Button
                     variant="primary"
                     size="lg"
@@ -1068,6 +1072,7 @@ export function ChannelList(props: ChannelListProps): ReactElement {
     <>
       {channelListContent({
         ...props,
+        bell: <BellButton />,
         input,
         search,
         onSearchChange: setSearch,

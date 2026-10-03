@@ -690,3 +690,21 @@ export function IconArrowUp(props: IconProps) {
     </Svg>
   );
 }
+
+export function IconBell(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15L6 16z" />
+      <path d="M10 20.5a2 2 0 0 0 4 0" />
+    </Svg>
+  );
+}
+
+export function IconAlarmClock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx={12} cy={13} r={7} />
+      <path d="M12 9.5V13l2.5 1.5M4.5 5.5 7 3.5M19.5 5.5 17 3.5M7 19.5 5.5 21M17 19.5l1.5 1.5" />
+    </Svg>
+  );
+}

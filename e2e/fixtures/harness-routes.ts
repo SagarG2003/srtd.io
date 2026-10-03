@@ -139,6 +139,50 @@ const RPC: Record<string, RpcHandler> = {
   },
   chat_read_cursor_set: () => null,
   inbox_mark_read: () => null,
+  // Bell read state: snooze one entry, or mark every unread entry of the types read.
+  inbox_snooze: (args, tables) => {
+    const row = (tables.inbox_entries ?? []).find((r) => r.id === args.p_entry_id);
+    if (row !== undefined) row.snoozed_until = new Date(Date.now() + 3_600_000).toISOString();
+    return null;
+  },
+  inbox_mark_read_events: (args, tables) => {
+    const types = Array.isArray(args.p_event_types) ? args.p_event_types.map(String) : [];
+    for (const row of tables.inbox_entries ?? []) {
+      if (row.read_at === null && types.includes(String(row.event_type))) {
+        row.read_at = new Date().toISOString();
+      }
+    }
+    return null;
+  },
+  // Reminders: an id already held is a no-op; a new one replaces the pending
+  // reminder on the same message (the proc's Change time rule).
+  chat_reminder_set: (args, tables) => {
+    const rows = (tables.chat_message_reminders ??= []);
+    if (rows.some((r) => r.id === args.p_id)) return null;
+    const now = new Date().toISOString();
+    for (const r of rows) {
+      if (r.message_id === args.p_message_id && r.fired_at === null && r.cancelled_at === null) {
+        r.cancelled_at = now;
+      }
+    }
+    rows.push({
+      id: args.p_id,
+      user_id: ME,
+      message_id: args.p_message_id,
+      channel_id: args.p_channel_id,
+      workspace_id: WORKSPACE_ID,
+      remind_at: args.p_remind_at,
+      fired_at: null,
+      cancelled_at: null,
+      created_at: now,
+    });
+    return null;
+  },
+  chat_reminder_cancel: (args, tables) => {
+    const row = (tables.chat_message_reminders ?? []).find((r) => r.id === args.p_id);
+    if (row !== undefined && row.fired_at === null) row.cancelled_at = new Date().toISOString();
+    return null;
+  },
   session_register: () => null,
   // Live replies per thread root (deleted ones left out), the first 200 ids only.
   chat_thread_reply_counts: (args, tables) => {
