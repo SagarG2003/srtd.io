@@ -212,3 +212,21 @@ test.describe('laptop', () => {
     expect(network.blocked, 'blocked non-fixture requests').toEqual([]);
   });
 });
+
+test('personal notes: a failed ensure shows the Retry state, not a skeleton', async ({ page }) => {
+  const network = await installHarnessNetwork(page);
+  // Registered after the harness routes, so it answers first: the proc refuses.
+  await page.route('**/rest/v1/rpc/notes_channel_ensure', (route) =>
+    route.fulfill({
+      status: 400,
+      headers: { 'access-control-allow-origin': '*', 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'P0001', message: 'refused', details: null, hint: null }),
+    }),
+  );
+  await page.goto('/chat');
+  await page.locator('[data-notes-tile]').waitFor({ state: 'visible', timeout: 30_000 });
+  await page.locator('[data-notes-tile]').click();
+  await expect(page.getByText("Couldn't load messages")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
+  expect(network.blocked, 'blocked non-fixture requests').toEqual([]);
+});

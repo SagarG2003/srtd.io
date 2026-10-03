@@ -35,9 +35,10 @@ const NOTES_AVATAR_BOX = {
   tile: 'h-[76px] w-[76px] rounded-[18px]',
   row: 'h-12 w-12 rounded-[12px]',
   header: 'h-10 w-10 rounded-[12px]',
+  picker: 'h-[26px] w-[26px] rounded-[8px]',
 } as const;
 
-const NOTES_GLYPH_SIZE = { tile: 34, row: 24, header: 22 } as const;
+const NOTES_GLYPH_SIZE = { tile: 34, row: 24, header: 22, picker: 16 } as const;
 
 /** The accent-soft rounded square with the notebook, in place of a photo. */
 export function NotesAvatar(props: { size: keyof typeof NOTES_AVATAR_BOX }): ReactElement {

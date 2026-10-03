@@ -92,6 +92,7 @@ import { SavedFromProvider, type SavedFromWiring } from '@/components/chat/Notes
 import { useNotes } from '@/lib/chat/use-notes';
 import {
   isNotes,
+  isNotesChannelId,
   liveClientFor,
   saveToNotesEntry,
   SAVED_TO_NOTES_TOAST,
@@ -605,7 +606,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const toastRef = useRef(toast);
   toastRef.current = toast;
   useEffect(() => {
-    if (loadStatus !== 'ready') return;
+    // Notes never wait on the roster: they open from the session-built id.
+    if (loadStatus !== 'ready' && !isNotesChannelId(searchParams.get('channel'))) return;
     const channel = searchParams.get('channel');
     if (channel === null || channel === '') {
       selectedFromParam.current = null;
@@ -1142,7 +1144,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // Notes never schedule: nothing to read, nothing to wait for.
   const scheduledSettled =
     notesOpen || (scheduled.settled && scheduled.channelId === selectedChannelId);
-  const scheduledRows = scheduledSettled ? scheduled.rows : NO_SCHEDULED;
+  const scheduledRows = scheduledSettled && !notesOpen ? scheduled.rows : NO_SCHEDULED;
   // Notes: the saved copies' "Saved from" lines of the first page paint with
   // it. One batched source read per loaded page (and one batched name read
   // for their senders), never one per row.
@@ -1207,13 +1209,15 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     if (firstSavedSettled) setSavedSettledFor(selectedChannelId);
   }, [firstSavedSettled, selectedChannelId]);
   const savedReady = !notesOpen || savedSettledFor === selectedChannelId;
+  // Notes whose ensure failed: never the skeleton, the Retry state shows.
   const threadLoading =
-    thread.loading ||
-    !threadCurrent ||
-    !namesReady ||
-    !scheduledSettled ||
-    (notesOpen && notes.status !== 'ready' && notes.status !== 'failed') ||
-    (notesReady && !savedReady);
+    !notesFailed &&
+    (thread.loading ||
+      !threadCurrent ||
+      !namesReady ||
+      !scheduledSettled ||
+      (notesOpen && notes.status !== 'ready' && notes.status !== 'failed') ||
+      (notesReady && !savedReady));
   const [scheduledListOpen, setScheduledListOpen] = useState(false);
   useEffect(() => setScheduledListOpen(false), [selectedChannelId]);
   // The last one sent or cancelled: nothing left to show.
@@ -1417,13 +1421,18 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     (message: ThreadMessage) => {
       const entry = saveToNotesEntry(message, newMessageId());
       const target = notesChat;
-      void ensureNotes().then(() => outboxEnqueue(target.channelId, entry));
+      const forWorkspace = workspaceId;
+      // A workspace switch before the ensure answers drops it: the outbox is
+      // the new workspace's by then.
+      void ensureNotes().then(() => {
+        if (workspaceIdRef.current === forWorkspace) outboxEnqueue(target.channelId, entry);
+      });
       toast.show({
         title: SAVED_TO_NOTES_TOAST,
         onPress: () => leaveSelectionThen(() => openChannel(target)),
       });
     },
-    [notesChat, ensureNotes, outboxEnqueue, toast, openChannel],
+    [notesChat, ensureNotes, outboxEnqueue, toast, openChannel, workspaceId],
   );
   // A forward that includes notes waits on its ensure first.
   const threadForward = thread.forward;

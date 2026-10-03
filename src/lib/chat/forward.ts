@@ -172,7 +172,13 @@ export function forwardPickerChannels(
   summaryFor: (channelId: string) => RecencySummary | undefined,
   query: string,
 ): ChannelSummary[] {
-  return filterChannelsByName(sortChannelsByRecency(channels, summaryFor), query);
+  // Personal notes is always first (D9); the rest by recency.
+  const notes = channels.filter((c) => c.channelType === 'notes');
+  const rest = sortChannelsByRecency(
+    channels.filter((c) => c.channelType !== 'notes'),
+    summaryFor,
+  );
+  return filterChannelsByName([...notes, ...rest], query);
 }
 
 /** Toggle a chat in the picker's selection (new Set). */

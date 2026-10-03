@@ -39,7 +39,7 @@ import { resolveLiveTarget } from '@/lib/chat/roster-signal';
 import { runSend } from '@/lib/chat/send-flow';
 import { mentionTargets } from '@/lib/chat/mentions';
 import { windowFocusTrigger } from '@/lib/chat/catch-up';
-import { deleteSelectionBlock } from '@/lib/chat/forward';
+import { deleteSelectionBlock, forwardPickerChannels } from '@/lib/chat/forward';
 import { messageMenuItems, ownMessageActions } from '@/components/chat/MessageActionMenu';
 import { trayTiles } from '@/components/chat/ComposerTray';
 import { ThreadHeaderIdentity, threadStripSlot } from '@/components/chat/MessageThread';
@@ -488,5 +488,14 @@ describe('notes thread chrome', () => {
   it('no open-loops strip without marks (notes pass none)', () => {
     expect(threadStripSlot({ hasMarks: false, selecting: false })).toBeNull();
     expect(threadStripSlot({ hasMarks: true, selecting: false })).toBe('loops');
+  });
+});
+
+describe('forward picker order', () => {
+  it('keeps Personal notes first whatever the recency', () => {
+    const notes = notesSummary(WS, ME);
+    const list = forwardPickerChannels([DM, notes], () => ({ lastMessageTs: 5 }), '');
+    expect(list[0]?.channelType).toBe('notes');
+    expect(forwardPickerChannels([DM, notes], () => undefined, 'priya')).toEqual([DM]);
   });
 });

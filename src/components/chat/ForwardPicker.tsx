@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import { Avatar } from '@/components/ui/Avatar';
+import { NotesAvatar } from '@/components/chat/NotesBits';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Sheet } from '@/components/ui/Sheet';
@@ -116,11 +117,15 @@ export function ForwardPicker(props: ForwardPickerProps): ReactElement {
                     isSelected ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-panel-2',
                   )}
                 >
-                  <Avatar
-                    name={channel.title}
-                    {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
-                    size="md"
-                  />
+                  {channel.channelType === 'notes' ? (
+                    <NotesAvatar size="picker" />
+                  ) : (
+                    <Avatar
+                      name={channel.title}
+                      {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
+                      size="md"
+                    />
+                  )}
                   <span className="min-w-0 flex-1 truncate text-sm font-medium">
                     {channel.title}
                   </span>
