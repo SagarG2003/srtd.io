@@ -1,6 +1,7 @@
 // Agora Chat REST client for group lifecycle, scoped to exactly what the
 // chat-agora-sync Worker (A2b) needs: register users, create a group, add/remove
-// a member, and rename a group. Every call is authenticated with an app token minted from the
+// a member, and rename a group. The chat-scheduled-send Worker adds one message
+// operation: send a text message as a given user (sendMessage). Every call is authenticated with an app token minted from the
 // App ID + App Certificate via ChatTokenBuilder.buildAppToken - the same scheme
 // the chat-token Worker uses, never a hand-rolled signature - and goes through
 // tracedFetch so it carries X-Trace-Id.
@@ -32,7 +33,8 @@ export type AgoraOperation =
   | 'create_group'
   | 'add_member'
   | 'remove_member'
-  | 'rename_group';
+  | 'rename_group'
+  | 'send_message';
 
 /** A non-2xx Agora REST response, with the log fields kept apart. */
 export class AgoraRestError extends Error {
@@ -84,6 +86,39 @@ export interface AgoraGroupApi {
   removeMember(groupId: string, username: string, traceId: string): Promise<void>;
   /** Rename a group. */
   updateGroupName(groupId: string, name: string, traceId: string): Promise<void>;
+}
+
+/** Where a REST-sent message is delivered: one user (DM) or one Agora group. */
+export type AgoraMessageChatType = 'singleChat' | 'groupChat';
+
+/** One text message sent over REST as `from`; `ext` rides as the message's ext. */
+export interface AgoraTextMessage {
+  /** Sender's Agora username. */
+  from: string;
+  /** Recipient's Agora username (singleChat) or Agora group id (groupChat). */
+  to: string;
+  chatType: AgoraMessageChatType;
+  msg: string;
+  ext: Record<string, unknown>;
+}
+
+/** The message operations a Worker performs against Agora; injected for tests. */
+export interface AgoraMessageApi {
+  /** Send one text message. Throws AgoraRestError on a non-2xx response. */
+  sendMessage(message: AgoraTextMessage, traceId: string): Promise<void>;
+}
+
+/** A REST message send is abandoned after this long, so one call cannot stall a run. */
+export const SEND_MESSAGE_TIMEOUT_MS = 5_000;
+
+/** Bearer app token + JSON content type for one REST call. */
+function appAuthHeaders(config: AgoraRestConfig): Record<string, string> {
+  const appToken = ChatTokenBuilder.buildAppToken(
+    config.appId,
+    config.appCertificate,
+    APP_TOKEN_TTL_SECONDS,
+  );
+  return { authorization: `Bearer ${appToken}`, 'content-type': 'application/json' };
 }
 
 /** Render any thrown value into a stable log string (logging only). */
@@ -147,12 +182,7 @@ export function createAgoraGroupApi(
   const base = config.restUrl.replace(/\/+$/, '');
 
   function authHeaders(): Record<string, string> {
-    const appToken = ChatTokenBuilder.buildAppToken(
-      config.appId,
-      config.appCertificate,
-      APP_TOKEN_TTL_SECONDS,
-    );
-    return { authorization: `Bearer ${appToken}`, 'content-type': 'application/json' };
+    return appAuthHeaders(config);
   }
 
   /** POST /users with the chat-token Worker's body shape (one object or an array). */
@@ -263,6 +293,43 @@ export function createAgoraGroupApi(
       );
       if (!response.ok) {
         throw new AgoraRestError('rename_group', response.status, await response.text());
+      }
+    },
+  };
+}
+
+/**
+ * Build the Agora REST message client. POST /messages/users (DM) or
+ * /messages/chatgroups (group) with one target, sync_device so the sender's
+ * own devices receive it too, exactly as an SDK send does.
+ */
+export function createAgoraMessageApi(
+  config: AgoraRestConfig,
+  fetchImpl: TracedFetchFn = tracedFetch,
+): AgoraMessageApi {
+  const base = config.restUrl.replace(/\/+$/, '');
+  return {
+    async sendMessage(message, traceId) {
+      const path = message.chatType === 'groupChat' ? 'chatgroups' : 'users';
+      const response = await fetchImpl(
+        `${base}/messages/${path}`,
+        {
+          method: 'POST',
+          headers: appAuthHeaders(config),
+          body: JSON.stringify({
+            from: message.from,
+            to: [message.to],
+            type: 'txt',
+            body: { msg: message.msg },
+            ext: message.ext,
+            sync_device: true,
+          }),
+          signal: AbortSignal.timeout(SEND_MESSAGE_TIMEOUT_MS),
+        },
+        traceId,
+      );
+      if (!response.ok) {
+        throw new AgoraRestError('send_message', response.status, await response.text());
       }
     },
   };

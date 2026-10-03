@@ -1,0 +1,45 @@
+name: Deploy chat-scheduled-send Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'workers/chat-scheduled-send/**'
+      - 'src/server/workers/chat-scheduled-send.ts'
+      - 'src/server/workers/chat-agora-rest.ts'
+      - 'src/server/workers/agora-identity.ts'
+      - 'src/server/logger.ts'
+      - 'src/server/trace.ts'
+      - 'src/server/traced-fetch.ts'
+      - 'src/lib/chat/thread.ts'
+      - 'src/lib/chat/thread-rail.ts'
+      - 'src/lib/chat/attachments.ts'
+      - 'src/lib/chat/mentions.ts'
+      - 'src/lib/chat/agora-identity.ts'
+      - 'src/lib/chat/waveform-peaks.ts'
+      - 'src/lib/asset-upload.ts'
+      - 'src/lib/trace.ts'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/chat-scheduled-send-deploy.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Deploy
+        uses: cloudflare/wrangler-action@v3.14.1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers/chat-scheduled-send
+          wranglerVersion: '3.114.17'
+          packageManager: pnpm
