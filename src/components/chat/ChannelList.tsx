@@ -45,7 +45,16 @@ import { leaveSelectionThen } from '@/lib/chat/forward';
 import { summaryIconOfLine } from '@/lib/chat/thread';
 import { SummaryGlyph } from '@/components/chat/ReplyQuote';
 import { SearchResults, useMessageSearch } from '@/components/chat/SearchResults';
-import { normalizeQuery, SEARCH_MIN_CHARS, type SearchHit } from '@/lib/chat/search';
+import {
+  normalizeQuery,
+  SEARCH_CHIPS,
+  SEARCH_MIN_CHARS,
+  toggleSearchKind,
+  type SearchHit,
+  type SearchKind,
+} from '@/lib/chat/search';
+import { NOTES_TILE_LINE } from '@/lib/chat/notes';
+import { NotesAvatar } from '@/components/chat/NotesBits';
 import { useSession } from '@/lib/session-context';
 import { BellButton } from '@/components/chat/BellButton';
 import {
@@ -134,6 +143,12 @@ interface ChannelListProps {
   workspaceId?: string | null;
   /** A message search hit tapped: open that chat at that message, the bar on the query. */
   onOpenSearchHit?: (channel: ChannelSummary, messageId: string, query: string) => void;
+  /**
+   * The caller's Personal notes (built from the session, never read): its
+   * tile is pinned above Groups from the first paint, and search hits in it
+   * carry its name. Absent: no tile.
+   */
+  notes?: ChannelSummary;
 }
 
 interface ChannelListBodyProps extends Omit<ChannelListProps, 'status' | 'onRetry'> {
@@ -717,6 +732,95 @@ export function ChannelCard(props: {
   );
 }
 
+/**
+ * The Personal notes tile: full width above Groups, the accent-soft notebook
+ * square, "Personal notes" over "Only you can see this". Paints the same in
+ * every list state (loading, error, ready) from the session alone, so the
+ * first paint is final. No motion. Not selectable in Select mode (inert).
+ * Hook-free so it is unit tested.
+ */
+export function notesTile(props: {
+  notes: ChannelSummary;
+  selected: boolean;
+  /** Select mode is on: the tile is inert. */
+  selecting: boolean;
+  onSelect: (channel: ChannelSummary) => void;
+}): ReactElement {
+  const { notes } = props;
+  return (
+    <div className={cn(CHAT_HOME_STACK, 'pb-2')}>
+      <button
+        type="button"
+        data-notes-tile=""
+        aria-label={`Open ${notes.title}`}
+        disabled={props.selecting}
+        onClick={() => {
+          if (props.selecting) return;
+          // A thread selecting messages exits that first (history.back()).
+          leaveSelectionThen(() => props.onSelect(notes));
+        }}
+        className={cn(
+          tileBoxClass('wide'),
+          CHANNEL_ROW_BUTTON,
+          'border-border disabled:cursor-default',
+          props.selected && !props.selecting ? 'bg-panel-2' : 'bg-panel',
+          !props.selecting && 'hover:bg-panel-2',
+        )}
+      >
+        <NotesAvatar size="tile" />
+        <span className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className={cn('min-w-0 truncate text-fg', GROUP_NAME_TYPE)}>{notes.title}</span>
+          <span className={cn('min-w-0 truncate text-fg-2', GROUP_PREVIEW_TYPE)}>
+            {NOTES_TILE_LINE}
+          </span>
+        </span>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The filter chips under the search box: Photos, Links, Files, Voice notes.
+ * One at a time (tap again to clear). Each is a 44px tall target around a
+ * 32px pill. Tokens only, no motion. Hook-free.
+ */
+export function searchChips(props: {
+  kind: SearchKind | null;
+  onChange: (kind: SearchKind | null) => void;
+}): ReactElement {
+  return (
+    <div data-search-chips="" role="group" aria-label="Filter messages" className="flex gap-2">
+      {SEARCH_CHIPS.map((chip) => {
+        const on = props.kind === chip.kind;
+        return (
+          <button
+            key={chip.kind}
+            type="button"
+            data-search-chip={chip.kind}
+            aria-pressed={on}
+            onClick={() => props.onChange(toggleSearchKind(props.kind, chip.kind))}
+            className={cn(
+              'group/chip flex min-h-[44px] shrink-0 items-center focus-visible:outline-none',
+              NO_TOUCH_SELECT,
+            )}
+          >
+            <span
+              className={cn(
+                'flex h-8 items-center rounded-full border px-3 text-sm group-focus-visible/chip:ring-2 group-focus-visible/chip:ring-accent',
+                on
+                  ? 'border-accent-line bg-accent-soft font-medium text-accent'
+                  : 'border-border bg-panel text-fg-2 hover:bg-panel-2',
+              )}
+            >
+              {chip.label}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 interface ChannelListContentProps extends ChannelListProps {
   search: string;
   onSearchChange: (value: string) => void;
@@ -738,14 +842,17 @@ interface ChannelListContentProps extends ChannelListProps {
   input?: ChannelListInput;
   /**
    * The message search results; they replace the list (no old list under them)
-   * while the box holds 2+ characters. Absent: the name filter only.
+   * while the box holds 2+ characters or a chip is on. Absent: the name filter only.
    */
   searchResults?: ReactNode;
+  /** The active filter chip and its setter; absent shows no chips. */
+  kind?: SearchKind | null;
+  onKindChange?: (kind: SearchKind | null) => void;
 }
 
-/** Whether the search box holds enough to show the message results. Pure. */
-export function showSearchResults(search: string): boolean {
-  return normalizeQuery(search).length >= SEARCH_MIN_CHARS;
+/** Whether the search box (or a chip) holds enough to show the message results. Pure. */
+export function showSearchResults(search: string, kind: SearchKind | null = null): boolean {
+  return kind !== null || normalizeQuery(search).length >= SEARCH_MIN_CHARS;
 }
 
 /**
@@ -830,13 +937,19 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
   const selecting = select?.active === true ? select : undefined;
   // New chat from a thread selecting messages exits that first (history.back()).
   const newChat = (): void => leaveSelectionThen(props.onNewChat);
+  const kind = props.kind ?? null;
+  const searching = props.searchResults !== undefined && showSearchResults(props.search, kind);
+  const onKindChange = props.onKindChange;
   return (
     <div className="flex h-full flex-col">
       {selecting !== undefined ? (
         selectHeader(selecting)
       ) : (
-        <div className="border-b border-border pb-3">
+        // The app's own Clear (X) is the only one: the browser's native
+        // search cancel button is hidden.
+        <div className="border-b border-border pb-3 [&_input::-webkit-search-cancel-button]:hidden">
           <SectionHeader
+            stackSearchMd
             search={{
               value: props.search,
               onChange: props.onSearchChange,
@@ -863,15 +976,25 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
                 </>
               ),
             }}
-          />
+          >
+            {onKindChange !== undefined ? searchChips({ kind, onChange: onKindChange }) : undefined}
+          </SectionHeader>
         </div>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {props.notes !== undefined && !searching
+          ? notesTile({
+              notes: props.notes,
+              selected: props.notes.channelId === props.selectedChannelId,
+              selecting: selecting !== undefined,
+              onSelect: props.onSelect,
+            })
+          : null}
         {props.status === 'loading'
           ? channelListSkeleton()
           : props.status === 'error'
             ? channelListError(props.onRetry)
-            : props.searchResults !== undefined && showSearchResults(props.search)
+            : searching
               ? props.searchResults
               : channelListView({
                   channels: visibleChannels(props.channels, summaryFor, isHidden, props.search),
@@ -1038,6 +1161,8 @@ export function deleteChatsConfirm(props: {
 export function ChannelList(props: ChannelListProps): ReactElement {
   const listWorkspaceId = props.workspaceId ?? null;
   const [search, setSearch] = useState('');
+  // The filter chip: one at a time, tap again to clear.
+  const [kind, setKind] = useState<SearchKind | null>(null);
   const [selecting, setSelecting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<{ channel: ChannelSummary; rect: DOMRect | null } | null>(null);
@@ -1095,12 +1220,15 @@ export function ChannelList(props: ChannelListProps): ReactElement {
     workspaceId: listWorkspaceId,
   });
   useEffect(() => {
-    searchRunner?.setQuery(search);
-  }, [searchRunner, search]);
-  const channelsById = useMemo(
-    () => new Map(props.channels.map((c) => [c.channelId, c] as const)),
-    [props.channels],
-  );
+    searchRunner?.setQuery(search, kind);
+  }, [searchRunner, search, kind]);
+  // Hits in notes carry its name ("Personal notes") and notebook.
+  const notes = props.notes;
+  const channelsById = useMemo(() => {
+    const byId = new Map(props.channels.map((c) => [c.channelId, c] as const));
+    if (notes !== undefined) byId.set(notes.channelId, notes);
+    return byId;
+  }, [props.channels, notes]);
   const nameOf = useMemo(() => mentionNamesIn(listWorkspaceId), [listWorkspaceId]);
   const onOpenSearchHit = props.onOpenSearchHit;
   const openHit = useCallback(
@@ -1119,9 +1247,10 @@ export function ChannelList(props: ChannelListProps): ReactElement {
     [props.onSelect],
   );
   const nowMs = Date.now();
-  const searchResults = showSearchResults(search) ? (
+  const searchResults = showSearchResults(search, kind) ? (
     <SearchResults
       query={search}
+      kind={kind}
       chats={visibleChannels(props.channels, summaryFor, isHidden, search)}
       state={searchState}
       runner={searchRunner}
@@ -1142,6 +1271,8 @@ export function ChannelList(props: ChannelListProps): ReactElement {
         input,
         search,
         onSearchChange: setSearch,
+        kind,
+        onKindChange: setKind,
         ...(searchResults !== undefined ? { searchResults } : {}),
         summaryFor,
         isHidden,

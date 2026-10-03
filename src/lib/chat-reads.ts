@@ -31,7 +31,8 @@ export interface ChatProfile {
 /** One conversation in the channel list, with display info already resolved. */
 export interface ChannelSummary {
   channelId: string;
-  channelType: 'dm' | 'group';
+  /** 'notes' is the caller's own Personal notes chat (lib/chat/notes.ts builds it). */
+  channelType: 'dm' | 'group' | 'notes';
   /** Title shown in the list: group name or the DM peer's display name. */
   title: string;
   /** Avatar src: the DM peer's users.avatar_url, or the group's groups.avatar_url. */
@@ -197,35 +198,42 @@ export function shapeChannelSummaries(
   currentUserId: string,
   rolesByUserId: Map<string, string> = new Map(),
 ): ChannelSummary[] {
-  return channels.map((channel) => {
+  return channels.flatMap((channel): ChannelSummary[] => {
+    // The notes chat is never a list row: the chat home pins its own tile,
+    // built from the session (notesSummary), so it never waits on this read.
+    if (channel.channel_type === 'notes') return [];
     if (channel.channel_type === 'group') {
       const group = channel.entity_id !== null ? groupsById.get(channel.entity_id) : undefined;
-      return {
-        channelId: channel.channel_id,
-        channelType: 'group',
-        title: group?.name ?? 'Group',
-        avatarUrl: group?.avatar_url ?? null,
-        createdBy: group?.created_by ?? null,
-        agoraGroupId: channel.agora_group_id,
-        groupId: channel.entity_id,
-        peerUserId: null,
-        role: null,
-        createdAt: channel.created_at,
-      };
+      return [
+        {
+          channelId: channel.channel_id,
+          channelType: 'group',
+          title: group?.name ?? 'Group',
+          avatarUrl: group?.avatar_url ?? null,
+          createdBy: group?.created_by ?? null,
+          agoraGroupId: channel.agora_group_id,
+          groupId: channel.entity_id,
+          peerUserId: null,
+          role: null,
+          createdAt: channel.created_at,
+        },
+      ];
     }
     const peerId = dmPeerId(channel, currentUserId);
     const peer = peerId !== null ? usersById.get(peerId) : undefined;
-    return {
-      channelId: channel.channel_id,
-      channelType: 'dm',
-      title: peer?.display_name ?? 'Direct message',
-      avatarUrl: peer?.avatar_url ?? null,
-      agoraGroupId: channel.agora_group_id,
-      groupId: null,
-      peerUserId: peerId,
-      role: peerId !== null ? (rolesByUserId.get(peerId) ?? null) : null,
-      createdAt: channel.created_at,
-    };
+    return [
+      {
+        channelId: channel.channel_id,
+        channelType: 'dm',
+        title: peer?.display_name ?? 'Direct message',
+        avatarUrl: peer?.avatar_url ?? null,
+        agoraGroupId: channel.agora_group_id,
+        groupId: null,
+        peerUserId: peerId,
+        role: peerId !== null ? (rolesByUserId.get(peerId) ?? null) : null,
+        createdAt: channel.created_at,
+      },
+    ];
   });
 }
 
@@ -471,6 +479,9 @@ export async function readChannelMemberIds(
       ids = unique(members.data);
     } else if (row.channel_type === 'dm') {
       ids = unique([row.dm_user_a, row.dm_user_b]);
+    } else if (row.channel_type === 'notes') {
+      // Notes name nobody: a save sends no mentions.
+      return { ok: true, data: [] };
     } else {
       return fail(`readChannelMemberIds: no mention rule for ${row.channel_type}`);
     }

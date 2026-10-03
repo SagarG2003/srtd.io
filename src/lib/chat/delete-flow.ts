@@ -84,7 +84,7 @@ export async function runEdit(
     body: string;
     traceId: string;
     /** The chat's type; a DM never sends "all" in p_mentions. */
-    channelType?: 'dm' | 'group';
+    channelType?: 'dm' | 'group' | 'notes';
   },
 ): Promise<{ ok: true } | { ok: false; message: string; error: string }> {
   const edit = (mentions: string[]): ReturnType<typeof editMessageRecord> =>

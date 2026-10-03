@@ -225,6 +225,11 @@ export interface ThreadMessage {
   /** True when this message was forwarded from another; absent is the same as false. */
   forwarded?: boolean;
   /**
+   * The source message's id when read from the record (forwarded_from_message_id);
+   * notes use it for the "Saved from" line. Absent on live copies.
+   */
+  forwardedFromId?: string;
+  /**
    * An own unrecorded send whose picked files were lost to a reload: it reads
    * "Photos not sent" and offers Remove only. Absent is the same as false.
    */
@@ -326,14 +331,19 @@ export type CreateTextMessage = (options: {
  * the UI renders as a Postgres-only thread (history and sends still work).
  */
 export function targetFromSummary(summary: ChannelSummary): ChannelTarget | null {
-  if (summary.channelType === 'group') {
-    return summary.agoraGroupId !== null
-      ? { targetId: summary.agoraGroupId, chatType: 'groupChat' }
-      : null;
+  switch (summary.channelType) {
+    case 'group':
+      return summary.agoraGroupId !== null
+        ? { targetId: summary.agoraGroupId, chatType: 'groupChat' }
+        : null;
+    case 'dm':
+      return summary.peerUserId !== null
+        ? { targetId: toAgoraUsername(summary.peerUserId), chatType: 'singleChat' }
+        : null;
+    case 'notes':
+      // Notes never go live: Postgres only, synced by catch-up.
+      return null;
   }
-  return summary.peerUserId !== null
-    ? { targetId: toAgoraUsername(summary.peerUserId), chatType: 'singleChat' }
-    : null;
 }
 
 /** Read the Sorted ids off a live message's `ext`; absent on pre-rewrite clients. */
@@ -451,6 +461,11 @@ export interface LocalMessageContent {
   /** Shared brief uuids; absent is the same as none. */
   sharedBriefIds?: readonly string[];
   reply: ReplyQuote | null;
+  /**
+   * Save to notes: the source message's id (p_forwarded_from_message_id). A
+   * send that carries it sends no mentions. Absent on ordinary sends.
+   */
+  forwardedFromMessageId?: string;
 }
 
 /**
@@ -505,7 +520,7 @@ export function rowToThreadMessage(
     deleted: false,
     mentions: storedMentions(row.mentions),
     ...(row.forwarded_from_message_id != null && row.forwarded_from_message_id !== ''
-      ? { forwarded: true }
+      ? { forwarded: true, forwardedFromId: row.forwarded_from_message_id }
       : {}),
   };
 }

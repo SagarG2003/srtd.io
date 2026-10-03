@@ -80,6 +80,8 @@ export function deleteSelectionBlock(
   messages: readonly ThreadMessage[],
   marks: Map<string, ChatMark>,
   nowMs: number,
+  /** Notes: own notes delete at any age (no 30 minute window). */
+  noWindow = false,
 ): DeleteBlock | null {
   if (selected.size === 0) return null;
   const byId = new Map(messages.map((m) => [m.id, m]));
@@ -92,6 +94,7 @@ export function deleteSelectionBlock(
     }
     if (marks.has(id)) hit.add('marked');
     const created = Date.parse(message.createdAt);
+    if (noWindow) continue;
     if (Number.isNaN(created) || nowMs - created > DELETE_SELECTION_WINDOW_MS) hit.add('old');
   }
   return DELETE_BLOCK_PRIORITY.find((block) => hit.has(block)) ?? null;

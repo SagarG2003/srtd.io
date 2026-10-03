@@ -172,6 +172,13 @@ import { quoteMedia, ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { withDaySeparators } from '@/components/chat/day-separators';
 import { ForwardPicker, type ForwardSendResult } from '@/components/chat/ForwardPicker';
 import {
+  NotesAvatar,
+  SavedFromLabel,
+  useSavedFrom,
+  type SavedFromWiring,
+} from '@/components/chat/NotesBits';
+import { canSaveToNotes, NOTES_PLACEHOLDER } from '@/lib/chat/notes';
+import {
   FORWARDED_LABEL,
   canForward,
   clearSelectionLeave,
@@ -391,6 +398,13 @@ interface MessageThreadProps {
   unreadAtOpen?: number;
   /** Who-reacted reader; defaults to Supabase. */
   loadReactors?: WhoReactedLoad;
+  /**
+   * Personal notes: the notes header (not tappable, no second line), Delete
+   * with no window, the "Note" placeholder, and no "Save to notes".
+   */
+  notes?: boolean;
+  /** Menu "Save to notes" in any other chat; absent hides it. */
+  onSaveToNotes?: (message: ThreadMessage) => void;
 }
 
 /** Users who asked for less motion: the swipe resets without a spring. */
@@ -782,21 +796,26 @@ export function ThreadHeaderIdentity(props: {
   headerLine: string | null;
   layout: ChatLayout;
   onOpenContact?: () => void;
+  /** Personal notes: the notebook square in place of a photo. */
+  notes?: boolean;
 }): ReactElement {
-  const photo = props.isGroup ? (
-    <Avatar
-      name={props.title}
-      size="header"
-      {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
-    />
-  ) : (
-    <Avatar
-      name={props.title}
-      size="row"
-      {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
-      presence={props.presence}
-    />
-  );
+  const photo =
+    props.notes === true ? (
+      <NotesAvatar size="header" />
+    ) : props.isGroup ? (
+      <Avatar
+        name={props.title}
+        size="header"
+        {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
+      />
+    ) : (
+      <Avatar
+        name={props.title}
+        size="row"
+        {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
+        presence={props.presence}
+      />
+    );
   const text = (
     <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
       <span className={cn('block truncate text-fg', sized(HEADER_NAME_TYPE, props.layout))}>
@@ -1594,6 +1613,8 @@ function withRailPhoto(
  */
 export function MessageBubble(props: {
   message: ThreadMessage;
+  /** Notes only: a saved copy's "Saved from" line replaces "Forwarded". */
+  savedFrom?: SavedFromWiring | null;
   /** The open in-chat search's words; absent or [] draws no marks. */
   searchWords?: readonly string[];
   profiles: Map<string, ChatProfile>;
@@ -1663,6 +1684,10 @@ export function MessageBubble(props: {
 }): ReactElement {
   const { message, profiles, cache, presignEnabled, showTicks, isGroup, head, tail } = props;
   const { onBadgeClick } = props;
+  // Notes: a saved copy names its source instead of "Forwarded".
+  const savedFrom = props.savedFrom ?? null;
+  const savedLine =
+    savedFrom !== null && message.forwarded === true ? savedFrom.lineFor(message) : null;
   const { bubbleRef, press, timeZone, layout } = props;
   const mine = message.mine;
   const reply = message.reply;
@@ -1864,7 +1889,15 @@ export function MessageBubble(props: {
                   ? { onChangePriority: props.onChangePriority }
                   : {})}
               />
-              {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
+              {message.forwarded === true ? (
+                savedFrom !== null ? (
+                  savedLine !== null ? (
+                    <SavedFromLabel line={savedLine} mine={mine} onOpen={savedFrom.onOpen} />
+                  ) : null
+                ) : (
+                  <ForwardedLabel mine={mine} />
+                )
+              ) : null}
             </div>
             <div data-bubble-content="" className={cn('contents', mine && OWN_BUBBLE_CONTENT)}>
               {threadMember ? null : chip?.kind === 'chip' && !parentDeleted ? (
@@ -2348,9 +2381,11 @@ function MessageRow(props: {
   const onChangePriority = props.onChangePriority;
   // The in-chat search's words: matched words in this bubble draw as <mark>.
   const searchWords = useContext(SearchHighlightContext);
+  const savedFrom = useSavedFrom();
   return (
     <MessageBubble
       searchWords={searchWords}
+      savedFrom={savedFrom}
       message={props.message}
       profiles={props.profiles}
       cache={props.cache}
@@ -2737,6 +2772,10 @@ function ThreadBody(
     onOpenReadInfo?: () => void;
     /** A reaction badge tapped: the who-reacted sheet; absent keeps the menu. */
     onOpenReactions?: (message: ThreadMessage) => void;
+    /** Personal notes: Delete has no window and carries no hint. */
+    notes?: boolean;
+    /** Menu "Save to notes" picked; absent hides it. */
+    onSaveToNotes?: (message: ThreadMessage) => void;
   },
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
@@ -3191,7 +3230,12 @@ function ThreadBody(
   const nowMs = Date.now();
   const menuOwn =
     menu !== null
-      ? ownMessageActions(menu.message, props.marks.get(menu.message.id), menu.openedAt)
+      ? ownMessageActions(
+          menu.message,
+          props.marks.get(menu.message.id),
+          menu.openedAt,
+          props.notes === true,
+        )
       : { canEdit: false, canDelete: false, lockedByMark: false };
   const viewerMessage =
     viewer !== null ? props.messages.find((m) => m.id === viewer.messageId) : undefined;
@@ -3442,6 +3486,13 @@ function ThreadBody(
           props.onDeleteMessage?.(menu.message);
         }}
         lockedByMark={menuOwn.lockedByMark}
+        notes={props.notes === true}
+        canSaveToNotes={
+          menu !== null && props.onSaveToNotes !== undefined && canSaveToNotes(menu.message)
+        }
+        onSaveToNotes={() => {
+          if (menu) props.onSaveToNotes?.(menu.message);
+        }}
         currentReaction={menu ? (menu.message.reactions.find((r) => r.mine)?.emoji ?? null) : null}
         canCopy={menu ? menu.message.body.trim() !== '' : false}
         canTranscribe={
@@ -4221,13 +4272,17 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       if (current !== null) setDraft(channelId, { reply: strippedReply(current) });
     }
   }, [replyQuoteDeleted, channelId]);
-  const headerLine = dmHeaderLine({
-    isGroup: props.isGroup === true,
-    peerTyping: props.typingUserIds.length > 0,
-    role: props.role ?? null,
-    workspaceName: props.subtitle,
-  });
-  const canOpenContact = props.isGroup !== true && props.channelId !== undefined;
+  const notes = props.notes === true;
+  // Notes: no second line (no role, typing or online) and nothing to open.
+  const headerLine = notes
+    ? null
+    : dmHeaderLine({
+        isGroup: props.isGroup === true,
+        peerTyping: props.typingUserIds.length > 0,
+        role: props.role ?? null,
+        workspaceName: props.subtitle,
+      });
+  const canOpenContact = !notes && props.isGroup !== true && props.channelId !== undefined;
   // The Contact sheet's role line is the header's resting line: never typing,
   // so it reads "role · workspace" from the same source.
   const contactRoleLine = dmHeaderLine({
@@ -4747,16 +4802,17 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // Delete follows the 30 minute window on server time; the bar says why not.
   // One timeout re-computes it when the earliest selected own message ages out.
   useEffect(() => {
-    if (!selecting) return;
+    // Notes delete at any age: no window boundary to wait for.
+    if (!selecting || notes) return;
     return scheduleSelectionBoundary({
       selected,
       messages: selectable,
       now: serverNow,
       onBoundary: () => setSelectionTick((t) => t + 1),
     });
-  }, [selecting, selected, selectable, serverNow, selectionTick]);
+  }, [selecting, selected, selectable, serverNow, selectionTick, notes]);
   const deleteBlock = selecting
-    ? deleteSelectionBlock(selected, selectable, marks, serverNow())
+    ? deleteSelectionBlock(selected, selectable, marks, serverNow(), notes)
     : null;
   const stripSlot = threadStripSlot({ hasMarks: props.marks !== undefined, selecting });
   // Selection mode's bar: in place of the composer, in the chat or the open thread.
@@ -4880,6 +4936,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     ...(props.onToggleReaction !== undefined && !selecting
       ? { onOpenReactions: (message: ThreadMessage) => setReactionsFor(message.id) }
       : {}),
+    notes,
+    ...(props.onSaveToNotes !== undefined && !notes && !selecting
+      ? { onSaveToNotes: props.onSaveToNotes }
+      : {}),
   };
   return (
     <div className="relative flex h-full flex-col bg-bg">
@@ -4923,6 +4983,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
               presence={headerAvatarPresence(props.presence)}
               headerLine={headerLine}
               layout={layout}
+              notes={notes}
               {...(canOpenContact
                 ? { onOpenContact: () => setContactOpen(true) }
                 : props.isGroup === true && props.onOpenInfo !== undefined
@@ -5035,6 +5096,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
               }
             : {})}
           {...(aboutDraft !== null && !aboutGone ? { about: aboutPost ?? null } : {})}
+          {...(notes && replyDraft === null ? { placeholder: NOTES_PLACEHOLDER } : {})}
+          {...(notes ? { noSchedule: true } : {})}
           onCancelAbout={() => setAboutDraft(null)}
           sharedPostIds={sharedInChat}
           onBringPost={bringPost}

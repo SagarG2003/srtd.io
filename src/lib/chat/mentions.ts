@@ -90,9 +90,11 @@ export function mentionsAll(body: string): boolean {
 /**
  * The p_mentions list for a body: its user ids, plus the string "all" while
  * the `@[all]` token is present and the chat is not a DM (a stray `@[all]` in
- * a DM never goes out). Send and edit both derive it here.
+ * a DM never goes out), and nothing in notes. Send and edit both derive it here.
  */
-export function mentionTargets(body: string, channelType?: 'dm' | 'group'): string[] {
+export function mentionTargets(body: string, channelType?: 'dm' | 'group' | 'notes'): string[] {
+  // Notes are private: a note never mentions anyone (no inbox rows).
+  if (channelType === 'notes') return [];
   const ids = mentionIds(body);
   return mentionsAll(body) && channelType !== 'dm' ? [...ids, ALL_MENTION] : ids;
 }

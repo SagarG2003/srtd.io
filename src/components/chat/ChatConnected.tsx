@@ -88,6 +88,22 @@ import {
 import { useToast } from '@/components/ui/toast';
 import { BellProvider } from '@/components/chat/BellContext';
 import { NotificationsSheets } from '@/components/chat/NotificationsPanel';
+import { SavedFromProvider, type SavedFromWiring } from '@/components/chat/NotesBits';
+import { useNotes } from '@/lib/chat/use-notes';
+import {
+  isNotes,
+  liveClientFor,
+  saveToNotesEntry,
+  SAVED_TO_NOTES_TOAST,
+  withNotesFirst,
+} from '@/lib/chat/notes';
+import {
+  readSavedSources,
+  savedFromLine,
+  savedSourceIds,
+  type SavedSource,
+} from '@/lib/chat/saved-from';
+import type { ForwardSendResult } from '@/components/chat/ForwardPicker';
 import type { Result } from '@srtdio/rpc';
 
 interface ChatConnectedProps {
@@ -102,6 +118,20 @@ const DESKTOP_QUERY = '(min-width: 768px)';
 const NO_MESSAGES: ThreadMessage[] = [];
 
 const NO_SCHEDULED: ScheduledRow[] = [];
+
+const NO_TYPING: string[] = [];
+
+/** What the open notes thread knows about its saved copies' sources. */
+interface SavedState {
+  /** workspace:channel the sources belong to. */
+  key: string;
+  /** Source id to its row, or null when it came back unreadable. */
+  sources: ReadonlyMap<string, SavedSource | null>;
+  /** Ids whose last read failed (no line yet; asked again on the next open). */
+  failed: ReadonlySet<string>;
+}
+
+const NO_SAVED: SavedState = { key: '', sources: new Map(), failed: new Set() };
 
 /** The toast when opening a DM from a mention fails; the raw error is only logged. */
 export const MENTION_DM_FAILED = "Couldn't open that chat, try again";
@@ -487,6 +517,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     clearConversation,
   } = useChatStore();
   const layout = useChatLayout();
+  // Personal notes: built from the session (never waits on a read), ensured
+  // once per workspace per session in the background.
+  const notes = useNotes({ workspaceId, currentUserId });
+  const notesChat = notes.summary;
+  // Every chat the page resolves against: notes first (forward picker, deep
+  // links, search hit names, the bell), then the roster.
+  const chatRoster = useMemo(() => withNotesFirst(roster, notesChat), [roster, notesChat]);
 
   // The open thread lives in ?channel={channelId} (replace, never push), so the
   // shell hides the mobile chrome in the same render the thread opens. Opening
@@ -576,7 +613,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     }
     if (selectedFromParam.current === channel) return;
     selectedFromParam.current = channel;
-    const step = deepLinkStep(searchParams, roster);
+    const step = deepLinkStep(searchParams, chatRoster);
     const linkParams = new URLSearchParams(searchParams);
     // ?message= is consumed once: the thread takes it, the url drops it. A link
     // to a chat not (yet) in my list keeps no earlier jump.
@@ -599,7 +636,11 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     // Not in the snapshot: re-read the list once; toast only if still absent.
     // The answer applies only on the same mounted page, workspace and link.
     const started: DeepLinkRefreshContext = { mounted: true, workspaceId, channel };
-    void deepLinkAfterRefresh(linkParams, roster, reloadRoster, ROSTER_READ_BUDGET_MS).then(
+    const reloadWithNotes = async (): Promise<readonly ChannelSummary[] | null> => {
+      const next = await reloadRoster();
+      return next !== null ? withNotesFirst(next, notesChat) : null;
+    };
+    void deepLinkAfterRefresh(linkParams, chatRoster, reloadWithNotes, ROSTER_READ_BUDGET_MS).then(
       (again) => {
         if (selectedFromParam.current !== channel) return;
         const outcome = deepLinkRefreshOutcome(again, started, {
@@ -619,7 +660,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     );
   }, [
     loadStatus,
-    roster,
+    chatRoster,
+    notesChat,
     searchParams,
     setSearchParams,
     writeChannelParam,
@@ -804,10 +846,10 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const pendingOpen = chatStore.pendingOpenConversationId;
   useEffect(() => {
     if (pendingOpen === null || loadStatus !== 'ready') return;
-    const found = roster.find((channel) => channel.channelId === pendingOpen);
+    const found = chatRoster.find((channel) => channel.channelId === pendingOpen);
     if (found !== undefined) openChannel(found);
     clearPendingOpen();
-  }, [pendingOpen, loadStatus, roster, clearPendingOpen, openChannel]);
+  }, [pendingOpen, loadStatus, chatRoster, clearPendingOpen, openChannel]);
 
   // Keyed on the channel the send was recorded in, which may no longer be open.
   const onOwnMessage = useCallback(
@@ -828,13 +870,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     const reloaded = reloadedFor(seenRosterVersion.current, rosterReload, scope);
     seenRosterVersion.current = rosterReload.version;
     if (loadStatus !== 'ready') return;
-    const step = openChannelAfterRoster(selectedRef.current, roster, reloaded);
+    const step = openChannelAfterRoster(selectedRef.current, chatRoster, reloaded);
     if (step.kind === 'update') setSelected(step.channel);
     else if (step.kind === 'close') {
       setGroupInfoOpen(false);
       closeChannel();
     }
-  }, [roster, rosterReload, scope, loadStatus, closeChannel]);
+  }, [chatRoster, rosterReload, scope, loadStatus, closeChannel]);
 
   // A group's member ids, so its typing row only names members and an unsynced
   // group's live traffic reaches each of them. Tagged with the group they
@@ -844,7 +886,25 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // What the open chat shows (header, group info, target): its row in the
   // roster the list renders from, so a rename or photo lands in the header and
   // the tile in the same commit.
-  const shown = useMemo(() => shownChannel(selected, roster), [selected, roster]);
+  const shown = useMemo(() => shownChannel(selected, chatRoster), [selected, chatRoster]);
+  // The open chat is Personal notes: no Agora at all (no client handed to the
+  // thread, marks or typing), no schedule, marks, @ picker or reading layer.
+  const notesOpen = isNotes(selected);
+  const notesReady = notesOpen && notes.status === 'ready';
+  // Opening notes after its ensure failed tries again (the open waits 5s).
+  const notesRetry = notes.retry;
+  const notesFailed = notesOpen && notes.status === 'failed';
+  const retriedOpenRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!notesOpen) {
+      retriedOpenRef.current = null;
+      return;
+    }
+    if (!notesFailed || retriedOpenRef.current === selectedChannelId) return;
+    retriedOpenRef.current = selectedChannelId;
+    notesRetry();
+  }, [notesOpen, notesFailed, notesRetry, selectedChannelId]);
+  const liveClient = liveClientFor(selected, client);
   const [groupMembers, setGroupMembers] = useState<{
     groupId: string;
     ids: ReadonlySet<string>;
@@ -879,7 +939,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const targetRef = useRef(computedTarget);
   if (!sameTarget(targetRef.current, computedTarget)) targetRef.current = computedTarget;
   const target = targetRef.current;
-  const marks = useChatMarks({ client, channelId: selectedChannelId, target, currentUserId });
+  const marks = useChatMarks({
+    client: liveClient,
+    channelId: notesOpen ? null : selectedChannelId,
+    target,
+    currentUserId,
+  });
   const refetchMarks = marks.refetch;
   // Every catch-up refreshes the unread counts and re-reads the channel's marks.
   const onCaughtUp = useCallback(() => {
@@ -888,9 +953,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   }, [refreshUnreadCounts, refetchMarks]);
   const onMessagesDeleted = useCallback(() => refreshPreviews(), [refreshPreviews]);
   const thread = useChatThread({
-    client,
+    client: liveClient,
     status,
-    channelId: selectedChannelId,
+    // Notes load once its row is ensured (at most 5s); then Postgres only,
+    // caught up on open, window focus and tab visible.
+    channelId: notesOpen && !notesReady ? null : selectedChannelId,
+    catchUpOnFocus: notesOpen,
     target,
     currentUserId,
     peerUserId: selected?.peerUserId ?? null,
@@ -911,7 +979,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   useEffect(() => setThreadChannelId(selectedChannelId), [selectedChannelId]);
   const threadCurrent = threadChannelId === selectedChannelId;
 
-  const typing = useChatTyping({ client, target, channelId: selectedChannelId, currentUserId });
+  const typing = useChatTyping({
+    client: liveClient,
+    target,
+    channelId: notesOpen ? null : selectedChannelId,
+    currentUserId,
+  });
 
   const typingUserIds = visibleTypingIds({
     ids: typing.typingUserIds,
@@ -925,7 +998,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // new ids (no N+1). The first page of a chat is held until its names are in,
   // and a live row or an older page is held until the read for its names
   // settles, so no mention ever paints as "@Unknown member" and then swaps.
-  const firstPageIn = !thread.loading && threadCurrent;
+  const firstPageIn = !thread.loading && threadCurrent && (!notesOpen || notesReady);
   const [nameReadState, setNameReadState] = useState<{ workspaceId: string; reads: NameReads }>(
     () => ({ workspaceId, reads: NO_NAME_READS }),
   );
@@ -1055,20 +1128,92 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     );
   }, []);
   useEffect(() => {
-    if (selectedChannelId !== null) refetchScheduled(selectedChannelId);
-  }, [selectedChannelId, refetchScheduled]);
+    if (selectedChannelId !== null && !notesOpen) refetchScheduled(selectedChannelId);
+  }, [selectedChannelId, refetchScheduled, notesOpen]);
   useEffect(() => {
-    if (selectedChannelId === null) return;
+    if (selectedChannelId === null || notesOpen) return;
     const channelId = selectedChannelId;
     function onVisible(): void {
       if (document.visibilityState === 'visible') refetchScheduled(channelId);
     }
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [selectedChannelId, refetchScheduled]);
-  const scheduledSettled = scheduled.settled && scheduled.channelId === selectedChannelId;
+  }, [selectedChannelId, refetchScheduled, notesOpen]);
+  // Notes never schedule: nothing to read, nothing to wait for.
+  const scheduledSettled =
+    notesOpen || (scheduled.settled && scheduled.channelId === selectedChannelId);
   const scheduledRows = scheduledSettled ? scheduled.rows : NO_SCHEDULED;
-  const threadLoading = thread.loading || !threadCurrent || !namesReady || !scheduledSettled;
+  // Notes: the saved copies' "Saved from" lines of the first page paint with
+  // it. One batched source read per loaded page (and one batched name read
+  // for their senders), never one per row.
+  const savedKey = notesOpen ? `${workspaceId}:${selectedChannelId ?? ''}` : '';
+  const [savedState, setSavedState] = useState<SavedState>(NO_SAVED);
+  const saved = savedState.key === savedKey ? savedState : NO_SAVED;
+  const savedAsked = useRef<{ key: string; ids: Set<string> }>({ key: '', ids: new Set() });
+  const profilesRef = useRef(profiles);
+  profilesRef.current = profiles;
+  // Each open asks again for the sources whose last read failed.
+  useEffect(() => {
+    savedAsked.current = { key: '', ids: new Set() };
+    setSavedState((prev) => (prev.failed.size === 0 ? prev : { ...prev, failed: new Set() }));
+  }, [selectedChannelId]);
+  useEffect(() => {
+    if (!notesOpen || savedKey === '') return;
+    if (savedAsked.current.key !== savedKey) savedAsked.current = { key: savedKey, ids: new Set() };
+    const asked = savedAsked.current.ids;
+    const known = new Set([...asked, ...saved.sources.keys()]);
+    const ids = savedSourceIds(thread.messages, known);
+    if (ids.length === 0) return;
+    for (const id of ids) asked.add(id);
+    const forKey = savedKey;
+    const forWorkspace = workspaceId;
+    void readSavedSources(supabase, {
+      ids,
+      knownName: (id) => profilesRef.current.has(id),
+    }).then((result) => {
+      if (!mountedRef.current || savedAsked.current.key !== forKey) return;
+      if (!result.ok) {
+        logger.warn('chat: saved sources read failed', { error: result.error.message });
+      } else if (result.data.profiles.length > 0) {
+        const read = result.data.profiles;
+        setProfileState((prev) => {
+          const next = new Map(prev.workspaceId === forWorkspace ? prev.profiles : undefined);
+          for (const profile of read)
+            if (!next.has(profile.userId)) next.set(profile.userId, profile);
+          return { workspaceId: forWorkspace, profiles: next };
+        });
+      }
+      setSavedState((prev) => {
+        const base = prev.key === forKey ? prev : { ...NO_SAVED, key: forKey };
+        if (!result.ok) {
+          const failed = new Set(base.failed);
+          for (const id of ids) failed.add(id);
+          return { ...base, failed };
+        }
+        const byId = new Map(result.data.sources.map((source) => [source.id, source] as const));
+        const sources = new Map(base.sources);
+        for (const id of ids) sources.set(id, byId.get(id) ?? null);
+        return { ...base, sources };
+      });
+    });
+  }, [notesOpen, savedKey, thread.messages, saved.sources, workspaceId]);
+  const savedPending = notesOpen
+    ? savedSourceIds(thread.messages, new Set([...saved.sources.keys(), ...saved.failed])).length >
+      0
+    : false;
+  const firstSavedSettled = notesOpen && firstPageIn && !savedPending;
+  const [savedSettledFor, setSavedSettledFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (firstSavedSettled) setSavedSettledFor(selectedChannelId);
+  }, [firstSavedSettled, selectedChannelId]);
+  const savedReady = !notesOpen || savedSettledFor === selectedChannelId;
+  const threadLoading =
+    thread.loading ||
+    !threadCurrent ||
+    !namesReady ||
+    !scheduledSettled ||
+    (notesOpen && notes.status !== 'ready' && notes.status !== 'failed') ||
+    (notesReady && !savedReady);
   const [scheduledListOpen, setScheduledListOpen] = useState(false);
   useEffect(() => setScheduledListOpen(false), [selectedChannelId]);
   // The last one sent or cancelled: nothing left to show.
@@ -1235,7 +1380,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const readsLoading = thread.readState.status === 'loading';
   const scheduleWiring = useMemo<ChatSchedule | null>(
     () =>
-      selectedChannelId === null
+      selectedChannelId === null || notesOpen
         ? null
         : {
             channelId: selectedChannelId,
@@ -1249,6 +1394,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
           },
     [
       selectedChannelId,
+      notesOpen,
       chatName,
       scheduledRows,
       threadLoading,
@@ -1260,6 +1406,74 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const scheduleNameOf = useMemo(
     () => profileNameOf(profiles, workspaceId),
     [profiles, workspaceId],
+  );
+
+  // Save to notes: through the store's outbox (the same retries as any send,
+  // never a visible failure), after this session's ensure (a failed one still
+  // queues it: the outbox keeps trying). The toast opens notes.
+  const outboxEnqueue = outbox.enqueue;
+  const ensureNotes = notes.ensured;
+  const saveToNotes = useCallback(
+    (message: ThreadMessage) => {
+      const entry = saveToNotesEntry(message, newMessageId());
+      const target = notesChat;
+      void ensureNotes().then(() => outboxEnqueue(target.channelId, entry));
+      toast.show({
+        title: SAVED_TO_NOTES_TOAST,
+        onPress: () => leaveSelectionThen(() => openChannel(target)),
+      });
+    },
+    [notesChat, ensureNotes, outboxEnqueue, toast, openChannel],
+  );
+  // A forward that includes notes waits on its ensure first.
+  const threadForward = thread.forward;
+  const forwardWithNotes = useCallback(
+    async (
+      messages: readonly ThreadMessage[],
+      targets: ChannelSummary[],
+    ): Promise<ForwardSendResult> => {
+      if (targets.some((t) => isNotes(t))) await ensureNotes();
+      return threadForward(messages, targets);
+    },
+    [ensureNotes, threadForward],
+  );
+  const rosterById = useMemo(
+    () => new Map(chatRoster.map((c) => [c.channelId, c] as const)),
+    [chatRoster],
+  );
+  // The saved line's tap: the existing ?channel=&message= deep link.
+  const openSavedSource = useCallback<SavedFromWiring['onOpen']>(
+    (line) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set('channel', line.channelId);
+          next.set('message', line.messageId);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+  const savedWiring = useMemo<SavedFromWiring | null>(
+    () =>
+      notesOpen
+        ? {
+            lineFor: (message) => {
+              const id = message.forwardedFromId;
+              if (id === undefined) return null;
+              return savedFromLine({
+                source: saved.sources.has(id) ? (saved.sources.get(id) ?? null) : undefined,
+                channelsById: rosterById,
+                nameOf: (userId) => profiles.get(userId)?.displayName,
+                currentUserId,
+              });
+            },
+            onOpen: openSavedSource,
+          }
+        : null,
+    [notesOpen, saved.sources, rosterById, profiles, currentUserId, openSavedSource],
   );
 
   const opening = openingChannelId({
@@ -1298,6 +1512,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
             onDeleteChats={onDeleteChats}
             workspaceId={workspaceId}
             onOpenSearchHit={openSearchHit}
+            notes={notesChat}
           />
         </div>
       ) : null}
@@ -1314,91 +1529,108 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               status={status}
             >
               <ChatScheduleProvider value={scheduleWiring}>
-                <MessageThread
-                  key={selected.channelId}
-                  title={(shown ?? selected).title}
-                  channelId={selected.channelId}
-                  avatarUrl={(shown ?? selected).avatarUrl}
-                  {...(!isGroup && workspace !== undefined ? { subtitle: workspace.name } : {})}
-                  {...(!isGroup ? { role: (shown ?? selected).role ?? null } : {})}
-                  isGroup={isGroup}
-                  profiles={profiles}
-                  messages={threadCurrent ? threadMessages : NO_MESSAGES}
-                  loading={threadLoading}
-                  loadFailed={threadCurrent && thread.loadFailed}
-                  onRetryLoad={thread.retryLoad}
-                  loadingOlder={thread.loadingOlder}
-                  hasMore={thread.hasMore}
-                  onLoadOlder={thread.loadOlder}
-                  onNewestVisible={thread.markNewestVisible}
-                  timeZone={timeZone}
-                  canSend
-                  onSend={thread.send}
-                  onRetry={thread.retry}
-                  typingUserIds={typingUserIds}
-                  onTyping={typing.notifyTyping}
-                  onToggleReaction={thread.toggleReaction}
-                  marks={marks.marks}
-                  marksLoaded={marks.loaded}
-                  marksFailed={marks.failed}
-                  markedMessages={marks.markedMessages}
-                  onSetMark={marks.setMark}
-                  onResolveMark={marks.resolve}
-                  onReopenMark={marks.reopen}
-                  currentUserId={currentUserId}
-                  onDeleteMessages={thread.deleteMessages}
-                  onEditMessage={thread.editMessage}
-                  forwardChannels={roster}
-                  onForward={thread.forward}
-                  onEnsureLoaded={thread.ensureLoaded}
-                  mentionMembers={mentionMembers}
-                  mentionGone={mentionGone(membersLoad, currentUserId, workspaceId)}
-                  mentions={{
-                    peerUserId:
-                      selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
-                    onOpen: onOpenMention,
-                  }}
-                  initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
-                  onInitialJumpTaken={() => setPendingJump(null)}
-                  searchRequest={
-                    searchRequest?.channelId === selected.channelId ? searchRequest : null
-                  }
-                  onSearchRequestTaken={() => setSearchRequest(null)}
-                  showTicks={selected.channelType === 'dm'}
-                  {...(threadCurrent ? { readState: thread.readState } : {})}
-                  peerUserId={selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null}
-                  unreadAtOpen={
-                    unreadAtOpen.channelId === selected.channelId ? unreadAtOpen.unread : 0
-                  }
-                  {...(selected.peerUserId != null ? { presence } : {})}
-                  {...(isDesktop ? {} : { onBack })}
-                  {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
-                  {...(infoGroupId !== null
-                    ? {
-                        renderGroupInfo: (tabs: GroupInfoTabsWiring) => (
-                          <GroupInfoSheet
-                            open={groupInfoOpen}
-                            onClose={() => setGroupInfoOpen(false)}
-                            workspaceId={workspaceId}
-                            workspaceName={workspace?.name}
-                            groupId={infoGroupId}
-                            groupName={(shown ?? selected).title}
-                            avatarUrl={(shown ?? selected).avatarUrl}
-                            createdBy={(shown ?? selected).createdBy ?? null}
-                            viewerRole={
-                              mentionMembers?.find((m) => m.userId === currentUserId)?.role ?? null
-                            }
-                            currentUserId={currentUserId}
-                            onChanged={onGroupChanged}
-                            signalRoster={(change) => signalRoster(shown ?? selected, change)}
-                            membersVersion={rosterVersion}
-                            onLeft={onGroupLeft}
-                            tabs={tabs}
-                          />
-                        ),
-                      }
-                    : {})}
-                />
+                <SavedFromProvider value={savedWiring}>
+                  <MessageThread
+                    key={selected.channelId}
+                    title={(shown ?? selected).title}
+                    channelId={selected.channelId}
+                    avatarUrl={(shown ?? selected).avatarUrl}
+                    {...(!isGroup && !notesOpen && workspace !== undefined
+                      ? { subtitle: workspace.name }
+                      : {})}
+                    {...(!isGroup && !notesOpen ? { role: (shown ?? selected).role ?? null } : {})}
+                    notes={notesOpen}
+                    {...(!notesOpen ? { onSaveToNotes: saveToNotes } : {})}
+                    isGroup={isGroup}
+                    profiles={profiles}
+                    messages={threadCurrent ? threadMessages : NO_MESSAGES}
+                    loading={threadLoading}
+                    loadFailed={threadCurrent && (thread.loadFailed || notesFailed)}
+                    onRetryLoad={notesFailed ? notesRetry : thread.retryLoad}
+                    loadingOlder={thread.loadingOlder}
+                    hasMore={thread.hasMore}
+                    onLoadOlder={thread.loadOlder}
+                    onNewestVisible={thread.markNewestVisible}
+                    timeZone={timeZone}
+                    canSend
+                    onSend={thread.send}
+                    onRetry={thread.retry}
+                    typingUserIds={notesOpen ? NO_TYPING : typingUserIds}
+                    {...(!notesOpen ? { onTyping: typing.notifyTyping } : {})}
+                    onToggleReaction={thread.toggleReaction}
+                    {...(notesOpen
+                      ? { marksLoaded: true }
+                      : {
+                          marks: marks.marks,
+                          marksLoaded: marks.loaded,
+                          marksFailed: marks.failed,
+                          markedMessages: marks.markedMessages,
+                          onSetMark: marks.setMark,
+                          onResolveMark: marks.resolve,
+                          onReopenMark: marks.reopen,
+                        })}
+                    currentUserId={currentUserId}
+                    onDeleteMessages={thread.deleteMessages}
+                    onEditMessage={thread.editMessage}
+                    forwardChannels={chatRoster}
+                    onForward={forwardWithNotes}
+                    onEnsureLoaded={thread.ensureLoaded}
+                    {...(!notesOpen
+                      ? {
+                          mentionMembers,
+                          mentionGone: mentionGone(membersLoad, currentUserId, workspaceId),
+                        }
+                      : {})}
+                    mentions={{
+                      peerUserId:
+                        selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
+                      onOpen: onOpenMention,
+                    }}
+                    initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
+                    onInitialJumpTaken={() => setPendingJump(null)}
+                    searchRequest={
+                      searchRequest?.channelId === selected.channelId ? searchRequest : null
+                    }
+                    onSearchRequestTaken={() => setSearchRequest(null)}
+                    showTicks={selected.channelType === 'dm'}
+                    {...(threadCurrent && !notesOpen ? { readState: thread.readState } : {})}
+                    peerUserId={
+                      selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null
+                    }
+                    unreadAtOpen={
+                      unreadAtOpen.channelId === selected.channelId ? unreadAtOpen.unread : 0
+                    }
+                    {...(selected.peerUserId != null ? { presence } : {})}
+                    {...(isDesktop ? {} : { onBack })}
+                    {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
+                    {...(infoGroupId !== null
+                      ? {
+                          renderGroupInfo: (tabs: GroupInfoTabsWiring) => (
+                            <GroupInfoSheet
+                              open={groupInfoOpen}
+                              onClose={() => setGroupInfoOpen(false)}
+                              workspaceId={workspaceId}
+                              workspaceName={workspace?.name}
+                              groupId={infoGroupId}
+                              groupName={(shown ?? selected).title}
+                              avatarUrl={(shown ?? selected).avatarUrl}
+                              createdBy={(shown ?? selected).createdBy ?? null}
+                              viewerRole={
+                                mentionMembers?.find((m) => m.userId === currentUserId)?.role ??
+                                null
+                              }
+                              currentUserId={currentUserId}
+                              onChanged={onGroupChanged}
+                              signalRoster={(change) => signalRoster(shown ?? selected, change)}
+                              membersVersion={rosterVersion}
+                              onLeft={onGroupLeft}
+                              tabs={tabs}
+                            />
+                          ),
+                        }
+                      : {})}
+                  />
+                </SavedFromProvider>
               </ChatScheduleProvider>
               <ScheduledListSheet
                 open={scheduledListOpen}
@@ -1432,7 +1664,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     <BellProvider
       workspaceId={workspaceId}
       currentUserId={currentUserId}
-      roster={roster}
+      roster={chatRoster}
       openChannelId={selected?.channelId ?? null}
       messages={threadCurrent ? threadMessages : NO_MESSAGES}
       nameOf={scheduleNameOf}

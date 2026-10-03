@@ -229,6 +229,20 @@ export function browserCatchUpTriggers(run: (reason: CatchUpReason) => void): ()
   });
 }
 
+/**
+ * Window focus runs a catch-up (notes: other devices' notes land when this
+ * window is picked up again, with no live delivery). Returns the teardown,
+ * which removes the listener.
+ */
+export function windowFocusTrigger(
+  run: () => void,
+  target: Pick<Window, 'addEventListener' | 'removeEventListener'> = window,
+): () => void {
+  const onFocus = (): void => run();
+  target.addEventListener('focus', onFocus);
+  return () => target.removeEventListener('focus', onFocus);
+}
+
 /** Ids per reactions re-read (one IN read each). */
 export const REACTION_RECHECK_CHUNK = 100;
 /** At most this many reactions chunk reads in flight at once. */

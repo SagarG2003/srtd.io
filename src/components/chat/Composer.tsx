@@ -109,6 +109,8 @@ export interface ComposerProps {
    * a menu, sheet or lightbox is open over the thread.
    */
   focusOnMount?: boolean | undefined;
+  /** Personal notes: no Schedule tile (the hold and the chevron need schedule wiring). */
+  noSchedule?: boolean | undefined;
   /**
    * Queues the trimmed text plus any picked files (local attachments that upload
    * in the background) and shared posts and briefs. Synchronous: uploads,
@@ -1754,6 +1756,7 @@ export function Composer(props: ComposerProps): ReactElement {
               {canAttach ? (
                 <ComposerTray
                   layout={layout}
+                  schedule={props.noSchedule !== true}
                   onPick={(id) => {
                     if (scheduleBusy) return;
                     if (id === 'photos') photoInputRef.current?.click();

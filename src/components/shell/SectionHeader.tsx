@@ -52,6 +52,13 @@ interface SectionHeaderProps<S extends string = string> {
    * rendering identically.
    */
   stickyChildren?: boolean;
+  /**
+   * Opt-in, md and up: the actions take the first row (right-aligned) and the
+   * search the full width of a second row, for a narrow pane (the 288px chat
+   * list) where actions beside the box would squeeze it. Below md the single
+   * row is unchanged. Default false keeps every other caller identical.
+   */
+  stackSearchMd?: boolean;
 }
 
 function renderPrimaryAction(action: SectionHeaderPrimaryAction): ReactNode {
@@ -91,6 +98,7 @@ export function SectionHeader<S extends string = string>({
   primaryAction,
   children,
   stickyChildren = false,
+  stackSearchMd = false,
 }: SectionHeaderProps<S>) {
   const searching = search !== undefined && search.value.trim() !== '';
   // The scroll container is the shell <main>, so top-0 pins to just below the
@@ -101,12 +109,22 @@ export function SectionHeader<S extends string = string>({
   );
   return (
     <>
-      <div className="px-4 md:px-6 mt-3 flex items-center gap-2">
+      <div
+        className={cn(
+          'px-4 md:px-6 mt-3 flex items-center gap-2',
+          stackSearchMd && 'md:flex-wrap md:gap-y-3',
+        )}
+      >
         {title !== undefined ? (
           <h2 className="shrink-0 text-[15px] font-semibold text-fg">{title}</h2>
         ) : null}
         {search !== undefined ? (
-          <div className="relative min-w-0 flex-1">
+          <div
+            className={cn(
+              'relative min-w-0 flex-1',
+              stackSearchMd && 'md:order-last md:basis-full',
+            )}
+          >
             <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-3">
               <IconSearch size={16} />
             </span>
@@ -130,7 +148,15 @@ export function SectionHeader<S extends string = string>({
           </div>
         ) : null}
         {sort !== undefined ? renderSort(sort) : null}
-        {primaryAction !== undefined ? renderPrimaryAction(primaryAction) : null}
+        {primaryAction !== undefined ? (
+          stackSearchMd ? (
+            <div className="contents md:ml-auto md:flex md:items-center md:gap-2">
+              {renderPrimaryAction(primaryAction)}
+            </div>
+          ) : (
+            renderPrimaryAction(primaryAction)
+          )
+        ) : null}
       </div>
       {children !== undefined ? <div className={childRowClass}>{children}</div> : null}
     </>
