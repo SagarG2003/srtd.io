@@ -110,7 +110,7 @@ for (const scenario of SCENARIOS) {
     }
     if (scenario.isDm) {
       // Read receipts survive: the peer read our last own message.
-      await expect(page.getByText('Seen', { exact: false }).first()).toBeVisible();
+      await expect(page.getByText(/^Seen\b/).first()).toBeVisible();
     }
   });
 }

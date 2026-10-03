@@ -60,7 +60,8 @@ async function probe(page: Page): Promise<Probe> {
     const composers = [...document.querySelectorAll('form')].filter((form) => {
       if (form.querySelector('textarea') === null) return false;
       const box = form.getBoundingClientRect();
-      return box.height > 0 && box.bottom > 0 && box.top < window.innerHeight;
+      // Any laid-out copy counts, on screen or below the fold.
+      return box.height > 0;
     });
     const first = composers[0]?.getBoundingClientRect();
     return {
@@ -93,7 +94,7 @@ export async function checkStep(
     : ['message', 'thread'].includes(p.centre);
   if (!okCentre) failures.push(`C2 screen centre is ${p.centre} (${p.centreDetail})`);
   if (options.requireComposer || p.composerCount > 0) {
-    if (p.composerCount !== 1) failures.push(`C3 ${p.composerCount} composers on screen`);
+    if (p.composerCount !== 1) failures.push(`C3 ${p.composerCount} composers rendered`);
     else if (p.composerBottom < p.viewportHeight - 2 || p.composerTop < p.viewportHeight * 0.6) {
       failures.push(`C3 composer box ${p.composerTop}..${p.composerBottom} is not at the bottom`);
     }

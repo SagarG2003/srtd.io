@@ -265,6 +265,15 @@ export async function installHarnessNetwork(page: Page): Promise<HarnessNetwork>
   };
 
   await page.route(/^(?!https?:\/\/localhost[:/])/, handle);
+  // page.route never sees WebSockets. A socket to a fixture host is accepted
+  // and left silent (no server behind it); any other socket is closed and
+  // recorded as blocked.
+  await page.routeWebSocket(/^(?!wss?:\/\/localhost[:/])/, (socket) => {
+    const host = new URL(socket.url()).hostname;
+    if (host.endsWith('.test')) return;
+    blocked.push(socket.url());
+    void socket.close();
+  });
 
   return {
     world,
