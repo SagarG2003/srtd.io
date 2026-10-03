@@ -1398,8 +1398,12 @@ export function Composer(props: ComposerProps): ReactElement {
         }
       }
     }
-    // Left the chat while the write ran: this composer is gone.
-    if (run.signal.aborted) return;
+    // Left the chat while the write ran: this composer is gone, but the
+    // message is scheduled, so the app-level toast still says so.
+    if (run.signal.aborted) {
+      if (outcome.ok) toast.show({ title: scheduledToast(sendAt, new Date()) });
+      return;
+    }
     if (!outcome.ok) {
       if (outcome.copy !== null) toast.show({ title: outcome.copy });
       return;
