@@ -1347,6 +1347,25 @@ export function sendText(params: {
   /** The source message id when this send forwards it. */
   forwardedFrom?: string | null;
 }): Promise<AgoraChat.SendMsgResult> {
+  const built = buildLiveTextExt(params);
+  const ext = built !== null ? { ext: built } : {};
+  return sendRouted(params.connection, params.target, (to, chatType) =>
+    params.createMessage({ chatType, type: 'txt', to, msg: params.text, ...ext }),
+  );
+}
+
+/**
+ * The `ext` a live text send carries (before sendRouted stamps the workspace),
+ * or null for a bare text send. Pure; shared with the chat-scheduled-send
+ * Worker so a scheduled message publishes with the same keys and values.
+ */
+export function buildLiveTextExt(params: {
+  attachments: readonly MessageAttachment[];
+  sharedPostIds: readonly string[];
+  reply: ReplyQuote | null;
+  liveIds?: LiveMessageIds;
+  forwardedFrom?: string | null;
+}): (MessageExt & Partial<LiveMessageIds> & { [LIVE_THREAD_ROOT_KEY]?: string }) | null {
   const forwardedFrom = params.forwardedFrom ?? null;
   const hasContentExt =
     params.attachments.length > 0 ||
@@ -1354,25 +1373,17 @@ export function sendText(params: {
     params.reply !== null ||
     forwardedFrom !== null;
   const hasExt = hasContentExt || params.liveIds !== undefined;
-  const ext = hasExt
-    ? {
-        ext: {
-          ...buildMessageExt({
-            attachments: params.attachments,
-            sharedPostIds: params.sharedPostIds,
-            reply: params.reply,
-            forwardedFrom,
-          }),
-          ...(params.liveIds !== undefined ? params.liveIds : {}),
-          ...(params.reply?.rootId !== undefined
-            ? { [LIVE_THREAD_ROOT_KEY]: params.reply.rootId }
-            : {}),
-        },
-      }
-    : {};
-  return sendRouted(params.connection, params.target, (to, chatType) =>
-    params.createMessage({ chatType, type: 'txt', to, msg: params.text, ...ext }),
-  );
+  if (!hasExt) return null;
+  return {
+    ...buildMessageExt({
+      attachments: params.attachments,
+      sharedPostIds: params.sharedPostIds,
+      reply: params.reply,
+      forwardedFrom,
+    }),
+    ...(params.liveIds !== undefined ? params.liveIds : {}),
+    ...(params.reply?.rootId !== undefined ? { [LIVE_THREAD_ROOT_KEY]: params.reply.rootId } : {}),
+  };
 }
 
 /** A gap this long (or longer) between neighbours starts a new run and shows a time label. */

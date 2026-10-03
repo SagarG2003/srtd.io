@@ -1,0 +1,24 @@
+name = "chat-scheduled-send"
+main = "../../src/server/workers/chat-scheduled-send.ts"
+compatibility_date = "2026-05-16"
+compatibility_flags = ["nodejs_compat"]
+
+# Every-minute cron sends the due scheduled chat messages: chat_scheduled_due,
+# then chat_scheduled_dispatch per id, then a live Agora REST publish per row.
+[triggers]
+crons = ["* * * * *"]
+
+# Structured logs to stdout; Cloudflare Logpush ships them to the R2 sink
+# srtdio-logs (see docs/cloudflare-logpush-setup.md).
+[observability]
+enabled = true
+head_sampling_rate = 1.0
+
+# All values are supplied as Worker secrets (wrangler secret put / CI), never
+# committed. Only binding names live here:
+#   SUPABASE_URL              - project URL for the chat_scheduled_due / chat_scheduled_dispatch rpcs + channel reads
+#   SUPABASE_SERVICE_ROLE_KEY - service role: bare client, no minted member JWT
+#   AGORA_APP_ID              - Agora App ID; pairs with the certificate to sign tokens
+#   AGORA_APP_CERTIFICATE     - Agora App Certificate; REST app-token signing secret
+#   AGORA_CHAT_APP_KEY        - Agora Chat App Key
+#   AGORA_CHAT_REST_URL       - Agora Chat REST base URL (host + org + app)
