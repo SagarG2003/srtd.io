@@ -267,10 +267,7 @@ describe('thread reads', () => {
       p_channel_id: CHANNEL,
       p_root_ids: roots.slice(0, 200),
     });
-    expect(result.ok && result.data.get('r1')).toEqual({
-      count: 4,
-      lastReplyAt: '2026-10-01T10:00:00Z',
-    });
+    expect(result.ok && result.data.get('r1')).toEqual({ count: 4 });
     // Nothing to count: no call at all.
     const none = makeClient({ data: [], error: null });
     await loadThreadReplyCounts(none.client, CHANNEL, [], 'trace-2');

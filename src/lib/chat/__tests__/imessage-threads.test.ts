@@ -18,7 +18,13 @@ import {
   writePersistedOutbox,
   type OutboxStorage,
 } from '@/lib/chat/chat-store';
-import { PAGE_HYDRATION_WAIT_MS, parentIndexOf, rowReady } from '@/lib/chat/post-refs';
+import {
+  PAGE_HYDRATION_WAIT_MS,
+  admitRows,
+  hydrationDeadline,
+  parentIndexOf,
+  rowReady,
+} from '@/lib/chat/post-refs';
 import { threadViewRows } from '@/lib/chat/use-thread-view';
 
 const ME = '11111111-1111-4111-8111-111111111111';
@@ -91,13 +97,16 @@ describe('thread root on rows', () => {
     expect(missingRootIds([member], new Set(['r']))).toEqual(['root']);
     expect(missingRootIds([member], new Set(['r', 'root']))).toEqual([]);
     const rootCard = rowToThreadMessage(row({ id: 'root', shared_post_ids: ['p9'] }), ME);
-    const [hydrated] = hydrateRoots([member], [rootCard], true);
+    const mine = new Set(['r']);
+    const [hydrated] = hydrateRoots([member], [rootCard], mine);
     expect(hydrated?.rootPostIds).toEqual(['p9']);
-    // A root that cannot be read (or is deleted) shares nothing once settled.
-    expect(hydrateRoots([member], [], false)).toEqual([member]);
-    expect(hydrateRoots([member], [], true)[0]?.rootPostIds).toEqual([]);
+    // A root that cannot be read (or is deleted) shares nothing once its batch settles.
+    expect(hydrateRoots([member], [])).toEqual([member]);
+    expect(hydrateRoots([member], [], mine)[0]?.rootPostIds).toEqual([]);
     const deletedRoot = { ...rootCard, deleted: true };
-    expect(hydrateRoots([member], [deletedRoot], true)[0]?.rootPostIds).toEqual([]);
+    expect(hydrateRoots([member], [deletedRoot], mine)[0]?.rootPostIds).toEqual([]);
+    // Another batch's row with its read still in flight is left unknown.
+    expect(hydrateRoots([member], [], new Set(['other']))).toEqual([member]);
   });
 });
 
@@ -203,6 +212,17 @@ describe('page gate: thread readiness', () => {
   it('waits for the root hydration, capped', () => {
     expect(ready(member({}))).toBe(false);
     expect(ready(member({}), { nowMs: at + PAGE_HYDRATION_WAIT_MS })).toBe(true);
+  });
+
+  it('a deadline already run out sets no new timer (no re-render loop)', () => {
+    const waiting = member({});
+    const { gate } = admitRows(null, 'k', [waiting], () => false, at);
+    const index = parentIndexOf([]);
+    const loaded = new Set<string>();
+    expect(hydrationDeadline(gate, [waiting], index, loaded)).toBe(at + PAGE_HYDRATION_WAIT_MS);
+    expect(
+      hydrationDeadline(gate, [waiting], index, loaded, at + PAGE_HYDRATION_WAIT_MS),
+    ).toBeNull();
   });
 
   it('a chip root waits for its post and the page counts read', () => {

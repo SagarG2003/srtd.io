@@ -95,7 +95,7 @@ export interface UseThreadView {
   update: (fn: (rows: ThreadMessage[]) => ThreadMessage[]) => void;
 }
 
-export function defaultThreadViewReads(client: Client, currentUserId: string): ThreadViewReads {
+function defaultThreadViewReads(client: Client, currentUserId: string): ThreadViewReads {
   return {
     loadRoot: (rootId) => loadMessagesByIds(client, [rootId]),
     loadPage: (channelId, rootId, before) => loadThreadPage(client, channelId, rootId, before),

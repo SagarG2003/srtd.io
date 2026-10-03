@@ -174,7 +174,7 @@ export function isUnhydratedReply(row: Pick<ThreadMessage, 'reply'>): boolean {
  */
 export const PAGE_HYDRATION_WAIT_MS = 4_000;
 
-export type GateFields = RefFields & RootFields & Pick<ThreadMessage, 'time'>;
+type GateFields = RefFields & RootFields & Pick<ThreadMessage, 'time'>;
 
 /**
  * Which rows of a conversation are on screen. Page rows (the first page, an
@@ -307,6 +307,8 @@ export function hydrationDeadline(
   rows: readonly GateFields[],
   parentIndex: ParentIndex,
   loaded?: ReadonlySet<string>,
+  /** Deadlines at or before this have already run out (no timer for them). */
+  afterMs: number = Number.NEGATIVE_INFINITY,
 ): number | null {
   let deadline: number | null = null;
   for (const row of rows) {
@@ -316,6 +318,7 @@ export function hydrationDeadline(
     const waitsQuote = isUnhydratedReply(row) && chipTargetFor(row, parentIndex) === null;
     if (!waitsRoot && !waitsQuote) continue;
     const at = since + PAGE_HYDRATION_WAIT_MS;
+    if (at <= afterMs) continue;
     if (deadline === null || at < deadline) deadline = at;
   }
   return deadline;

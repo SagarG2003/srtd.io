@@ -14,6 +14,7 @@
 
 import type { AgoraChat } from 'agora-chat';
 import { truncateBody } from '@/lib/chat/mentions';
+import { awaitsRootHydration } from '@/lib/chat/thread-rail';
 import type { Database } from '@srtdio/schemas';
 import type { ChatConnection } from '@/lib/chat/types';
 import { toAgoraUsername, userIdFromAgoraUsername } from '@/lib/chat/agora-identity';
@@ -741,12 +742,6 @@ export function hydrateReplies(
   });
 }
 
-/** A row whose thread root is neither loaded nor hydrated yet. */
-function awaitsRoot(message: ThreadMessage, loaded: ReadonlySet<string>): boolean {
-  const root = message.threadRootId;
-  return typeof root === 'string' && message.rootPostIds === undefined && !loaded.has(root);
-}
-
 /** Thread roots of `fetched` that are not loaded and not hydrated (to read in the quotes' IN read). */
 export function missingRootIds(
   fetched: readonly ThreadMessage[],
@@ -754,7 +749,8 @@ export function missingRootIds(
 ): string[] {
   const ids = new Set<string>();
   for (const m of fetched) {
-    if (awaitsRoot(m, loaded) && typeof m.threadRootId === 'string') ids.add(m.threadRootId);
+    if (awaitsRootHydration(m, loaded) && typeof m.threadRootId === 'string')
+      ids.add(m.threadRootId);
   }
   return [...ids];
 }
@@ -762,22 +758,24 @@ export function missingRootIds(
 /**
  * Fill the root post ids of rows whose thread root is not loaded, from
  * `sources` (root rows fetched separately). A deleted root shares nothing.
- * With `settle`, a root that cannot be found (not visible) shares nothing
- * instead of staying unknown. The same list when nothing changes.
+ * `settle` names the rows whose read this was: a root of theirs that cannot
+ * be found (not visible) shares nothing instead of staying unknown; rows of
+ * another batch whose read is still in flight are left alone. The same list
+ * when nothing changes.
  */
 export function hydrateRoots(
   messages: ThreadMessage[],
   sources: readonly ThreadMessage[],
-  settle = false,
+  settle: ReadonlySet<string> = new Set(),
 ): ThreadMessage[] {
   const loaded = new Set(messages.map((m) => m.id));
-  if (!messages.some((m) => awaitsRoot(m, loaded))) return messages;
+  if (!messages.some((m) => awaitsRootHydration(m, loaded))) return messages;
   const byId = new Map(sources.map((m) => [m.id, m] as const));
   let changed = false;
   const next = messages.map((m) => {
-    if (!awaitsRoot(m, loaded) || typeof m.threadRootId !== 'string') return m;
+    if (!awaitsRootHydration(m, loaded) || typeof m.threadRootId !== 'string') return m;
     const root = byId.get(m.threadRootId);
-    if (root === undefined && !settle) return m;
+    if (root === undefined && !settle.has(m.id)) return m;
     changed = true;
     return {
       ...m,

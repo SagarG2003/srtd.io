@@ -131,6 +131,24 @@ describe('member rows on the rail', () => {
     expect(plain).not.toContain('data-rail');
   });
 
+  it('a left root card no reply follows yet already sits shifted, with no rail piece', () => {
+    const card = msg('card', { body: 'Card' });
+    const rail: RowRail = {
+      role: null,
+      geometry: rowGeometry({
+        role: null,
+        mine: false,
+        isGroup: false,
+        photo: false,
+        selecting: false,
+        rootCard: true,
+      }),
+    };
+    const out = bubble(card, { rail });
+    expect(out).toContain('pl-[30px]');
+    expect(out).not.toContain('data-rail');
+  });
+
   it('the last member draws only its elbow; the root card its top elbow', () => {
     const last = bubble(memberRow, { member: true, rail: railFor('last', {}) });
     expect(last).not.toContain('data-rail="through"');

@@ -194,6 +194,7 @@ import {
 import { MARK_FAILED_COPY, type WriteResult } from '@/lib/chat/record';
 import {
   aboutState,
+  PAGE_HYDRATION_WAIT_MS,
   admitRows,
   chipPostIds,
   chipTargetFor,
@@ -208,6 +209,7 @@ import {
 } from '@/lib/chat/post-refs';
 import {
   NO_RAIL,
+  awaitsRootHydration,
   createThreadCounts,
   freezeMemberships,
   isRootCard,
@@ -590,10 +592,10 @@ export const ABOUT_UNAVAILABLE_TOAST = 'That post is not available here';
 export const SHARE_UNAVAILABLE_TOAST = 'Could not share right now';
 
 /** Toast when a thread's root or first page cannot be read; the chat stays as it is. */
-export const THREAD_OPEN_FAILED_TOAST = 'Could not open this thread';
+const THREAD_OPEN_FAILED_TOAST = 'Could not open this thread';
 
 /** The thread view composer's placeholder. */
-export const THREAD_REPLY_PLACEHOLDER = 'Reply in thread';
+const THREAD_REPLY_PLACEHOLDER = 'Reply in thread';
 
 /**
  * The About reply a send may carry: only while the About bar shows its post.
@@ -1451,20 +1453,24 @@ export const FAILED_RETRY_CLASS =
 /** Hover-only controls fade in on opacity alone, 120ms, and not at all under reduced motion. */
 const HOVER_FADE = 'transition-opacity duration-[120ms] motion-reduce:transition-none';
 
-/** A row's piece of the rail and its shifted geometry; absent off the rail and while selecting. */
+/**
+ * A row's piece of the rail (none for a left root card no member follows yet,
+ * which still sits shifted) and its geometry; absent off threads and while
+ * selecting.
+ */
 export interface RowRail {
-  role: RailRole;
+  role: RailRole | null;
   geometry: RowGeometry;
 }
 
 /** How far a row's tick reaches up: through the row's own top padding. */
-export function railTop(head: boolean, afterLabel: boolean): string {
+function railTop(head: boolean, afterLabel: boolean): string {
   if (!head) return '-top-0.5';
   return afterLabel ? 'top-0' : '-top-2.5';
 }
 
 /** The root's rail reaches down through the row's bottom padding (the reaction badge's room). */
-export function railBottom(hasReactions: boolean): string {
+function railBottom(hasReactions: boolean): string {
   return hasReactions ? '-bottom-5' : 'bottom-0';
 }
 
@@ -1481,7 +1487,7 @@ export function railRowClass(rail: RowRail | undefined, mine: boolean): string {
 
 /** The rail piece a row's target carries: a tick for a member, the elbow for a root card. */
 function railPiece(
-  rail: RowRail,
+  rail: RowRail & { role: RailRole },
   edge: { head: boolean; afterLabel: boolean; hasReactions: boolean },
 ): ReactElement {
   return rail.role === 'root' ? (
@@ -1501,10 +1507,11 @@ function withRailBox(
   rail: RowRail | undefined,
   edge: { head: boolean; afterLabel: boolean; hasReactions: boolean },
 ): ReactElement {
-  if (rail === undefined || rail.geometry.target !== 'bubble') return bubble;
+  const role = rail?.role ?? null;
+  if (rail === undefined || role === null || rail.geometry.target !== 'bubble') return bubble;
   return (
     <div data-rail-target="" className="relative min-w-0 max-w-full">
-      {railPiece(rail, edge)}
+      {railPiece({ ...rail, role }, edge)}
       {bubble}
     </div>
   );
@@ -1516,10 +1523,11 @@ function withRailPhoto(
   rail: RowRail | undefined,
   edge: { head: boolean; afterLabel: boolean; hasReactions: boolean },
 ): ReactElement {
-  if (rail === undefined || rail.geometry.target !== 'photo') return photo;
+  const role = rail?.role ?? null;
+  if (rail === undefined || role === null || rail.geometry.target !== 'photo') return photo;
   return (
     <span data-rail-target="" className="relative flex shrink-0">
-      {railPiece(rail, edge)}
+      {railPiece({ ...rail, role }, edge)}
       {photo}
     </span>
   );
@@ -1744,7 +1752,7 @@ export function MessageBubble(props: {
       // piece of the rail) reaches the next row with no gap.
       className={cn(
         rowClass,
-        hasReactions && (rail !== undefined ? 'pb-5' : REACTION_ROW_SPACE),
+        hasReactions && (rail?.role != null ? 'pb-5' : REACTION_ROW_SPACE),
         checked && 'isolate',
       )}
       // Selection mode: the whole row is the target, owned by the selection
@@ -1914,7 +1922,7 @@ export function MessageBubble(props: {
                   props.onRetry?.(message.id);
                 }}
                 // On the rail the tick runs into the alert: the page fill keeps the "!" clear of it.
-                className={cn(FAILED_RETRY_CLASS, rail !== undefined && 'bg-bg')}
+                className={cn(FAILED_RETRY_CLASS, rail?.role != null && 'bg-bg')}
               >
                 <FailedGlyph />
               </button>
@@ -1984,7 +1992,7 @@ export function MessageBubble(props: {
           className={cn(
             'flex h-11 w-11 shrink-0 items-center justify-center self-center rounded-full text-fg-3 opacity-0 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover:opacity-100',
             // An own row's tick passes under the smiley; the page fill keeps the glyph clear.
-            rail !== undefined && mine && 'bg-bg',
+            rail?.role != null && mine && 'bg-bg',
             HOVER_FADE,
           )}
         >
@@ -2104,8 +2112,9 @@ export function threadListItems(
           type="button"
           data-load-older=""
           onClick={loadOlder}
+          onContextMenu={preventDefault}
           className={cn(
-            'flex min-h-[44px] items-center rounded-md px-4 text-xs font-medium text-accent transition-colors hover:bg-panel-2',
+            'flex min-h-[44px] items-center rounded-md px-4 text-xs font-medium text-accent hover:bg-panel-2',
             NO_TOUCH_SELECT,
           )}
         >
@@ -2567,7 +2576,7 @@ function paintSwipe(
 }
 
 /** What a thread list needs to draw card threads. */
-export interface ThreadBodyThreads {
+interface ThreadBodyThreads {
   /** A row's thread as it renders now (decided at its first paint). */
   memberOf: (message: ThreadMessage) => ThreadMembership | null;
   /** A thread's reply count, null when unknown. */
@@ -3209,8 +3218,11 @@ function ThreadBody(
               const plan = plans.get(row.message.id) ?? NO_RAIL;
               const chipRoot = plan.chipRoot;
               const viewRoot = threads?.viewRootId === row.message.id;
+              const rootCard = isRootCard(row.message);
+              // A left root card keeps its shifted place from its first paint,
+              // so its first reply never moves it.
               const rowRail: RowRail | undefined =
-                threads !== undefined && plan.role !== null
+                threads !== undefined && (plan.role !== null || (rootCard && !row.message.mine))
                   ? {
                       role: plan.role,
                       geometry: rowGeometry({
@@ -3220,10 +3232,10 @@ function ThreadBody(
                         photo: props.isGroup && !row.message.mine && row.head,
                         selecting: false,
                         viewRoot,
+                        rootCard,
                       }),
                     }
                   : undefined;
-              const rootCard = isRootCard(row.message);
               const replies =
                 threads !== undefined && rootCard
                   ? replyCountLabel(threads.countOf(row.message.id))
@@ -3311,7 +3323,7 @@ function ThreadBody(
                       label={replies}
                       mine={row.message.mine}
                       isGroup={props.isGroup}
-                      shifted={rowRail !== undefined}
+                      shifted={rowRail !== undefined && rowRail.geometry.shift > 0}
                       through={plan.continues}
                       coarse={coarsePointer}
                       onOpen={() => openThread(row.message.id)}
@@ -3995,6 +4007,16 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     const loaded = new Set(props.messages.map((m) => m.id));
     return view.fetched.filter((m) => !loaded.has(m.id));
   }, [view, props.messages]);
+  // The open thread: its root, then its replies oldest first (the chat's loaded
+  // rows win over the view's own copies, so live arrivals and own sends show).
+  const viewParts = useMemo(
+    () => (view !== null ? threadViewRows(view, props.messages) : null),
+    [view, props.messages],
+  );
+  const viewMessages = useMemo(
+    () => (viewParts !== null ? [viewParts.root, ...viewParts.replies] : []),
+    [viewParts],
+  );
   // Every message an action can name: the chat's loaded rows and the view's own.
   const actionable = useMemo(
     () => (viewOnly.length > 0 ? [...props.messages, ...viewOnly] : props.messages),
@@ -4252,8 +4274,14 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const localCountsRef = useRef(localCounts);
   localCountsRef.current = localCounts;
   useEffect(() => {
-    const pageRows = props.messages.filter((m) => admitted.gate.pending.has(m.id));
-    const roots = pageCountRoots(pageRows, loadedIds, counts.requested);
+    const pending = admitted.gate.pending;
+    const pageRows = props.messages.filter((m) => pending.has(m.id));
+    const nowMs = Date.now();
+    // A row whose root read has run out of time no longer holds the read back.
+    const roots = pageCountRoots(pageRows, loadedIds, counts.requested, (row) => {
+      const since = pending.get(row.id) ?? nowMs;
+      return awaitsRootHydration(row, loadedIds) && nowMs - since < PAGE_HYDRATION_WAIT_MS;
+    });
     if (roots.length === 0) return;
     void counts
       .request(roots, (rootId) => localCountsRef.current.get(rootId) ?? 0)
@@ -4390,7 +4418,14 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   );
   const reactorLoad = props.loadReactors ?? defaultReactorLoad;
   useEffect(() => {
-    const deadline = hydrationDeadline(admitted.gate, props.messages, parentIndex, loadedIds);
+    // A deadline already passed was handled by the cut it re-ran: no timer again.
+    const deadline = hydrationDeadline(
+      admitted.gate,
+      props.messages,
+      parentIndex,
+      loadedIds,
+      Date.now(),
+    );
     if (deadline === null) return;
     const handle = setTimeout(
       () => setHydrationTick((t) => t + 1),
@@ -4401,10 +4436,12 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
 
   // Selection, jumps and the forward source read the list that is on screen
   // (and the open thread view's own rows).
-  const selectable = useMemo(
-    () => (viewOnly.length > 0 ? [...shownMessages, ...viewOnly] : shownMessages),
-    [shownMessages, viewOnly],
-  );
+  const selectable = useMemo(() => {
+    if (viewMessages.length === 0) return shownMessages;
+    const shown = new Set(shownMessages.map((m) => m.id));
+    const extra = viewMessages.filter((m) => !shown.has(m.id));
+    return extra.length > 0 ? [...shownMessages, ...extra] : shownMessages;
+  }, [shownMessages, viewMessages]);
   useEffect(() => {
     setSelected((prev) => {
       const next = pruneThreadSelection(prev, selectable);
@@ -4493,15 +4530,20 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const openThread = (rootId: string): void => {
     if (openingRef.current) return;
     openingRef.current = true;
-    void threadView.open(rootId, props.messages).then((opened) => {
-      openingRef.current = false;
-      if (!opened) {
-        toast.show({ title: THREAD_OPEN_FAILED_TOAST });
-        return;
-      }
-      setEditing(null);
-      setViewReply(null);
-    });
+    void threadView
+      .open(rootId, props.messages)
+      .catch(() => false)
+      .then((opened) => {
+        if (!opened) {
+          toast.show({ title: THREAD_OPEN_FAILED_TOAST });
+          return;
+        }
+        setEditing(null);
+        setViewReply(null);
+      })
+      .finally(() => {
+        openingRef.current = false;
+      });
   };
   const closeThread = (): void => {
     if (selecting) cancelSelection();
@@ -4526,14 +4568,6 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   };
   // The open thread: its root, then its replies oldest first (the chat's loaded
   // rows win over the view's own copies, so live arrivals and own sends show).
-  const viewParts = useMemo(
-    () => (view !== null ? threadViewRows(view, props.messages) : null),
-    [view, props.messages],
-  );
-  const viewMessages = useMemo(
-    () => (viewParts !== null ? [viewParts.root, ...viewParts.replies] : []),
-    [viewParts],
-  );
   const viewRoot = viewParts?.root;
   const viewPostId =
     viewRoot !== undefined && isRootCard(viewRoot) ? viewRoot.sharedPostIds[0] : undefined;
@@ -4546,10 +4580,10 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // counts read's), else the view's rows once it has read them all.
   const viewCount = ((): number | null => {
     if (view === null || viewParts === null) return null;
-    if (loadedIds.has(view.rootId) || counts.get(view.rootId) !== undefined) {
-      return countOf(view.rootId);
-    }
-    return view.hasMore ? null : (localReplyCounts(viewParts.replies).get(view.rootId) ?? 0);
+    if (loadedIds.has(view.rootId)) return countOf(view.rootId);
+    // Every reply read: the view counts them itself.
+    if (!view.hasMore) return localReplyCounts(viewParts.replies).get(view.rootId) ?? 0;
+    return countOf(view.rootId);
   })();
   const viewThreads: ThreadBodyThreads | undefined =
     view !== null

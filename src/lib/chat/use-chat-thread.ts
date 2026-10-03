@@ -581,8 +581,11 @@ export function useChatThread(params: {
           ...missingRootIds(fetched, known),
         ]),
       ];
+      // Only this batch's rows settle a root that cannot be read; another
+      // batch whose read is still in flight keeps waiting for its own.
+      const batch = new Set(fetched.map((m) => m.id));
       if (missing.length === 0) {
-        setMessages((prev) => hydrateRoots(hydrateReplies(prev, [], true), [], true));
+        setMessages((prev) => hydrateRoots(hydrateReplies(prev, [], true), [], batch));
         return;
       }
       const result = await loadMessagesByIds(db, missing);
@@ -593,7 +596,7 @@ export function useChatThread(params: {
         return;
       }
       const quoted = result.data.map((row) => rowToThreadMessage(row, currentUserId));
-      setMessages((prev) => hydrateRoots(hydrateReplies(prev, quoted, true), quoted, true));
+      setMessages((prev) => hydrateRoots(hydrateReplies(prev, quoted, true), quoted, batch));
     },
     [db, currentUserId],
   );

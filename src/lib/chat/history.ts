@@ -34,6 +34,7 @@ import {
 } from '@/lib/chat/attachments';
 import type { ChatMessageRow, MessageCursor, MessageReaction } from '@/lib/chat/thread';
 import type { ReadCursorRow } from '@/lib/chat/read-receipts';
+import { THREAD_COUNT_ROOT_LIMIT } from '@/lib/chat/thread-rail';
 
 /** History page size; also the "has more" probe (a full page means keep paging). */
 export const HISTORY_PAGE_SIZE = 50;
@@ -232,14 +233,10 @@ export function loadThreadPage(
   });
 }
 
-/** The live replies of one thread root and when the newest was sent. */
+/** The live replies of one thread root. */
 export interface ThreadReplyCount {
   count: number;
-  lastReplyAt: string;
 }
-
-/** Root ids one counts read carries at most (the proc reads the first 200). */
-export const THREAD_COUNT_ROOT_LIMIT = 200;
 
 /**
  * Reply counts for thread roots in one call to chat_thread_reply_counts
@@ -267,12 +264,7 @@ export function loadThreadReplyCounts(
     const rows = (data ?? []) as ThreadReplyCountRow[];
     return {
       ok: true,
-      data: new Map(
-        rows.map((row) => [
-          row.root_id,
-          { count: Number(row.reply_count), lastReplyAt: row.last_reply_at },
-        ]),
-      ),
+      data: new Map(rows.map((row) => [row.root_id, { count: Number(row.reply_count) }])),
     };
   });
 }

@@ -13,7 +13,7 @@ import { useMediaQuery } from '@/lib/use-media-query';
 import { COARSE_POINTER_QUERY, NO_TOUCH_SELECT } from '@/components/chat/chat-type';
 
 /** The view's fade, in and out (opacity only). */
-export const THREAD_VIEW_FADE_MS = 150;
+const THREAD_VIEW_FADE_MS = 150;
 
 /** Users who asked for less motion: the view appears and goes at once. */
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';

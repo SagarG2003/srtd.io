@@ -55,7 +55,7 @@ export function withThreadRoot(
 }
 
 /** The root a row sits under: its own, else derived from a loaded parent; null for a non-reply. */
-export function rowRootId(
+function rowRootId(
   row: RailFields,
   byId: ReadonlyMap<string, RailFields>,
 ): string | null | undefined {
@@ -276,14 +276,16 @@ export function chipCountRoot(row: RootFields, loaded: ReadonlySet<string>): str
 /**
  * The roots one counts read carries for a page: the not-loaded card roots of
  * its rows not asked for yet. Empty (no read) while a row of the page still
- * waits for its root's hydration, so a page makes one read, never one per row.
+ * waits for its root's hydration (`waiting`: its wait has not run out), so a
+ * page makes one read, never one per row.
  */
-export function pageCountRoots(
-  pageRows: readonly RootFields[],
+export function pageCountRoots<T extends RootFields>(
+  pageRows: readonly T[],
   loaded: ReadonlySet<string>,
   requested: (rootId: string) => boolean,
+  waiting: (row: T) => boolean = (row) => awaitsRootHydration(row, loaded),
 ): string[] {
-  if (pageRows.some((row) => awaitsRootHydration(row, loaded))) return [];
+  if (pageRows.some(waiting)) return [];
   const roots = new Set<string>();
   for (const row of pageRows) {
     const root = chipCountRoot(row, loaded);
@@ -291,6 +293,9 @@ export function pageCountRoots(
   }
   return [...roots].sort();
 }
+
+/** Root ids one counts read carries at most (the proc reads the first 200). */
+export const THREAD_COUNT_ROOT_LIMIT = 200;
 
 /** How long a page waits for its counts read before its chips paint without a count. */
 export const THREAD_COUNTS_WAIT_MS = 4_000;
@@ -325,7 +330,10 @@ export function createThreadCounts(
     settled: (rootId) => entries.has(rootId),
     requested: (rootId) => requested.has(rootId),
     request: (rootIds, baseOf) => {
-      const fresh = [...new Set(rootIds)].filter((id) => !requested.has(id));
+      // Over the proc's 200: the rest wait for the next read, never counted as 0.
+      const fresh = [...new Set(rootIds)]
+        .filter((id) => !requested.has(id))
+        .slice(0, THREAD_COUNT_ROOT_LIMIT);
       if (fresh.length === 0) return null;
       for (const id of fresh) requested.add(id);
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -382,8 +390,9 @@ export const OWN_REACH = 'w-[calc(100cqw-100%+1px)]';
 
 /**
  * A row's rail geometry. Selection mode, outgoing rows and rows off the rail
- * keep today's place. A member row (or a left root card heading a rail) shifts
- * its content 14px right, a thread view's root 29px. On a group row that shows
+ * keep today's place. A member row and a left root card (from its first
+ * paint, so its first reply never moves it) shift their content 14px right, a
+ * thread view's root 29px. On a group row that shows
  * the sender photo, a member's tick runs into the photo; on a tucked row (the
  * gutter, no photo) and on a root card it runs to the bubble, past the gutter.
  */
@@ -396,9 +405,12 @@ export function rowGeometry(input: {
   selecting: boolean;
   /** The thread view's root card row. */
   viewRoot?: boolean;
+  /** A card that heads a thread: shifted from its first paint, rail or not. */
+  rootCard?: boolean;
 }): RowGeometry {
   const onRail = input.role !== null && !input.selecting;
-  const shift: RowShift = !onRail || input.mine ? 0 : input.viewRoot === true ? 29 : 14;
+  const shifted = !input.selecting && (onRail || input.rootCard === true);
+  const shift: RowShift = !shifted || input.mine ? 0 : input.viewRoot === true ? 29 : 14;
   const target: RailTarget =
     input.isGroup && !input.mine && input.photo && input.role !== 'root' ? 'photo' : 'bubble';
   const pastPhoto = input.isGroup && !input.mine && target === 'bubble';

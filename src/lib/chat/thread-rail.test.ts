@@ -253,21 +253,34 @@ describe('counts batching', () => {
     expect(pageCountRoots(hydrated, loaded, (id) => id === 'r1')).toEqual(['r2']);
   });
 
-  it('reads the roots in one call, never twice (the read itself sends at most 200)', async () => {
+  it('reads the roots in one call, at most 200, never twice', async () => {
     const load = vi.fn<(ids: string[]) => Promise<Result<Map<string, ThreadReplyCount>>>>((ids) =>
-      Promise.resolve({
-        ok: true,
-        data: new Map(ids.map((id) => [id, { count: 3, lastReplyAt: '2026-10-01T10:00:00Z' }])),
-      }),
+      Promise.resolve({ ok: true, data: new Map(ids.map((id) => [id, { count: 3 }])) }),
     );
     const counts = createThreadCounts(load);
     const roots = Array.from({ length: 250 }, (_, i) => `r${i}`);
     await counts.request(roots, () => 1);
     expect(load).toHaveBeenCalledTimes(1);
-    expect(load.mock.calls[0]?.[0]).toHaveLength(250);
+    expect(load.mock.calls[0]?.[0]).toHaveLength(200);
     expect(counts.get('r0')).toEqual({ count: 3, base: 1 });
+    // Past the 200: not read, so not counted as 0; the next page's read takes them.
+    expect(counts.get('r220')).toBeUndefined();
+    expect(counts.requested('r220')).toBe(false);
     expect(counts.request(['r0'], () => 0)).toBeNull();
     expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('a row whose root read ran out of time no longer holds the page read back', () => {
+    const page = [reply('a', 'x', 'r1'), { ...reply('b', 'y', 'r2'), rootPostIds: ['p2'] }];
+    expect(pageCountRoots(page, new Set(), () => false)).toEqual([]);
+    expect(
+      pageCountRoots(
+        page,
+        new Set(),
+        () => false,
+        () => false,
+      ),
+    ).toEqual(['r2']);
   });
 
   it('a read that times out settles with no count for good; a late answer is dropped', async () => {
@@ -284,7 +297,7 @@ describe('counts batching', () => {
     vi.advanceTimersByTime(THREAD_COUNTS_WAIT_MS);
     await done;
     expect(counts.get('r1')).toBe('none');
-    late.answer?.({ ok: true, data: new Map([['r1', { count: 9, lastReplyAt: '' }]]) });
+    late.answer?.({ ok: true, data: new Map([['r1', { count: 9 }]]) });
     await Promise.resolve();
     expect(counts.get('r1')).toBe('none');
     expect(counts.request(['r1'], () => 0)).toBeNull();
@@ -350,6 +363,39 @@ describe('rowGeometry', () => {
     expect(
       rowGeometry({ role: 'middle', mine: true, isGroup: true, photo: false, selecting: false }),
     ).toEqual({ padLeft: 'pl-4', shift: 0, target: 'bubble', reach: OWN_REACH });
+  });
+
+  it('a left root card is shifted from its first paint, rail or not; an own one is not', () => {
+    expect(
+      rowGeometry({
+        role: null,
+        mine: false,
+        isGroup: false,
+        photo: false,
+        selecting: false,
+        rootCard: true,
+      }),
+    ).toEqual({ padLeft: 'pl-[30px]', shift: 14, target: 'bubble', reach: '' });
+    expect(
+      rowGeometry({
+        role: null,
+        mine: true,
+        isGroup: false,
+        photo: false,
+        selecting: false,
+        rootCard: true,
+      }),
+    ).toMatchObject({ padLeft: 'pl-4', shift: 0 });
+    expect(
+      rowGeometry({
+        role: null,
+        mine: false,
+        isGroup: false,
+        photo: false,
+        selecting: true,
+        rootCard: true,
+      }),
+    ).toMatchObject({ padLeft: 'pl-4', shift: 0 });
   });
 
   it('selection removes the rail and the shift', () => {
