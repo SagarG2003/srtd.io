@@ -3,7 +3,7 @@
 // tile, thread header, forward picker, search rows), and the "Saved from"
 // line a saved copy shows in place of "Forwarded". Tokens only, no motion.
 
-import { createContext, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactElement, RefObject } from 'react';
 import { cn } from '@/lib/cn';
 import type { ThreadMessage } from '@/lib/chat/thread';
@@ -59,6 +59,14 @@ const RING: Record<NotesAvatarSurface, string> = {
   'accent-soft': 'border-accent-soft',
 };
 
+/** The ring while the row is hovered (rows fill panel-2 on hover). */
+const HOVER_RING: Record<'panel-2', string> = {
+  'panel-2': 'group-hover/notes-row:border-panel-2',
+};
+
+/** Photo URLs that loaded this session: a later mount paints them on its first frame. */
+const LOADED_PHOTOS = new Set<string>();
+
 /** The accessible name the notes avatar keeps everywhere. */
 export const NOTES_AVATAR_LABEL = 'Personal notes';
 
@@ -76,17 +84,31 @@ export function NotesAvatar(props: {
   /** The user's own users.avatar_url; null or absent shows the notebook. */
   src?: string | null;
   surface?: NotesAvatarSurface;
+  /**
+   * The surface while its row (a `group/notes-row` ancestor) is hovered, so
+   * the badge ring follows the row's hover fill.
+   */
+  hoverSurface?: 'panel-2';
 }): ReactElement {
   const src = props.src ?? null;
-  // Keyed by URL: a new photo starts unloaded, a failed one never retries.
-  const [loaded, setLoaded] = useState<string | null>(null);
+  // Keyed by URL: a photo this session already showed paints on the first
+  // frame; a new one starts unloaded; a failed one never retries.
+  const [loaded, setLoaded] = useState<string | null>(() =>
+    src !== null && LOADED_PHOTOS.has(src) ? src : null,
+  );
   const [failed, setFailed] = useState<string | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
-  // A cached photo can finish before React wires onLoad: read it once.
-  useEffect(() => {
+  const markLoaded = (url: string): void => {
+    LOADED_PHOTOS.add(url);
+    setLoaded(url);
+  };
+  // A cached photo (or a cached broken one) can settle before React wires
+  // onLoad / onError: read it before paint.
+  useLayoutEffect(() => {
     const img = imgRef.current;
     if (img === null || src === null || !img.complete) return;
-    if (img.naturalWidth > 0) setLoaded(src);
+    if (img.naturalWidth > 0) markLoaded(src);
+    else setFailed(src);
   }, [src]);
   return notesAvatarView({
     size: props.size,
@@ -95,8 +117,11 @@ export function NotesAvatar(props: {
     failed: src !== null && failed === src,
     surface: props.surface ?? 'panel',
     imgRef,
-    onLoad: () => setLoaded(src),
+    onLoad: () => {
+      if (src !== null) markLoaded(src);
+    },
     onError: () => setFailed(src),
+    ...(props.hoverSurface !== undefined ? { hoverSurface: props.hoverSurface } : {}),
   });
 }
 
@@ -111,6 +136,7 @@ export function notesAvatarView(input: {
   loaded: boolean;
   failed: boolean;
   surface: NotesAvatarSurface;
+  hoverSurface?: 'panel-2';
   imgRef?: RefObject<HTMLImageElement>;
   onLoad?: () => void;
   onError?: () => void;
@@ -156,6 +182,7 @@ export function notesAvatarView(input: {
             'absolute flex items-center justify-center rounded-full bg-accent text-accent-fg',
             badge.box,
             RING[input.surface],
+            input.hoverSurface !== undefined && HOVER_RING[input.hoverSurface],
           )}
         >
           <NotesGlyph size={badge.glyph} />

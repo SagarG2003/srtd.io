@@ -762,7 +762,7 @@ export function notesTile(props: {
         className={cn(
           tileBoxClass('wide'),
           CHANNEL_ROW_BUTTON,
-          'border-border disabled:cursor-default',
+          'group/notes-row border-border disabled:cursor-default',
           props.selected && !props.selecting ? 'bg-panel-2' : 'bg-panel',
           !props.selecting && 'hover:bg-panel-2',
         )}
@@ -771,6 +771,7 @@ export function notesTile(props: {
           size="tile"
           src={notes.avatarUrl}
           surface={props.selected && !props.selecting ? 'panel-2' : 'panel'}
+          {...(!props.selected && !props.selecting ? { hoverSurface: 'panel-2' as const } : {})}
         />
         <span className="flex min-w-0 flex-1 flex-col gap-1">
           <span className={cn('min-w-0 truncate text-fg', GROUP_NAME_TYPE)}>{notes.title}</span>

@@ -49,6 +49,7 @@ export function forwardRowAvatar(channel: ChannelSummary, selected: boolean): Re
         size="small"
         src={channel.avatarUrl}
         surface={selected ? 'accent-soft' : 'panel'}
+        {...(!selected ? { hoverSurface: 'panel-2' as const } : {})}
       />
     );
   }
@@ -136,7 +137,7 @@ export function ForwardPicker(props: ForwardPickerProps): ReactElement {
                     setSelected((prev) => toggleForwardTarget(prev, channel.channelId))
                   }
                   className={cn(
-                    'flex w-full min-h-[44px] items-center gap-3 rounded-md px-2 py-1 text-left transition-colors',
+                    'group/notes-row flex w-full min-h-[44px] items-center gap-3 rounded-md px-2 py-1 text-left transition-colors',
                     isSelected ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-panel-2',
                   )}
                 >

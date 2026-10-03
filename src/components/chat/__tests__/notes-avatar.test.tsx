@@ -50,6 +50,11 @@ describe('notes avatar', () => {
     expect(html).toContain('bg-accent text-accent-fg');
   });
 
+  it('the badge ring follows the row hover fill when asked', () => {
+    expect(view({ hoverSurface: 'panel-2' })).toContain('group-hover/notes-row:border-panel-2');
+    expect(view()).not.toContain('group-hover/notes-row');
+  });
+
   it('small sizes: 44px radius 12, 20px badge, -4px out, 2px ring', () => {
     const html = view({ size: 'small', surface: 'bg' });
     expect(html).toContain('h-11 w-11 rounded-[12px]');
