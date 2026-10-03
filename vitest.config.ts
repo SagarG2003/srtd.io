@@ -1,5 +1,5 @@
 import { fileURLToPath, URL } from 'node:url';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 // Unit test config. Kept separate from vite.config.ts so tests do not load the
 // Sentry build plugin. The Zod-validated env (src/lib/env.ts) is satisfied with
@@ -12,6 +12,8 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    // e2e/ holds Playwright specs, run by pnpm test:e2e, not vitest.
+    exclude: [...configDefaults.exclude, 'e2e/**'],
     env: {
       VITE_SUPABASE_URL: 'https://test.supabase.co',
       VITE_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test_000000000000',
