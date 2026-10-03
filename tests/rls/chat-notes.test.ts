@@ -377,7 +377,10 @@ describe.runIf(RLS_SUITE)('chat notes channel and search kind', () => {
         const found = all.map((r) => r.id).filter((id) => seeded.has(id));
         expect(new Set(found)).toEqual(new Set([ids[kind].alpha, ids[kind].beta]));
 
-        const narrowed = await search(owner.id, searchArgs(wsA.id, 'alpha', { kind, channelId }));
+        const narrowed = await search(
+          owner.id,
+          searchArgs(wsA.id, 'alpha kindcase', { kind, channelId }),
+        );
         expect(narrowed.map((r) => r.id)).toEqual([ids[kind].alpha]);
       }
       // Control: the query alone matches every alpha message, so the kind filter did the work.
