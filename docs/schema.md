@@ -381,6 +381,19 @@ RLS: chat_scheduled_select_own (SELECT to authenticated) USING sender_user_id = 
 
 Recorded in 20261003130000_chat_scheduled_send.sql.
 
+### chat_message_reminders
+
+PK id uuid (client-generated). Fields: user_id FK auth.users.id ON DELETE CASCADE (the person reminded), message_id text (no FK; chat_messages is partitioned), channel_id text FK chat_channels ON DELETE CASCADE, workspace_id FK workspaces ON DELETE CASCADE, remind_at timestamptz, fired_at nullable, cancelled_at nullable, created_at default now(). A reminder is pending while fired_at and cancelled_at are both null. Indexes: chat_reminders_one_active UNIQUE (user_id, message_id) WHERE pending (one pending reminder per person per message), chat_reminders_due_idx (remind_at) WHERE pending, chat_reminders_user_idx (user_id, workspace_id, remind_at), chat_reminders_channel_idx (channel_id), chat_reminders_workspace_idx (workspace_id), chat_reminders_message_idx (message_id).
+
+RLS: chat_reminders_select_own (SELECT to authenticated) USING user_id = auth.uid(): own rows only. No write policies. Table grants: authenticated SELECT only; anon none. All writes go through the SECURITY DEFINER procs below (all search_path='').
+
+- chat_reminder_set(p_id uuid, p_message_id text, p_channel_id text, p_remind_at timestamptz, p_trace_id uuid) RETURNS void (EXECUTE to authenticated only). Requires auth.uid(), p_id and p_trace_id. An existing row with p_id is a no-op. Raises on remind_at outside [now() + 1 minute, now() + 365 days] ('reminder must be between 1 minute and 1 year from now'), non-member ('not a member of this chat'), and a message that is deleted or not in p_channel_id ('message not found'). Also replaces the caller's pending reminder on that message (the earlier one is cancelled, then the new one inserted), which is how "Change time" works. Audits chat_reminder_set.
+- chat_reminder_cancel(p_id uuid, p_trace_id uuid) RETURNS void (EXECUTE to authenticated only). Requires auth.uid() and p_trace_id. Cancels the caller's own pending reminder; any other id (someone else's, already fired or cancelled, unknown) is a silent no-op. Audits chat_reminder_cancel when a row changed.
+- chat_reminders_fire(p_limit integer default 500) RETURNS integer (no grants; cron only). Run by pg_cron job chat-reminders-fire every minute (`select public.chat_reminders_fire(500)`). Locks up to p_limit (clamped 1..2000) due pending reminders (FOR UPDATE SKIP LOCKED), sets fired_at, and writes one 'reminder' inbox_entries row per reminder: tier urgent, entity chat_channel, entity_id and scope_key channel_id, scope groups for a group channel else people, payload {message_id, reminder_id}, actor_user_id null. Skips people no longer in the chat (chat_channel_member false) and deleted messages: those are marked fired with no entry. Returns the number of entries written.
+- Trigger chat_messages_reminders_on_delete (AFTER UPDATE OF deleted_at ON chat_messages, when deleted_at goes from null to not null) runs chat_messages_reminders_on_delete() (no grants): cancels every pending reminder on that message.
+
+Recorded in 20261003140000_chat_message_reminders.sql.
+
 ## 8. Inbox and delivery
 
 Inbox is the only permanent in-app event surface. Email is out-of-app catch-up, bundled 9am to 9pm workspace TZ.
@@ -406,6 +419,13 @@ Inbox is the only permanent in-app event surface. Email is out-of-app catch-up, 
 PK (id, created_at). Partitions: 2026_05, 2026_06, 2026_07. actor_user_id is set by the seven procs that fan out into inbox_entries (checkpoint_ask, checkpoint_send_back, comment_batch_create, comment_create, comment_resolve, post_ready_notify, stage_transition); it is permanently null on stage_change and post_ready rows written before this change, because the actor was never recorded at the time.
 
 inbox_mark_read_events(p_workspace_id uuid, p_event_types text[], p_trace_id uuid) RETURNS void, SECURITY DEFINER (search_path=''; EXECUTE to authenticated only): requires is_active_workspace_member ('workspace_member_only') and p_trace_id; marks the caller's unread, non-deleted entries in the workspace whose event_type is in p_event_types read; no-op for an empty list; audits inbox_mark_read_events with the count when any row changed. Recorded in 20261003130000_chat_scheduled_send.sql.
+
+Where inbox entries are shown:
+
+- Chat bell only, never Activity: mention with entity_type chat_channel, scheduled_sent, scheduled_failed, reminder.
+- Activity: everything else, including mentions on posts and briefs.
+
+Decision 3 Oct 2026 (Shubham): Activity is posts only; chat notifications live in the chat bell.
 
 ### email_threads
 
@@ -460,7 +480,7 @@ PK id. Fields: operator_user_id FK, flow_type (billing_override / sentry_inspect
 - workspace.subscription_state: trial, active, read_only, grace, soft_pause, full_pause, soft_delete
 - brief.status: open, closed
 - approval (table removed): n/a, approval is now a post.stage value
-- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas)
+- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent), reminder (tier urgent) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas)
 - inbox_entries.scope: everything, posts, briefs, people, groups, clients
 - inbox_entries.tier: urgent, active, ambient
 - chat_channels.channel_type: dm, group
