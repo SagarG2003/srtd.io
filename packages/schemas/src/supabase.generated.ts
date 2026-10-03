@@ -4389,6 +4389,81 @@ export type Database = {
           },
         ]
       }
+      chat_scheduled_messages: {
+        Row: {
+          attachment_asset_ids: string[] | null
+          attachment_meta: Json | null
+          body: string | null
+          channel_id: string
+          created_at: string
+          failure_reason: string | null
+          id: string
+          mentions: Json | null
+          reply_to_message_id: string | null
+          send_at: string
+          sender_user_id: string
+          sent_at: string | null
+          shared_brief_ids: string[] | null
+          shared_post_ids: string[] | null
+          status: string
+          updated_at: string
+          workspace_id: string
+        }
+        Insert: {
+          attachment_asset_ids?: string[] | null
+          attachment_meta?: Json | null
+          body?: string | null
+          channel_id: string
+          created_at?: string
+          failure_reason?: string | null
+          id: string
+          mentions?: Json | null
+          reply_to_message_id?: string | null
+          send_at: string
+          sender_user_id: string
+          sent_at?: string | null
+          shared_brief_ids?: string[] | null
+          shared_post_ids?: string[] | null
+          status?: string
+          updated_at?: string
+          workspace_id: string
+        }
+        Update: {
+          attachment_asset_ids?: string[] | null
+          attachment_meta?: Json | null
+          body?: string | null
+          channel_id?: string
+          created_at?: string
+          failure_reason?: string | null
+          id?: string
+          mentions?: Json | null
+          reply_to_message_id?: string | null
+          send_at?: string
+          sender_user_id?: string
+          sent_at?: string | null
+          shared_brief_ids?: string[] | null
+          shared_post_ids?: string[] | null
+          status?: string
+          updated_at?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chat_scheduled_messages_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "chat_channels"
+            referencedColumns: ["channel_id"]
+          },
+          {
+            foreignKeyName: "chat_scheduled_messages_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       chat_sync_events: {
         Row: {
           attempts: number
@@ -7990,6 +8065,46 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      chat_message_schedule: {
+        Args: {
+          p_attachment_asset_ids?: string[]
+          p_attachment_meta?: Json
+          p_body?: string
+          p_channel_id: string
+          p_id: string
+          p_mentions?: Json
+          p_reply_to_message_id?: string
+          p_send_at: string
+          p_shared_brief_ids?: string[]
+          p_shared_post_ids?: string[]
+          p_trace_id: string
+        }
+        Returns: {
+          attachment_asset_ids: string[] | null
+          attachment_meta: Json | null
+          body: string | null
+          channel_id: string
+          created_at: string
+          failure_reason: string | null
+          id: string
+          mentions: Json | null
+          reply_to_message_id: string | null
+          send_at: string
+          sender_user_id: string
+          sent_at: string | null
+          shared_brief_ids: string[] | null
+          shared_post_ids: string[] | null
+          status: string
+          updated_at: string
+          workspace_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "chat_scheduled_messages"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       chat_message_search: {
         Args: {
           p_before_created_at?: string
@@ -8087,6 +8202,113 @@ export type Database = {
       chat_read_cursor_set: {
         Args: { p_channel_id: string; p_message_id: string; p_trace_id: string }
         Returns: undefined
+      }
+      chat_scheduled_cancel: {
+        Args: { p_id: string; p_trace_id: string }
+        Returns: undefined
+      }
+      chat_scheduled_clear_failed: {
+        Args: { p_scheduled_id: string; p_user_id: string }
+        Returns: undefined
+      }
+      chat_scheduled_dispatch: {
+        Args: { p_id: string; p_trace_id: string }
+        Returns: {
+          agora_event_id: string | null
+          attachment_asset_ids: string[] | null
+          attachment_meta: Json | null
+          body: string | null
+          channel_id: string
+          created_at: string
+          deleted_at: string | null
+          edited_at: string | null
+          forwarded_from_message_id: string | null
+          id: string
+          mentions: Json | null
+          reply_to_message_id: string | null
+          sender_user_id: string | null
+          shared_brief_ids: string[] | null
+          shared_post_ids: string[] | null
+          thread_root_message_id: string | null
+          workspace_id: string
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "chat_messages"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      chat_scheduled_due: { Args: { p_limit: number }; Returns: string[] }
+      chat_scheduled_outcome_entry: {
+        Args: {
+          p_event: string
+          p_payload: Json
+          s: Database["public"]["Tables"]["chat_scheduled_messages"]["Row"]
+        }
+        Returns: undefined
+      }
+      chat_scheduled_send_now: {
+        Args: { p_id: string; p_trace_id: string }
+        Returns: {
+          agora_event_id: string | null
+          attachment_asset_ids: string[] | null
+          attachment_meta: Json | null
+          body: string | null
+          channel_id: string
+          created_at: string
+          deleted_at: string | null
+          edited_at: string | null
+          forwarded_from_message_id: string | null
+          id: string
+          mentions: Json | null
+          reply_to_message_id: string | null
+          sender_user_id: string | null
+          shared_brief_ids: string[] | null
+          shared_post_ids: string[] | null
+          thread_root_message_id: string | null
+          workspace_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "chat_messages"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      chat_scheduled_update: {
+        Args: {
+          p_body: string
+          p_id: string
+          p_mentions: Json
+          p_send_at: string
+          p_trace_id: string
+        }
+        Returns: {
+          attachment_asset_ids: string[] | null
+          attachment_meta: Json | null
+          body: string | null
+          channel_id: string
+          created_at: string
+          failure_reason: string | null
+          id: string
+          mentions: Json | null
+          reply_to_message_id: string | null
+          send_at: string
+          sender_user_id: string
+          sent_at: string | null
+          shared_brief_ids: string[] | null
+          shared_post_ids: string[] | null
+          status: string
+          updated_at: string
+          workspace_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "chat_scheduled_messages"
+          isOneToOne: true
+          isSetofReturn: false
+        }
       }
       chat_thread_reply_counts: {
         Args: { p_channel_id: string; p_root_ids: string[]; p_trace_id: string }
@@ -8233,6 +8455,14 @@ export type Database = {
         Args: {
           p_created_at: string
           p_entry_id: string
+          p_trace_id: string
+          p_workspace_id: string
+        }
+        Returns: undefined
+      }
+      inbox_mark_read_events: {
+        Args: {
+          p_event_types: string[]
           p_trace_id: string
           p_workspace_id: string
         }

@@ -24,7 +24,8 @@ const RLS_SUITE = process.env.RLS_SUITE === '1';
 // (20260927131500_chat_marks_delete_briefs.sql, created with RLS enabled).
 // Then 141 -> 142 for chat_channel_clears
 // (20260927200000_chat_forward_and_clear.sql, created with RLS enabled).
-const EXPECTED_RELATION_COUNT = 142;
+// Then 142 -> 143 for chat_scheduled_messages.
+const EXPECTED_RELATION_COUNT = 143;
 
 interface Relation {
   relname: string;
@@ -46,7 +47,7 @@ describe.runIf(RLS_SUITE)('RLS is enabled on every public relation', () => {
     relations = JSON.parse(out.trim()) as Relation[];
   });
 
-  it('covers exactly 142 relations (40 base + 3 parents + 99 children)', () => {
+  it('covers exactly 143 relations (41 base + 3 parents + 99 children)', () => {
     expect(relations).toHaveLength(EXPECTED_RELATION_COUNT);
   });
 

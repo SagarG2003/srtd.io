@@ -33,6 +33,8 @@ export const INBOX_EVENT_TYPES = [
   'post_ready',
   'checkpoint_reopened',
   'checkpoint_asked',
+  'scheduled_sent',
+  'scheduled_failed',
 ] as const;
 
 /** One inbox_entries.event_type value, derived from the canonical list. */
