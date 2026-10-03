@@ -129,7 +129,7 @@ export function ScheduledAttachments(props: {
           ))}
         </span>
       ) : null}
-      {(strip ? others.slice(0, images.length > 0 ? 0 : 1) : others).map((file, index) => (
+      {(strip ? others.slice(0, 1) : others).map((file, index) => (
         <span
           key={`${file.assetId}-${index}`}
           data-scheduled-file=""

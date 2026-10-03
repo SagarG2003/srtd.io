@@ -479,7 +479,9 @@ export async function installHarnessNetwork(page: Page): Promise<HarnessNetwork>
     await route.abort('blockedbyclient');
   };
 
-  await page.route(/^(?!https?:\/\/localhost[:/])/, handle);
+  // The page's own object URLs (picked-file previews; WebKit routes them) never
+  // leave the page, so they are not routed.
+  await page.route(/^(?!https?:\/\/localhost[:/]|blob:)/, handle);
   // page.route never sees WebSockets. A socket to a fixture host is accepted
   // and left silent (no server behind it); any other socket is closed and
   // recorded as blocked.

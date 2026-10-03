@@ -1315,50 +1315,59 @@ export function Composer(props: ComposerProps): ReactElement {
       sharedBriefIds: sharedBriefs.map((brief) => brief.id),
     };
     const replyToMessageId = props.reply?.quote.id ?? null;
-    const result = await scheduleWithFiles<ScheduleOutcome | null>({
-      files,
-      upload: props.uploadFile,
-      signal: run.signal,
-      onProgress: (key, fraction) =>
-        setScheduleUploads((prev) => withScheduleUpload(prev, key, { progress: fraction })),
-      onUploaded: (key, versionId) =>
-        setScheduleUploads((prev) =>
-          withScheduleUpload(prev, key, { versionId, progress: 1, uploading: false }),
-        ),
-      write: async (attachmentArgs) => {
-        const origin = currentOrigin();
-        const draft =
-          workspaceId === null || !hasLinkCards(body, workspaceKey, origin)
-            ? base
-            : await withLinkCards(
-                base,
-                { workspaceKey, origin },
-                {
-                  postIds: (numbers) => readPostIdsByNumbers(supabase, { workspaceId, numbers }),
-                  briefIds: (numbers) => readBriefIdsByNumbers(supabase, { workspaceId, numbers }),
-                },
-              ).catch(() => base);
-        // Left the chat while the links resolved: schedule nothing.
-        if (run.signal.aborted) return null;
-        return schedule
-          .schedule(
-            {
-              body: draft.text,
-              sharedPostIds: draft.sharedPostIds,
-              sharedBriefIds: draft.sharedBriefIds,
-              replyToMessageId,
-              ...attachmentArgs,
-            },
-            sendAt,
-          )
-          .catch((error: unknown) => {
-            logger.error('chat composer: schedule threw', { error: String(error) });
-            return { ok: false as const, copy: SCHEDULE_FAILED_COPY };
-          });
-      },
-    });
-    if (scheduleRunRef.current === run) scheduleRunRef.current = null;
-    setScheduleBusy(false);
+    let result: Awaited<ReturnType<typeof scheduleWithFiles<ScheduleOutcome | null>>>;
+    try {
+      result = await scheduleWithFiles<ScheduleOutcome | null>({
+        files,
+        upload: props.uploadFile,
+        signal: run.signal,
+        onProgress: (key, fraction) =>
+          setScheduleUploads((prev) => withScheduleUpload(prev, key, { progress: fraction })),
+        onUploaded: (key, versionId) =>
+          setScheduleUploads((prev) =>
+            withScheduleUpload(prev, key, { versionId, progress: 1, uploading: false }),
+          ),
+        write: async (attachmentArgs) => {
+          const origin = currentOrigin();
+          const draft =
+            workspaceId === null || !hasLinkCards(body, workspaceKey, origin)
+              ? base
+              : await withLinkCards(
+                  base,
+                  { workspaceKey, origin },
+                  {
+                    postIds: (numbers) => readPostIdsByNumbers(supabase, { workspaceId, numbers }),
+                    briefIds: (numbers) =>
+                      readBriefIdsByNumbers(supabase, { workspaceId, numbers }),
+                  },
+                ).catch(() => base);
+          // Left the chat while the links resolved: schedule nothing.
+          if (run.signal.aborted) return null;
+          return schedule
+            .schedule(
+              {
+                body: draft.text,
+                sharedPostIds: draft.sharedPostIds,
+                sharedBriefIds: draft.sharedBriefIds,
+                replyToMessageId,
+                ...attachmentArgs,
+              },
+              sendAt,
+            )
+            .catch((error: unknown) => {
+              logger.error('chat composer: schedule threw', { error: String(error) });
+              return { ok: false as const, copy: SCHEDULE_FAILED_COPY };
+            });
+        },
+      });
+    } catch (error) {
+      logger.error('chat composer: schedule threw', { error: String(error) });
+      result = { kind: 'written', result: { ok: false, copy: SCHEDULE_FAILED_COPY } };
+    } finally {
+      // Never left locked, whatever the run did.
+      if (scheduleRunRef.current === run) scheduleRunRef.current = null;
+      setScheduleBusy(false);
+    }
     if (result.kind === 'aborted') return;
     if (result.kind === 'upload-failed') {
       logger.warn('chat composer: schedule upload failed', {
@@ -1371,21 +1380,25 @@ export function Composer(props: ComposerProps): ReactElement {
           prev,
         ),
       );
+      // Keep the picked time: Send in schedule mode retries at it.
+      setScheduleAt(sendAt);
       toast.show({ title: SCHEDULE_UPLOAD_FAILED_COPY });
       return;
     }
     const outcome = result.result;
     if (outcome === null) return;
-    if (outcome.ok && channelId !== undefined) clearDraft(channelId);
+    if (outcome.ok) {
+      if (channelId !== undefined) clearDraft(channelId);
+      // The previews belong to no bubble: the message sends later from storage.
+      for (const item of picked) {
+        if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
+      }
+    }
     // Left the chat while the write ran: this composer is gone.
     if (run.signal.aborted) return;
     if (!outcome.ok) {
       if (outcome.copy !== null) toast.show({ title: outcome.copy });
       return;
-    }
-    // The previews belong to no bubble: the message sends later from storage.
-    for (const item of picked) {
-      if (item.previewUrl !== null) URL.revokeObjectURL(item.previewUrl);
     }
     setText('');
     setPicks([]);
@@ -1836,7 +1849,6 @@ export function Composer(props: ComposerProps): ReactElement {
                           aria-expanded={scheduleOpen !== null}
                           data-schedule-chevron=""
                           className="w-11 shrink-0 rounded-l-none px-0"
-                          disabled={scheduleBusy}
                           onClick={() =>
                             scheduleOpen !== null ? setScheduleOpen(null) : openSchedule()
                           }
