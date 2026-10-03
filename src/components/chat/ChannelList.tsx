@@ -44,6 +44,9 @@ import { mentionNamesIn, resolveMentionPreview, splitAllMentions } from '@/lib/c
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import { summaryIconOfLine } from '@/lib/chat/thread';
 import { SummaryGlyph } from '@/components/chat/ReplyQuote';
+import { SearchResults, useMessageSearch } from '@/components/chat/SearchResults';
+import { normalizeQuery, SEARCH_MIN_CHARS, type SearchHit } from '@/lib/chat/search';
+import { useSession } from '@/lib/session-context';
 import { BellButton } from '@/components/chat/BellButton';
 import {
   COARSE_POINTER_QUERY,
@@ -129,6 +132,8 @@ interface ChannelListProps {
   onDeleteChats?: (channels: ChannelSummary[]) => Promise<ClearRunResult<ChannelSummary>>;
   /** The open workspace: a Draft line resolves names from its registry only. */
   workspaceId?: string | null;
+  /** A message search hit tapped: open that chat at that message, the bar on the query. */
+  onOpenSearchHit?: (channel: ChannelSummary, messageId: string, query: string) => void;
 }
 
 interface ChannelListBodyProps extends Omit<ChannelListProps, 'status' | 'onRetry'> {
@@ -731,6 +736,16 @@ interface ChannelListContentProps extends ChannelListProps {
   draftFor?: DraftLookup;
   /** The list's input, read once by ChannelList; touch when absent. */
   input?: ChannelListInput;
+  /**
+   * The message search results; they replace the list (no old list under them)
+   * while the box holds 2+ characters. Absent: the name filter only.
+   */
+  searchResults?: ReactNode;
+}
+
+/** Whether the search box holds enough to show the message results. Pure. */
+export function showSearchResults(search: string): boolean {
+  return normalizeQuery(search).length >= SEARCH_MIN_CHARS;
 }
 
 /**
@@ -856,29 +871,31 @@ export function channelListContent(props: ChannelListContentProps): ReactElement
           ? channelListSkeleton()
           : props.status === 'error'
             ? channelListError(props.onRetry)
-            : channelListView({
-                channels: visibleChannels(props.channels, summaryFor, isHidden, props.search),
-                hasChannels: hasChannels || props.search.trim() !== '',
-                selectedChannelId: props.selectedChannelId,
-                onSelect: props.onSelect,
-                onNewChat: newChat,
-                summaryFor,
-                ...(props.draftFor !== undefined ? { draftFor: props.draftFor } : {}),
-                ...(selecting !== undefined
-                  ? {
-                      selecting: {
-                        selectedIds: selecting.selectedIds,
-                        onToggle: selecting.onToggle,
-                      },
-                    }
-                  : {}),
-                ...(props.onLongPress !== undefined && selecting === undefined
-                  ? { onLongPress: props.onLongPress }
-                  : {}),
-                ...(props.nowMs !== undefined ? { nowMs: props.nowMs } : {}),
-                ...(props.timeZone !== undefined ? { timeZone: props.timeZone } : {}),
-                ...(props.input !== undefined ? { input: props.input } : {}),
-              })}
+            : props.searchResults !== undefined && showSearchResults(props.search)
+              ? props.searchResults
+              : channelListView({
+                  channels: visibleChannels(props.channels, summaryFor, isHidden, props.search),
+                  hasChannels: hasChannels || props.search.trim() !== '',
+                  selectedChannelId: props.selectedChannelId,
+                  onSelect: props.onSelect,
+                  onNewChat: newChat,
+                  summaryFor,
+                  ...(props.draftFor !== undefined ? { draftFor: props.draftFor } : {}),
+                  ...(selecting !== undefined
+                    ? {
+                        selecting: {
+                          selectedIds: selecting.selectedIds,
+                          onToggle: selecting.onToggle,
+                        },
+                      }
+                    : {}),
+                  ...(props.onLongPress !== undefined && selecting === undefined
+                    ? { onLongPress: props.onLongPress }
+                    : {}),
+                  ...(props.nowMs !== undefined ? { nowMs: props.nowMs } : {}),
+                  ...(props.timeZone !== undefined ? { timeZone: props.timeZone } : {}),
+                  ...(props.input !== undefined ? { input: props.input } : {}),
+                })}
       </div>
       {selecting !== undefined ? selectBar(selecting) : null}
     </div>
@@ -1068,6 +1085,55 @@ export function ChannelList(props: ChannelListProps): ReactElement {
 
   // One layout listener (and hover / coarse query) for the whole list.
   const input = useChannelListInput();
+
+  // Message search: 2+ characters run the server search (debounced, each
+  // keystroke aborting the last); under 2 the name filter alone. Names come
+  // from the loaded roster and the workspace's name registry, never per row.
+  const { session } = useSession();
+  const currentUserId = session?.user.id ?? null;
+  const { state: searchState, runner: searchRunner } = useMessageSearch({
+    workspaceId: listWorkspaceId,
+  });
+  useEffect(() => {
+    searchRunner?.setQuery(search);
+  }, [searchRunner, search]);
+  const channelsById = useMemo(
+    () => new Map(props.channels.map((c) => [c.channelId, c] as const)),
+    [props.channels],
+  );
+  const nameOf = useMemo(() => mentionNamesIn(listWorkspaceId), [listWorkspaceId]);
+  const onOpenSearchHit = props.onOpenSearchHit;
+  const openHit = useCallback(
+    (channel: ChannelSummary, hit: SearchHit, query: string) =>
+      leaveSelectionThen(() =>
+        onOpenSearchHit !== undefined
+          ? onOpenSearchHit(channel, hit.id, query)
+          : props.onSelect(channel),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [onOpenSearchHit, props.onSelect],
+  );
+  const openChat = useCallback(
+    (channel: ChannelSummary) => leaveSelectionThen(() => props.onSelect(channel)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [props.onSelect],
+  );
+  const nowMs = Date.now();
+  const searchResults = showSearchResults(search) ? (
+    <SearchResults
+      query={search}
+      chats={visibleChannels(props.channels, summaryFor, isHidden, search)}
+      state={searchState}
+      runner={searchRunner}
+      channelsById={channelsById}
+      currentUserId={currentUserId}
+      nameOf={nameOf}
+      nowMs={nowMs}
+      timeZone={workspaceTimeZone(props.timeZone)}
+      onOpenChat={openChat}
+      onOpenHit={openHit}
+    />
+  ) : undefined;
   return (
     <>
       {channelListContent({
@@ -1076,10 +1142,11 @@ export function ChannelList(props: ChannelListProps): ReactElement {
         input,
         search,
         onSearchChange: setSearch,
+        ...(searchResults !== undefined ? { searchResults } : {}),
         summaryFor,
         isHidden,
         draftFor,
-        nowMs: Date.now(),
+        nowMs,
         ...(onDeleteChats !== undefined
           ? {
               select: {

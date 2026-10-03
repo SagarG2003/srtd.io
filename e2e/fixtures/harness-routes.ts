@@ -185,6 +185,37 @@ const RPC: Record<string, RpcHandler> = {
     return null;
   },
   session_register: () => null,
+  // Message search: each word a prefix match, newest first, keyset paging,
+  // deleted rows left out, the limit clamped 1..50, a query outside 2..100 empty.
+  chat_message_search: (args, tables) => {
+    const query = String(args.p_query ?? '').trim();
+    if (query.length < 2 || query.length > 100) return [];
+    const words = query.toLowerCase().match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
+    const limit = Math.min(50, Math.max(1, Number(args.p_limit ?? 30)));
+    const beforeAt = typeof args.p_before_created_at === 'string' ? args.p_before_created_at : null;
+    const beforeId = typeof args.p_before_id === 'string' ? args.p_before_id : null;
+    return (tables.chat_messages ?? [])
+      .filter((m) => m.deleted_at === null && typeof m.body === 'string')
+      .filter((m) => args.p_channel_id == null || m.channel_id === args.p_channel_id)
+      .filter((m) => {
+        const tokens =
+          String(m.body)
+            .toLowerCase()
+            .match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
+        return words.every((w) => tokens.some((t) => t.startsWith(w)));
+      })
+      .sort(
+        (a, b) =>
+          String(b.created_at).localeCompare(String(a.created_at)) ||
+          String(b.id).localeCompare(String(a.id)),
+      )
+      .filter((m) => {
+        if (beforeAt === null || beforeId === null) return true;
+        const at = String(m.created_at);
+        return at < beforeAt || (at === beforeAt && String(m.id) < beforeId);
+      })
+      .slice(0, limit);
+  },
   // Live replies per thread root (deleted ones left out), the first 200 ids only.
   chat_thread_reply_counts: (args, tables) => {
     const ids = Array.isArray(args.p_root_ids) ? args.p_root_ids.slice(0, 200).map(String) : [];

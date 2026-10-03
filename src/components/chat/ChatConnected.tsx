@@ -530,10 +530,36 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     },
     [writeChannelParam],
   );
+  // A message search hit: the chat opens at that message (the jump and its
+  // highlight) with the in-chat bar on the query. seq repeats a same-chat tap.
+  const [searchRequest, setSearchRequest] = useState<{
+    channelId: string;
+    messageId: string;
+    query: string;
+    seq: number;
+  } | null>(null);
   const closeChannel = useCallback(() => {
+    // A hit's jump not taken yet (backed out while loading) never fires later.
+    setSearchRequest(null);
     setSelected(null);
     writeChannelParam(null);
   }, [writeChannelParam]);
+  // Only ever counts up: a taken request goes back to null, and the next tap
+  // in the same open chat must still read as new.
+  const searchSeqRef = useRef(0);
+  const openSearchHit = useCallback(
+    (channel: ChannelSummary, messageId: string, query: string) => {
+      searchSeqRef.current += 1;
+      setSearchRequest({
+        channelId: channel.channelId,
+        messageId,
+        query,
+        seq: searchSeqRef.current,
+      });
+      openChannel(channel);
+    },
+    [openChannel],
+  );
 
   // Email deep-link: ?channel={channelId} selects that channel once the store's
   // roster is ready, once per distinct id. The param stays while the thread is
@@ -1196,6 +1222,14 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   );
 
   const onBack = closeChannel;
+  // A hit's jump belongs to its chat: any route that leaves or switches the
+  // chat (browser back, a toast, a deep link) drops it before it can fire later.
+  const selectedChannelForSearch = selected?.channelId ?? null;
+  useEffect(() => {
+    setSearchRequest((prev) =>
+      prev !== null && prev.channelId !== selectedChannelForSearch ? null : prev,
+    );
+  }, [selectedChannelForSearch]);
 
   const chatName = selected !== null ? (shown ?? selected).title : '';
   const readsLoading = thread.readState.status === 'loading';
@@ -1254,11 +1288,16 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
             status={loadStatus}
             onRetry={retryLoad}
             selectedChannelId={selected?.channelId ?? null}
-            onSelect={openChannel}
+            onSelect={(channel: ChannelSummary) => {
+              // A plain open drops any hit's jump not taken yet.
+              setSearchRequest(null);
+              openChannel(channel);
+            }}
             onNewChat={() => setNewChatOpen(true)}
             timeZone={timeZone}
             onDeleteChats={onDeleteChats}
             workspaceId={workspaceId}
+            onOpenSearchHit={openSearchHit}
           />
         </div>
       ) : null}
@@ -1321,6 +1360,10 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                   }}
                   initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
                   onInitialJumpTaken={() => setPendingJump(null)}
+                  searchRequest={
+                    searchRequest?.channelId === selected.channelId ? searchRequest : null
+                  }
+                  onSearchRequestTaken={() => setSearchRequest(null)}
                   showTicks={selected.channelType === 'dm'}
                   {...(threadCurrent ? { readState: thread.readState } : {})}
                   peerUserId={selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null}

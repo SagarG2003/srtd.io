@@ -12,6 +12,7 @@ import {
   ChannelCard,
   channelListContent,
   channelListView,
+  showSearchResults,
   visibleChannels,
   type ChannelSelectMode,
 } from '@/components/chat/ChannelList';
@@ -402,5 +403,65 @@ describe('load status', () => {
     expect((retry.props as { className: string }).className).toContain('min-w-[44px]');
     (retry.props as { onClick: () => void }).onClick();
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('message search wiring (S1)', () => {
+  const channels = [
+    summary({ channelId: 'g1', title: 'Shoot crew' }),
+    summary({ channelId: 'g2', title: 'Accounts' }),
+  ];
+  const results = <div data-testid-results="">results</div>;
+  const content = (search: string) =>
+    channelListContent({
+      channels,
+      selectedChannelId: null,
+      status: 'ready',
+      onRetry: () => {},
+      onSelect: () => {},
+      onNewChat: () => {},
+      search,
+      onSearchChange: () => {},
+      searchResults: results,
+    });
+
+  it('shows results only from 2 trimmed characters', () => {
+    expect(showSearchResults('')).toBe(false);
+    expect(showSearchResults(' s ')).toBe(false);
+    expect(showSearchResults('sh')).toBe(true);
+  });
+
+  it('2+ characters replace the list with the results (no old list under them)', () => {
+    const tree = content('sh');
+    expect(findAll(tree, (el) => el === results)).toHaveLength(1);
+    expect(findAll(tree, (el) => el.props['data-chat-home'] === '')).toHaveLength(0);
+  });
+
+  it('under 2 characters keeps the name filter only', () => {
+    const tree = content('a');
+    expect(findAll(tree, (el) => el === results)).toHaveLength(0);
+    const titles = findAll(tree, (el) => el.type === ChannelCard).map(
+      (el) => (el.props as { channel: ChannelSummary }).channel.title,
+    );
+    expect(titles).toEqual(['Accounts']);
+  });
+
+  it('clearing restores the list exactly as before', () => {
+    const before = findAll(content(''), (el) => el.type === ChannelCard).map(
+      (el) => (el.props as { channel: ChannelSummary }).channel.channelId,
+    );
+    content('shoot');
+    const after = findAll(content(''), (el) => el.type === ChannelCard).map(
+      (el) => (el.props as { channel: ChannelSummary }).channel.channelId,
+    );
+    expect(after).toEqual(before);
+  });
+
+  it('the SectionHeader search box is untouched (one header, same placeholder)', () => {
+    const headers = findAll(content('sh'), (el) => el.type === SectionHeader);
+    expect(headers).toHaveLength(1);
+    expect((headers[0]!.props as { search: { placeholder: string } }).search.placeholder).toBe(
+      'Search conversations',
+    );
   });
 });
