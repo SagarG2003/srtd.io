@@ -15,7 +15,7 @@ All tables are in schema `public`, all have RLS enabled. `id` uses `uuidv7()` un
 4. Briefs: briefs
 5. Assets: assets, asset_versions, asset_attachments, folders
 6. People grouping: groups, group_members
-7. Chat (Postgres record): chat_channels, chat_messages, chat_message_marks, chat_reactions, chat_read_cursors, chat_sync_events
+7. Chat (Postgres record): chat_channels, chat_messages, chat_message_marks, chat_message_stars, chat_reactions, chat_read_cursors, chat_sync_events
 8. Inbox and delivery: inbox_entries, email_threads, delivery_attempts, webhook_events, webhook_processing_attempts
 9. Platform ops (Cockpit): audit_log, feature_flags, cockpit_access_log, cockpit_procedure_allowlist, intent_ledger, pending_flows
 10. Enumerations reference
@@ -401,6 +401,19 @@ RLS: chat_reminders_select_own (SELECT to authenticated) USING user_id = auth.ui
 - Trigger chat_messages_reminders_on_delete (AFTER UPDATE OF deleted_at ON chat_messages, when deleted_at goes from null to not null) runs chat_messages_reminders_on_delete() (no grants): cancels every pending reminder on that message.
 
 Recorded in 20261003140000_chat_message_reminders.sql.
+
+### chat_message_stars
+
+PK (user_id, message_id). Fields: user_id FK auth.users.id ON DELETE CASCADE (the person who starred), message_id text (no FK; chat_messages is partitioned with PK (id, created_at), same as chat_message_marks), message_created_at timestamptz (the starred message's created_at, used to join back to chat_messages and to order), channel_id text FK chat_channels ON DELETE CASCADE, workspace_id FK workspaces ON DELETE CASCADE, starred_at timestamptz default now(). Stars are private: each person sees only their own. Indexes: chat_message_stars_user_ws_idx (user_id, workspace_id, message_created_at DESC), chat_message_stars_user_channel_idx (user_id, channel_id, message_created_at DESC), chat_message_stars_message_idx (message_id), chat_message_stars_channel_idx (channel_id), chat_message_stars_workspace_idx (workspace_id).
+
+RLS: chat_message_stars_select_own (SELECT to authenticated) USING user_id = auth.uid() AND chat_channel_member(channel_id, auth.uid()): own rows in chats the caller is still in. No write policies. Table grants: authenticated SELECT only (INSERT, UPDATE, DELETE revoked); anon none. All writes go through chat_message_star_set.
+
+- chat_message_star_set(p_message_ids text[], p_channel_id text, p_starred boolean, p_trace_id uuid) RETURNS void, SECURITY DEFINER (search_path=''; EXECUTE to authenticated only). Requires auth.uid(), p_trace_id ('trace id required') and p_starred ('starred flag required'); 1 to 100 ids ('select between 1 and 100 messages'); member only ('not a member of this chat'). p_starred true: every id must be a live message in p_channel_id after the caller's clear, else 'message not found' (deleted and cleared-away messages are refused); already-starred ids are a no-op. p_starred false: removes the caller's stars on those ids in that channel; unknown ids are a no-op. Idempotent. Writes one audit_log row per call that changed rows: chat_message_star or chat_message_unstar, entity chat_channel / p_channel_id, payload {count}. A call that changes nothing writes no audit row.
+- chat_message_starred_list(p_workspace_id uuid, p_trace_id uuid, p_channel_id text default null, p_query text default null, p_before_created_at timestamptz default null, p_before_id text default null, p_limit integer default 30) RETURNS SETOF chat_messages, SQL STABLE SECURITY INVOKER (search_path public, pg_temp; EXECUTE to authenticated only). The caller's own stars in the workspace only, joined to chat_messages (RLS on both tables applies), skipping deleted messages; newest message first (created_at desc, id desc); keyset paging via p_before_created_at + p_before_id; optional p_channel_id filter; optional p_query prefix text search with the same rules as chat_message_search (simple tsvector over body, each term a prefix, query trimmed length 2 to 100, else no rows); p_limit clamped 1 to 50. Writes nothing (allowlisted in tests/rls/trace-id-usage.test.ts).
+- Trigger chat_messages_stars_on_delete (AFTER UPDATE OF deleted_at ON chat_messages, when deleted_at goes from null to not null) runs chat_messages_stars_on_delete() (no grants): deletes every star on that message (mirrors chat_messages_reminders_on_delete).
+- Clear for me: a cleared chat hides its stars. chat_message_starred_list returns nothing at or before the caller's cleared_at (chat_messages RLS), and starring a pre-clear message raises 'message not found'.
+
+Recorded in 20261004050000_chat_message_stars.sql.
 
 ## 8. Inbox and delivery
 

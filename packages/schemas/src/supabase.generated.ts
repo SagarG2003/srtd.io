@@ -2304,6 +2304,48 @@ export type Database = {
           },
         ]
       }
+      chat_message_stars: {
+        Row: {
+          channel_id: string
+          message_created_at: string
+          message_id: string
+          starred_at: string
+          user_id: string
+          workspace_id: string
+        }
+        Insert: {
+          channel_id: string
+          message_created_at: string
+          message_id: string
+          starred_at?: string
+          user_id: string
+          workspace_id: string
+        }
+        Update: {
+          channel_id?: string
+          message_created_at?: string
+          message_id?: string
+          starred_at?: string
+          user_id?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chat_message_stars_channel_id_fkey"
+            columns: ["channel_id"]
+            isOneToOne: false
+            referencedRelation: "chat_channels"
+            referencedColumns: ["channel_id"]
+          },
+          {
+            foreignKeyName: "chat_message_stars_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       chat_messages: {
         Row: {
           agora_event_id: string | null
@@ -8234,6 +8276,51 @@ export type Database = {
           to: "chat_messages"
           isOneToOne: true
           isSetofReturn: false
+        }
+      }
+      chat_message_star_set: {
+        Args: {
+          p_channel_id: string
+          p_message_ids: string[]
+          p_starred: boolean
+          p_trace_id: string
+        }
+        Returns: undefined
+      }
+      chat_message_starred_list: {
+        Args: {
+          p_before_created_at?: string
+          p_before_id?: string
+          p_channel_id?: string
+          p_limit?: number
+          p_query?: string
+          p_trace_id: string
+          p_workspace_id: string
+        }
+        Returns: {
+          agora_event_id: string | null
+          attachment_asset_ids: string[] | null
+          attachment_meta: Json | null
+          body: string | null
+          channel_id: string
+          created_at: string
+          deleted_at: string | null
+          edited_at: string | null
+          forwarded_from_message_id: string | null
+          id: string
+          mentions: Json | null
+          reply_to_message_id: string | null
+          sender_user_id: string | null
+          shared_brief_ids: string[] | null
+          shared_post_ids: string[] | null
+          thread_root_message_id: string | null
+          workspace_id: string
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "chat_messages"
+          isOneToOne: false
+          isSetofReturn: true
         }
       }
       chat_reaction_add: {
