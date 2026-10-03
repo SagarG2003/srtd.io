@@ -14,7 +14,7 @@
 // of navigating; the sheet portals above the thread. Holding a card (450 ms,
 // 10 px) brings its post into the conversation (onTalkAbout) and the click that
 // ends the hold is swallowed, so the sheet does not open; the KEY on a card
-// shows only that post's conversation (onShowPost).
+// opens the card's thread (onOpenThread).
 
 import {
   createContext,
@@ -376,25 +376,25 @@ export function sharedCardPresignCache(): PresignCache {
 export const PRESIGN_ENABLED =
   env.VITE_ASSET_READ_URL !== undefined && env.VITE_ASSET_READ_URL !== '';
 
-/** Talk-about and filter hooks a thread hands its cards; absent disables both. */
+/** Talk-about and thread hooks a thread hands its cards; absent disables both. */
 export interface CardRefActions {
   /** Hold on a card, or the sheet's "Talk about": bring the post into the conversation. */
   onTalkAbout?: ((postId: string) => void) | undefined;
-  /** Tap on a card's KEY: show only that post's conversation. */
-  onShowPost?: ((postId: string) => void) | undefined;
+  /** Tap on a card's KEY: open the card message's thread. */
+  onOpenThread?: (() => void) | undefined;
 }
 
 export function SharedPostCards({
   postIds,
   messageId,
   onTalkAbout,
-  onShowPost,
+  onOpenThread,
 }: {
   postIds: string[];
   /** The card message's id, handed to onTalkAbout. */
   messageId?: string;
   onTalkAbout?: ((postId: string, messageId: string) => void) | undefined;
-  onShowPost?: ((postId: string) => void) | undefined;
+  onOpenThread?: (() => void) | undefined;
 }): ReactElement | null {
   const { workspaceId, workspaceKey, workspaces } = useWorkspace();
   const { side, ready, known } = useSettledViewerSide(workspaceId);
@@ -425,7 +425,7 @@ export function SharedPostCards({
           ? (postId) => onTalkAbout(postId, messageId)
           : undefined
       }
-      onShowPost={onShowPost}
+      onOpenThread={onOpenThread}
     />
   );
 }
@@ -468,7 +468,7 @@ export function SharedPostCardList(
   } & CardContext &
     CardRefActions,
 ): ReactElement {
-  const { views, onTalkAbout, onShowPost, failed = [], onRetry, ...context } = props;
+  const { views, onTalkAbout, onOpenThread, failed = [], onRetry, ...context } = props;
   const failedIds = new Set(failed);
   return (
     <div className="mt-1.5 flex flex-col items-start gap-1.5">
@@ -483,7 +483,7 @@ export function SharedPostCardList(
             view={view}
             {...context}
             {...(onTalkAbout !== undefined ? { onTalkAbout: () => onTalkAbout(view.postId) } : {})}
-            {...(onShowPost !== undefined ? { onShowPost: () => onShowPost(view.postId) } : {})}
+            {...(onOpenThread !== undefined ? { onOpenThread } : {})}
           />
         ),
       )}
@@ -546,21 +546,21 @@ export const CARD_HOLD = { thresholdMs: 450, moveTolerancePx: 10 } as const;
 /**
  * A tap on a card's KEY. The KEY sits inside the card, so a hold that starts on
  * it is the card's hold: the release click reads (and so clears) the card's
- * suppression flag and does nothing else. A plain tap shows the post. Never
- * reaches the card's own click (which would open the sheet). Pure.
+ * suppression flag and does nothing else. A plain tap opens the card's thread.
+ * Never reaches the card's own click (which would open the sheet). Pure.
  */
 export function keyTapHandler(
-  onShowPost: () => void,
+  onOpenThread: () => void,
   consumeHold: () => boolean,
 ): (e: { stopPropagation: () => void }) => void {
   return (e) => {
     e.stopPropagation();
     if (consumeHold()) return;
-    onShowPost();
+    onOpenThread();
   };
 }
 
-/** The small KEY pill on a card; a button (44px hit area) when it filters. */
+/** The small KEY pill on a card; a button (44px hit area) when it opens the thread. */
 function CardRef(props: {
   label: string;
   className: string;
@@ -581,7 +581,7 @@ function CardRef(props: {
     <button
       type="button"
       {...marker}
-      aria-label={`Show the conversation about ${props.label}`}
+      aria-label={`Open the thread about ${props.label}`}
       onClick={onTap}
       onKeyDown={(e) => e.stopPropagation()}
       className={cn(
@@ -597,7 +597,7 @@ function CardRef(props: {
 export function PostCardItem(
   props: { view: Extract<SharedPostView, { kind: 'post' }> } & CardContext & {
       onTalkAbout?: () => void;
-      onShowPost?: () => void;
+      onOpenThread?: () => void;
     },
 ): ReactElement {
   const { view, side, workspaceKey, timeZone } = props;
@@ -623,9 +623,11 @@ export function PostCardItem(
     setSheetMounted(true);
     setSheetOpen(true);
   }, hold.consumeClickSuppression);
-  const onShowPost = props.onShowPost;
+  const onOpenThread = props.onOpenThread;
   const keyTap =
-    onShowPost !== undefined ? keyTapHandler(onShowPost, hold.consumeClickSuppression) : undefined;
+    onOpenThread !== undefined
+      ? keyTapHandler(onOpenThread, hold.consumeClickSuppression)
+      : undefined;
   return (
     <>
       <div

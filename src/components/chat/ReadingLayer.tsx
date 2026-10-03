@@ -19,6 +19,7 @@ import { cn } from '@/lib/cn';
 import { formatClockTime, civilDay } from '@/lib/chat/time-format';
 import { dayPillLabel } from '@/components/chat/day-separators';
 import { BUBBLE_META_TYPE, NO_TOUCH_SELECT } from '@/components/chat/chat-type';
+import { RailThrough } from '@/components/chat/ThreadRail';
 import { UNKNOWN_MEMBER, type MentionMember } from '@/lib/chat/mentions';
 import type { ChatProfile } from '@/lib/chat-reads';
 import type { ReactorRow } from '@/lib/chat/history';
@@ -132,10 +133,25 @@ export function LatestButton(props: {
   );
 }
 
-/** "Seen <time>" under the last own message the DM peer has read. */
-export function SeenLine(props: { lastReadAt: string; timeZone: string }): ReactElement {
+/**
+ * "Seen <time>" under the last own message the DM peer has read. `rail`: a
+ * card thread's rail runs on past it (its through line at the left).
+ */
+export function SeenLine(props: {
+  lastReadAt: string;
+  timeZone: string;
+  rail?: boolean;
+}): ReactElement {
   return (
-    <li data-seen-line="" className={cn('flex justify-end px-4 pt-0.5', NO_TOUCH_SELECT)}>
+    <li
+      data-seen-line=""
+      className={cn(
+        'flex justify-end px-4 pt-0.5',
+        props.rail === true && 'relative',
+        NO_TOUCH_SELECT,
+      )}
+    >
+      {props.rail === true ? <RailThrough /> : null}
       <span className={cn(BUBBLE_META_TYPE, 'text-fg-3')}>
         Seen <span className="font-mono">{formatClockTime(props.lastReadAt, props.timeZone)}</span>
       </span>
@@ -143,10 +159,21 @@ export function SeenLine(props: { lastReadAt: string; timeZone: string }): React
   );
 }
 
-/** "Read by X of Y" (or "Read by all") under the last own group message; a 44px button. */
-export function ReadByLine(props: { label: string; onOpen: () => void }): ReactElement {
+/**
+ * "Read by X of Y" (or "Read by all") under the last own group message; a 44px
+ * button. `rail`: a card thread's rail runs on past it.
+ */
+export function ReadByLine(props: {
+  label: string;
+  onOpen: () => void;
+  rail?: boolean;
+}): ReactElement {
   return (
-    <li data-read-by-line="" className={cn('flex justify-end px-2', NO_TOUCH_SELECT)}>
+    <li
+      data-read-by-line=""
+      className={cn('flex justify-end px-2', props.rail === true && 'relative', NO_TOUCH_SELECT)}
+    >
+      {props.rail === true ? <RailThrough /> : null}
       <button
         type="button"
         onClick={props.onOpen}

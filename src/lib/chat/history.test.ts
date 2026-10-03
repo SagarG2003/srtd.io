@@ -19,6 +19,8 @@ import {
   loadOlderMessages,
   loadPeerReadCursor,
   loadReactions,
+  loadThreadPage,
+  loadThreadReplyCounts,
   loadUnreadCounts,
   newerThanFilter,
   olderThanFilter,
@@ -215,6 +217,61 @@ describe('loadUnreadCounts', () => {
     expect(result.ok && result.data).toEqual([
       { channelId: CHANNEL, unread: 3, lastMessageAt: '2026-09-22T10:00:00+00:00' },
     ]);
+  });
+});
+
+describe('thread reads', () => {
+  it('a thread page filters on the thread root (its index), newest 50 first, returned oldest-first', async () => {
+    const { client, calls } = makeClient({
+      data: [
+        { id: 'b', created_at: '2026-10-01T10:02:00Z' },
+        { id: 'a', created_at: '2026-10-01T10:01:00Z' },
+      ],
+      error: null,
+    });
+    const page = await loadThreadPage(client, CHANNEL, 'root');
+    expect(argsOf(calls, 'eq')).toEqual([
+      ['channel_id', CHANNEL],
+      ['thread_root_message_id', 'root'],
+    ]);
+    expect(argsOf(calls, 'or')).toEqual([]);
+    expect(argsOf(calls, 'order')).toEqual([
+      ['created_at', { ascending: false }],
+      ['id', { ascending: false }],
+    ]);
+    expect(argsOf(calls, 'limit')).toEqual([[HISTORY_PAGE_SIZE]]);
+    expect(String(argsOf(calls, 'select')[0]?.[0])).toContain('thread_root_message_id');
+    expect(page.ok && page.data.rows.map((r) => r.id)).toEqual(['a', 'b']);
+    expect(page.ok && page.data.hasMore).toBe(false);
+  });
+
+  it('an older thread page continues before the oldest loaded reply', async () => {
+    const { client, calls } = makeClient({ data: [], error: null });
+    const cursor = { createdAt: '2026-10-01T10:01:00Z', id: 'a' };
+    await loadThreadPage(client, CHANNEL, 'root', cursor);
+    expect(argsOf(calls, 'or')).toEqual([[olderThanFilter(cursor)]]);
+  });
+
+  it('counts go in one proc call with p_trace_id and at most 200 root ids', async () => {
+    const { client, calls } = makeClient({
+      data: [{ root_id: 'r1', reply_count: 4, last_reply_at: '2026-10-01T10:00:00Z' }],
+      error: null,
+    });
+    const roots = Array.from({ length: 230 }, (_, i) => `r${i}`);
+    const result = await loadThreadReplyCounts(client, CHANNEL, roots, 'trace-1');
+    const rpc = argsOf(calls, 'rpc');
+    expect(rpc).toHaveLength(1);
+    expect(rpc[0]?.[0]).toBe('chat_thread_reply_counts');
+    expect(rpc[0]?.[1]).toEqual({
+      p_trace_id: 'trace-1',
+      p_channel_id: CHANNEL,
+      p_root_ids: roots.slice(0, 200),
+    });
+    expect(result.ok && result.data.get('r1')).toEqual({ count: 4 });
+    // Nothing to count: no call at all.
+    const none = makeClient({ data: [], error: null });
+    await loadThreadReplyCounts(none.client, CHANNEL, [], 'trace-2');
+    expect(argsOf(none.calls, 'rpc')).toEqual([]);
   });
 });
 

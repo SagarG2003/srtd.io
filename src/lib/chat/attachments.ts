@@ -314,6 +314,12 @@ export interface ReplyQuote {
   authorUserId: string | null;
   /** Short text snapshot of the quoted message, shown in the quote line. */
   preview: string;
+  /**
+   * A send's thread root as the sender derived it from the loaded parent
+   * (coalesce(parent's root, parent id), the record trigger's rule). Rides
+   * the live ext as sorted_thread_root_id, never reply_to; absent when unknown.
+   */
+  rootId?: string;
 }
 
 /**

@@ -14,6 +14,7 @@
 
 import type { AgoraChat } from 'agora-chat';
 import { truncateBody } from '@/lib/chat/mentions';
+import { awaitsRootHydration } from '@/lib/chat/thread-rail';
 import type { Database } from '@srtdio/schemas';
 import type { ChatConnection } from '@/lib/chat/types';
 import { toAgoraUsername, userIdFromAgoraUsername } from '@/lib/chat/agora-identity';
@@ -204,6 +205,18 @@ export interface ThreadMessage {
    * Absent when unknown or when the quoted message shares no posts.
    */
   parentSharedPostIds?: string[];
+  /**
+   * The top-level message of this reply's thread (row thread_root_message_id,
+   * set by the record's trigger; on an own unrecorded send, the root the
+   * sender derived). Null when this is not a reply; absent when unknown.
+   */
+  threadRootId?: string | null;
+  /**
+   * The thread root's shared post ids when the root is not loaded, filled by
+   * reply hydration (empty: the root shares no post, is deleted or not
+   * visible). Absent until hydrated, or when the root is loaded.
+   */
+  rootPostIds?: string[];
   state: MessageState;
   /** Read state; rendered as ticks for own DM messages only. */
   status: MessageStatus;
@@ -273,6 +286,19 @@ export const LIVE_MESSAGE_ID_KEY = 'sorted_message_id';
 export const LIVE_CHANNEL_ID_KEY = 'sorted_channel_id';
 /** The `ext` key naming a live-only signal on a command message. */
 export const LIVE_EVENT_KEY = 'sorted_event';
+/**
+ * The `ext` key carrying a reply's thread root, as the sender derived it. Only
+ * own unrecorded rows and the store's previews read it; the open thread
+ * renders live rows from their verified record row, which carries the root.
+ */
+export const LIVE_THREAD_ROOT_KEY = 'sorted_thread_root_id';
+
+/** The thread root a live message names on its ext; null when absent. */
+export function parseLiveThreadRoot(ext: unknown): string | null {
+  if (typeof ext !== 'object' || ext === null) return null;
+  const value = (ext as Record<string, unknown>)[LIVE_THREAD_ROOT_KEY];
+  return typeof value === 'string' && value !== '' ? value : null;
+}
 
 /** The Sorted ids stamped on a live text message. */
 export interface LiveMessageIds {
@@ -458,7 +484,9 @@ export function rowToThreadMessage(
     (row.reply_to_message_id !== null && row.reply_to_message_id !== ''
       ? { id: row.reply_to_message_id, authorUserId: null, preview: '' }
       : null);
+  const root = rowThreadRoot(row);
   return {
+    ...(root !== null ? { threadRootId: root } : {}),
     id: row.id,
     senderUserId,
     body: row.body ?? '',
@@ -482,10 +510,21 @@ export function rowToThreadMessage(
   };
 }
 
-/** A deleted row: keeps its id, sender, time and side; no content of any kind. */
+/** A row's thread root; a row read without the column (an older select) reads as none. */
+function rowThreadRoot(row: ChatMessageRow): string | null {
+  const root: string | null | undefined = row.thread_root_message_id;
+  return root !== undefined && root !== null && root !== '' ? root : null;
+}
+
+/**
+ * A deleted row: keeps its id, sender, time, side and thread root (a deleted
+ * reply stays in its thread as a tombstone); no content of any kind.
+ */
 function tombstoneFromRow(row: ChatMessageRow, currentUserId: string): ThreadMessage {
   const senderUserId = row.sender_user_id;
+  const root = rowThreadRoot(row);
   return {
+    ...(root !== null ? { threadRootId: root } : {}),
     id: row.id,
     senderUserId,
     body: '',
@@ -505,9 +544,11 @@ function tombstoneFromRow(row: ChatMessageRow, currentUserId: string): ThreadMes
   };
 }
 
-/** The same message as a tombstone: content, reactions and quote cleared. */
+/** The same message as a tombstone: content, reactions and quote cleared; the thread root stays. */
 function asTombstone(message: ThreadMessage): ThreadMessage {
   return {
+    ...(message.threadRootId !== undefined ? { threadRootId: message.threadRootId } : {}),
+    ...(message.rootPostIds !== undefined ? { rootPostIds: message.rootPostIds } : {}),
     id: message.id,
     senderUserId: message.senderUserId,
     body: '',
@@ -701,6 +742,49 @@ export function hydrateReplies(
   });
 }
 
+/** Thread roots of `fetched` that are not loaded and not hydrated (to read in the quotes' IN read). */
+export function missingRootIds(
+  fetched: readonly ThreadMessage[],
+  loaded: ReadonlySet<string>,
+): string[] {
+  const ids = new Set<string>();
+  for (const m of fetched) {
+    if (awaitsRootHydration(m, loaded) && typeof m.threadRootId === 'string')
+      ids.add(m.threadRootId);
+  }
+  return [...ids];
+}
+
+/**
+ * Fill the root post ids of rows whose thread root is not loaded, from
+ * `sources` (root rows fetched separately). A deleted root shares nothing.
+ * `settle` names the rows whose read this was: a root of theirs that cannot
+ * be found (not visible) shares nothing instead of staying unknown; rows of
+ * another batch whose read is still in flight are left alone. The same list
+ * when nothing changes.
+ */
+export function hydrateRoots(
+  messages: ThreadMessage[],
+  sources: readonly ThreadMessage[],
+  settle: ReadonlySet<string> = new Set(),
+): ThreadMessage[] {
+  const loaded = new Set(messages.map((m) => m.id));
+  if (!messages.some((m) => awaitsRootHydration(m, loaded))) return messages;
+  const byId = new Map(sources.map((m) => [m.id, m] as const));
+  let changed = false;
+  const next = messages.map((m) => {
+    if (!awaitsRootHydration(m, loaded) || typeof m.threadRootId !== 'string') return m;
+    const root = byId.get(m.threadRootId);
+    if (root === undefined && !settle.has(m.id)) return m;
+    changed = true;
+    return {
+      ...m,
+      rootPostIds: root === undefined || root.deleted === true ? [] : [...root.sharedPostIds],
+    };
+  });
+  return changed ? next : messages;
+}
+
 /**
  * Map a live Agora text message to the rendered shape. Messages without the
  * Sorted ids on `ext` are rejected (pre-rewrite clients during the reload
@@ -731,12 +815,19 @@ export function mapLiveTextMessage(
       sharedPostIds: parseSharedPostIds(raw.ext),
       sharedBriefIds: [],
       reply: parseReply(raw.ext),
+      ...liveThreadRoot(raw.ext),
       state: 'sent',
       status: 'sent',
       reactions: [],
       ...(parseForwardedFrom(raw.ext) !== null ? { forwarded: true } : {}),
     },
   };
+}
+
+/** A live message's thread root from its ext (store previews); absent when not carried. */
+function liveThreadRoot(ext: unknown): Pick<ThreadMessage, 'threadRootId'> {
+  const root = parseLiveThreadRoot(ext);
+  return root !== null ? { threadRootId: root } : {};
 }
 
 /**
@@ -962,10 +1053,17 @@ export function pendingMessage(params: {
     sharedPostIds: [...params.local.sharedPostIds],
     sharedBriefIds: [...(params.local.sharedBriefIds ?? [])],
     reply: params.local.reply,
+    ...pendingThreadRoot(params.local.reply),
     state: 'sending',
     status: 'sent',
     reactions: [],
   };
+}
+
+/** An own unrecorded send's thread root: none without a reply, else the root the sender derived. */
+function pendingThreadRoot(reply: ReplyQuote | null): Pick<ThreadMessage, 'threadRootId'> {
+  if (reply === null) return {};
+  return reply.rootId !== undefined ? { threadRootId: reply.rootId } : {};
 }
 
 /** An unrecorded own send as the outbox holds it (structural: see chat-store OutboxEntry). */
@@ -1266,6 +1364,9 @@ export function sendText(params: {
             forwardedFrom,
           }),
           ...(params.liveIds !== undefined ? params.liveIds : {}),
+          ...(params.reply?.rootId !== undefined
+            ? { [LIVE_THREAD_ROOT_KEY]: params.reply.rootId }
+            : {}),
         },
       }
     : {};

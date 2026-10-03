@@ -1,12 +1,12 @@
 // Post references in a thread, pure. A card message is one that shares posts
 // (shared_post_ids). A message "about" a post is a reply whose target is a card
-// message: it renders a KEY chip instead of a quote, and the per-post filter
-// keeps the post's card messages plus the replies to them. The composer's hash
-// picker opens while the text at the caret is a hash token. Client-side over the
-// loaded pages only; no reads here.
+// message: outside a card's thread (thread-rail.ts) it renders a KEY chip
+// instead of a quote. The composer's hash picker opens while the text at the
+// caret is a hash token. Client-side over the loaded pages only; no reads here.
 
 import type { ReplyQuote } from '@/lib/chat/attachments';
 import type { ThreadMessage } from '@/lib/chat/thread';
+import { awaitsRootHydration, chipCountRoot, type RootFields } from '@/lib/chat/thread-rail';
 
 type CardFields = Pick<ThreadMessage, 'sharedPostIds'>;
 type RefFields = Pick<ThreadMessage, 'id' | 'sharedPostIds' | 'reply' | 'parentSharedPostIds'>;
@@ -174,7 +174,7 @@ export function isUnhydratedReply(row: Pick<ThreadMessage, 'reply'>): boolean {
  */
 export const PAGE_HYDRATION_WAIT_MS = 4_000;
 
-type GateFields = RefFields & Pick<ThreadMessage, 'time'>;
+type GateFields = RefFields & RootFields & Pick<ThreadMessage, 'time'>;
 
 /**
  * Which rows of a conversation are on screen. Page rows (the first page, an
@@ -200,14 +200,37 @@ export interface RowReadiness {
   /** The chip post is in the batch (a row or null) or its read was attempted. */
   chipSettled: (postId: string) => boolean;
   nowMs: number;
+  /** Every loaded message id (thread roots on any page count as loaded). */
+  loaded?: ReadonlySet<string>;
+  /** A not-loaded thread root's count is in, or its read ended without one. */
+  countSettled?: (rootId: string) => boolean;
+  /** The card post a row's thread names (its chip and the thread view), null off a thread. */
+  threadPost?: (row: GateFields) => string | null;
 }
 
 /**
- * Whether a page row can go on screen: its chip post is settled when it has a
- * chip; an unhydrated reply whose parent is not loaded waits for hydration
- * (capped); anything else is ready at once.
+ * Whether a page row's thread is ready: a row whose thread root is not loaded
+ * waits for the root's hydration (capped, then it paints as a plain reply); a
+ * member waits for its card's post, and a member of a not-loaded card root
+ * for the page's counts read too, so its chip paints whole.
+ */
+function threadReady(row: GateFields, since: number, r: RowReadiness): boolean {
+  const loaded = r.loaded;
+  if (loaded === undefined) return true;
+  if (awaitsRootHydration(row, loaded)) return r.nowMs - since >= PAGE_HYDRATION_WAIT_MS;
+  const post = r.threadPost?.(row) ?? null;
+  if (post !== null && !r.chipSettled(post)) return false;
+  const root = chipCountRoot(row, loaded);
+  return root === null || (r.countSettled?.(root) ?? true);
+}
+
+/**
+ * Whether a page row can go on screen: its thread is ready; its chip post is
+ * settled when it has a chip; an unhydrated reply whose parent is not loaded
+ * waits for hydration (capped); anything else is ready at once.
  */
 export function rowReady(row: GateFields, since: number, r: RowReadiness): boolean {
+  if (!threadReady(row, since, r)) return false;
   const target = chipTargetFor(row, r.parentIndex);
   if (target !== null) return r.chipSettled(target.postId);
   if (isUnhydratedReply(row)) return r.nowMs - since >= PAGE_HYDRATION_WAIT_MS;
@@ -283,13 +306,19 @@ export function hydrationDeadline(
   gate: PageGate,
   rows: readonly GateFields[],
   parentIndex: ParentIndex,
+  loaded?: ReadonlySet<string>,
+  /** Deadlines at or before this have already run out (no timer for them). */
+  afterMs: number = Number.NEGATIVE_INFINITY,
 ): number | null {
   let deadline: number | null = null;
   for (const row of rows) {
     const since = gate.pending.get(row.id);
-    if (since === undefined || !isUnhydratedReply(row)) continue;
-    if (chipTargetFor(row, parentIndex) !== null) continue;
+    if (since === undefined) continue;
+    const waitsRoot = loaded !== undefined && awaitsRootHydration(row, loaded);
+    const waitsQuote = isUnhydratedReply(row) && chipTargetFor(row, parentIndex) === null;
+    if (!waitsRoot && !waitsQuote) continue;
     const at = since + PAGE_HYDRATION_WAIT_MS;
+    if (at <= afterMs) continue;
     if (deadline === null || at < deadline) deadline = at;
   }
   return deadline;
@@ -303,15 +332,6 @@ export function hydrationDeadline(
 export function aboutState(post: unknown): 'visible' | 'pending' | 'gone' {
   if (post === undefined) return 'pending';
   return post === null ? 'gone' : 'visible';
-}
-
-/**
- * One post's conversation: its card messages and every message replying to one
- * of them, in thread order. Status lines ride on their rows.
- */
-export function filterRows<T extends RefFields>(rows: readonly T[], postId: string): T[] {
-  const cards = new Set(rows.filter((r) => r.sharedPostIds.includes(postId)).map((r) => r.id));
-  return rows.filter((r) => cards.has(r.id) || (r.reply !== null && cards.has(r.reply.id)));
 }
 
 /**

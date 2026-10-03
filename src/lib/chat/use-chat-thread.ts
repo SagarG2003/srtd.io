@@ -76,6 +76,8 @@ import {
   applyEditFromRow,
   applyReactionOp,
   hydrateReplies,
+  hydrateRoots,
+  missingRootIds,
   markMessagesDeleted,
   markReadUpTo,
   markReadUpToMessage,
@@ -565,21 +567,25 @@ export function useChatThread(params: {
   );
 
   /**
-   * Fill the reply quotes of freshly fetched rows: from what is loaded, else
-   * one IN read for the quoted rows that are not.
+   * Fill the reply quotes and thread roots of freshly fetched rows: from what
+   * is loaded, else one IN read for the quoted and root rows that are not.
    */
   const resolveReplies = useCallback(
     async (fetched: readonly ThreadMessage[], forChannel: string): Promise<void> => {
       const known = new Set([...messagesRef.current, ...fetched].map((m) => m.id));
       const missing = [
-        ...new Set(
-          fetched
+        ...new Set([
+          ...fetched
             .filter((m) => m.reply !== null && m.reply.preview === '' && !known.has(m.reply.id))
             .map((m) => m.reply?.id ?? ''),
-        ),
+          ...missingRootIds(fetched, known),
+        ]),
       ];
+      // Only this batch's rows settle a root that cannot be read; another
+      // batch whose read is still in flight keeps waiting for its own.
+      const batch = new Set(fetched.map((m) => m.id));
       if (missing.length === 0) {
-        setMessages((prev) => hydrateReplies(prev, [], true));
+        setMessages((prev) => hydrateRoots(hydrateReplies(prev, [], true), [], batch));
         return;
       }
       const result = await loadMessagesByIds(db, missing);
@@ -590,7 +596,7 @@ export function useChatThread(params: {
         return;
       }
       const quoted = result.data.map((row) => rowToThreadMessage(row, currentUserId));
-      setMessages((prev) => hydrateReplies(prev, quoted, true));
+      setMessages((prev) => hydrateRoots(hydrateReplies(prev, quoted, true), quoted, batch));
     },
     [db, currentUserId],
   );

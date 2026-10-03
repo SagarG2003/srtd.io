@@ -41,9 +41,6 @@ import {
   aboutQuote,
   aboutReplyFor,
   bubbleChip,
-  CARD_NOT_LOADED_TOAST,
-  filterEmptyLabel,
-  openPostFilter,
   EDITED_LABEL,
   MessageBubble,
   messageTimeSource,
@@ -128,13 +125,11 @@ import { SharedPostCards } from '@/components/chat/PostCard';
 import {
   admitRows,
   chipTargetFor,
-  filterRows,
   parentIndexOf,
   replyForSend,
   rowReady,
   type PageGate,
 } from '@/lib/chat/post-refs';
-import type { FindOlderOutcome } from '@/lib/chat/marks';
 import { runSend } from '@/lib/chat/send-flow';
 import { sendMessageRecord } from '@/lib/chat/record';
 import type { Client } from '@srtdio/rpc';
@@ -1750,11 +1745,11 @@ describe('post references', () => {
     return found;
   }
 
-  it('a reply to a card message renders the KEY chip instead of the quote', () => {
-    const onShowPost = vi.fn();
+  it('a reply to a card message renders the KEY chip instead of the quote; a tap jumps to the card', () => {
+    const onOpenCard = vi.fn();
     const target = chipTargetFor(reply, parentIndexOf([card, reply]));
     expect(target).toEqual({ cardMessageId: 'card', postId: 'p1' });
-    const chip = bubbleChip(target, POST, { workspaceKey: 'gbl', onShowPost });
+    const chip = bubbleChip(target, POST, { workspaceKey: 'gbl', onOpenCard });
     const root = bubbleWith(reply, chip);
     expect(types(root)).toContain(PostRefChip);
     expect(types(root)).not.toContain(ReplyQuoteBox);
@@ -1763,12 +1758,12 @@ describe('post references', () => {
       if (el.type === PostRefChip) onTap = (el.props as { onTap: () => void }).onTap;
     });
     onTap?.();
-    expect(onShowPost).toHaveBeenCalledWith('p1', 'card');
+    expect(onOpenCard).toHaveBeenCalledWith('card');
   });
 
   it('a live row whose chip post is still being read keeps the plain quote (the chip comes later)', () => {
     const target = chipTargetFor(reply, parentIndexOf([card]));
-    const chip = bubbleChip(target, undefined, { workspaceKey: 'gbl', onShowPost: vi.fn() });
+    const chip = bubbleChip(target, undefined, { workspaceKey: 'gbl', onOpenCard: vi.fn() });
     expect(chip).toBeUndefined();
     const root = bubbleWith(reply, chip);
     expect(types(root)).not.toContain(PostRefChip);
@@ -1783,10 +1778,13 @@ describe('post references', () => {
   });
 
   it('keeps the quote for a plain parent or a post the viewer cannot see', () => {
-    const plain = bubbleChip(null, undefined, { workspaceKey: 'gbl', onShowPost: vi.fn() });
+    const plain = bubbleChip(null, undefined, { workspaceKey: 'gbl', onOpenCard: vi.fn() });
     expect(plain).toBeUndefined();
     expect(types(bubbleWith(reply, plain))).toContain(ReplyQuoteBox);
-    const hidden = bubbleChip({ postId: 'p1' }, null, { workspaceKey: null, onShowPost: vi.fn() });
+    const hidden = bubbleChip({ postId: 'p1', cardMessageId: 'card' }, null, {
+      workspaceKey: null,
+      onOpenCard: vi.fn(),
+    });
     expect(types(bubbleWith(reply, hidden))).toContain(ReplyQuoteBox);
   });
 
@@ -1814,34 +1812,7 @@ describe('post references', () => {
     expect(props?.onTalkAbout).toBe(onTalkAbout);
   });
 
-  it('the filter shows only that post: its cards and the replies to them', () => {
-    const t0 = Date.parse(CREATED_AT);
-    const at = (min: number): Pick<ThreadMessage, 'time' | 'createdAt'> => ({
-      time: t0 + min * 60_000,
-      createdAt: new Date(t0 + min * 60_000).toISOString(),
-    });
-    const rows = [
-      makeMessage({ id: 'a', ...at(0) }),
-      makeMessage({ id: 'card', body: '', sharedPostIds: ['p1'], ...at(1) }),
-      makeMessage({ id: 'other', body: '', sharedPostIds: ['p2'], ...at(2) }),
-      makeMessage({
-        id: 'r1',
-        reply: { id: 'card', authorUserId: null, preview: '' },
-        ...at(30),
-      }),
-      makeMessage({
-        id: 'r2',
-        reply: { id: 'other', authorUserId: null, preview: '' },
-        ...at(31),
-      }),
-    ];
-    const shown = filterRows(rows, 'p1');
-    expect(shown.map((m) => m.id)).toEqual(['card', 'r1']);
-    const filtered = threadRows(shown, t0, 'UTC');
-    expect(filtered.filter((r) => r.kind === 'message')).toHaveLength(2);
-  });
-
-  it('the filter adds a 44px Load older row at the top that calls the loader', () => {
+  it('the thread view adds a 44px Load older row at the top that calls the loader', () => {
     const loadOlder = vi.fn();
     const items = threadListItems([], false, () => <li />, loadOlder);
     const row = items[1] as ReactElement<{ children: ReactElement }>;
@@ -1854,7 +1825,7 @@ describe('post references', () => {
     expect(button.props.className).toContain('min-h-[44px]');
     button.props.onClick();
     expect(loadOlder).toHaveBeenCalledTimes(1);
-    // Not while a page is loading, and never outside the filter.
+    // Not while a page is loading, and never without a loader.
     expect(threadListItems([], true, () => <li />, loadOlder).map((i) => i.key)).not.toContain(
       'load-older',
     );
@@ -1980,7 +1951,7 @@ describe('post references after audit', () => {
         const target = chipTargetFor(m, index);
         const chip = bubbleChip(target, target !== null ? step.lookup(target.postId) : null, {
           workspaceKey: 'gbl',
-          onShowPost: () => {},
+          onOpenCard: () => {},
         });
         list.set(
           m.id,
@@ -2124,7 +2095,7 @@ describe('post references after audit', () => {
     expect(state).toBe('sent');
   });
 
-  it('F8: after found, the filter shows the card row at once while its page is still held', () => {
+  it('F8: an older page waiting on its chip post stays held; the row on screen stays', () => {
     const t0 = Date.parse(CREATED_AT);
     const at = (min: number): Pick<ThreadMessage, 'time' | 'createdAt'> => ({
       time: t0 + min * 60_000,
@@ -2163,8 +2134,6 @@ describe('post references after audit', () => {
     cut(first, 1);
     const onScreen = cut(all, 2);
     expect(onScreen.map((m) => m.id)).toEqual(['r1']);
-    // The filter reads the full list: the card and its reply, right away.
-    expect(filterRows(all, 'p1').map((m) => m.id)).toEqual(['card', 'r1']);
   });
 
   it('F14: About pending or gone attaches no reply_to on send', async () => {
@@ -2202,93 +2171,13 @@ describe('post references after audit', () => {
       expect(rpc.mock.calls[0]?.[1]).not.toHaveProperty('p_reply_to_message_id');
     }
   });
-
-  describe('F8: entering the filter', () => {
-    function run(rows: ThreadMessage[], outcome: FindOlderOutcome | null) {
-      const apply = vi.fn();
-      const toast = vi.fn();
-      const ensure = vi.fn<(id: string) => Promise<FindOlderOutcome>>(() =>
-        Promise.resolve(outcome ?? 'found'),
-      );
-      const done = openPostFilter({
-        postId: 'p1',
-        cardMessageId: 'card',
-        rows,
-        ensureLoaded: outcome === null ? undefined : ensure,
-        apply,
-        toast,
-      });
-      return { apply, toast, ensure, done };
-    }
-
-    it('a loaded card applies at once, About on the newest card', async () => {
-      const newer = makeMessage({ id: 'card2', body: '', sharedPostIds: ['p1'] });
-      const { apply, ensure, done } = run([card, chipRow, newer], 'found');
-      await done;
-      expect(ensure).not.toHaveBeenCalled();
-      expect(apply).toHaveBeenCalledWith('p1', 'card2');
-    });
-
-    it('no loaded card: pages it in, applies on found', async () => {
-      const { apply, toast, ensure, done } = run([chipRow], 'found');
-      await done;
-      expect(ensure).toHaveBeenCalledWith('card');
-      expect(apply).toHaveBeenCalledWith('p1', 'card');
-      expect(toast).not.toHaveBeenCalled();
-    });
-
-    it.each(['not_found', 'exhausted', 'error'] as const)(
-      'no loaded card and %s: toast, no filter',
-      async (outcome) => {
-        const { apply, toast, done } = run([chipRow], outcome);
-        await done;
-        expect(apply).not.toHaveBeenCalled();
-        expect(toast).toHaveBeenCalledWith(CARD_NOT_LOADED_TOAST);
-        expect(CARD_NOT_LOADED_TOAST).toBe("That post's card is not loaded here");
-      },
-    );
-
-    it('no loader: toast, no filter', async () => {
-      const { apply, toast, done } = run([chipRow], null);
-      await done;
-      expect(apply).not.toHaveBeenCalled();
-      expect(toast).toHaveBeenCalledWith(CARD_NOT_LOADED_TOAST);
-    });
-  });
-
-  it('F8: an empty filter shows Load older above its own line, never the empty state', () => {
-    const loadOlder = vi.fn();
-    const items = threadListItems([], false, () => <li />, loadOlder, filterEmptyLabel('GBL-14'));
-    expect(items.map((i) => i.key)).toEqual(['thread-spacer', 'load-older', 'filter-empty']);
-    const note = items[2] as ReactElement<{ children: string }>;
-    expect(note.props.children).toBe('No messages about GBL-14 loaded yet');
-    expect(filterEmptyLabel(null)).toBe('No messages about this post loaded yet');
-    const withRows = threadListItems(
-      [
-        {
-          kind: 'message',
-          message: card,
-          head: true,
-          tail: true,
-          meta: bubbleMeta(card, 'UTC', { showTicks: false }),
-        },
-      ],
-      false,
-      () => <li key="m" />,
-      loadOlder,
-      filterEmptyLabel('GBL-14'),
-    );
-    expect(withRows.map((i) => i.key)).not.toContain('filter-empty');
-  });
 });
 
 describe('open loops strip slot', () => {
-  it('FilterStrip still wins while filtering; else the loops strip for threads with marks', () => {
-    expect(threadStripSlot({ filtering: true, hasMarks: true, selecting: false })).toBe('filter');
-    expect(threadStripSlot({ filtering: true, hasMarks: false, selecting: true })).toBe('filter');
-    expect(threadStripSlot({ filtering: false, hasMarks: true, selecting: false })).toBe('loops');
-    expect(threadStripSlot({ filtering: false, hasMarks: true, selecting: true })).toBeNull();
-    expect(threadStripSlot({ filtering: false, hasMarks: false, selecting: false })).toBeNull();
+  it('the loops strip shows for threads with marks, never while selecting', () => {
+    expect(threadStripSlot({ hasMarks: true, selecting: false })).toBe('loops');
+    expect(threadStripSlot({ hasMarks: true, selecting: true })).toBeNull();
+    expect(threadStripSlot({ hasMarks: false, selecting: false })).toBeNull();
   });
 
   it('the strip label carries the posts waiting ahead of the marks', () => {
@@ -2902,7 +2791,7 @@ describe('D8: WhatsApp multi-select', () => {
 
   it('F6: while selecting, cards get no talkAbout, so a hold on a card only toggles the row', () => {
     const talk = vi.fn();
-    const refs = { onTalkAbout: talk, onShowPost: noop };
+    const refs = { onTalkAbout: talk, onOpenThread: noop };
     expect(cardRefsFor('m1', selectable(noop), refs).onTalkAbout).toBeUndefined();
     expect(cardRefsFor('m1', undefined, refs).onTalkAbout).toBe(talk);
     // The card inside the row renders without its own hold handlers.
