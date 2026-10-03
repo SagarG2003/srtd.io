@@ -530,10 +530,6 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     },
     [writeChannelParam],
   );
-  const closeChannel = useCallback(() => {
-    setSelected(null);
-    writeChannelParam(null);
-  }, [writeChannelParam]);
   // A message search hit: the chat opens at that message (the jump and its
   // highlight) with the in-chat bar on the query. seq repeats a same-chat tap.
   const [searchRequest, setSearchRequest] = useState<{
@@ -542,6 +538,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     query: string;
     seq: number;
   } | null>(null);
+  const closeChannel = useCallback(() => {
+    // A hit's jump not taken yet (backed out while loading) never fires later.
+    setSearchRequest(null);
+    setSelected(null);
+    writeChannelParam(null);
+  }, [writeChannelParam]);
   // Only ever counts up: a taken request goes back to null, and the next tap
   // in the same open chat must still read as new.
   const searchSeqRef = useRef(0);
@@ -1278,7 +1280,11 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
             status={loadStatus}
             onRetry={retryLoad}
             selectedChannelId={selected?.channelId ?? null}
-            onSelect={openChannel}
+            onSelect={(channel: ChannelSummary) => {
+              // A plain open drops any hit's jump not taken yet.
+              setSearchRequest(null);
+              openChannel(channel);
+            }}
             onNewChat={() => setNewChatOpen(true)}
             timeZone={timeZone}
             onDeleteChats={onDeleteChats}

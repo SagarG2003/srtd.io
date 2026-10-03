@@ -161,6 +161,8 @@ export function InChatSearchBar(props: InChatSearchBarProps): ReactElement {
   );
 
   const older = async (): Promise<void> => {
+    // While paging to the tapped hit its place is unknown: no stepping yet.
+    if (anchoring) return;
     if (state.status !== 'ready' || state.query !== normalizeQuery(query)) return;
     const next = stepSearchIndex(index, 'older', state.hits.length);
     if (next !== null) {
@@ -175,6 +177,7 @@ export function InChatSearchBar(props: InChatSearchBarProps): ReactElement {
     if (more !== null) goTo(after.hits, more);
   };
   const newer = (): void => {
+    if (anchoring) return;
     if (state.status !== 'ready') return;
     const next = stepSearchIndex(index, 'newer', state.hits.length);
     if (next !== null) goTo(state.hits, next);
@@ -218,7 +221,10 @@ export function InChatSearchBar(props: InChatSearchBarProps): ReactElement {
         }}
         onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
           // Enter while an IME is composing commits the word, never steps.
-          if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
+          // WebKit sends the commit Enter after compositionend with keyCode 229.
+          if (e.key !== 'Enter' || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
+            return;
+          }
           e.preventDefault();
           void older();
         }}
