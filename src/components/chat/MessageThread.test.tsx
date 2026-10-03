@@ -1781,7 +1781,10 @@ describe('post references', () => {
     const plain = bubbleChip(null, undefined, { workspaceKey: 'gbl', onOpenCard: vi.fn() });
     expect(plain).toBeUndefined();
     expect(types(bubbleWith(reply, plain))).toContain(ReplyQuoteBox);
-    const hidden = bubbleChip({ postId: 'p1', cardMessageId: 'card' }, null, { workspaceKey: null, onOpenCard: vi.fn() });
+    const hidden = bubbleChip({ postId: 'p1', cardMessageId: 'card' }, null, {
+      workspaceKey: null,
+      onOpenCard: vi.fn(),
+    });
     expect(types(bubbleWith(reply, hidden))).toContain(ReplyQuoteBox);
   });
 

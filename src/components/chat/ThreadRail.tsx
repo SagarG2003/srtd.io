@@ -25,7 +25,10 @@ function RailCurve(props: { d: string; className: string }): ReactElement {
       aria-hidden="true"
       viewBox="0 0 13 13"
       fill="none"
-      className={cn('absolute h-[13px] w-[13px] overflow-visible text-border-strong', props.className)}
+      className={cn(
+        'absolute h-[13px] w-[13px] overflow-visible text-border-strong',
+        props.className,
+      )}
     >
       <path
         d={props.d}
@@ -236,4 +239,3 @@ export function RepliesSeparatorRow(props: { label: string; through: boolean }):
     </li>
   );
 }
-

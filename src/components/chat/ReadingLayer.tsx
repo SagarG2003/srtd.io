@@ -145,7 +145,11 @@ export function SeenLine(props: {
   return (
     <li
       data-seen-line=""
-      className={cn('flex justify-end px-4 pt-0.5', props.rail === true && 'relative', NO_TOUCH_SELECT)}
+      className={cn(
+        'flex justify-end px-4 pt-0.5',
+        props.rail === true && 'relative',
+        NO_TOUCH_SELECT,
+      )}
     >
       {props.rail === true ? <RailThrough /> : null}
       <span className={cn(BUBBLE_META_TYPE, 'text-fg-3')}>

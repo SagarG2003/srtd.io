@@ -402,6 +402,12 @@ export function rowGeometry(input: {
     padLeft: PAD_LEFT[shift],
     shift,
     target,
-    reach: !onRail ? '' : input.mine ? OWN_REACH : pastPhoto ? REACH[shift].pastPhoto : REACH[shift].first,
+    reach: !onRail
+      ? ''
+      : input.mine
+        ? OWN_REACH
+        : pastPhoto
+          ? REACH[shift].pastPhoto
+          : REACH[shift].first,
   };
 }

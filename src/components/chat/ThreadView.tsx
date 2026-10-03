@@ -74,8 +74,7 @@ export function ThreadViewFrame(props: {
   }, [closing, reduced]);
   const close = (): void => setClosing(true);
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    const overlayOpen =
-      document.querySelector('[aria-modal="true"], [role="menu"]') !== null;
+    const overlayOpen = document.querySelector('[aria-modal="true"], [role="menu"]') !== null;
     if (
       !escapeCloses({
         key: event.key,
@@ -106,7 +105,9 @@ export function ThreadViewFrame(props: {
           'grid h-14 shrink-0 grid-cols-[88px_minmax(0,1fr)_88px] items-center border-b border-border bg-panel',
           NO_TOUCH_SELECT,
         )}
-        {...(coarse ? { onContextMenu: (e: { preventDefault: () => void }) => e.preventDefault() } : {})}
+        {...(coarse
+          ? { onContextMenu: (e: { preventDefault: () => void }) => e.preventDefault() }
+          : {})}
       >
         <button
           ref={closeRef}

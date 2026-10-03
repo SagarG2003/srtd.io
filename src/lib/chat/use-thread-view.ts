@@ -136,7 +136,8 @@ export function useThreadView(params: {
       ]);
       if (attempt !== attemptRef.current) return false;
       const rootRow = rootRead !== null && rootRead.ok ? rootRead.data[0] : undefined;
-      const root = known ?? (rootRow !== undefined ? rowToThreadMessage(rootRow, currentUserId) : undefined);
+      const root =
+        known ?? (rootRow !== undefined ? rowToThreadMessage(rootRow, currentUserId) : undefined);
       if (root === undefined || !pageRead.ok) {
         logger.warn('chat: thread open failed', {
           root_id: rootId,

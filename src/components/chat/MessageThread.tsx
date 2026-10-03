@@ -1669,13 +1669,13 @@ export function MessageBubble(props: {
     // Selection mode: a static 44px check column at the left of every row.
     selecting && SELECTION_ROW_OFFSET,
   );
-  const photo = showMeta ? (
-    withRailPhoto(
-      <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" />,
-      rail,
-      railEdge,
-    )
-  ) : null;
+  const photo = showMeta
+    ? withRailPhoto(
+        <Avatar name={name} {...senderAvatarProps(message, profiles)} size="md" />,
+        rail,
+        railEdge,
+      )
+    : null;
   // Rows never show the native menu or callout on a touch-first device.
   const rowContextMenu = press?.coarse === true ? preventDefault : undefined;
   if (message.deleted === true) {
@@ -1775,198 +1775,198 @@ export function MessageBubble(props: {
         {senderLine}
         {swipe !== undefined ? <SwipeReplyIcon iconRef={swipe.iconRef} /> : null}
         {withRailBox(
-        <div
-          ref={bubbleRef}
-          data-bubble=""
-          data-swipe-reply={swipe !== undefined ? '' : undefined}
-          role="group"
-          tabIndex={0}
-          aria-label={`${mine ? 'Your message' : `Message from ${name}`}, ${bubbleTimeLabel(message, timeZone)}`}
-          {...(selection === undefined ? press?.handlers : {})}
-          onContextMenu={selection === undefined ? press?.onContextMenu : undefined}
-          onKeyDown={(e: KeyboardEvent<HTMLDivElement>) => {
-            if (selection !== undefined || press === undefined || !keyOpensMenu(e)) return;
-            e.preventDefault();
-            press.onKeyOpen();
-          }}
-          onClickCapture={(e) => {
-            // The click that trails a long-press or a swipe does nothing more.
-            if (press?.consumeClick()) {
+          <div
+            ref={bubbleRef}
+            data-bubble=""
+            data-swipe-reply={swipe !== undefined ? '' : undefined}
+            role="group"
+            tabIndex={0}
+            aria-label={`${mine ? 'Your message' : `Message from ${name}`}, ${bubbleTimeLabel(message, timeZone)}`}
+            {...(selection === undefined ? press?.handlers : {})}
+            onContextMenu={selection === undefined ? press?.onContextMenu : undefined}
+            onKeyDown={(e: KeyboardEvent<HTMLDivElement>) => {
+              if (selection !== undefined || press === undefined || !keyOpensMenu(e)) return;
               e.preventDefault();
-              e.stopPropagation();
-            }
-          }}
-          className={cn(
-            bubbleClass({ ...shape, failed, voiceOnly, album }),
-            // The browser keeps vertical pans (the list scrolls); a horizontal
-            // move is left to the swipe controller.
-            swipe !== undefined && 'touch-pan-y touch-pinch-zoom',
-          )}
-        >
-          <div className={album ? cn(albumInset, 'empty:hidden') : 'contents'}>
-            <MarkBadge
-              mark={props.mark}
-              {...(props.onChangePriority !== undefined && selection === undefined
-                ? { onChangePriority: props.onChangePriority }
-                : {})}
-            />
-            {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
-          </div>
-          <div data-bubble-content="" className={cn('contents', mine && OWN_BUBBLE_CONTENT)}>
-            {threadMember ? null : chip?.kind === 'chip' && !parentDeleted ? (
-              <PostRefChip
-                post={chip.post}
-                workspaceKey={chip.workspaceKey}
-                onTap={chip.onTap}
-                className={album ? 'mx-[9px]' : '-mb-1.5 -mt-2'}
-              />
-            ) : (chip === undefined || parentDeleted) && reply !== null ? (
-              <ReplyQuoteBox
-                author={
-                  reply.authorUserId !== null
-                    ? (profiles.get(reply.authorUserId)?.displayName ?? 'Member')
-                    : 'Member'
-                }
-                preview={
-                  parentDeleted
-                    ? deletedMessageLabel({ mine: quotedMine })
-                    : resolveMentionText(
-                        reply.preview,
-                        profileNameOf(profiles, props.workspaceId ?? null),
-                      )
-                }
-                deleted={parentDeleted}
-                inBubble={layout}
-                media={parentDeleted ? null : quoteMedia(props.quoted)}
-                thumbSource={{ cache, presignEnabled }}
-                onJump={() => props.onJumpToMessage?.(reply.id)}
-                className={album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1'}
-              />
-            ) : null}
-            {textOnly ? (
-              body
-            ) : voiceOnly ? (
-              <MessageAttachments
-                attachments={message.attachments}
-                cache={cache}
-                presignEnabled={presignEnabled}
-                onCancelUpload={cancelUpload}
-                voice={{
-                  messageId: message.id,
-                  mine,
-                  sender: { name, ...senderAvatarProps(message, profiles) },
-                  nextVoiceId: props.nextVoiceId ?? null,
-                  // The time sits in the note's last row (Transcribe row / length row).
-                  meta: <BubbleMetaView meta={meta} mine={mine} placement={placement} />,
-                  ...(!mine && props.onTranscribe !== undefined && isTranscribable(message)
-                    ? { onTranscribe: props.onTranscribe }
-                    : {}),
-                }}
-              />
-            ) : album ? (
-              <>
-                <MessageAttachments
-                  attachments={message.attachments}
-                  cache={cache}
-                  presignEnabled={presignEnabled}
-                  album
-                  onCancelUpload={cancelUpload}
-                  caption={hasBody ? body : undefined}
-                  onImageClick={(_attachment, index) => props.onOpenImage?.(index)}
-                />
-                {hasCards ? (
-                  <div className="flex flex-col px-[9px] pb-[5px]">
-                    <SharedPostCards postIds={message.sharedPostIds} {...cardRefs} />
-                    <SharedBriefCards briefIds={message.sharedBriefIds} />
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <>
-                {hasBody ? body : null}
-                <MessageAttachments
-                  attachments={message.attachments}
-                  cache={cache}
-                  presignEnabled={presignEnabled}
-                  onCancelUpload={cancelUpload}
-                />
-                <SharedPostCards postIds={message.sharedPostIds} {...cardRefs} />
-                <SharedBriefCards briefIds={message.sharedBriefIds} />
-              </>
+              press.onKeyOpen();
+            }}
+            onClickCapture={(e) => {
+              // The click that trails a long-press or a swipe does nothing more.
+              if (press?.consumeClick()) {
+                e.preventDefault();
+                e.stopPropagation();
+              }
+            }}
+            className={cn(
+              bubbleClass({ ...shape, failed, voiceOnly, album }),
+              // The browser keeps vertical pans (the list scrolls); a horizontal
+              // move is left to the swipe controller.
+              swipe !== undefined && 'touch-pan-y touch-pinch-zoom',
             )}
-          </div>
-          {voiceOnly ? null : (
-            <BubbleMetaView
-              meta={meta}
-              mine={mine}
-              placement={placement}
-              className={placement === 'row' && album ? 'px-1.5 pb-0.5' : undefined}
-            />
-          )}
-          {failed && mine && message.filesMissing !== true ? (
-            <button
-              type="button"
-              data-failed-retry=""
-              aria-label="Retry sending"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={(e) => {
-                e.stopPropagation();
-                props.onRetry?.(message.id);
-              }}
-              // On the rail the tick runs into the alert: the page fill keeps the "!" clear of it.
-              className={cn(FAILED_RETRY_CLASS, rail !== undefined && 'bg-bg')}
-            >
-              <FailedGlyph />
-            </button>
-          ) : null}
-          {onMore !== undefined ? (
-            <button
-              type="button"
-              data-more=""
-              aria-label="Message options"
-              aria-haspopup="menu"
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={(e) => {
-                e.stopPropagation();
-                onMore();
-              }}
-              className={cn(
-                'pointer-events-none absolute right-0 top-0 z-10 flex h-11 w-11 items-start justify-end rounded-tr-[inherit] opacity-0 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover/bubble:pointer-events-auto group-hover/bubble:opacity-100',
-                HOVER_FADE,
+          >
+            <div className={album ? cn(albumInset, 'empty:hidden') : 'contents'}>
+              <MarkBadge
+                mark={props.mark}
+                {...(props.onChangePriority !== undefined && selection === undefined
+                  ? { onChangePriority: props.onChangePriority }
+                  : {})}
+              />
+              {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
+            </div>
+            <div data-bubble-content="" className={cn('contents', mine && OWN_BUBBLE_CONTENT)}>
+              {threadMember ? null : chip?.kind === 'chip' && !parentDeleted ? (
+                <PostRefChip
+                  post={chip.post}
+                  workspaceKey={chip.workspaceKey}
+                  onTap={chip.onTap}
+                  className={album ? 'mx-[9px]' : '-mb-1.5 -mt-2'}
+                />
+              ) : (chip === undefined || parentDeleted) && reply !== null ? (
+                <ReplyQuoteBox
+                  author={
+                    reply.authorUserId !== null
+                      ? (profiles.get(reply.authorUserId)?.displayName ?? 'Member')
+                      : 'Member'
+                  }
+                  preview={
+                    parentDeleted
+                      ? deletedMessageLabel({ mine: quotedMine })
+                      : resolveMentionText(
+                          reply.preview,
+                          profileNameOf(profiles, props.workspaceId ?? null),
+                        )
+                  }
+                  deleted={parentDeleted}
+                  inBubble={layout}
+                  media={parentDeleted ? null : quoteMedia(props.quoted)}
+                  thumbSource={{ cache, presignEnabled }}
+                  onJump={() => props.onJumpToMessage?.(reply.id)}
+                  className={album ? 'mx-[9px] mb-1 mt-[5px]' : 'mb-1'}
+                />
+              ) : null}
+              {textOnly ? (
+                body
+              ) : voiceOnly ? (
+                <MessageAttachments
+                  attachments={message.attachments}
+                  cache={cache}
+                  presignEnabled={presignEnabled}
+                  onCancelUpload={cancelUpload}
+                  voice={{
+                    messageId: message.id,
+                    mine,
+                    sender: { name, ...senderAvatarProps(message, profiles) },
+                    nextVoiceId: props.nextVoiceId ?? null,
+                    // The time sits in the note's last row (Transcribe row / length row).
+                    meta: <BubbleMetaView meta={meta} mine={mine} placement={placement} />,
+                    ...(!mine && props.onTranscribe !== undefined && isTranscribable(message)
+                      ? { onTranscribe: props.onTranscribe }
+                      : {}),
+                  }}
+                />
+              ) : album ? (
+                <>
+                  <MessageAttachments
+                    attachments={message.attachments}
+                    cache={cache}
+                    presignEnabled={presignEnabled}
+                    album
+                    onCancelUpload={cancelUpload}
+                    caption={hasBody ? body : undefined}
+                    onImageClick={(_attachment, index) => props.onOpenImage?.(index)}
+                  />
+                  {hasCards ? (
+                    <div className="flex flex-col px-[9px] pb-[5px]">
+                      <SharedPostCards postIds={message.sharedPostIds} {...cardRefs} />
+                      <SharedBriefCards briefIds={message.sharedBriefIds} />
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  {hasBody ? body : null}
+                  <MessageAttachments
+                    attachments={message.attachments}
+                    cache={cache}
+                    presignEnabled={presignEnabled}
+                    onCancelUpload={cancelUpload}
+                  />
+                  <SharedPostCards postIds={message.sharedPostIds} {...cardRefs} />
+                  <SharedBriefCards briefIds={message.sharedBriefIds} />
+                </>
               )}
-            >
-              <span
-                aria-hidden="true"
-                data-more-glyph=""
+            </div>
+            {voiceOnly ? null : (
+              <BubbleMetaView
+                meta={meta}
+                mine={mine}
+                placement={placement}
+                className={placement === 'row' && album ? 'px-1.5 pb-0.5' : undefined}
+              />
+            )}
+            {failed && mine && message.filesMissing !== true ? (
+              <button
+                type="button"
+                data-failed-retry=""
+                aria-label="Retry sending"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onRetry?.(message.id);
+                }}
+                // On the rail the tick runs into the alert: the page fill keeps the "!" clear of it.
+                className={cn(FAILED_RETRY_CLASS, rail !== undefined && 'bg-bg')}
+              >
+                <FailedGlyph />
+              </button>
+            ) : null}
+            {onMore !== undefined ? (
+              <button
+                type="button"
+                data-more=""
+                aria-label="Message options"
+                aria-haspopup="menu"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onMore();
+                }}
                 className={cn(
-                  'flex h-[18px] w-10 items-start justify-end rounded-tr-[inherit] bg-gradient-to-l from-50% pr-1',
-                  mine
-                    ? 'from-bubble-own text-[color:var(--bubble-meta-own)]'
-                    : 'from-panel-2 text-[color:var(--bubble-meta)]',
+                  'pointer-events-none absolute right-0 top-0 z-10 flex h-11 w-11 items-start justify-end rounded-tr-[inherit] opacity-0 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent group-hover/bubble:pointer-events-auto group-hover/bubble:opacity-100',
+                  HOVER_FADE,
                 )}
               >
-                <ChevronGlyph />
-              </span>
-            </button>
-          ) : null}
-          {hasReactions ? (
-            <button
-              type="button"
-              data-reaction-badge=""
-              onClick={onBadgeClick}
-              className={REACTION_BADGE_CLASS}
-            >
-              <span aria-hidden="true" className={REACTION_EMOJI_TYPE}>
-                {distinctEmojis}
-              </span>
-              {totalReactions > 1 ? (
-                <span className={cn(BUBBLE_META_TYPE, mine ? 'text-fg-2' : 'text-fg-3')}>
-                  {totalReactions}
+                <span
+                  aria-hidden="true"
+                  data-more-glyph=""
+                  className={cn(
+                    'flex h-[18px] w-10 items-start justify-end rounded-tr-[inherit] bg-gradient-to-l from-50% pr-1',
+                    mine
+                      ? 'from-bubble-own text-[color:var(--bubble-meta-own)]'
+                      : 'from-panel-2 text-[color:var(--bubble-meta)]',
+                  )}
+                >
+                  <ChevronGlyph />
                 </span>
-              ) : null}
-            </button>
-          ) : null}
-        </div>,
+              </button>
+            ) : null}
+            {hasReactions ? (
+              <button
+                type="button"
+                data-reaction-badge=""
+                onClick={onBadgeClick}
+                className={REACTION_BADGE_CLASS}
+              >
+                <span aria-hidden="true" className={REACTION_EMOJI_TYPE}>
+                  {distinctEmojis}
+                </span>
+                {totalReactions > 1 ? (
+                  <span className={cn(BUBBLE_META_TYPE, mine ? 'text-fg-2' : 'text-fg-3')}>
+                    {totalReactions}
+                  </span>
+                ) : null}
+              </button>
+            ) : null}
+          </div>,
           rail,
           railEdge,
         )}
@@ -3230,109 +3230,111 @@ function ThreadBody(
                   : null;
               const openThread = (rootId: string): void => threads?.onOpen(rootId);
               return (
-              <Fragment key={row.message.id}>
-                {unread?.kind === 'loaded' && unread.firstId === row.message.id ? (
-                  <UnreadDivider count={unread.count} />
-                ) : null}
-                {threads !== undefined && chipRoot !== null ? (
-                  <ThreadChipRow
-                    post={threads.postOf(chipRoot)}
-                    workspaceKey={threads.workspaceKey}
-                    count={threads.countOf(chipRoot)}
-                    coarse={coarsePointer}
-                    onOpen={() => openThread(chipRoot)}
-                  />
-                ) : null}
-                <MessageRow
-                  message={row.message}
-                  profiles={props.profiles}
-                  cache={props.cache}
-                  presignEnabled={props.presignEnabled}
-                  showTicks={props.showTicks}
-                  isGroup={props.isGroup}
-                  head={row.head}
-                  tail={row.tail}
-                  afterLabel={afterLabel}
-                  timeZone={props.timeZone}
-                  layout={props.layout}
-                  viewerUserId={props.viewerUserId}
-                  mentions={props.mentions}
-                  workspaceId={props.workspaceId}
-                  meta={row.meta}
-                  onOpen={(m, rect, held, reactionsOnly) => {
-                    if (m.deleted === true) return;
-                    setMenu({
-                      message: m,
-                      rect,
-                      held,
-                      openedAt: serverNow(),
-                      reactionsOnly: reactionsOnly === true,
-                    });
-                  }}
-                  onOpenImage={(m, index) => setViewer({ messageId: m.id, index })}
-                  hoverMenu={hoverMenu}
-                  coarsePointer={coarsePointer}
-                  reducedMotion={reducedMotion}
-                  onSwipeReply={props.onReply}
-                  onJumpToMessage={scrollToMessage}
-                  nextVoiceId={voiceNext.get(row.message.id) ?? null}
-                  onTranscribe={props.onTranscribe}
-                  quoted={
-                    row.message.reply !== null ? messagesById.get(row.message.reply.id) : undefined
-                  }
-                  postRefs={{
-                    chip: props.chipFor?.(row.message),
-                    onTalkAbout: props.onTalkAbout,
-                    onOpenThread: rootCard ? props.onOpenThread : undefined,
-                  }}
-                  threadMember={memberOf?.(row.message) != null}
-                  rail={rowRail}
-                  mark={props.marks.get(row.message.id)}
-                  {...(props.onChangePriority !== undefined
-                    ? { onChangePriority: props.onChangePriority }
-                    : {})}
-                  {...(props.selection !== undefined
-                    ? {
-                        selection: rowSelection(row.message, props.selection),
-                      }
-                    : {})}
-                  {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
-                  {...(props.onCancelUpload !== undefined
-                    ? { onCancelUpload: props.onCancelUpload }
-                    : {})}
-                  {...(props.onOpenReactions !== undefined && props.selection === undefined
-                    ? { onOpenReactions: props.onOpenReactions }
-                    : {})}
-                />
-                {replies !== null && !viewRoot ? (
-                  <RepliesButtonRow
-                    label={replies}
-                    mine={row.message.mine}
+                <Fragment key={row.message.id}>
+                  {unread?.kind === 'loaded' && unread.firstId === row.message.id ? (
+                    <UnreadDivider count={unread.count} />
+                  ) : null}
+                  {threads !== undefined && chipRoot !== null ? (
+                    <ThreadChipRow
+                      post={threads.postOf(chipRoot)}
+                      workspaceKey={threads.workspaceKey}
+                      count={threads.countOf(chipRoot)}
+                      coarse={coarsePointer}
+                      onOpen={() => openThread(chipRoot)}
+                    />
+                  ) : null}
+                  <MessageRow
+                    message={row.message}
+                    profiles={props.profiles}
+                    cache={props.cache}
+                    presignEnabled={props.presignEnabled}
+                    showTicks={props.showTicks}
                     isGroup={props.isGroup}
-                    shifted={rowRail !== undefined}
-                    through={plan.continues}
-                    coarse={coarsePointer}
-                    onOpen={() => openThread(row.message.id)}
-                  />
-                ) : null}
-                {replies !== null && viewRoot ? (
-                  <RepliesSeparatorRow label={replies} through={plan.continues} />
-                ) : null}
-                {props.reading?.seen?.messageId === row.message.id ? (
-                  <SeenLine
-                    lastReadAt={props.reading.seen.lastReadAt}
+                    head={row.head}
+                    tail={row.tail}
+                    afterLabel={afterLabel}
                     timeZone={props.timeZone}
-                    rail={plan.continues}
+                    layout={props.layout}
+                    viewerUserId={props.viewerUserId}
+                    mentions={props.mentions}
+                    workspaceId={props.workspaceId}
+                    meta={row.meta}
+                    onOpen={(m, rect, held, reactionsOnly) => {
+                      if (m.deleted === true) return;
+                      setMenu({
+                        message: m,
+                        rect,
+                        held,
+                        openedAt: serverNow(),
+                        reactionsOnly: reactionsOnly === true,
+                      });
+                    }}
+                    onOpenImage={(m, index) => setViewer({ messageId: m.id, index })}
+                    hoverMenu={hoverMenu}
+                    coarsePointer={coarsePointer}
+                    reducedMotion={reducedMotion}
+                    onSwipeReply={props.onReply}
+                    onJumpToMessage={scrollToMessage}
+                    nextVoiceId={voiceNext.get(row.message.id) ?? null}
+                    onTranscribe={props.onTranscribe}
+                    quoted={
+                      row.message.reply !== null
+                        ? messagesById.get(row.message.reply.id)
+                        : undefined
+                    }
+                    postRefs={{
+                      chip: props.chipFor?.(row.message),
+                      onTalkAbout: props.onTalkAbout,
+                      onOpenThread: rootCard ? props.onOpenThread : undefined,
+                    }}
+                    threadMember={memberOf?.(row.message) != null}
+                    rail={rowRail}
+                    mark={props.marks.get(row.message.id)}
+                    {...(props.onChangePriority !== undefined
+                      ? { onChangePriority: props.onChangePriority }
+                      : {})}
+                    {...(props.selection !== undefined
+                      ? {
+                          selection: rowSelection(row.message, props.selection),
+                        }
+                      : {})}
+                    {...(props.onRetry !== undefined ? { onRetry: props.onRetry } : {})}
+                    {...(props.onCancelUpload !== undefined
+                      ? { onCancelUpload: props.onCancelUpload }
+                      : {})}
+                    {...(props.onOpenReactions !== undefined && props.selection === undefined
+                      ? { onOpenReactions: props.onOpenReactions }
+                      : {})}
                   />
-                ) : null}
-                {props.reading?.readBy?.messageId === row.message.id ? (
-                  <ReadByLine
-                    label={props.reading.readBy.label}
-                    onOpen={() => props.onOpenReadInfo?.()}
-                    rail={plan.continues}
-                  />
-                ) : null}
-              </Fragment>
+                  {replies !== null && !viewRoot ? (
+                    <RepliesButtonRow
+                      label={replies}
+                      mine={row.message.mine}
+                      isGroup={props.isGroup}
+                      shifted={rowRail !== undefined}
+                      through={plan.continues}
+                      coarse={coarsePointer}
+                      onOpen={() => openThread(row.message.id)}
+                    />
+                  ) : null}
+                  {replies !== null && viewRoot ? (
+                    <RepliesSeparatorRow label={replies} through={plan.continues} />
+                  ) : null}
+                  {props.reading?.seen?.messageId === row.message.id ? (
+                    <SeenLine
+                      lastReadAt={props.reading.seen.lastReadAt}
+                      timeZone={props.timeZone}
+                      rail={plan.continues}
+                    />
+                  ) : null}
+                  {props.reading?.readBy?.messageId === row.message.id ? (
+                    <ReadByLine
+                      label={props.reading.readBy.label}
+                      onOpen={() => props.onOpenReadInfo?.()}
+                      rail={plan.continues}
+                    />
+                  ) : null}
+                </Fragment>
               );
             },
             props.loadOlderRow === true && props.hasMore === true
@@ -4533,7 +4535,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     [viewParts],
   );
   const viewRoot = viewParts?.root;
-  const viewPostId = viewRoot !== undefined && isRootCard(viewRoot) ? viewRoot.sharedPostIds[0] : undefined;
+  const viewPostId =
+    viewRoot !== undefined && isRootCard(viewRoot) ? viewRoot.sharedPostIds[0] : undefined;
   const viewPost = viewPostId !== undefined ? (postRef(viewPostId) ?? null) : null;
   const viewTitle = threadViewTitle(
     viewPost !== null ? postRefKey(workspaceKey, viewPost.number) : null,
@@ -4842,9 +4845,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         {...(props.loadingOlder !== undefined ? { loadingOlder: props.loadingOlder } : {})}
         {...(props.hasMore !== undefined ? { hasMore: props.hasMore } : {})}
         {...(props.onLoadOlder !== undefined ? { onLoadOlder: props.onLoadOlder } : {})}
-        {...(props.onNewestVisible !== undefined
-          ? { onNewestVisible: props.onNewestVisible }
-          : {})}
+        {...(props.onNewestVisible !== undefined ? { onNewestVisible: props.onNewestVisible } : {})}
         {...(props.onToggleReaction !== undefined
           ? { onToggleReaction: props.onToggleReaction }
           : {})}
