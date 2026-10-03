@@ -960,10 +960,10 @@ function parseAttachment(value: unknown): MessageAttachment | null {
 function parseReply(value: unknown): ReplyQuote | null | undefined {
   if (value === null) return null;
   if (!isRecord(value)) return undefined;
-  const { id, authorUserId, preview } = value;
+  const { id, authorUserId, preview, rootId } = value;
   if (typeof id !== 'string' || typeof preview !== 'string') return undefined;
   if (authorUserId !== null && typeof authorUserId !== 'string') return undefined;
-  return { id, authorUserId, preview };
+  return { id, authorUserId, preview, ...(typeof rootId === 'string' ? { rootId } : {}) };
 }
 
 /**

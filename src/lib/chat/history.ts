@@ -47,9 +47,11 @@ export const PREVIEW_SCAN_LIMIT = 200;
 type ChatReactionRow = Database['public']['Tables']['chat_reactions']['Row'];
 type ChatReadCursorRow = Database['public']['Tables']['chat_read_cursors']['Row'];
 type UnreadCountRow = Database['public']['Functions']['chat_unread_counts']['Returns'][number];
+type ThreadReplyCountRow =
+  Database['public']['Functions']['chat_thread_reply_counts']['Returns'][number];
 
 const MESSAGE_COLUMNS =
-  'id, channel_id, workspace_id, sender_user_id, body, mentions, attachment_asset_ids, shared_post_ids, shared_brief_ids, reply_to_message_id, forwarded_from_message_id, attachment_meta, agora_event_id, created_at, edited_at, deleted_at';
+  'id, channel_id, workspace_id, sender_user_id, body, mentions, attachment_asset_ids, shared_post_ids, shared_brief_ids, reply_to_message_id, forwarded_from_message_id, attachment_meta, agora_event_id, created_at, edited_at, deleted_at, thread_root_message_id';
 
 function fail<T>(message: string): Result<T> {
   return { ok: false, error: { code: 'unknown', message } };
@@ -198,6 +200,80 @@ export async function loadMessagesByIds(
     );
     if (res.error) return fail(`loadMessagesByIds: ${res.error.message}`);
     return { ok: true, data: (res.data ?? []) as ChatMessageRow[] };
+  });
+}
+
+/**
+ * One page of a thread: the replies whose thread_root_message_id is `rootId`
+ * (newest first from `before`, or the newest page), returned oldest-first,
+ * plus whether an older page may exist. The (channel_id,
+ * thread_root_message_id, created_at) index serves it; the page size is the
+ * history page size. Deleted replies are kept (they render as tombstones).
+ */
+export function loadThreadPage(
+  client: Client,
+  channelId: string,
+  rootId: string,
+  before?: MessageCursor,
+): Promise<Result<HistoryPage>> {
+  return withReadTimeout(async (signal) => {
+    const base = client
+      .from('chat_messages')
+      .select(MESSAGE_COLUMNS)
+      .eq('channel_id', channelId)
+      .eq('thread_root_message_id', rootId);
+    const query = (before !== undefined ? base.or(olderThanFilter(before)) : base)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(HISTORY_PAGE_SIZE);
+    const res = await abortable(query, signal);
+    if (res.error) return fail(`loadThreadPage: ${res.error.message}`);
+    return { ok: true, data: toPage((res.data ?? []) as ChatMessageRow[]) };
+  });
+}
+
+/** The live replies of one thread root and when the newest was sent. */
+export interface ThreadReplyCount {
+  count: number;
+  lastReplyAt: string;
+}
+
+/** Root ids one counts read carries at most (the proc reads the first 200). */
+export const THREAD_COUNT_ROOT_LIMIT = 200;
+
+/**
+ * Reply counts for thread roots in one call to chat_thread_reply_counts
+ * (SECURITY INVOKER: chat_messages RLS applies; deleted replies are not
+ * counted). Only the first 200 ids are sent. `traceId` is minted with
+ * uuid_v7 at the user action (the page load) and passed as p_trace_id. A
+ * root with no live reply is absent from the result. 5s timeout.
+ */
+export function loadThreadReplyCounts(
+  client: Client,
+  channelId: string,
+  rootIds: readonly string[],
+  traceId: string,
+): Promise<Result<Map<string, ThreadReplyCount>>> {
+  const ids = [...new Set(rootIds)].slice(0, THREAD_COUNT_ROOT_LIMIT);
+  if (ids.length === 0) return Promise.resolve({ ok: true, data: new Map() });
+  return withReadTimeout(async (signal) => {
+    const args: Database['public']['Functions']['chat_thread_reply_counts']['Args'] = {
+      p_trace_id: traceId,
+      p_channel_id: channelId,
+      p_root_ids: ids,
+    };
+    const { data, error } = await abortable(client.rpc('chat_thread_reply_counts', args), signal);
+    if (error) return fail(`loadThreadReplyCounts: ${error.message}`);
+    const rows = (data ?? []) as ThreadReplyCountRow[];
+    return {
+      ok: true,
+      data: new Map(
+        rows.map((row) => [
+          row.root_id,
+          { count: Number(row.reply_count), lastReplyAt: row.last_reply_at },
+        ]),
+      ),
+    };
   });
 }
 

@@ -1,5 +1,6 @@
-// The KEY chip a message carries when it replies to a card message, plus the
-// thread-level batch that feeds every chip, the About bar and the filter strip.
+// The KEY chip a message carries when it replies to a card message outside the
+// card's thread, plus the thread-level batch that feeds every chip, the thread
+// chips and titles, and the About bar.
 // The batch is ONE readPostCards call per distinct set of new post ids per
 // thread (memoised; it only grows when new ids appear), never one per chip. A
 // chip paints only once its post is in the batch, so it never swaps after first
@@ -19,7 +20,7 @@ import { useWorkspace } from '@/lib/workspace-context';
 import type { Result } from '@srtdio/posts';
 import { readPostCards, type PostCardRow } from '../../../packages/posts/src/reads';
 
-/** What a chip, the About bar and the filter strip show for one post. */
+/** What a chip, a thread chip or title and the About bar show for one post. */
 export type PostRefPost = Pick<PostCardRow, 'id' | 'number' | 'title' | 'thumbnailAssetVersionId'>;
 
 /** A post in the batch: its row, null when not visible, undefined while unknown. */
@@ -95,7 +96,7 @@ export interface ChipLookup {
 }
 
 /**
- * The thread's chip batch over `ids` (chip posts plus the About and filter
+ * The thread's chip batch over `ids` (chip posts plus the thread and About
  * posts). A new batch per workspace; re-renders once each read lands or times
  * out, and a timed-out id is requested again on that render. With no workspace
  * there is nothing to read: every post is null (the plain quote).
@@ -136,10 +137,13 @@ export function postRefKey(workspaceKey: string | null, number: number): string 
     : null;
 }
 
-/** A post's cover as a small thumbnail (round for chips, rounded for bars). */
+/**
+ * A post's cover as a small thumbnail (round for chips, rounded for bars; the
+ * 20px thread chip thumbnail at a 5px radius).
+ */
 export function PostRefThumb(props: {
   assetVersionId: string | null;
-  size: 18 | 24 | 32;
+  size: 18 | 20 | 24 | 32;
   round?: boolean;
 }): ReactElement {
   const thumb = useThumbnail<HTMLSpanElement>({
@@ -147,7 +151,7 @@ export function PostRefThumb(props: {
     cache: sharedCardPresignCache(),
     enabled: PRESIGN_ENABLED,
   });
-  const box = { 18: 'h-[18px] w-[18px]', 24: 'h-6 w-6', 32: 'h-8 w-8' }[props.size];
+  const box = { 18: 'h-[18px] w-[18px]', 20: 'h-5 w-5', 24: 'h-6 w-6', 32: 'h-8 w-8' }[props.size];
   return (
     <span
       ref={thumb.ref}
@@ -156,7 +160,7 @@ export function PostRefThumb(props: {
       className={cn(
         'flex shrink-0 items-center justify-center overflow-hidden bg-panel-3 text-fg-3',
         box,
-        props.round === true ? 'rounded-full' : 'rounded-md',
+        props.round === true ? 'rounded-full' : props.size === 20 ? 'rounded-[5px]' : 'rounded-md',
       )}
     >
       {thumb.url !== null && !thumb.failed ? (
@@ -167,7 +171,7 @@ export function PostRefThumb(props: {
           className="h-full w-full object-cover"
         />
       ) : (
-        <IconPipeline size={props.size === 18 ? 11 : 16} />
+        <IconPipeline size={props.size <= 20 ? 11 : 16} />
       )}
     </span>
   );
@@ -175,8 +179,8 @@ export function PostRefThumb(props: {
 
 /**
  * The chip itself: a 24px pill (18px round thumb, KEY in mono accent, title
- * truncated) inside a 44px-tall tap target. Tapping shows only that post's
- * conversation. The own bubble's content overrides restyle it like the quote.
+ * truncated) inside a 44px-tall tap target. Tapping jumps to the card. The own
+ * bubble's content overrides restyle it like the quote.
  */
 export function PostRefChip(props: {
   post: PostRefPost;
@@ -191,7 +195,7 @@ export function PostRefChip(props: {
       type="button"
       data-post-ref={post.id}
       data-msg-link=""
-      aria-label={`Show the conversation about ${ref ?? post.title}`}
+      aria-label={`Go to the card about ${ref ?? post.title}`}
       onClick={(e) => {
         e.stopPropagation();
         props.onTap();

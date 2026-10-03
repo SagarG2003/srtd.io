@@ -82,7 +82,7 @@ import {
   useChatLayout,
 } from '@/components/chat/chat-type';
 
-interface ComposerProps {
+export interface ComposerProps {
   /**
    * The open chat's Sorted channel id. The composer starts from this chat's
    * draft (text, caret, cards, files) on its first render and writes back as it
@@ -154,6 +154,8 @@ interface ComposerProps {
    * mentions off; the text is then sent as typed.
    */
   mentions?: ComposerMentions | undefined;
+  /** The placeholder in place of the chat's ("Reply in thread" in a thread view); editing keeps its own. */
+  placeholder?: string | undefined;
 }
 
 /** What the composer needs for @ mentions. */
@@ -1371,11 +1373,11 @@ export function Composer(props: ComposerProps): ReactElement {
               }}
               onSelect={trackCaret}
               onKeyDown={handleKeyDown}
-              placeholder={composerPlaceholder(
-                aboutRef,
-                props.reply != null,
-                editing !== undefined,
-              )}
+              placeholder={
+                props.placeholder !== undefined && editing === undefined
+                  ? props.placeholder
+                  : composerPlaceholder(aboutRef, props.reply != null, editing !== undefined)
+              }
               rows={1}
               compact
               className={sized(COMPOSER_INPUT_TYPE, layout)}
