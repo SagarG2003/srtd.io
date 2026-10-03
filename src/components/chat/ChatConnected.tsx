@@ -534,6 +534,26 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     setSelected(null);
     writeChannelParam(null);
   }, [writeChannelParam]);
+  // A message search hit: the chat opens at that message (the jump and its
+  // highlight) with the in-chat bar on the query. seq repeats a same-chat tap.
+  const [searchRequest, setSearchRequest] = useState<{
+    channelId: string;
+    messageId: string;
+    query: string;
+    seq: number;
+  } | null>(null);
+  const openSearchHit = useCallback(
+    (channel: ChannelSummary, messageId: string, query: string) => {
+      setSearchRequest((prev) => ({
+        channelId: channel.channelId,
+        messageId,
+        query,
+        seq: (prev?.seq ?? 0) + 1,
+      }));
+      openChannel(channel);
+    },
+    [openChannel],
+  );
 
   // Email deep-link: ?channel={channelId} selects that channel once the store's
   // roster is ready, once per distinct id. The param stays while the thread is
@@ -1259,6 +1279,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
             timeZone={timeZone}
             onDeleteChats={onDeleteChats}
             workspaceId={workspaceId}
+            onOpenSearchHit={openSearchHit}
           />
         </div>
       ) : null}
@@ -1321,6 +1342,10 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                   }}
                   initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
                   onInitialJumpTaken={() => setPendingJump(null)}
+                  searchRequest={
+                    searchRequest?.channelId === selected.channelId ? searchRequest : null
+                  }
+                  onSearchRequestTaken={() => setSearchRequest(null)}
                   showTicks={selected.channelType === 'dm'}
                   {...(threadCurrent ? { readState: thread.readState } : {})}
                   peerUserId={selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null}

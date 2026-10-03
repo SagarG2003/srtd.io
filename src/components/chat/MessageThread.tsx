@@ -1,6 +1,7 @@
 import {
   Fragment,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -61,6 +62,7 @@ import {
   IconChat,
   IconChevronLeft,
   IconForward,
+  IconSearch,
   IconSettings,
   IconTrash,
 } from '@/components/ui/icons';
@@ -237,6 +239,8 @@ import { applyEdit, applyReactionOp, markMessagesDeleted } from '@/lib/chat/thre
 import { generateTraceId } from '@/lib/trace';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
+import { matchRuns } from '@/lib/chat/search';
+import { InChatSearchBar, SearchHighlightContext } from '@/components/chat/InChatSearchBar';
 import type { ThreadReadState } from '@/lib/chat/use-chat-thread';
 import {
   firstUnread,
@@ -372,6 +376,13 @@ interface MessageThreadProps {
   initialMessageId?: string | null;
   /** The thread took initialMessageId (its jump runs, found or miss): the caller drops it. */
   onInitialJumpTaken?: () => void;
+  /**
+   * A message search hit: jump to the message and open the in-chat bar on the
+   * query. seq makes a repeat in the same chat run again.
+   */
+  searchRequest?: { messageId: string; query: string; seq: number } | null;
+  /** The thread took searchRequest: the caller drops it. */
+  onSearchRequestTaken?: () => void;
   /** The channel's read cursors (Seen, Read by, the unread divider); absent: none of them. */
   readState?: ThreadReadState;
   /** The DM peer whose cursor drives the Seen line; absent or null for groups. */
@@ -1199,10 +1210,17 @@ export function renderMessageBody(
   body: string,
   mine: boolean,
   origin: string | null = currentOrigin(),
+  highlight: readonly string[] = [],
 ): ReactNode[] {
   const className = bodyLinkClass(mine);
   return tokenize(body).map((segment, i) => {
-    if (segment.kind === 'text') return segment.text;
+    if (segment.kind === 'text') {
+      return highlight.length === 0 ? (
+        segment.text
+      ) : (
+        <Fragment key={i}>{markSearchWords(segment.text, highlight)}</Fragment>
+      );
+    }
     const target = classify(segment.url, origin, APP_ENTITY_ROUTES);
     const label = displayUrl(segment.url);
     return target.kind === 'external' ? (
@@ -1222,6 +1240,22 @@ export function renderMessageBody(
       </Link>
     );
   });
+}
+
+/** A searched word in a bubble: the annotation fill, --fg ink on either side. */
+export const SEARCH_MARK_CLASS = 'rounded-sm bg-annotation-bg [color:var(--fg)]';
+
+/** Text with every word the in-chat search matched wrapped in a <mark>. Pure. */
+export function markSearchWords(text: string, words: readonly string[]): ReactNode[] {
+  return matchRuns(text, words).map((run, i) =>
+    run.hit ? (
+      <mark key={i} data-search-mark="" className={SEARCH_MARK_CLASS}>
+        {run.text}
+      </mark>
+    ) : (
+      run.text
+    ),
+  );
 }
 
 /**
@@ -1256,6 +1290,8 @@ export interface MentionRenderContext {
    * me or "@all" sit on the mention-of-me tint. Absent is the same as false.
    */
   mentionedMe?: boolean;
+  /** The in-chat search's words: matched words in the text runs draw as <mark>. */
+  highlight?: readonly string[];
 }
 
 /**
@@ -1324,11 +1360,18 @@ export function renderBodyWithMentions(
   ctx: MentionRenderContext,
 ): ReactNode[] {
   const segments = splitMentions(body);
+  const highlight = ctx.highlight ?? [];
   // No mention: exactly the plain renderer's runs.
-  if (segments.every((segment) => segment.kind === 'text')) return renderMessageBody(body, mine);
+  if (segments.every((segment) => segment.kind === 'text')) {
+    return renderMessageBody(body, mine, currentOrigin(), highlight);
+  }
   return segments.map((segment, i) => {
     if (segment.kind === 'text') {
-      return <Fragment key={i}>{renderMessageBody(segment.text, mine)}</Fragment>;
+      return (
+        <Fragment key={i}>
+          {renderMessageBody(segment.text, mine, currentOrigin(), highlight)}
+        </Fragment>
+      );
     }
     const id = segment.userId;
     const everyone = id === ALL_MENTION;
@@ -1551,6 +1594,8 @@ function withRailPhoto(
  */
 export function MessageBubble(props: {
   message: ThreadMessage;
+  /** The open in-chat search's words; absent or [] draws no marks. */
+  searchWords?: readonly string[];
   profiles: Map<string, ChatProfile>;
   cache: PresignCache;
   presignEnabled: boolean;
@@ -1737,6 +1782,7 @@ export function MessageBubble(props: {
         viewerUserId: props.viewerUserId ?? null,
         mentions: selection === undefined ? props.mentions : undefined,
         mentionedMe: mentionsMe(message, props.viewerUserId ?? null, isGroup),
+        highlight: props.searchWords ?? [],
       })}
       {spacer}
     </p>
@@ -2300,8 +2346,11 @@ function MessageRow(props: {
     },
   };
   const onChangePriority = props.onChangePriority;
+  // The in-chat search's words: matched words in this bubble draw as <mark>.
+  const searchWords = useContext(SearchHighlightContext);
   return (
     <MessageBubble
+      searchWords={searchWords}
       message={props.message}
       profiles={props.profiles}
       cache={props.cache}
@@ -4050,6 +4099,13 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   } | null>(null);
   const [priorityBusy, setPriorityBusy] = useState(false);
   const [jumpRequest, setJumpRequest] = useState<{ id: string; seq: number } | null>(null);
+  // The in-chat search bar (null: the header shows) and the words bubbles mark.
+  const [chatSearch, setChatSearch] = useState<{
+    query: string;
+    anchor: string | null;
+    key: number;
+  } | null>(null);
+  const [searchWords, setSearchWords] = useState<readonly string[]>([]);
   const [forwardFor, setForwardFor] = useState<ThreadMessage[] | null>(null);
   // The own message being edited in the composer.
   const [editing, setEditing] = useState<EditingDraft | null>(null);
@@ -4320,6 +4376,28 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 }));
     onInitialJumpTaken?.();
   }, [initialMessageId, bodyLoading, onInitialJumpTaken]);
+  // A message search hit: once the rows are on screen, jump to it (the same
+  // jump and highlight as a deep link) and open the bar on its query.
+  const searchRequest = props.searchRequest ?? null;
+  const onSearchRequestTaken = props.onSearchRequestTaken;
+  const searchSeqRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (searchRequest === null || bodyLoading) return;
+    if (searchSeqRef.current === searchRequest.seq) return;
+    searchSeqRef.current = searchRequest.seq;
+    const { messageId, query, seq } = searchRequest;
+    setChatSearch({ query, anchor: messageId, key: seq });
+    setJumpRequest((prev) => ({ id: messageId, seq: (prev?.seq ?? 0) + 1 }));
+    onSearchRequestTaken?.();
+  }, [searchRequest, bodyLoading, onSearchRequestTaken]);
+  const closeChatSearch = useCallback(() => {
+    setSearchWords([]);
+    setChatSearch(null);
+  }, []);
+  const searchJump = useCallback(
+    (id: string) => setJumpRequest((prev) => ({ id, seq: (prev?.seq ?? 0) + 1 })),
+    [],
+  );
   const gatedIndex = useMemo(() => parentIndexOf(onScreen), [onScreen]);
   const shownMessages = onScreen;
   // Reading layer. Everything comes from the channel's cursors (one batched
@@ -4820,6 +4898,17 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
             ) : null}
             <SelectionHeader count={selected.size} onCancel={cancelSelection} layout={layout} />
           </>
+        ) : chatSearch !== null && channelId !== undefined ? (
+          <InChatSearchBar
+            key={chatSearch.key}
+            workspaceId={workspaceId}
+            channelId={channelId}
+            initialQuery={chatSearch.query}
+            anchorMessageId={chatSearch.anchor}
+            onJump={searchJump}
+            onTermsChange={setSearchWords}
+            onClose={closeChatSearch}
+          />
         ) : (
           <>
             {props.onBack !== undefined ? (
@@ -4840,6 +4929,14 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
                   ? { onOpenContact: props.onOpenInfo }
                   : {})}
             />
+            {channelId !== undefined ? (
+              <IconButton
+                label="Search this chat"
+                onClick={() => setChatSearch({ query: '', anchor: null, key: 0 })}
+              >
+                <IconSearch size={20} />
+              </IconButton>
+            ) : null}
             {props.onOpenInfo !== undefined ? (
               <IconButton label="Group info" onClick={props.onOpenInfo}>
                 <IconSettings size={20} />
@@ -4868,34 +4965,38 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           onOpen={() => setMarksOpen(true)}
         />
       ) : null}
-      <ThreadBody
-        {...bodyActions}
-        jumpRequest={jumpRequest}
-        {...(props.onEnsureLoaded !== undefined ? { onEnsureLoaded: props.onEnsureLoaded } : {})}
-        messages={shownMessages}
-        chipFor={chipFor}
-        onTalkAbout={talkAbout}
-        onOpenThread={openThread}
-        threads={mainThreads}
-        loading={bodyLoading}
-        {...(props.loadFailed !== undefined ? { loadFailed: props.loadFailed } : {})}
-        {...(props.onRetryLoad !== undefined ? { onRetryLoad: props.onRetryLoad } : {})}
-        onReply={handleReply}
-        {...(props.loadingOlder !== undefined ? { loadingOlder: props.loadingOlder } : {})}
-        {...(props.hasMore !== undefined ? { hasMore: props.hasMore } : {})}
-        {...(props.onLoadOlder !== undefined ? { onLoadOlder: props.onLoadOlder } : {})}
-        {...(props.onNewestVisible !== undefined ? { onNewestVisible: props.onNewestVisible } : {})}
-        {...(props.onToggleReaction !== undefined
-          ? { onToggleReaction: props.onToggleReaction }
-          : {})}
-        reading={{
-          unread,
-          seen,
-          readBy: readBy !== null ? { messageId: readBy.message.id, label: readBy.label } : null,
-        }}
-        onJumpFirstUnread={jumpFirstUnread}
-        onOpenReadInfo={() => setReadInfoOpen(true)}
-      />
+      <SearchHighlightContext.Provider value={searchWords}>
+        <ThreadBody
+          {...bodyActions}
+          jumpRequest={jumpRequest}
+          {...(props.onEnsureLoaded !== undefined ? { onEnsureLoaded: props.onEnsureLoaded } : {})}
+          messages={shownMessages}
+          chipFor={chipFor}
+          onTalkAbout={talkAbout}
+          onOpenThread={openThread}
+          threads={mainThreads}
+          loading={bodyLoading}
+          {...(props.loadFailed !== undefined ? { loadFailed: props.loadFailed } : {})}
+          {...(props.onRetryLoad !== undefined ? { onRetryLoad: props.onRetryLoad } : {})}
+          onReply={handleReply}
+          {...(props.loadingOlder !== undefined ? { loadingOlder: props.loadingOlder } : {})}
+          {...(props.hasMore !== undefined ? { hasMore: props.hasMore } : {})}
+          {...(props.onLoadOlder !== undefined ? { onLoadOlder: props.onLoadOlder } : {})}
+          {...(props.onNewestVisible !== undefined
+            ? { onNewestVisible: props.onNewestVisible }
+            : {})}
+          {...(props.onToggleReaction !== undefined
+            ? { onToggleReaction: props.onToggleReaction }
+            : {})}
+          reading={{
+            unread,
+            seen,
+            readBy: readBy !== null ? { messageId: readBy.message.id, label: readBy.label } : null,
+          }}
+          onJumpFirstUnread={jumpFirstUnread}
+          onOpenReadInfo={() => setReadInfoOpen(true)}
+        />
+      </SearchHighlightContext.Provider>
       <WhoReactedSheet
         messageId={reactionsFor}
         onClose={() => setReactionsFor(null)}
