@@ -28,8 +28,19 @@ import {
   bellPopoverPosition,
   visibleNowSections,
 } from '@/components/chat/NotificationsPanel';
-import { presetDetail, ReminderOptions } from '@/components/chat/ReminderSheet';
-import { remindProps } from '@/components/chat/MessageActionMenu';
+import {
+  CANCEL_REMINDER_LABEL,
+  presetDetail,
+  REMINDER_CHANGE_TITLE,
+  ReminderOptions,
+} from '@/components/chat/ReminderSheet';
+import {
+  messageMenuItems,
+  REMINDER_SET_LABEL,
+  reminderMenuTime,
+  remindProps,
+} from '@/components/chat/MessageActionMenu';
+import { REMINDER_CANCELLED_COPY } from '@/components/chat/BellContext';
 import { isDismissOf, ringTitle } from '@/components/chat/BellRing';
 import { EMPTY_BELL, mapBellEntry, type BellData, type BellEntry } from '@/lib/chat/bell';
 import type { ReminderRow } from '@/lib/chat/reminders';
@@ -141,6 +152,8 @@ function bell(
     openScheduledChat: noop,
     canRemind: () => true,
     openReminderFor: noop,
+    pendingReminderFor: () => null,
+    cancelReminderFromSheet: anoop,
     reminderTarget: null,
     closeReminder: noop,
     pickReminderTime: anoop,
@@ -353,7 +366,10 @@ describe('B2: Upcoming', () => {
 // Actions: the right RPC (with p_trace_id), then a refetch
 // ---------------------------------------------------------------------------
 
-function harness(error: { message: string } | null = null) {
+function harness(
+  error: { message: string } | null = null,
+  changed: Array<[string, { id: string; remindAt: Date } | null]> = [],
+) {
   const rpcs: { name: string; args: Record<string, unknown> }[] = [];
   const events: string[] = [];
   const client = {
@@ -382,6 +398,8 @@ function harness(error: { message: string } | null = null) {
     openChannelSheet: (channelId) => events.push(`sheet:${channelId}`),
     isStaleFailed: (id) => id === 'gone',
     remindersChanged: () => events.push('reminders-changed'),
+    reminderChanged: (messageId, next) =>
+      changed.push([messageId, next === null ? null : { id: next.id, remindAt: next.remindAt }]),
   };
   return { actions: createBellActions(deps), rpcs, events, toasts };
 }
@@ -580,6 +598,115 @@ describe('B3: Remind me', () => {
     expect(
       presetDetail({ id: 'tomorrow', label: 'Tomorrow', at: new Date(2026, 9, 4, 9, 0) }, now),
     ).toBe('Sun 4 Oct, 9:00 AM');
+  });
+});
+
+describe('UI-3 S10: reminder state in the long-press menu', () => {
+  function held(messageId: string): HTMLElement {
+    const row = { getAttribute: () => messageId };
+    return { closest: () => row } as unknown as HTMLElement;
+  }
+  const rowsOf = (props: Parameters<typeof messageMenuItems>[0]) =>
+    messageMenuItems(props).filter((i) => i.kind === 'action' && i.key === 'remind');
+
+  it('"Remind me" without a pending reminder', () => {
+    const props = remindProps(
+      {},
+      { canRemind: () => true, openReminderFor: noop, pendingReminderFor: () => null },
+      held('m1'),
+    );
+    expect(props.reminderAt).toBeUndefined();
+    const [item] = rowsOf({ onReply: noop, onCopy: noop, canCopy: true, ...props });
+    expect(item?.kind === 'action' && item.label).toBe('Remind me');
+  });
+
+  it('"Reminder · <time>" with one, matched by message id from the loaded list', () => {
+    const at = new Date(Date.now() + 2 * 86_400_000);
+    at.setHours(9, 0, 0, 0);
+    const lookups: string[] = [];
+    const props = remindProps(
+      {},
+      {
+        canRemind: () => true,
+        openReminderFor: noop,
+        pendingReminderFor: (id) => {
+          lookups.push(id);
+          return id === 'm1' ? reminderRow({ remind_at: at.toISOString() }) : null;
+        },
+      },
+      held('m1'),
+    );
+    expect(lookups).toEqual(['m1']);
+    const [item] = rowsOf({ onReply: noop, onCopy: noop, canCopy: true, ...props });
+    expect(item?.kind === 'action' && item.label).toBe(REMINDER_SET_LABEL);
+    expect(REMINDER_SET_LABEL).toBe('Reminder · ');
+    expect(item?.kind === 'action' && item.mono).toBe(reminderMenuTime(at, new Date()));
+    expect(item?.kind === 'action' && item.icon).toBeTruthy();
+  });
+
+  it('the time is device-local: the clock today, "Tomorrow 9:00 AM" style otherwise', () => {
+    const now = new Date(2026, 9, 3, 10, 0);
+    expect(reminderMenuTime(new Date(2026, 9, 3, 15, 20), now)).toBe('3:20 PM');
+    expect(reminderMenuTime(new Date(2026, 9, 4, 9, 0), now)).toBe('Tomorrow 9:00 AM');
+    expect(reminderMenuTime(new Date(2026, 9, 7, 11, 30), now)).toBe('Wed 7 Oct, 11:30 AM');
+  });
+
+  it('the menu renders the time in mono', () => {
+    const menu = source('../MessageActionMenu.tsx');
+    expect(menu).toContain('data-menu-mono="" className="font-mono');
+  });
+
+  it('change mode: title "Reminder", presets, then "Cancel reminder" in the danger token', () => {
+    expect(REMINDER_CHANGE_TITLE).toBe('Reminder');
+    const html = renderToStaticMarkup(
+      <ReminderOptions preview="Ship it" onPick={noop} onCancelReminder={noop} />,
+    );
+    expect(html).toContain('data-reminder-row="tomorrow"');
+    expect(html.indexOf('data-reminder-row="cancel"')).toBeGreaterThan(
+      html.indexOf('data-reminder-row="custom"'),
+    );
+    expect(html).toContain(CANCEL_REMINDER_LABEL);
+    expect(html).toMatch(/data-reminder-row="cancel"[^>]*text-bad/);
+    const plain = renderToStaticMarkup(<ReminderOptions preview={null} onPick={noop} />);
+    expect(plain).not.toContain('data-reminder-row="cancel"');
+  });
+
+  it('change time sends a NEW id and the label updates at once', async () => {
+    const changed: Array<[string, { id: string; remindAt: Date } | null]> = [];
+    const h = harness(null, changed);
+    const when = new Date(Date.now() + 86_400_000);
+    await h.actions.setReminderAt({ messageId: 'm1', channelId: 'c1' }, when);
+    expect(h.rpcs[0]?.args.p_id).toBe('new-id');
+    expect(changed).toEqual([['m1', { id: 'new-id', remindAt: when }]]);
+  });
+
+  it('cancel calls chat_reminder_cancel, resolves true, and clears the label', async () => {
+    const changed: Array<[string, { id: string; remindAt: Date } | null]> = [];
+    const h = harness(null, changed);
+    const ok = await h.actions.cancelReminder(reminderRow({ id: 'r9', message_id: 'm3' }));
+    expect(ok).toBe(true);
+    expect(h.rpcs[0]).toEqual({
+      name: 'chat_reminder_cancel',
+      args: { p_id: 'r9', p_trace_id: 'trace-x' },
+    });
+    expect(changed).toEqual([['m3', null]]);
+    expect(REMINDER_CANCELLED_COPY).toBe('Reminder cancelled');
+    const failed = harness({ message: 'boom' }, []);
+    expect(await failed.actions.cancelReminder(reminderRow())).toBe(false);
+  });
+
+  it('the sheet opens in change mode for a message with a pending reminder', () => {
+    const ctx = source('../BellContext.tsx');
+    expect(ctx).toMatch(/pending !== null\s*\? \{ mode: 'change', reminder: pending, preview \}/);
+    expect(ctx).toContain('toast.show({ title: REMINDER_CANCELLED_COPY })');
+  });
+
+  it('no reminder icon on a bubble, anywhere', () => {
+    for (const file of ['../MessageThread.tsx', '../ThreadView.tsx', '../MessageAttachments.tsx']) {
+      const text = source(file);
+      expect(text).not.toContain('IconAlarmClock');
+      expect(text).not.toContain('pendingReminderFor');
+    }
   });
 });
 

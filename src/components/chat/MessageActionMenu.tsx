@@ -30,6 +30,7 @@ import { logger } from '@/lib/logger';
 import { DELETE_SELECTION_WINDOW_MS } from '@/lib/chat/forward';
 import { TYPE_LABEL, type ChatMark, type MarkType } from '@/lib/chat/marks';
 import type { ThreadMessage } from '@/lib/chat/thread';
+import { formatClock, formatSendLabel } from '@/lib/chat/scheduled';
 import { cn } from '@/lib/cn';
 
 /** Quick-react row offered when a message's action menu is opened; "+" opens the picker after it. */
@@ -169,6 +170,12 @@ interface MessageActionMenuProps {
    */
   canRemind?: boolean;
   onRemind?: () => void;
+  /**
+   * The viewer's pending reminder on this message (its remind_at): the same
+   * slot then reads "Reminder · <time>" and opens the sheet to change or
+   * cancel it. Never shown on the bubble itself.
+   */
+  reminderAt?: string | null;
 }
 
 /** One entry of the message action menu. */
@@ -187,6 +194,8 @@ export type MessageMenuItem =
       submenu?: boolean;
       /** A colour dot in place of the icon (the mark types). */
       dot?: MarkType;
+      /** A time after the label, in mono ("Reminder · 9:00 AM"). */
+      mono?: string;
     }
   | { kind: 'note'; key: string; label: string; icon: ReactNode }
   | { kind: 'divider'; key: string };
@@ -212,6 +221,7 @@ type MenuItemProps = Pick<
   | 'onSelect'
   | 'canRemind'
   | 'onRemind'
+  | 'reminderAt'
 >;
 
 /** The ban glyph (circle with a slash) for tombstones and the locked line. */
@@ -310,12 +320,16 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
     });
   }
   if (props.canRemind === true) {
+    const at = props.reminderAt != null ? new Date(props.reminderAt) : null;
     items.push({
       kind: 'action',
       key: 'remind',
-      label: 'Remind me',
+      label: at !== null && !Number.isNaN(at.getTime()) ? REMINDER_SET_LABEL : 'Remind me',
       icon: <IconAlarmClock />,
       run: () => props.onRemind?.(),
+      ...(at !== null && !Number.isNaN(at.getTime())
+        ? { mono: reminderMenuTime(at, new Date()) }
+        : {}),
     });
   }
   if (props.lockedByMark === true) {
@@ -463,7 +477,14 @@ function MenuRow(props: {
       >
         {icon}
       </span>
-      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+      <span className="min-w-0 flex-1 truncate">
+        {item.label}
+        {item.mono !== undefined ? (
+          <span data-menu-mono="" className="font-mono text-[13px] tabular-nums">
+            {item.mono}
+          </span>
+        ) : null}
+      </span>
       {item.hint !== undefined ? (
         <span className="shrink-0 text-[13px] text-fg-3">{item.hint}</span>
       ) : null}
@@ -917,22 +938,44 @@ export function EmojiPickerShell(props: {
  * picker is open). Motion is opacity + scale only. All colours
  * are design tokens, so light and dark stay at parity.
  */
+/** The reminder row's label when one is pending; the time follows in mono. */
+export const REMINDER_SET_LABEL = 'Reminder · ';
+
+/**
+ * A pending reminder's time for the menu, device-local: "3:20 PM" today, else
+ * "Tomorrow 9:00 AM" or "Wed 7 Oct, 11:30 AM". Pure.
+ */
+export function reminderMenuTime(at: Date, now: Date): string {
+  const label = formatSendLabel(at, now);
+  return label.startsWith('Today ') ? formatClock(at) : label;
+}
+
+type BellRemind = Pick<
+  NonNullable<ReturnType<typeof useBellOptional>>,
+  'canRemind' | 'openReminderFor'
+> &
+  Partial<Pick<NonNullable<ReturnType<typeof useBellOptional>>, 'pendingReminderFor'>>;
+
 /**
  * "Remind me" for the menu: the caller's own wiring when given, else the
- * bell's for the held bubble's row (its data-msg-id). Pure but for the lookup.
+ * bell's for the held bubble's row (its data-msg-id). With a pending reminder
+ * on that message (the bell's already-loaded list, no read here) the row
+ * carries its time and opens the sheet in change mode. Pure but for the lookup.
  */
 export function remindProps(
-  props: Pick<MessageActionMenuProps, 'canRemind' | 'onRemind'>,
-  bell: Pick<
-    NonNullable<ReturnType<typeof useBellOptional>>,
-    'canRemind' | 'openReminderFor'
-  > | null,
+  props: Pick<MessageActionMenuProps, 'canRemind' | 'onRemind' | 'reminderAt'>,
+  bell: BellRemind | null,
   held: HTMLElement | null | undefined,
-): Pick<MessageActionMenuProps, 'canRemind' | 'onRemind'> {
+): Pick<MessageActionMenuProps, 'canRemind' | 'onRemind' | 'reminderAt'> {
   if (props.canRemind !== undefined) return props;
   const messageId = held?.closest('[data-msg-id]')?.getAttribute('data-msg-id') ?? null;
   if (bell === null || messageId === null || !bell.canRemind(messageId)) return {};
-  return { canRemind: true, onRemind: () => bell.openReminderFor(messageId) };
+  const pending = bell.pendingReminderFor?.(messageId) ?? null;
+  return {
+    canRemind: true,
+    onRemind: () => bell.openReminderFor(messageId),
+    ...(pending !== null ? { reminderAt: pending.remind_at } : {}),
+  };
 }
 
 export function MessageActionMenu(props: MessageActionMenuProps): ReactElement | null {

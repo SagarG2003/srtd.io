@@ -123,6 +123,54 @@ test('Remind me from a held message, then Upcoming', async ({ page }) => {
   expectClean(network);
 });
 
+test('reminder state lives in the long-press menu: set, change, cancel', async ({ page }) => {
+  const network = await installHarnessNetwork(page);
+  await page.goto('/chat');
+  await page.getByText(PEER_NAME, { exact: true }).first().click();
+  await page.locator('[data-msg-id]').first().waitFor({ state: 'visible', timeout: 8000 });
+  await page.waitForTimeout(400);
+  const menu = page.getByRole('menu', { name: 'Message actions' });
+  const remind = menu.locator('[data-menu-item="remind"]');
+
+  // Set one from "Remind me".
+  await holdBubble(page, MENTION_PREVIEW);
+  await expect(remind).toHaveText('Remind me');
+  await remind.click();
+  await page
+    .getByRole('dialog', { name: 'Remind me' })
+    .locator('[data-reminder-row="tomorrow"]')
+    .click();
+  await expect(page.getByText(/^Reminder set for /)).toBeVisible();
+
+  // No reminder icon on any bubble.
+  await expect(page.locator('[data-bubble] [data-reminder-badge]')).toHaveCount(0);
+
+  // The same slot now reads "Reminder · <time>", the time in mono.
+  await holdBubble(page, MENTION_PREVIEW);
+  await expect(remind).toContainText('Reminder · ');
+  await expect(remind.locator('[data-menu-mono]')).toHaveText('Tomorrow 9:00 AM');
+  await page.waitForTimeout(250);
+  await shot(page, 'ui3-remind-1-menu-set');
+
+  // Change mode: "Reminder", the presets, then "Cancel reminder".
+  await remind.click();
+  const sheet = page.getByRole('dialog', { name: 'Reminder' });
+  await expect(sheet.locator('[data-reminder-row="1h"]')).toBeVisible();
+  await expect(sheet.locator('[data-reminder-row="cancel"]')).toHaveText('Cancel reminder');
+  await page.waitForTimeout(300);
+  await shot(page, 'ui3-remind-2-change-sheet');
+  await sheet.locator('[data-reminder-row="cancel"]').click();
+  await expect(page.getByText('Reminder cancelled')).toBeVisible();
+  const stored = network.world.tables.chat_message_reminders ?? [];
+  expect(stored.every((r) => r.cancelled_at !== null)).toBe(true);
+
+  // Back to "Remind me".
+  await holdBubble(page, MENTION_PREVIEW);
+  await expect(remind).toHaveText('Remind me');
+  await shot(page, 'ui3-remind-3-menu-cleared');
+  expectClean(network);
+});
+
 test('a reminder fires while the app is open: toast, then it shows in Now', async ({ page }) => {
   const network = await installHarnessNetwork(page);
   const start = new Date();

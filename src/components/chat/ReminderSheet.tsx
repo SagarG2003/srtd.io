@@ -2,16 +2,19 @@
 // 1 hour, 3 hours, Tomorrow 9:00 AM, Next week on Monday 9:00 AM) and Custom,
 // the same Custom step as the Schedule sheet (native date and time inputs, 1
 // minute to 365 days ahead). Device-local times in mono, the zone named in the
-// footer from Intl. Used for a new reminder and for Change time. Tokens only;
-// the Sheet moves on translateY only.
+// footer from Intl. Used for a new reminder and, in change mode (a reminder is
+// already pending: Change time from Upcoming, or "Reminder · <time>" from the
+// message menu), titled "Reminder" with a "Cancel reminder" row in the danger
+// token under the presets. Tokens only; the Sheet moves on translateY only.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactElement } from 'react';
 import { Sheet } from '@/components/ui/Sheet';
 import { Button } from '@/components/ui/Button';
-import { IconAlarmClock, IconChevronRight } from '@/components/ui/icons';
+import { IconAlarmClock, IconChevronRight, IconX } from '@/components/ui/icons';
 import { cn } from '@/lib/cn';
 import { NO_TOUCH_SELECT } from '@/components/chat/chat-type';
+import { useBellOptional } from '@/components/chat/BellContext';
 import { zoneLine } from '@/components/chat/ScheduleSheet';
 import {
   dateInputValue,
@@ -28,6 +31,9 @@ import {
 } from '@/lib/chat/reminders';
 
 export const REMINDER_SHEET_TITLE = 'Remind me';
+/** The sheet's title while a reminder is pending (change mode). */
+export const REMINDER_CHANGE_TITLE = 'Reminder';
+export const CANCEL_REMINDER_LABEL = 'Cancel reminder';
 export const REMINDER_HELPER = 'Any time from 1 minute to 1 year ahead.';
 
 /** A preset row's right text: "3:20 PM" today, else "Sun 4 Oct, 9:00 AM". Pure. */
@@ -44,6 +50,8 @@ export function presetDetail(preset: ReminderPreset, now: Date): string {
 export function ReminderOptions(props: {
   preview: string | null;
   onPick: (at: Date) => void;
+  /** Change mode: a "Cancel reminder" row after the presets. */
+  onCancelReminder?: (() => void) | undefined;
 }): ReactElement {
   const [step, setStep] = useState<'presets' | 'custom'>('presets');
   const now = new Date();
@@ -80,6 +88,9 @@ export function ReminderOptions(props: {
             />
           ))}
           <PresetRow id="custom" label="Custom" onClick={() => setStep('custom')} />
+          {props.onCancelReminder !== undefined ? (
+            <CancelReminderRow onClick={props.onCancelReminder} />
+          ) : null}
         </ul>
       ) : (
         <div data-reminder-custom="" className="flex flex-col gap-3">
@@ -158,13 +169,46 @@ function PresetRow(props: {
   );
 }
 
-/** The Remind me sheet (both layouts; the Sheet centres on wide screens). */
+/** Change mode's last row: cancels the pending reminder, in the danger token. */
+function CancelReminderRow(props: { onClick: () => void }): ReactElement {
+  return (
+    <li className="mt-1 border-t border-border pt-1">
+      <button
+        type="button"
+        data-reminder-row="cancel"
+        onClick={props.onClick}
+        className="flex min-h-[56px] w-full items-center gap-3 rounded-md px-2 text-left text-bad hover:bg-bad-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-bad-soft text-bad">
+          <IconX size={20} />
+        </span>
+        <span className="flex-1 text-[15px] font-medium">{CANCEL_REMINDER_LABEL}</span>
+      </button>
+    </li>
+  );
+}
+
+/**
+ * The Remind me sheet (both layouts; the Sheet centres on wide screens). Change
+ * mode comes from `change`, else from the bell's target when it is a change.
+ */
 export function ReminderSheet(props: {
   open: boolean;
   onClose: () => void;
   preview: string | null;
   onPick: (at: Date) => void;
+  change?: { onCancelReminder: () => void } | undefined;
 }): ReactElement {
+  const bell = useBellOptional();
+  const live =
+    props.change ??
+    (bell !== null && bell.reminderTarget?.mode === 'change'
+      ? { onCancelReminder: () => void bell.cancelReminderFromSheet() }
+      : undefined);
+  // The mode stays as opened while the sheet slides away (the target clears first).
+  const openedAs = useRef(live);
+  if (props.open) openedAs.current = live;
+  const change = props.open ? live : openedAs.current;
   // A fresh options state (presets step, default custom values) per opening.
   const [openings, setOpenings] = useState(0);
   useEffect(() => {
@@ -174,7 +218,7 @@ export function ReminderSheet(props: {
     <Sheet
       open={props.open}
       onClose={props.onClose}
-      title={REMINDER_SHEET_TITLE}
+      title={change !== undefined ? REMINDER_CHANGE_TITLE : REMINDER_SHEET_TITLE}
       footer={
         <>
           <span data-reminder-zone="" className="flex-1 text-xs text-fg-2">
@@ -186,7 +230,12 @@ export function ReminderSheet(props: {
         </>
       }
     >
-      <ReminderOptions key={openings} preview={props.preview} onPick={props.onPick} />
+      <ReminderOptions
+        key={openings}
+        preview={props.preview}
+        onPick={props.onPick}
+        onCancelReminder={change?.onCancelReminder}
+      />
     </Sheet>
   );
 }

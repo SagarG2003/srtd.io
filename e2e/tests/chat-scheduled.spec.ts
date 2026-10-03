@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { installHarnessNetwork, type HarnessNetwork } from '../fixtures/harness-routes';
+import { installHarnessNetwork, solidPng, type HarnessNetwork } from '../fixtures/harness-routes';
 import {
   DM_CHANNEL,
   GROUP_CHANNEL,
@@ -276,6 +276,91 @@ test.describe('phone', () => {
     await expect(confirm.getByRole('button', { name: 'Keep' })).toBeVisible();
     await confirm.getByRole('button', { name: 'Cancel message' }).click();
     await expect(strip).toContainText('1 scheduled message');
+    expectClean(network);
+  });
+});
+
+/** Pick a photo through the composer's Photos input (the tray's own picker). */
+async function pickPhoto(page: Page, name: string): Promise<void> {
+  const input = composer(page).locator('input[type="file"]').first();
+  test.skip((await input.count()) === 0, 'no upload endpoint in this env: attaching is off');
+  await input.setInputFiles({
+    name,
+    mimeType: 'image/png',
+    buffer: solidPng(64, 48, [200, 120, 60]),
+  });
+  await expect(composer(page).getByText(name)).toBeVisible();
+}
+
+test.describe('phone: photos and files (UI-3)', () => {
+  test('pick a photo, hold Send, Tomorrow: the card shows its thumbnail; Edit is text only', async ({
+    page,
+  }) => {
+    const network = await installHarnessNetwork(page);
+    await openChat(page, PEER_NAME);
+    const before = await page.locator('[data-msg-id]').count();
+    await pickPhoto(page, 'moodboard.png');
+
+    // S1: a photo alone can be scheduled; the preview names it.
+    await holdSend(page);
+    const sheet = page.getByRole('dialog', { name: 'Schedule message' });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.locator('[data-schedule-preview]')).toHaveText(`To ${PEER_NAME}: 1 photo`);
+
+    // S2: the upload runs first; the composer locks and Send reads "Scheduling...".
+    const gate = network.holdUploads();
+    await sheet.locator('[data-schedule-row="tomorrow"]').click();
+    await expect(page.locator('[data-scheduling]')).toHaveText('Scheduling...');
+    await expect(composer(page).locator('[data-schedule-upload-bar]')).toBeVisible();
+    await page.waitForTimeout(200);
+    await shot(page, 'ui3-1-uploading');
+    gate.release();
+
+    await expect(page.getByText('Scheduled for tomorrow 9:00 AM')).toBeVisible();
+    await expect(composer(page).getByText('moodboard.png')).toHaveCount(0);
+    expect(network.uploads).toEqual(['moodboard.png']);
+    const stored = network.world.tables.chat_scheduled_messages ?? [];
+    expect(stored).toHaveLength(1);
+    const ids = stored[0]?.attachment_asset_ids as string[];
+    expect(ids).toHaveLength(1);
+    expect(stored[0]?.attachment_meta).toEqual({
+      [ids[0] as string]: { mime: 'image/png', name: 'moodboard.png', size: expect.any(Number) },
+    });
+    expect(await page.locator('[data-msg-id]').count()).toBe(before);
+
+    // S4: the strip and the card show the thumbnail.
+    const strip = page.locator('[data-scheduled-strip]');
+    await expect(strip.locator('[data-scheduled-thumb]')).toHaveCount(1);
+    await page.waitForTimeout(300);
+    await shot(page, 'ui3-2-strip-thumb');
+    await strip.click();
+    const list = page.getByRole('dialog', { name: 'Scheduled in this chat' });
+    const card = list.locator('[data-scheduled-card]');
+    await expect(card.locator('[data-scheduled-thumb] img')).toBeVisible();
+    await page.waitForTimeout(400);
+    await shot(page, 'ui3-3-card-thumb');
+
+    // S5: Edit is text only; the files are read-only with the line.
+    await card.getByRole('button', { name: 'Edit' }).click();
+    const files = card.locator('[data-scheduled-files-readonly]');
+    await expect(files).toContainText('To change files, cancel and schedule again.');
+    await expect(files.locator('[data-scheduled-thumb]')).toHaveCount(1);
+    await page.waitForTimeout(300);
+    await shot(page, 'ui3-4-edit-files-readonly');
+    expectClean(network);
+  });
+
+  test('a normal tap-send with photos is unchanged', async ({ page }) => {
+    const network = await installHarnessNetwork(page);
+    await openChat(page, PEER_NAME);
+    await pickPhoto(page, 'final-cut.png');
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(page.locator('[data-album]').last()).toBeVisible();
+    await expect(composer(page).getByText('final-cut.png')).toHaveCount(0);
+    await expect.poll(() => network.uploads).toEqual(['final-cut.png']);
+    expect(network.world.tables.chat_scheduled_messages ?? []).toEqual([]);
+    await page.waitForTimeout(400);
+    await shot(page, 'ui3-5-tap-send-photo');
     expectClean(network);
   });
 });

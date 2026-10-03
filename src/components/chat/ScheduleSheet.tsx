@@ -28,10 +28,29 @@ import {
 export const SCHEDULE_SHEET_TITLE = 'Schedule message';
 export const SCHEDULE_HELPER = 'Any time from 1 minute to 1 year ahead.';
 
-/** "To <chat name>: <draft text>", or null without a draft. Pure. */
-export function schedulePreview(chatName: string, draftText: string): string | null {
+/** "1 photo", "3 photos", "2 files", "2 photos, 1 file"; '' for none. Pure. */
+export function filesLabel(files: { photos: number; others: number }): string {
+  const part = (n: number, one: string): string => (n === 1 ? `1 ${one}` : `${n} ${one}s`);
+  return [
+    files.photos > 0 ? part(files.photos, 'photo') : '',
+    files.others > 0 ? part(files.others, 'file') : '',
+  ]
+    .filter((p) => p !== '')
+    .join(', ');
+}
+
+/**
+ * "To <chat name>: <draft text>", or, for picked files with no text, "To <chat
+ * name>: 2 photos"; null without either. Pure.
+ */
+export function schedulePreview(
+  chatName: string,
+  draftText: string,
+  files: { photos: number; others: number } = { photos: 0, others: 0 },
+): string | null {
   const text = draftText.replace(/\s+/g, ' ').trim();
-  return text === '' ? null : `To ${chatName}: ${text}`;
+  const shown = text !== '' ? text : filesLabel(files);
+  return shown === '' ? null : `To ${chatName}: ${shown}`;
 }
 
 /** The footer's zone line. Pure over `now`. */

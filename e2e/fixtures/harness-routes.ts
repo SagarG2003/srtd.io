@@ -18,6 +18,7 @@ import {
 const SUPABASE_HOST = 'harness.supabase.test';
 const CHAT_TOKEN_HOST = 'chat-token.harness.test';
 const ASSET_READ_HOST = 'asset-read.harness.test';
+const ASSET_UPLOAD_HOST = 'asset-upload.harness.test';
 
 function base64url(value: object): string {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -218,12 +219,14 @@ const RPC: Record<string, RpcHandler> = {
       sender_user_id: ME,
       body: typeof args.p_body === 'string' ? args.p_body : null,
       mentions: Array.isArray(args.p_mentions) ? args.p_mentions : null,
-      attachment_asset_ids: null,
+      attachment_asset_ids: Array.isArray(args.p_attachment_asset_ids)
+        ? args.p_attachment_asset_ids
+        : null,
       shared_post_ids: Array.isArray(args.p_shared_post_ids) ? args.p_shared_post_ids : null,
       shared_brief_ids: null,
       reply_to_message_id: replyTo,
       forwarded_from_message_id: null,
-      attachment_meta: null,
+      attachment_meta: isObject(args.p_attachment_meta) ? args.p_attachment_meta : null,
       agora_event_id: null,
       created_at: new Date().toISOString(),
       edited_at: null,
@@ -244,8 +247,10 @@ const RPC: Record<string, RpcHandler> = {
       sender_user_id: ME,
       body: typeof args.p_body === 'string' ? args.p_body : null,
       mentions: Array.isArray(args.p_mentions) ? args.p_mentions : null,
-      attachment_asset_ids: null,
-      attachment_meta: null,
+      attachment_asset_ids: Array.isArray(args.p_attachment_asset_ids)
+        ? args.p_attachment_asset_ids
+        : null,
+      attachment_meta: isObject(args.p_attachment_meta) ? args.p_attachment_meta : null,
       shared_post_ids: Array.isArray(args.p_shared_post_ids) ? args.p_shared_post_ids : null,
       shared_brief_ids: Array.isArray(args.p_shared_brief_ids) ? args.p_shared_brief_ids : null,
       reply_to_message_id:
@@ -290,11 +295,17 @@ const RPC: Record<string, RpcHandler> = {
             p_mentions: row.mentions,
             p_shared_post_ids: row.shared_post_ids,
             p_reply_to_message_id: row.reply_to_message_id,
+            p_attachment_asset_ids: row.attachment_asset_ids,
+            p_attachment_meta: row.attachment_meta,
           },
           tables,
         );
   },
 };
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 /** A refused record write (the proc raised): the send shows "Not sent" with its alert. */
 function refusedSend(name: string, args: Record<string, unknown>): boolean {
@@ -313,6 +324,10 @@ export interface HarnessNetwork {
   blocked: string[];
   /** Gate chat_messages reads until release() so a test can see first paint. */
   holdHistory: () => { release: () => void };
+  /** Every file name the asset-upload stub received, in order. */
+  uploads: string[];
+  /** Gate asset uploads until release() so a test can see them in flight. */
+  holdUploads: () => { release: () => void };
 }
 
 export async function installHarnessNetwork(page: Page): Promise<HarnessNetwork> {
@@ -320,6 +335,8 @@ export async function installHarnessNetwork(page: Page): Promise<HarnessNetwork>
   const unmatched: string[] = [];
   const blocked: string[] = [];
   let historyGate: Promise<void> | null = null;
+  const uploads: string[] = [];
+  let uploadGate: Promise<void> | null = null;
 
   await page.addInitScript((session) => {
     window.localStorage.setItem('sb-harness-auth-token', session);
@@ -438,11 +455,33 @@ export async function installHarnessNetwork(page: Page): Promise<HarnessNetwork>
       });
       return;
     }
+    if (url.hostname === ASSET_UPLOAD_HOST && method === 'POST') {
+      // The asset-upload Worker's answer: a fresh asset and version per file.
+      if (uploadGate) await uploadGate;
+      const body = request.postDataBuffer()?.toString('latin1') ?? '';
+      const name = /filename="([^"]+)"/.exec(body)?.[1] ?? 'file';
+      uploads.push(name);
+      const n = String(uploads.length).padStart(12, '0');
+      await route.fulfill({
+        status: 200,
+        headers: { ...CORS, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          asset: {
+            assetId: `0190f000-0000-7000-8000-${n}`,
+            versionId: `0190f100-0000-7000-8000-${n}`,
+            reused: false,
+          },
+        }),
+      });
+      return;
+    }
     blocked.push(request.url());
     await route.abort('blockedbyclient');
   };
 
-  await page.route(/^(?!https?:\/\/localhost[:/])/, handle);
+  // The page's own object URLs (picked-file previews; WebKit routes them) never
+  // leave the page, so they are not routed.
+  await page.route(/^(?!https?:\/\/localhost[:/]|blob:)/, handle);
   // page.route never sees WebSockets. A socket to a fixture host is accepted
   // and left silent (no server behind it); any other socket is closed and
   // recorded as blocked.
@@ -462,6 +501,17 @@ export async function installHarnessNetwork(page: Page): Promise<HarnessNetwork>
       historyGate = new Promise<void>((resolve) => {
         release = () => {
           historyGate = null;
+          resolve();
+        };
+      });
+      return { release };
+    },
+    uploads,
+    holdUploads: () => {
+      let release = (): void => {};
+      uploadGate = new Promise<void>((resolve) => {
+        release = () => {
+          uploadGate = null;
           resolve();
         };
       });
