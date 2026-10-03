@@ -95,6 +95,8 @@ export function InChatSearchBar(props: InChatSearchBarProps): ReactElement {
       : null,
   );
   const anchorPagesRef = useRef(0);
+  // Rendered twin of anchorRef: the counter hides while the bar pages to the hit.
+  const [anchoring, setAnchoring] = useState(props.anchorMessageId !== null);
   // The query whose results the index has been placed on.
   const placedRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
@@ -123,18 +125,24 @@ export function InChatSearchBar(props: InChatSearchBarProps): ReactElement {
       const at = state.hits.findIndex((h) => h.id === anchor.id);
       if (at !== -1) {
         anchorRef.current = null;
+        setAnchoring(false);
         placedRef.current = state.query;
         setIndex(at);
         return;
       }
-      if (state.hasMore && anchorPagesRef.current < ANCHOR_PAGE_CAP) {
-        if (!state.loadingMore && !state.moreFailed) {
+      if (state.hasMore && !state.moreFailed && anchorPagesRef.current < ANCHOR_PAGE_CAP) {
+        if (!state.loadingMore) {
           anchorPagesRef.current += 1;
           void runner?.loadMore();
         }
         return;
       }
+      // Not found: the thread stays on the tapped message (no jump away).
       anchorRef.current = null;
+      setAnchoring(false);
+      placedRef.current = state.query;
+      setIndex(0);
+      return;
     }
     placedRef.current = state.query;
     setIndex(0);
@@ -173,7 +181,8 @@ export function InChatSearchBar(props: InChatSearchBarProps): ReactElement {
   };
   const close = (): void => closeInChatSearch({ runner, onTermsChange, onClose });
 
-  const counter = inChatCounter(state, query, index);
+  // While the bar still pages to the tapped hit, its place is unknown: no counter.
+  const counter = anchoring ? null : inChatCounter(state, query, index);
   const ready = counter !== null;
   const failed =
     searchQueryReady(query) &&
@@ -197,9 +206,19 @@ export function InChatSearchBar(props: InChatSearchBarProps): ReactElement {
         value={query}
         // From the header icon the keyboard comes up; from a home hit the match shows first.
         autoFocus={props.anchorMessageId === null}
-        onChange={(e) => setQuery(e.target.value)}
+        onChange={(e) => {
+          // A new query is placed afresh, even when retyped to an earlier one.
+          if (normalizeQuery(e.target.value) !== normalizeQuery(query)) {
+            placedRef.current = null;
+            // Typing over the tapped hit's query drops the anchor.
+            anchorRef.current = null;
+            setAnchoring(false);
+          }
+          setQuery(e.target.value);
+        }}
         onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
-          if (e.key !== 'Enter') return;
+          // Enter while an IME is composing commits the word, never steps.
+          if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
           e.preventDefault();
           void older();
         }}

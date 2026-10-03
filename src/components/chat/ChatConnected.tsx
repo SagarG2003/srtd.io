@@ -542,14 +542,18 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     query: string;
     seq: number;
   } | null>(null);
+  // Only ever counts up: a taken request goes back to null, and the next tap
+  // in the same open chat must still read as new.
+  const searchSeqRef = useRef(0);
   const openSearchHit = useCallback(
     (channel: ChannelSummary, messageId: string, query: string) => {
-      setSearchRequest((prev) => ({
+      searchSeqRef.current += 1;
+      setSearchRequest({
         channelId: channel.channelId,
         messageId,
         query,
-        seq: (prev?.seq ?? 0) + 1,
-      }));
+        seq: searchSeqRef.current,
+      });
       openChannel(channel);
     },
     [openChannel],

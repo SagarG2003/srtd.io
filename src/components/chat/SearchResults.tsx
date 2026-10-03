@@ -320,5 +320,10 @@ export function SearchResults(
     return () => observer.disconnect();
   }, [runner, hasMore, loadingMore, moreFailed, props.state.hits.length]);
   const onRetry = useCallback(() => runner?.retry(), [runner]);
-  return <div ref={rootRef}>{searchResultsView({ ...props, onRetry, sentinelRef })}</div>;
+  // No runner (no workspace): nothing can be searched, so no skeleton forever.
+  const state: SearchState =
+    runner === null
+      ? { ...IDLE_SEARCH, query: normalizeQuery(props.query), status: 'ready' }
+      : props.state;
+  return <div ref={rootRef}>{searchResultsView({ ...props, state, onRetry, sentinelRef })}</div>;
 }

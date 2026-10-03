@@ -120,5 +120,18 @@ test.describe('laptop', () => {
     await runSearchFlow(page, async (name) => {
       await page.screenshot({ path: testInfo.outputPath(`search-laptop-${name}.png`) });
     });
+    // The list stays beside the thread: a second hit in the same open chat
+    // jumps again and reopens the bar on that match.
+    const hits = page.locator('[data-search-hit]');
+    const firstChat = await hits.nth(0).getAttribute('aria-label');
+    const sameChat = hits
+      .filter({ has: page.locator(':scope') })
+      .locator(`xpath=self::*[@aria-label=${JSON.stringify(firstChat)}]`);
+    await expect(sameChat).toHaveCount(3);
+    await sameChat.nth(1).click();
+    const bar = page.locator('[data-chat-search-bar]');
+    await expect(bar.locator('[data-search-counter]')).toHaveText(/^2 of \d+\+?$/);
+    await sameChat.nth(0).click();
+    await expect(bar.locator('[data-search-counter]')).toHaveText(/^1 of \d+\+?$/);
   });
 });
