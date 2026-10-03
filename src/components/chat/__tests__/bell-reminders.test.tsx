@@ -380,6 +380,7 @@ function harness(error: { message: string } | null = null) {
     notify: (title) => toasts.push(title),
     goToMessage: (channelId, messageId) => events.push(`go:${channelId}:${messageId}`),
     openChannelSheet: (channelId) => events.push(`sheet:${channelId}`),
+    failedRow: (id) => (id === 'gone' ? undefined : scheduledRow({ id, status: 'failed' })),
     remindersChanged: () => events.push('reminders-changed'),
   };
   return { actions: createBellActions(deps), rpcs, events, toasts };
@@ -442,6 +443,19 @@ describe('actions', () => {
     );
     expect(gone.toasts).toEqual([]);
     expect(gone.events).toContain('reload');
+  });
+
+  it('Edit or Retry on a row already resolved elsewhere clears the stale entry', async () => {
+    const h = harness();
+    h.actions.editFailed(
+      entry({ id: 'f1', event_type: 'scheduled_failed', payload: { scheduled_id: 'gone' } }),
+    );
+    await flush();
+    await h.actions.retryFailed(
+      entry({ id: 'f2', event_type: 'scheduled_failed', payload: { scheduled_id: 'gone' } }),
+    );
+    expect(h.rpcs.map((r) => r.name)).toEqual(['inbox_mark_read', 'inbox_mark_read']);
+    expect(h.events).not.toContain('sheet:c1');
   });
 
   it("Edit opens that chat's scheduled sheet", () => {

@@ -273,6 +273,16 @@ function fail<T>(message: string): Result<T> {
   return { ok: false, error: { code: 'unknown', message } };
 }
 
+/** The most ids one IN read carries. */
+export const IN_CHUNK = 100;
+
+/** Split ids into IN-sized chunks. Pure. */
+export function chunked(ids: readonly string[], size: number = IN_CHUNK): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+}
+
 function unique(values: readonly (string | null)[]): string[] {
   return [...new Set(values.filter((v): v is string => v !== null && v !== ''))];
 }
@@ -400,24 +410,32 @@ export async function readBellMessages(
 ): Promise<Map<string, BellMessage>> {
   const out = new Map<string, BellMessage>();
   if (messageIds.length === 0) return out;
-  const res = await client
-    .from('chat_messages')
-    .select(
-      'id, channel_id, sender_user_id, body, attachment_asset_ids, shared_post_ids, shared_brief_ids',
-    )
-    .in('id', [...messageIds])
-    .is('deleted_at', null);
-  if (res.error !== null) return out;
-  for (const r of res.data ?? []) {
-    out.set(r.id, {
-      id: r.id,
-      channelId: r.channel_id,
-      senderUserId: r.sender_user_id,
-      body: r.body,
-      hasAttachments: (r.attachment_asset_ids ?? []).length > 0,
-      hasPosts: (r.shared_post_ids ?? []).length > 0,
-      hasBriefs: (r.shared_brief_ids ?? []).length > 0,
-    });
+  // IN lists of at most IN_CHUNK ids keep each request URL short; the chunks
+  // run in parallel (a fixed number of reads per load, never one per row).
+  const results = await Promise.all(
+    chunked(messageIds).map((ids) =>
+      client
+        .from('chat_messages')
+        .select(
+          'id, channel_id, sender_user_id, body, attachment_asset_ids, shared_post_ids, shared_brief_ids',
+        )
+        .in('id', ids)
+        .is('deleted_at', null),
+    ),
+  );
+  for (const res of results) {
+    if (res.error !== null) continue;
+    for (const r of res.data ?? []) {
+      out.set(r.id, {
+        id: r.id,
+        channelId: r.channel_id,
+        senderUserId: r.sender_user_id,
+        body: r.body,
+        hasAttachments: (r.attachment_asset_ids ?? []).length > 0,
+        hasPosts: (r.shared_post_ids ?? []).length > 0,
+        hasBriefs: (r.shared_brief_ids ?? []).length > 0,
+      });
+    }
   }
   return out;
 }

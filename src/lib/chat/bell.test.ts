@@ -285,6 +285,19 @@ describe('loadBell: batched, no N+1', () => {
     ).toBe(true);
   });
 
+  it('IN reads are chunked to keep request URLs short', async () => {
+    const { chunked, readBellMessages } = await import('@/lib/chat/bell');
+    expect(chunked(Array.from({ length: 250 }, (_, i) => String(i))).map((c) => c.length)).toEqual([
+      100, 100, 50,
+    ]);
+    const { client, reads } = recordingClient({});
+    await readBellMessages(
+      client,
+      Array.from({ length: 150 }, (_, i) => `m${i}`),
+    );
+    expect(reads.filter((r) => r.table === 'chat_messages')).toHaveLength(2);
+  });
+
   it('a failed primary read fails the load', async () => {
     const { client } = recordingClient({});
     const broken = {

@@ -144,6 +144,8 @@ export interface BellActionDeps {
   notify: (title: string) => void;
   goToMessage: (channelId: string | null, messageId: string | null) => void;
   openChannelSheet: (channelId: string) => void;
+  /** The scheduled row behind a scheduled_failed entry, when loaded. */
+  failedRow: (scheduledId: string) => ScheduledRow | undefined;
   remindersChanged: () => void;
 }
 
@@ -224,6 +226,11 @@ export function createBellActions(deps: BellActionDeps): BellActions {
     },
     async retryFailed(entry) {
       if (entry.scheduledId === null) return;
+      // Sent, cancelled or edited elsewhere: the entry is stale, clear it.
+      if (deps.failedRow(entry.scheduledId)?.status !== 'failed') {
+        await markRead(entry, 'stale failed read');
+        return;
+      }
       const traceId = deps.newTraceId();
       const res = await sendScheduledNow({ client: deps.client, id: entry.scheduledId, traceId });
       if (!res.ok) {
@@ -233,6 +240,10 @@ export function createBellActions(deps: BellActionDeps): BellActions {
       deps.reload();
     },
     editFailed(entry) {
+      if (entry.scheduledId !== null && deps.failedRow(entry.scheduledId)?.status !== 'failed') {
+        void markRead(entry, 'stale failed read');
+        return;
+      }
       if (entry.channelId !== null) deps.openChannelSheet(entry.channelId);
     },
     async setReminderAt(target, at) {
@@ -354,6 +365,7 @@ export function BellProvider(props: {
   useEffect(() => {
     setStatus('loading');
     setData(EMPTY_BELL);
+    dataRef.current = EMPTY_BELL;
     reload();
   }, [reload]);
 
@@ -460,6 +472,7 @@ export function BellProvider(props: {
         notify: (title) => toast.show({ title }),
         goToMessage,
         openChannelSheet,
+        failedRow: (id) => dataRef.current.failed.get(id),
         remindersChanged: announceRemindersChanged,
       }),
     [workspaceId, reload, failed, toast, goToMessage, openChannelSheet],
