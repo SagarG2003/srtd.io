@@ -80,6 +80,8 @@ export function deleteSelectionBlock(
   messages: readonly ThreadMessage[],
   marks: Map<string, ChatMark>,
   nowMs: number,
+  /** Notes: own notes delete at any age (no 30 minute window). */
+  noWindow = false,
 ): DeleteBlock | null {
   if (selected.size === 0) return null;
   const byId = new Map(messages.map((m) => [m.id, m]));
@@ -92,6 +94,7 @@ export function deleteSelectionBlock(
     }
     if (marks.has(id)) hit.add('marked');
     const created = Date.parse(message.createdAt);
+    if (noWindow) continue;
     if (Number.isNaN(created) || nowMs - created > DELETE_SELECTION_WINDOW_MS) hit.add('old');
   }
   return DELETE_BLOCK_PRIORITY.find((block) => hit.has(block)) ?? null;
@@ -169,7 +172,13 @@ export function forwardPickerChannels(
   summaryFor: (channelId: string) => RecencySummary | undefined,
   query: string,
 ): ChannelSummary[] {
-  return filterChannelsByName(sortChannelsByRecency(channels, summaryFor), query);
+  // Personal notes is always first (D9); the rest by recency.
+  const notes = channels.filter((c) => c.channelType === 'notes');
+  const rest = sortChannelsByRecency(
+    channels.filter((c) => c.channelType !== 'notes'),
+    summaryFor,
+  );
+  return filterChannelsByName([...notes, ...rest], query);
 }
 
 /** Toggle a chat in the picker's selection (new Set). */

@@ -559,7 +559,7 @@ export function BellProvider(props: {
       failed(what, traceId, res.message, mapped === null ? null : mapped);
       return false;
     };
-    const channelType = (channelId: string): 'dm' | 'group' | undefined =>
+    const channelType = (channelId: string): ChannelSummary['channelType'] | undefined =>
       props.roster.find((c) => c.channelId === channelId)?.channelType;
     return {
       onSendNow: async (row: ScheduledRow): Promise<void> => {

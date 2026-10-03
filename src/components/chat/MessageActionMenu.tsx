@@ -102,6 +102,8 @@ export function ownMessageActions(
   message: Pick<ThreadMessage, 'mine' | 'state' | 'createdAt' | 'body' | 'deleted'>,
   mark: ChatMark | undefined,
   nowMs: number,
+  /** Notes: Delete has no window (Edit keeps its 15 minutes). */
+  notes = false,
 ): OwnMessageActions {
   const none = { canEdit: false, canDelete: false, lockedByMark: false };
   if (!message.mine || message.state !== 'sent' || message.deleted === true) return none;
@@ -112,7 +114,7 @@ export function ownMessageActions(
   const age = nowMs - created;
   return {
     canEdit: message.body.trim() !== '' && age <= EDIT_WINDOW_MS,
-    canDelete: age <= DELETE_WINDOW_MS,
+    canDelete: notes || age <= DELETE_WINDOW_MS,
     lockedByMark: false,
   };
 }
@@ -161,6 +163,14 @@ interface MessageActionMenuProps {
   onDelete?: () => void;
   /** Own marked message: the single disabled line in place of Edit and Delete. */
   lockedByMark?: boolean;
+  /**
+   * Offers "Save to notes", between Copy and Remind me (a recorded, live
+   * message in any chat but notes).
+   */
+  canSaveToNotes?: boolean;
+  onSaveToNotes?: () => void;
+  /** The menu is in Personal notes: Delete carries no "30 min" hint. */
+  notes?: boolean;
   /** Offers "Select" (multi-select forward and delete). */
   canSelect?: boolean;
   onSelect?: () => void;
@@ -217,6 +227,9 @@ type MenuItemProps = Pick<
   | 'canDelete'
   | 'onDelete'
   | 'lockedByMark'
+  | 'canSaveToNotes'
+  | 'onSaveToNotes'
+  | 'notes'
   | 'canSelect'
   | 'onSelect'
   | 'canRemind'
@@ -245,6 +258,29 @@ export function BanGlyph(props: { size?: number }): ReactElement {
   );
 }
 
+/** The menu row that copies a message into Personal notes. */
+export const SAVE_TO_NOTES_LABEL = 'Save to notes';
+
+/** The Save to notes glyph: a bookmark, drawn like the icon set (stroke 1.7). */
+export function SaveToNotesGlyph(props: { size?: number }): ReactElement {
+  const size = props.size ?? 18;
+  return (
+    <svg
+      aria-hidden="true"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M6 3h12v18l-6-4-6 4z" />
+    </svg>
+  );
+}
+
 /** The Transcribe row's glyph: three text lines, drawn like the icon set (stroke 1.7). */
 export function TranscribeGlyph(props: { size?: number }): ReactElement {
   const size = props.size ?? 18;
@@ -266,8 +302,9 @@ export function TranscribeGlyph(props: { size?: number }): ReactElement {
 }
 
 /**
- * The main view in display order: Reply, Forward, Copy or Transcribe, "Mark as" (or the
- * static "Marked as <type>"), "Remind me", Edit, Delete (or the locked line), then Select
+ * The main view in display order: Reply, Forward, Copy or Transcribe, "Save to notes",
+ * "Mark as" (or the static "Marked as <type>"), "Remind me", Edit, Delete (or the locked
+ * line), then Select
  * under a divider. Rows that do not apply are not rendered. Pure (no hooks) so
  * the row set is unit-tested without a DOM.
  */
@@ -300,6 +337,15 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
       label: 'Transcribe',
       icon: <TranscribeGlyph />,
       run: () => props.onTranscribe?.(),
+    });
+  }
+  if (props.canSaveToNotes === true) {
+    items.push({
+      kind: 'action',
+      key: 'save-notes',
+      label: SAVE_TO_NOTES_LABEL,
+      icon: <SaveToNotesGlyph />,
+      run: () => props.onSaveToNotes?.(),
     });
   }
   if (props.markedAs != null) {
@@ -351,7 +397,7 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
         key: 'delete',
         label: 'Delete',
         icon: <IconTrash />,
-        hint: '30 min',
+        ...(props.notes === true ? {} : { hint: '30 min' }),
         danger: true,
         run: () => props.onDelete?.(),
       });

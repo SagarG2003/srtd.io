@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import { Avatar } from '@/components/ui/Avatar';
+import { NotesAvatar } from '@/components/chat/NotesBits';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Sheet } from '@/components/ui/Sheet';
@@ -35,6 +36,30 @@ interface ForwardPickerProps {
   onSend: (targets: ChannelSummary[]) => Promise<ForwardSendResult>;
   /** Called after every chat received every message. */
   onSent: () => void;
+}
+
+/**
+ * A picker row's avatar: the notes avatar (own photo + badge, or the
+ * notebook) for Personal notes, else the chat's photo or initials. Hook-free.
+ */
+export function forwardRowAvatar(channel: ChannelSummary, selected: boolean): ReactElement {
+  if (channel.channelType === 'notes') {
+    return (
+      <NotesAvatar
+        size="small"
+        src={channel.avatarUrl}
+        surface={selected ? 'accent-soft' : 'panel'}
+        {...(!selected ? { hoverSurface: 'panel-2' as const } : {})}
+      />
+    );
+  }
+  return (
+    <Avatar
+      name={channel.title}
+      {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
+      size="md"
+    />
+  );
 }
 
 export function ForwardPicker(props: ForwardPickerProps): ReactElement {
@@ -112,15 +137,11 @@ export function ForwardPicker(props: ForwardPickerProps): ReactElement {
                     setSelected((prev) => toggleForwardTarget(prev, channel.channelId))
                   }
                   className={cn(
-                    'flex w-full min-h-[44px] items-center gap-3 rounded-md px-2 py-1 text-left transition-colors',
+                    'group/notes-row flex w-full min-h-[44px] items-center gap-3 rounded-md px-2 py-1 text-left transition-colors',
                     isSelected ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-panel-2',
                   )}
                 >
-                  <Avatar
-                    name={channel.title}
-                    {...(channel.avatarUrl !== null ? { src: channel.avatarUrl } : {})}
-                    size="md"
-                  />
+                  {forwardRowAvatar(channel, isSelected)}
                   <span className="min-w-0 flex-1 truncate text-sm font-medium">
                     {channel.title}
                   </span>

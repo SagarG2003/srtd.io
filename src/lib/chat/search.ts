@@ -4,14 +4,21 @@
 //
 // chat_message_search is SECURITY INVOKER: chat_messages RLS keeps the rows to
 // chats the caller is in (after their Clear chat), deleted rows are excluded,
-// newest first (created_at desc, id desc). It is always called with NAMED args
-// (a later migration appends p_kind), with a fresh uuid_v7 p_trace_id per call.
+// newest first (created_at desc, id desc). It is always called with NAMED args,
+// with a fresh uuid_v7 p_trace_id per call. A filter chip passes p_kind (photo,
+// voice, file, link); with a chip the query may be empty (newest matches).
 // Paging is keyset: the last row's created_at and id go back as the cursor.
 
 import type { Client } from '@srtdio/rpc';
 import type { Database } from '@srtdio/schemas';
 import { abortable, READ_TIMEOUT_MS } from '@/lib/chat-reads';
-import { previewPrefix, type PreviewNameOf } from '@/lib/chat/chat-store';
+import {
+  messagePreviewContent,
+  previewPrefix,
+  previewText,
+  type PreviewNameOf,
+} from '@/lib/chat/chat-store';
+import { rowToThreadMessage, type ChatMessageRow } from '@/lib/chat/thread';
 import { resolveMentionText } from '@/lib/chat/mentions';
 import { civilDay, formatClockTime, safeTimeZone } from '@/lib/chat/time-format';
 import { generateTraceId } from '@/lib/trace';
@@ -28,6 +35,39 @@ export const SEARCH_PAGE_SIZE = 30;
 /** Typing settles this long before a search goes out. */
 export const SEARCH_DEBOUNCE_MS = 250;
 
+/** A filter chip's kind: chat_message_search p_kind. */
+export type SearchKind = 'photo' | 'link' | 'file' | 'voice';
+
+/** The chips under the chat home search box, in order. */
+export const SEARCH_CHIPS: readonly { kind: SearchKind; label: string }[] = [
+  { kind: 'photo', label: 'Photos' },
+  { kind: 'link', label: 'Links' },
+  { kind: 'file', label: 'Files' },
+  { kind: 'voice', label: 'Voice notes' },
+];
+
+/** One chip at a time: tapping the active chip clears it, another replaces it. Pure. */
+export function toggleSearchKind(
+  current: SearchKind | null,
+  tapped: SearchKind,
+): SearchKind | null {
+  return current === tapped ? null : tapped;
+}
+
+/** Whether a search goes out: 2+ characters, or a chip (alone or with text). Pure. */
+export function searchReady(raw: string, kind: SearchKind | null): boolean {
+  return kind !== null || searchQueryReady(raw);
+}
+
+/**
+ * The p_query a call carries: the query when it is long enough, else '' when a
+ * chip is set (the chip alone lists the newest matches). Pure.
+ */
+export function effectiveQuery(raw: string, kind: SearchKind | null): string {
+  const q = normalizeQuery(raw);
+  return kind !== null && !searchQueryReady(q) ? '' : q;
+}
+
 /** The failure row's copy (never connection wording). */
 export const SEARCH_FAILED_COPY = "Couldn't search. Try again.";
 /** The empty Messages section. */
@@ -40,6 +80,11 @@ export interface SearchHit {
   senderUserId: string | null;
   body: string;
   createdAt: string;
+  /**
+   * The row's line when its body is empty (a chip's photo, voice note or
+   * file): "Photo", "Voice message (0:12)", "File"; '' when it has a body.
+   */
+  mediaLine?: string;
 }
 
 /** The keyset cursor: the last row of the previous page. */
@@ -78,11 +123,14 @@ export function searchArgs(params: {
   channelId?: string | null;
   before?: SearchCursor | null;
   limit?: number;
+  kind?: SearchKind | null;
 }): SearchArgs {
+  const kind = params.kind ?? null;
   return {
     p_workspace_id: params.workspaceId,
-    p_query: normalizeQuery(params.query),
+    p_query: effectiveQuery(params.query, kind),
     p_trace_id: params.traceId,
+    ...(kind !== null ? { p_kind: kind } : {}),
     ...(params.channelId != null ? { p_channel_id: params.channelId } : {}),
     ...(params.before != null
       ? { p_before_created_at: params.before.createdAt, p_before_id: params.before.id }
@@ -102,12 +150,17 @@ export function nextCursor(
 }
 
 function toHit(row: SearchRow): SearchHit {
+  const body = row.body ?? '';
   return {
     id: row.id,
     channelId: row.channel_id,
     senderUserId: row.sender_user_id,
-    body: row.body ?? '',
+    body,
     createdAt: row.created_at,
+    mediaLine:
+      body.trim() !== ''
+        ? ''
+        : previewText(messagePreviewContent(rowToThreadMessage(row as ChatMessageRow, ''))),
   };
 }
 
@@ -144,6 +197,7 @@ export async function searchMessages(params: {
   limit?: number;
   traceId?: string;
   timeoutMs?: number;
+  kind?: SearchKind | null;
 }): Promise<SearchResult> {
   const limit = params.limit ?? SEARCH_PAGE_SIZE;
   const args = searchArgs({
@@ -153,6 +207,7 @@ export async function searchMessages(params: {
     channelId: params.channelId ?? null,
     before: params.before ?? null,
     limit,
+    kind: params.kind ?? null,
   });
   const link = linkedSignal(params.signal, params.timeoutMs ?? READ_TIMEOUT_MS);
   try {
@@ -172,6 +227,8 @@ export async function searchMessages(params: {
 export interface SearchState {
   /** The trimmed query these hits are for ('' when idle). */
   query: string;
+  /** The chip these hits are for; null without one. */
+  kind: SearchKind | null;
   status: 'idle' | 'loading' | 'ready' | 'error';
   hits: SearchHit[];
   /** More pages exist past the loaded hits. */
@@ -183,6 +240,7 @@ export interface SearchState {
 
 export const IDLE_SEARCH: SearchState = {
   query: '',
+  kind: null,
   status: 'idle',
   hits: [],
   hasMore: false,
@@ -195,11 +253,16 @@ export type SearchPageFetch = (request: {
   query: string;
   before: SearchCursor | null;
   signal: AbortSignal;
+  /** The chip; absent or null without one. */
+  kind?: SearchKind | null;
 }) => Promise<SearchResult>;
 
 export interface SearchRunner {
-  /** A keystroke: aborts the previous request, debounces the next. Under 2 chars: idle, no call. */
-  setQuery: (raw: string) => void;
+  /**
+   * A keystroke or a chip tap: aborts the previous request, debounces the
+   * next. Under 2 chars and no chip: idle, no call.
+   */
+  setQuery: (raw: string, kind?: SearchKind | null) => void;
   /** The next page (keyset); resolves once it settled. No-op without more pages. */
   loadMore: () => Promise<void>;
   /** Re-run the failed read (first page or next page). */
@@ -245,51 +308,69 @@ export function createSearchRunner(options: {
     controller = null;
   };
 
-  const runFirst = (query: string, gen: number): void => {
+  const request = (query: string, kind: SearchKind | null) =>
+    kind !== null ? { query: effectiveQuery(query, kind), kind } : { query };
+
+  const runFirst = (query: string, kind: SearchKind | null, gen: number): void => {
     timer = null;
     const ctl = new AbortController();
     controller = ctl;
-    void options.fetch({ query, before: null, signal: ctl.signal }).then((result) => {
-      if (gen !== generation || disposed) return;
-      controller = null;
-      if (!result.ok) {
-        emit({ ...IDLE_SEARCH, query, status: 'error' });
-        return;
-      }
-      cursor = result.data.next;
-      emit({
-        ...IDLE_SEARCH,
-        query,
-        status: 'ready',
-        hits: result.data.hits,
-        hasMore: cursor !== null,
+    void options
+      .fetch({ ...request(query, kind), before: null, signal: ctl.signal })
+      .then((result) => {
+        if (gen !== generation || disposed) return;
+        controller = null;
+        if (!result.ok) {
+          emit({ ...IDLE_SEARCH, query, kind, status: 'error' });
+          return;
+        }
+        cursor = result.data.next;
+        emit({
+          ...IDLE_SEARCH,
+          query,
+          kind,
+          status: 'ready',
+          hits: result.data.hits,
+          hasMore: cursor !== null,
+        });
       });
-    });
   };
 
-  const setQuery = (raw: string): void => {
+  const setQuery = (raw: string, kindIn: SearchKind | null = null): void => {
     const query = normalizeQuery(raw);
-    if (query === state.query && state.status !== 'idle' && state.status !== 'error') return;
+    const kind = kindIn ?? null;
+    if (
+      query === state.query &&
+      kind === state.kind &&
+      state.status !== 'idle' &&
+      state.status !== 'error'
+    )
+      return;
     generation += 1;
     stop();
     cursor = null;
-    if (!searchQueryReady(query)) {
+    if (!searchReady(query, kind)) {
       emit(IDLE_SEARCH);
       return;
     }
     const gen = generation;
-    emit({ ...IDLE_SEARCH, query, status: 'loading' });
-    timer = setTimer(() => runFirst(query, gen), debounceMs);
+    emit({ ...IDLE_SEARCH, query, kind, status: 'loading' });
+    timer = setTimer(() => runFirst(query, kind, gen), debounceMs);
   };
 
   const loadMore = async (): Promise<void> => {
     if (state.status !== 'ready' || !state.hasMore || state.loadingMore || cursor === null) return;
     const gen = generation;
     const query = state.query;
+    const kind = state.kind;
     const ctl = new AbortController();
     controller = ctl;
     emit({ ...state, loadingMore: true, moreFailed: false });
-    const result = await options.fetch({ query, before: cursor, signal: ctl.signal });
+    const result = await options.fetch({
+      ...request(query, kind),
+      before: cursor,
+      signal: ctl.signal,
+    });
     if (gen !== generation || disposed) return;
     controller = null;
     if (!result.ok) {
@@ -310,11 +391,12 @@ export function createSearchRunner(options: {
   const retry = (): void => {
     if (state.status === 'error') {
       const query = state.query;
+      const kind = state.kind;
       generation += 1;
       stop();
       const gen = generation;
-      emit({ ...IDLE_SEARCH, query, status: 'loading' });
-      runFirst(query, gen);
+      emit({ ...IDLE_SEARCH, query, kind, status: 'loading' });
+      runFirst(query, kind, gen);
       return;
     }
     if (state.moreFailed) void loadMore();

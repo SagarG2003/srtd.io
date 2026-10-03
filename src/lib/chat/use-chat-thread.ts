@@ -42,6 +42,7 @@ import {
   reactionRecheckWanted,
   rereadReactions,
   untouchedSince,
+  windowFocusTrigger,
   type CatchUpReason,
 } from '@/lib/chat/catch-up';
 import { liveVerifierFor, type LiveVerifier } from '@/lib/chat/live-verify';
@@ -147,7 +148,7 @@ export function editRunInput(input: {
   body: string;
   traceId: string;
   target: ChannelTarget | null;
-  channelType?: 'dm' | 'group' | null;
+  channelType?: 'dm' | 'group' | 'notes' | null;
 }): Parameters<typeof runEdit>[1] {
   const channelType =
     input.channelType !== undefined
@@ -450,7 +451,7 @@ export function useChatThread(params: {
    */
   resolveTarget?: (channel: ChannelSummary) => Promise<ChannelTarget | null>;
   /** The open chat's type from its row (group or DM); edits take it, never the target's chatType. */
-  channelType?: 'dm' | 'group' | null;
+  channelType?: 'dm' | 'group' | 'notes' | null;
   currentUserId: string;
   /** The DM peer, for the seen ticks; null for groups. */
   peerUserId: string | null;
@@ -468,6 +469,11 @@ export function useChatThread(params: {
   db?: Client;
   /** Injected in tests; the app shares one verifier per client with the store. */
   verifier?: LiveVerifier;
+  /**
+   * Also catch up on window focus (notes: no live delivery, so another
+   * device's notes land on focus, tab visible and open).
+   */
+  catchUpOnFocus?: boolean;
 }): UseChatThread {
   const { client, status, channelId, target, currentUserId, peerUserId, onOwnMessage, onCaughtUp } =
     params;
@@ -961,6 +967,13 @@ export function useChatThread(params: {
   // Tab visible, browser online, and every 60s while visible (cleared while
   // hidden and on unmount).
   useEffect(() => browserCatchUpTriggers((reason) => catchUpRef.current(reason)), []);
+
+  // Window focus (notes only); removed on unmount and when it turns off.
+  const catchUpOnFocus = params.catchUpOnFocus === true;
+  useEffect(() => {
+    if (!catchUpOnFocus) return;
+    return windowFocusTrigger(() => catchUpRef.current('visible'));
+  }, [catchUpOnFocus]);
 
   // Every transition to 'connected'.
   const previousStatusRef = useRef<ChatStatus>(status);

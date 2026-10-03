@@ -68,6 +68,7 @@ import { useChat } from '@/lib/chat/chat-context';
 import { createTextMessage } from '@/lib/chat/message-factory';
 import { sendMessageRecord } from '@/lib/chat/record';
 import { createOutboxSender, runSend, type OutboxSender } from '@/lib/chat/send-flow';
+import { isNotesChannelId } from '@/lib/chat/notes';
 import {
   clearOutboxFiles,
   deleteOutboxFiles,
@@ -1141,7 +1142,12 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
               traceId,
               text: entry.text,
               local: entry.local,
-              ...(summary !== undefined ? { channelType: summary.channelType } : {}),
+              // Notes are never in the roster: their sends name nobody.
+              ...(summary !== undefined
+                ? { channelType: summary.channelType }
+                : isNotesChannelId(channelId)
+                  ? { channelType: 'notes' as const }
+                  : {}),
             },
           );
         },

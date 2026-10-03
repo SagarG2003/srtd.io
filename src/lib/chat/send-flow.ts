@@ -133,8 +133,8 @@ export interface SendInput {
   traceId: string;
   text: string;
   local: LocalMessageContent;
-  /** The chat's type; a DM never sends "all" in p_mentions. */
-  channelType?: 'dm' | 'group';
+  /** The chat's type; a DM never sends "all" in p_mentions, notes send none. */
+  channelType?: 'dm' | 'group' | 'notes';
 }
 
 export interface SendFlowDeps {
@@ -151,6 +151,8 @@ export interface SendFlowDeps {
     sharedBriefIds: string[];
     replyToMessageId: string | null;
     attachmentMeta: AttachmentMetaMap;
+    /** Save to notes: the source message (p_forwarded_from_message_id); absent on ordinary sends. */
+    forwardedFromMessageId?: string;
   }) => Promise<SendRecordResult>;
   /**
    * Agora publish for live delivery, or undefined while there is no live
@@ -247,8 +249,15 @@ export async function runSend(deps: SendFlowDeps, input: SendInput): Promise<Sen
       sharedBriefIds: [...(input.local.sharedBriefIds ?? [])],
       replyToMessageId: input.local.reply?.id ?? null,
       attachmentMeta: buildAttachmentMeta(input.local.attachments),
+      ...(input.local.forwardedFromMessageId !== undefined
+        ? { forwardedFromMessageId: input.local.forwardedFromMessageId }
+        : {}),
     });
-  let mentions = mentionTargets(input.text, input.channelType);
+  // A saved copy (Save to notes) names nobody: p_mentions stays null.
+  let mentions =
+    input.local.forwardedFromMessageId !== undefined
+      ? []
+      : mentionTargets(input.text, input.channelType);
   let recorded = await record(mentions);
   // The chat's type was unknown and "all" went out in a DM: drop only "all"
   // and send the people first; a further refusal takes the ladder below.

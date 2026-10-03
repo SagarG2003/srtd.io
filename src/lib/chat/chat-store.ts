@@ -975,8 +975,10 @@ function parseReply(value: unknown): ReplyQuote | null | undefined {
 function parseEntry(value: unknown): OutboxEntry | null {
   if (!isRecord(value) || !isRecord(value.local)) return null;
   const { id, text, createdMs } = value;
-  const { attachments, sharedPostIds, sharedBriefIds, reply } = value.local;
+  const { attachments, sharedPostIds, sharedBriefIds, reply, forwardedFromMessageId } = value.local;
   if (typeof id !== 'string' || typeof text !== 'string') return null;
+  if (forwardedFromMessageId !== undefined && typeof forwardedFromMessageId !== 'string')
+    return null;
   if (!Array.isArray(attachments) || !isStringArray(sharedPostIds)) return null;
   if (sharedBriefIds !== undefined && !isStringArray(sharedBriefIds)) return null;
   const parsedAttachments = attachments.map(parseAttachment);
@@ -993,6 +995,7 @@ function parseEntry(value: unknown): OutboxEntry | null {
       sharedPostIds,
       ...(sharedBriefIds !== undefined ? { sharedBriefIds } : {}),
       reply: parsedReply,
+      ...(forwardedFromMessageId !== undefined ? { forwardedFromMessageId } : {}),
     },
     state: filesMissing ? 'failed' : 'sending',
     ...(typeof createdMs === 'number' && Number.isFinite(createdMs) && createdMs > 0
