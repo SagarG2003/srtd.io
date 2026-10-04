@@ -616,9 +616,11 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const openChannel = useCallback(
     (channel: ChannelSummary, mode: ChannelWrite = channelWriteFor('open')) => {
       // The chat already open (a group edit's re-read): update its row only;
-      // its layers (group info) stay open and no step is written.
+      // its layers (group info) stay open. The param write is a no-op while it
+      // matches; it lands only if the param was lost meanwhile (a toast's /chat).
       if (selectedRef.current?.channelId === channel.channelId) {
         setSelected(channel);
+        writeChannelParam(channel.channelId, mode);
         return;
       }
       leaveSelectionThen(() => {
