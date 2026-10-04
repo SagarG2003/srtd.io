@@ -85,12 +85,14 @@ import { InMemoryAssetRepository, type UploadInput } from '@/server/assets';
 import {
   MIME,
   buildZip,
+  encryptedPdf,
   jpeg,
   mp4,
   office,
   ole2,
   pdf,
   png,
+  relationships,
   svg,
 } from '../../../packages/storage/src/__fixtures__/files';
 
@@ -1054,6 +1056,32 @@ describe('asset-upload file-safety refusals (real pipeline)', () => {
       422,
       'encrypted_file',
     ],
+    [
+      'remote attachedTemplate docx',
+      'a.docx',
+      MIME.docx,
+      () =>
+        office('docx', {
+          extra: [
+            {
+              name: 'word/_rels/settings.xml.rels',
+              data: relationships([
+                { type: 'attachedTemplate', target: 'http://example.test/t.dotm', external: true },
+              ]),
+            },
+          ],
+        }),
+      422,
+      'external_content',
+    ],
+    [
+      'pdf needing a password to open (AES-256)',
+      'a.pdf',
+      MIME.pdf,
+      () => encryptedPdf({ revision: 6, userPassword: 'secret' }),
+      422,
+      'encrypted_file',
+    ],
     ['encrypted zip entry', 'a.docx', MIME.docx, zipEncrypted, 422, 'encrypted_file'],
   ];
 
@@ -1080,6 +1108,7 @@ describe('asset-upload file-safety refusals (real pipeline)', () => {
     ['a.pdf', MIME.pdf, () => pdf()],
     ['a.mp4', MIME.mp4, () => mp4()],
     ['a.png', MIME.png, () => png()],
+    ['locked-no-print.pdf', MIME.pdf, () => encryptedPdf({ revision: 4, userPassword: '' })],
     ['a.jpg', MIME.jpeg, () => jpeg()],
     ['a.gif', 'image/gif', () => Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])],
     [

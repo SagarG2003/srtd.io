@@ -214,7 +214,7 @@ export function AttachmentsField({
   const uploadFile = useCallback(
     async (file: File): Promise<ChatAttachmentUpload> => {
       if (uploadEndpoint === undefined || uploadEndpoint === '' || workspaceId === null) {
-        return { ok: false, message: 'Upload failed. Check your connection and retry' };
+        return { ok: false, message: "Couldn't upload. Try again." };
       }
       const token = (await supabase.auth.getSession()).data.session?.access_token ?? null;
       if (token === null || token === '') {

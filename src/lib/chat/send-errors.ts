@@ -83,12 +83,23 @@ export function uploadFailureStatus(result: { ok: false; message: string }): num
   return typeof status === 'number' ? status : undefined;
 }
 
-/** The upload Worker codes whose Result copy is recognisable, by that copy. */
+/**
+ * The upload Worker codes whose Result copy is recognisable, by that copy,
+ * including the file-safety refusals. Logging only: classification above is
+ * unchanged.
+ */
 const UPLOAD_CODE_BY_MESSAGE: ReadonlyMap<string, string> = new Map(
-  ['file_too_large', 'unsupported_mime', 'mime_mismatch', 'virus_detected'].map((code) => [
-    uploadErrorMessage(code),
-    code,
-  ]),
+  [
+    'file_too_large',
+    'unsupported_mime',
+    'mime_mismatch',
+    'virus_detected',
+    'blocked_type',
+    'encrypted_file',
+    'embedded_content',
+    'archive_limits',
+    'external_content',
+  ].map((code) => [uploadErrorMessage(code), code]),
 );
 
 /**

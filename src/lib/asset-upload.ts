@@ -61,6 +61,8 @@ export function uploadErrorMessage(code: string): string {
       return "This file contains embedded content that can't be checked.";
     case 'archive_limits':
       return 'This file is too complex to check';
+    case 'external_content':
+      return "This file loads content from the internet and can't be shared.";
     default:
       return "Couldn't upload. Try again.";
   }
@@ -351,7 +353,7 @@ export function linkErrorMessage(code: string): string {
     case 'name_required':
       return 'The link needs a name';
     default:
-      return "Couldn't add the link. Check your connection and retry";
+      return "Couldn't add the link. Try again.";
   }
 }
 
@@ -413,7 +415,7 @@ export async function addAssetLink(config: AddLinkConfig): Promise<LinkOutcome> 
 function folderErrorMessage(code: string): string {
   switch (code) {
     default:
-      return "Couldn't create the folder. Check your connection and retry";
+      return "Couldn't create the folder. Try again.";
   }
 }
 
@@ -524,7 +526,7 @@ export async function renameFolderRequest(
     return {
       ok: false,
       nameTaken: false,
-      message: "Couldn't rename the folder. Check your connection and retry",
+      message: "Couldn't rename the folder. Try again.",
     };
   }
 
@@ -543,7 +545,7 @@ export async function renameFolderRequest(
     return {
       ok: false,
       nameTaken: false,
-      message: "Couldn't rename the folder. Check your connection and retry",
+      message: "Couldn't rename the folder. Try again.",
     };
   }
 
@@ -552,7 +554,7 @@ export async function renameFolderRequest(
     return {
       ok: false,
       nameTaken: false,
-      message: "Couldn't rename the folder. Check your connection and retry",
+      message: "Couldn't rename the folder. Try again.",
     };
   }
   return { ok: true, folder };
@@ -593,14 +595,14 @@ export async function deleteFolderRequest(
       }),
     });
   } catch {
-    return { ok: false, message: "Couldn't delete the folder. Check your connection and retry" };
+    return { ok: false, message: "Couldn't delete the folder. Try again." };
   }
 
   if (!response.ok) {
     if (response.status === 403) {
       return { ok: false, message: 'Only the agency team can delete folders' };
     }
-    return { ok: false, message: "Couldn't delete the folder. Check your connection and retry" };
+    return { ok: false, message: "Couldn't delete the folder. Try again." };
   }
   return { ok: true };
 }
@@ -621,7 +623,7 @@ export interface MoveAssetsConfig {
 }
 
 /** Shared retry copy for a failed move. No em-dashes in any string (CLAUDE.md). */
-const MOVE_RETRY = "Couldn't move the files. Check your connection and retry";
+const MOVE_RETRY = "Couldn't move the files. Try again.";
 
 /**
  * POST {workspace_id, asset_ids, target_folder_id} to the worker's /folders/move
@@ -675,7 +677,7 @@ export function canRenameAssets(role: string | null): boolean {
  */
 export function renameErrorMessage(status: number): string {
   if (status === 403) return 'Only the agency team can rename assets';
-  return "Couldn't rename this asset. Check your connection and retry";
+  return "Couldn't rename this asset. Try again.";
 }
 
 export type RenameOutcome = { ok: true } | { ok: false; message: string };

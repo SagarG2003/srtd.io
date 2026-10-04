@@ -84,6 +84,7 @@ const STATUS_BY_CODE: Record<UploadResponseCode, number> = {
   encrypted_file: 422,
   embedded_content: 422,
   archive_limits: 422,
+  external_content: 422,
   mime_mismatch: 415,
   file_too_large: 413,
   empty_file: 400,

@@ -390,7 +390,7 @@ export function AssetsPage() {
       targetFolderId: string | null,
     ): Promise<UploadOutcome> => {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
-        return { ok: false, message: 'Upload failed. Check your connection and retry' };
+        return { ok: false, message: "Couldn't upload. Try again." };
       }
       if (workspaceId === null) {
         return { ok: false, message: 'No workspace selected.' };

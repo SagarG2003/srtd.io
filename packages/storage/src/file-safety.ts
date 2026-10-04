@@ -24,7 +24,8 @@ export type FileSafetyCode =
   | 'mime_mismatch'
   | 'encrypted_file'
   | 'embedded_content'
-  | 'archive_limits';
+  | 'archive_limits'
+  | 'external_content';
 
 export const FILE_SAFETY_MESSAGES: Readonly<Record<FileSafetyCode, string>> = {
   blocked_type: "This file type isn't allowed",
@@ -32,6 +33,7 @@ export const FILE_SAFETY_MESSAGES: Readonly<Record<FileSafetyCode, string>> = {
   encrypted_file: "Password-protected files can't be shared",
   embedded_content: "This file contains embedded content that can't be checked.",
   archive_limits: 'This file is too complex to check',
+  external_content: "This file loads content from the internet and can't be shared.",
 };
 
 export type FileSafetyResult = { ok: true } | { ok: false; code: FileSafetyCode; message: string };
@@ -186,11 +188,16 @@ const utf16le = (text: string): Uint8Array => {
 
 const OLE_ENCRYPTED_PACKAGE = utf16le('EncryptedPackage');
 
+// ---------------------------------------------------------------------------
+// PDF encryption: refuse only when a password is needed to OPEN the file.
+// ---------------------------------------------------------------------------
+
 /** PDF whitespace and delimiters end a name token (ISO 32000 7.2.2). */
 const PDF_NAME_TERMINATORS: ReadonlySet<number> = new Set([
   0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20, 0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25,
 ]);
-/** Longer than any spelling of /Encrypt, even with every byte #-escaped. */
+const PDF_WHITESPACE: ReadonlySet<number> = new Set([0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20]);
+/** Longer than any spelling of /Encrypt or /ID, even with every byte #-escaped. */
 const PDF_NAME_SCAN = 24;
 
 function hexValue(byte: number | undefined): number {
@@ -201,32 +208,517 @@ function hexValue(byte: number | undefined): number {
   return -1;
 }
 
+/** Read a name token starting just after its '/', decoding #xx escapes. */
+function readPdfName(bytes: Uint8Array, start: number, max: number): { name: string; end: number } {
+  let name = '';
+  let j = start;
+  while (j < bytes.length && name.length <= max) {
+    const byte = bytes[j] as number;
+    if (PDF_NAME_TERMINATORS.has(byte)) break;
+    if (byte === 0x23) {
+      const hi = hexValue(bytes[j + 1]);
+      const lo = hexValue(bytes[j + 2]);
+      if (hi >= 0 && lo >= 0) {
+        name += String.fromCharCode(hi * 16 + lo);
+        j += 3;
+        continue;
+      }
+    }
+    name += String.fromCharCode(byte);
+    j += 1;
+  }
+  return { name, end: j };
+}
+
+/** Byte offsets just after every /Encrypt name, and after the last /ID name. */
+function scanPdfNames(bytes: Uint8Array): { encrypt: number[]; lastId: number } {
+  const encrypt: number[] = [];
+  let lastId = -1;
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (bytes[i] !== 0x2f) continue;
+    const { name, end } = readPdfName(bytes, i + 1, PDF_NAME_SCAN);
+    if (name === 'Encrypt') encrypt.push(end);
+    else if (name === 'ID') lastId = end;
+  }
+  return { encrypt, lastId };
+}
+
 /**
  * True when the PDF carries an /Encrypt entry. Every name token is decoded,
  * including #xx escapes, so "/Encr#79pt" is caught; "/EncryptMetadata" is not
  * a match.
  */
 export function isEncryptedPdf(bytes: Uint8Array): boolean {
-  for (let i = 0; i < bytes.length; i += 1) {
-    if (bytes[i] !== 0x2f) continue;
-    let name = '';
-    let j = i + 1;
-    while (j < bytes.length && name.length <= PDF_NAME_SCAN) {
-      const byte = bytes[j] as number;
-      if (PDF_NAME_TERMINATORS.has(byte)) break;
-      if (byte === 0x23) {
-        const hi = hexValue(bytes[j + 1]);
-        const lo = hexValue(bytes[j + 2]);
-        if (hi >= 0 && lo >= 0) {
-          name += String.fromCharCode(hi * 16 + lo);
-          j += 3;
-          continue;
+  return scanPdfNames(bytes).encrypt.length > 0;
+}
+
+type PdfValue =
+  | { t: 'num'; v: number }
+  | { t: 'name'; v: string }
+  | { t: 'str'; v: Uint8Array }
+  | { t: 'arr'; v: PdfValue[] }
+  | { t: 'dict'; v: Map<string, PdfValue> }
+  | { t: 'ref'; n: number; g: number }
+  | { t: 'bool'; v: boolean }
+  | { t: 'null' };
+
+/** Nesting and size bounds so a hostile dictionary cannot cost much to read. */
+const PDF_MAX_DEPTH = 16;
+const PDF_MAX_OBJECT_BYTES = 64 * 1024;
+
+/**
+ * A minimal reader for one PDF object (ISO 32000 7.3): enough to read an
+ * encryption dictionary and a trailer /ID. Returns null on anything malformed.
+ */
+class PdfObjectReader {
+  private pos: number;
+  private readonly limit: number;
+
+  constructor(
+    private readonly bytes: Uint8Array,
+    start: number,
+  ) {
+    this.pos = start;
+    this.limit = Math.min(bytes.length, start + PDF_MAX_OBJECT_BYTES);
+  }
+
+  private peek(offset = 0): number | undefined {
+    const at = this.pos + offset;
+    return at < this.limit ? this.bytes[at] : undefined;
+  }
+
+  private skipSpace(): void {
+    for (;;) {
+      const byte = this.peek();
+      if (byte === undefined) return;
+      if (PDF_WHITESPACE.has(byte)) {
+        this.pos += 1;
+      } else if (byte === 0x25) {
+        while (this.peek() !== undefined && this.peek() !== 0x0a && this.peek() !== 0x0d) {
+          this.pos += 1;
+        }
+      } else {
+        return;
+      }
+    }
+  }
+
+  private isDigit(byte: number | undefined): boolean {
+    return byte !== undefined && byte >= 0x30 && byte <= 0x39;
+  }
+
+  private readInteger(): number | null {
+    let text = '';
+    while (this.isDigit(this.peek()) && text.length < 12) {
+      text += String.fromCharCode(this.peek() as number);
+      this.pos += 1;
+    }
+    return text === '' ? null : Number(text);
+  }
+
+  private readNumber(): PdfValue | null {
+    let text = '';
+    for (;;) {
+      const byte = this.peek();
+      if (
+        byte === undefined ||
+        !(this.isDigit(byte) || byte === 0x2b || byte === 0x2d || byte === 0x2e)
+      ) {
+        break;
+      }
+      text += String.fromCharCode(byte);
+      this.pos += 1;
+      if (text.length > 32) return null;
+    }
+    const value = Number(text);
+    if (!Number.isFinite(value)) return null;
+    // "n g R" is an indirect reference.
+    if (/^\d+$/.test(text)) {
+      const save = this.pos;
+      this.skipSpace();
+      const generation = this.readInteger();
+      if (generation !== null) {
+        this.skipSpace();
+        const after = this.peek(1);
+        if (this.peek() === 0x52 && (after === undefined || PDF_NAME_TERMINATORS.has(after))) {
+          this.pos += 1;
+          return { t: 'ref', n: value, g: generation };
         }
       }
-      name += String.fromCharCode(byte);
-      j += 1;
+      this.pos = save;
     }
-    if (name === 'Encrypt') return true;
+    return { t: 'num', v: value };
+  }
+
+  private readLiteralString(): PdfValue | null {
+    this.pos += 1;
+    const out: number[] = [];
+    let depth = 1;
+    for (;;) {
+      const byte = this.peek();
+      if (byte === undefined) return null;
+      this.pos += 1;
+      if (byte === 0x5c) {
+        const next = this.peek();
+        if (next === undefined) return null;
+        this.pos += 1;
+        const simple: Record<number, number> = {
+          0x6e: 0x0a,
+          0x72: 0x0d,
+          0x74: 0x09,
+          0x62: 0x08,
+          0x66: 0x0c,
+          0x28: 0x28,
+          0x29: 0x29,
+          0x5c: 0x5c,
+        };
+        const mapped = simple[next];
+        if (mapped !== undefined) {
+          out.push(mapped);
+        } else if (next >= 0x30 && next <= 0x37) {
+          let code = next - 0x30;
+          for (
+            let k = 0;
+            k < 2 && (this.peek() ?? 0) >= 0x30 && (this.peek() ?? 0) <= 0x37;
+            k += 1
+          ) {
+            code = code * 8 + ((this.peek() as number) - 0x30);
+            this.pos += 1;
+          }
+          out.push(code & 0xff);
+        } else if (next === 0x0d) {
+          if (this.peek() === 0x0a) this.pos += 1;
+        } else if (next !== 0x0a) {
+          out.push(next);
+        }
+      } else if (byte === 0x0d) {
+        // An unescaped end-of-line is read as a single LF.
+        if (this.peek() === 0x0a) this.pos += 1;
+        out.push(0x0a);
+      } else {
+        if (byte === 0x28) depth += 1;
+        if (byte === 0x29) {
+          depth -= 1;
+          if (depth === 0) return { t: 'str', v: Uint8Array.from(out) };
+        }
+        out.push(byte);
+      }
+    }
+  }
+
+  private readHexString(): PdfValue | null {
+    this.pos += 1;
+    const digits: number[] = [];
+    for (;;) {
+      const byte = this.peek();
+      if (byte === undefined) return null;
+      this.pos += 1;
+      if (byte === 0x3e) break;
+      if (PDF_WHITESPACE.has(byte)) continue;
+      const value = hexValue(byte);
+      if (value < 0) return null;
+      digits.push(value);
+    }
+    if (digits.length % 2 === 1) digits.push(0);
+    const out = new Uint8Array(digits.length / 2);
+    for (let i = 0; i < out.length; i += 1) {
+      out[i] = (digits[i * 2] as number) * 16 + (digits[i * 2 + 1] as number);
+    }
+    return { t: 'str', v: out };
+  }
+
+  read(depth = 0): PdfValue | null {
+    if (depth > PDF_MAX_DEPTH) return null;
+    this.skipSpace();
+    const byte = this.peek();
+    if (byte === undefined) return null;
+    if (byte === 0x3c && this.peek(1) === 0x3c) {
+      this.pos += 2;
+      const dict = new Map<string, PdfValue>();
+      for (;;) {
+        this.skipSpace();
+        if (this.peek() === 0x3e && this.peek(1) === 0x3e) {
+          this.pos += 2;
+          return { t: 'dict', v: dict };
+        }
+        if (this.peek() !== 0x2f) return null;
+        const { name, end } = readPdfName(this.bytes, this.pos + 1, 127);
+        this.pos = end;
+        const value = this.read(depth + 1);
+        if (value === null) return null;
+        dict.set(name, value);
+      }
+    }
+    if (byte === 0x3c) return this.readHexString();
+    if (byte === 0x28) return this.readLiteralString();
+    if (byte === 0x5b) {
+      this.pos += 1;
+      const items: PdfValue[] = [];
+      for (;;) {
+        this.skipSpace();
+        if (this.peek() === 0x5d) {
+          this.pos += 1;
+          return { t: 'arr', v: items };
+        }
+        const value = this.read(depth + 1);
+        if (value === null) return null;
+        items.push(value);
+      }
+    }
+    if (byte === 0x2f) {
+      const { name, end } = readPdfName(this.bytes, this.pos + 1, 127);
+      this.pos = end;
+      return { t: 'name', v: name };
+    }
+    if (this.isDigit(byte) || byte === 0x2b || byte === 0x2d || byte === 0x2e) {
+      return this.readNumber();
+    }
+    for (const [word, value] of [
+      ['true', { t: 'bool', v: true }],
+      ['false', { t: 'bool', v: false }],
+      ['null', { t: 'null' }],
+    ] as const) {
+      if ([...word].every((char, i) => this.peek(i) === char.charCodeAt(0))) {
+        this.pos += word.length;
+        return value;
+      }
+    }
+    return null;
+  }
+}
+
+/** The body of the last "n g obj" in the file, or null. */
+function readIndirectObject(bytes: Uint8Array, n: number, g: number): PdfValue | null {
+  const needle = new TextEncoder().encode(`${n} ${g} obj`);
+  let found = -1;
+  for (let at = indexOfBytes(bytes, needle); at !== -1; at = indexOfBytes(bytes, needle, at + 1)) {
+    const before = bytes[at - 1];
+    if (at === 0 || (before !== undefined && PDF_NAME_TERMINATORS.has(before))) found = at;
+  }
+  return found === -1 ? null : new PdfObjectReader(bytes, found + needle.length).read();
+}
+
+// MD5 (RFC 1321) and RC4: the PDF standard security handler for revisions 2-4
+// needs both, and Web Crypto offers neither.
+const MD5_SHIFTS = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+const MD5_K = Array.from(
+  { length: 64 },
+  (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 2 ** 32) >>> 0,
+);
+
+function md5(input: Uint8Array): Uint8Array {
+  const length = input.length;
+  const padded = new Uint8Array(((length + 8) >>> 6) * 64 + 64);
+  padded.set(input);
+  padded[length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(padded.length - 8, (length * 8) >>> 0, true);
+  view.setUint32(padded.length - 4, Math.floor((length * 8) / 2 ** 32), true);
+  let a0 = 0x67452301;
+  let b0 = 0xefcdab89;
+  let c0 = 0x98badcfe;
+  let d0 = 0x10325476;
+  for (let block = 0; block < padded.length; block += 64) {
+    let a = a0;
+    let b = b0;
+    let c = c0;
+    let d = d0;
+    for (let i = 0; i < 64; i += 1) {
+      let f: number;
+      let g: number;
+      if (i < 16) {
+        f = (b & c) | (~b & d);
+        g = i;
+      } else if (i < 32) {
+        f = (d & b) | (~d & c);
+        g = (5 * i + 1) % 16;
+      } else if (i < 48) {
+        f = b ^ c ^ d;
+        g = (3 * i + 5) % 16;
+      } else {
+        f = c ^ (b | ~d);
+        g = (7 * i) % 16;
+      }
+      const shift = MD5_SHIFTS[(i >>> 4) * 4 + (i % 4)] as number;
+      const sum = (a + f + (MD5_K[i] as number) + view.getUint32(block + g * 4, true)) >>> 0;
+      a = d;
+      d = c;
+      c = b;
+      b = (b + ((sum << shift) | (sum >>> (32 - shift)))) >>> 0;
+    }
+    a0 = (a0 + a) >>> 0;
+    b0 = (b0 + b) >>> 0;
+    c0 = (c0 + c) >>> 0;
+    d0 = (d0 + d) >>> 0;
+  }
+  const out = new Uint8Array(16);
+  const outView = new DataView(out.buffer);
+  [a0, b0, c0, d0].forEach((word, i) => outView.setUint32(i * 4, word, true));
+  return out;
+}
+
+function rc4(key: Uint8Array, data: Uint8Array): Uint8Array {
+  const s = Uint8Array.from({ length: 256 }, (_, i) => i);
+  for (let i = 0, j = 0; i < 256; i += 1) {
+    j = (j + (s[i] as number) + (key[i % key.length] as number)) & 0xff;
+    [s[i], s[j]] = [s[j] as number, s[i] as number];
+  }
+  const out = new Uint8Array(data.length);
+  for (let k = 0, i = 0, j = 0; k < data.length; k += 1) {
+    i = (i + 1) & 0xff;
+    j = (j + (s[i] as number)) & 0xff;
+    [s[i], s[j]] = [s[j] as number, s[i] as number];
+    out[k] = (data[k] as number) ^ (s[((s[i] as number) + (s[j] as number)) & 0xff] as number);
+  }
+  return out;
+}
+
+/** The 32-byte padding string of the standard security handler (Algorithm 2). */
+const PDF_PASSWORD_PAD = Uint8Array.from([
+  0x28, 0xbf, 0x4e, 0x5e, 0x4e, 0x75, 0x8a, 0x41, 0x64, 0x00, 0x4e, 0x56, 0xff, 0xfa, 0x01, 0x08,
+  0x2e, 0x2e, 0x00, 0xb6, 0xd0, 0x68, 0x3e, 0x80, 0x2f, 0x0c, 0xa9, 0xfe, 0x64, 0x53, 0x69, 0x7a,
+]);
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
+function startsWithBytes(value: Uint8Array, prefix: Uint8Array): boolean {
+  return value.length >= prefix.length && prefix.every((byte, i) => value[i] === byte);
+}
+
+/** Revisions 2-4: Algorithm 2 key from the empty password, then Algorithm 4/5. */
+function emptyPasswordOpensRc4(
+  revision: number,
+  o: Uint8Array,
+  u: Uint8Array,
+  permissions: number,
+  id0: Uint8Array,
+): boolean {
+  if (o.length < 32 || u.length < 16) return false;
+  const p = new Uint8Array(4);
+  new DataView(p.buffer).setUint32(0, permissions >>> 0, true);
+  // The key length (Length) is read inconsistently by writers; trying every
+  // legal length costs nothing and a wrong length cannot match a 16-byte check.
+  const lengths = revision === 2 ? [5] : Array.from({ length: 12 }, (_, i) => i + 5);
+  const metadataFlags = revision >= 4 ? [false, true] : [false];
+  for (const skipMetadata of metadataFlags) {
+    const seed = md5(
+      concatBytes(
+        PDF_PASSWORD_PAD,
+        o.subarray(0, 32),
+        p,
+        id0,
+        skipMetadata ? Uint8Array.from([0xff, 0xff, 0xff, 0xff]) : new Uint8Array(0),
+      ),
+    );
+    for (const n of lengths) {
+      let hash = seed;
+      if (revision >= 3) {
+        for (let i = 0; i < 50; i += 1) hash = md5(hash.subarray(0, n));
+      }
+      const key = hash.subarray(0, n);
+      if (revision === 2) {
+        if (u.length >= 32 && startsWithBytes(rc4(key, PDF_PASSWORD_PAD), u.subarray(0, 32))) {
+          return true;
+        }
+        continue;
+      }
+      let x = rc4(key, md5(concatBytes(PDF_PASSWORD_PAD, id0)));
+      for (let i = 1; i <= 19; i += 1)
+        x = rc4(
+          key.map((byte) => byte ^ i),
+          x,
+        );
+      if (startsWithBytes(x, u.subarray(0, 16))) return true;
+    }
+  }
+  return false;
+}
+
+async function digest(algorithm: string, data: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest(algorithm, data.slice()));
+}
+
+/** Revision 6 hash (ISO 32000-2 Algorithm 2.B) for the empty user password. */
+async function revision6Hash(salt: Uint8Array): Promise<Uint8Array> {
+  let k = await digest('SHA-256', salt);
+  let e = new Uint8Array(0);
+  for (let round = 0; round < 64 || (e.at(-1) ?? 0) > round - 32; round += 1) {
+    const k1 = new Uint8Array(k.length * 64);
+    for (let i = 0; i < 64; i += 1) k1.set(k, i * k.length);
+    const key = await crypto.subtle.importKey('raw', k.slice(0, 16), 'AES-CBC', false, ['encrypt']);
+    const encrypted = await crypto.subtle.encrypt(
+      { name: 'AES-CBC', iv: k.slice(16, 32) },
+      key,
+      k1,
+    );
+    // Web Crypto appends one PKCS#7 block; K1 is block-aligned, so drop it.
+    e = new Uint8Array(encrypted, 0, k1.length);
+    const selector = e.subarray(0, 16).reduce((sum, byte) => sum + byte, 0) % 3;
+    k = await digest(selector === 0 ? 'SHA-256' : selector === 1 ? 'SHA-384' : 'SHA-512', e);
+    if (round > 4096) break;
+  }
+  return k.subarray(0, 32);
+}
+
+/**
+ * True when the encryption dictionary opens with an empty user password (an
+ * owner-only lock). Anything but the standard handler at revisions 2-6 is
+ * treated as needing a password.
+ */
+async function emptyUserPasswordOpens(
+  dict: Map<string, PdfValue>,
+  id0: Uint8Array,
+): Promise<boolean> {
+  const filter = dict.get('Filter');
+  if (filter?.t !== 'name' || filter.v !== 'Standard') return false;
+  const revision = dict.get('R');
+  const o = dict.get('O');
+  const u = dict.get('U');
+  const p = dict.get('P');
+  if (revision?.t !== 'num' || o?.t !== 'str' || u?.t !== 'str') return false;
+  if (revision.v >= 2 && revision.v <= 4) {
+    return p?.t === 'num' && emptyPasswordOpensRc4(revision.v, o.v, u.v, p.v, id0);
+  }
+  if ((revision.v === 5 || revision.v === 6) && u.v.length >= 40) {
+    const salt = u.v.subarray(32, 40);
+    const hash = revision.v === 5 ? await digest('SHA-256', salt) : await revision6Hash(salt);
+    return startsWithBytes(hash, u.v.subarray(0, 32));
+  }
+  return false;
+}
+
+/** The first /ID string from the last trailer, or empty when absent. */
+function pdfFirstId(bytes: Uint8Array, lastId: number): Uint8Array {
+  if (lastId < 0) return new Uint8Array(0);
+  const value = new PdfObjectReader(bytes, lastId).read();
+  if (value?.t !== 'arr') return new Uint8Array(0);
+  const first = value.v[0];
+  return first?.t === 'str' ? first.v : new Uint8Array(0);
+}
+
+/**
+ * True when a password is needed to OPEN the PDF. An /Encrypt dictionary that
+ * opens with an empty user password (no-edit/no-print/no-copy locks) passes;
+ * an unreadable dictionary, another handler (e.g. /Adobe.PubSec) or an
+ * unsupported revision counts as password-protected.
+ */
+export async function pdfNeedsPassword(bytes: Uint8Array): Promise<boolean> {
+  const { encrypt, lastId } = scanPdfNames(bytes);
+  if (encrypt.length === 0) return false;
+  const id0 = pdfFirstId(bytes, lastId);
+  for (const at of encrypt) {
+    let value = new PdfObjectReader(bytes, at).read();
+    if (value?.t === 'ref') value = readIndirectObject(bytes, value.n, value.g);
+    if (value?.t !== 'dict') return true;
+    if (!(await emptyUserPasswordOpens(value.v, id0))) return true;
   }
   return false;
 }
@@ -315,7 +807,9 @@ function readCentralDirectory(bytes: Uint8Array): ZipRead {
       compressedSize: u32(view, at + 20),
       uncompressedSize: u32(view, at + 24),
       localOffset: u32(view, at + 42),
-      name: decoder.decode(bytes.subarray(at + 46, at + 46 + nameLen)),
+      // Some writers use backslash separators; read them as '/' so every
+      // path rule (embeddings/, main part, duplicates) sees one spelling.
+      name: decoder.decode(bytes.subarray(at + 46, at + 46 + nameLen)).replace(/\\/g, '/'),
       nameBytes: bytes.subarray(at + 46, at + 46 + nameLen),
     };
     if (
@@ -420,7 +914,12 @@ const MAIN_CONTENT_TYPE: Readonly<Record<OoxmlKind, string>> = {
 const CONTENT_TYPES_PART = '[content_types].xml';
 
 /** Printer setup blobs (DEVMODE) are plain data, not OLE objects. */
-const PRINTER_SETTINGS = /^printersettings\d*\.bin$/;
+/**
+ * Plain data blobs Office stores as .bin: printer setup (DEVMODE) and Excel
+ * worksheet custom properties. Not OLE objects; still checked for nested
+ * containers like every other part.
+ */
+const DATA_BLOB_BIN = /^(printersettings|customproperty)\d*\.bin$/;
 
 /**
  * Largest part inflated into memory for inspection: an embedded docx/xlsx/pptx
@@ -512,12 +1011,12 @@ function xmlAttribute(tag: string, name: string): string | null {
 }
 
 /**
- * [Content_Types].xml as text, or null when it cannot be read the way the
- * checks read it: anything but strict UTF-8 (a UTF-16 BOM, NUL bytes, invalid
+ * A package XML part ([Content_Types].xml or a .rels part) as text, or null
+ * when it cannot be read the way the checks read it: anything but strict UTF-8 (a UTF-16 BOM, NUL bytes, invalid
  * sequences, another declared encoding) or a DTD, whose entities could spell a
  * macro type the text search would not see. Office writes UTF-8 without a DTD.
  */
-function decodeContentTypes(bytes: Uint8Array): string | null {
+function decodeStrictXml(bytes: Uint8Array): string | null {
   if (bytes.includes(0)) return null;
   let text: string;
   try {
@@ -542,16 +1041,64 @@ function checkContentTypes(raw: string, kind: OoxmlKind): FileSafetyResult {
   if (['macroenabled', 'vbaproject', 'macrosheet'].some((token) => decoded.includes(token))) {
     return refuse('blocked_type');
   }
+  // OPC: a part's type is its Override, else the Default for its extension
+  // (the .NET packaging writers declare the main part through Default). Tags
+  // may carry a namespace prefix (<ns0:Override>).
   const mainPart = `/${MAIN_PART[kind]}`;
-  for (const tag of raw.match(/<override\b[^>]*>/gi) ?? []) {
+  let mainType: string | null = null;
+  for (const tag of raw.match(/<(?:[a-z0-9_.-]+:)?override\b[^>]*>/gi) ?? []) {
     const part = xmlAttribute(tag, 'PartName');
-    if (part === null || part.toLowerCase() !== mainPart) continue;
-    const type = xmlAttribute(tag, 'ContentType');
-    return type !== null && type.toLowerCase() === MAIN_CONTENT_TYPE[kind]
-      ? OK
-      : refuse('mime_mismatch');
+    if (part !== null && part.replace(/\\/g, '/').toLowerCase() === mainPart) {
+      mainType = xmlAttribute(tag, 'ContentType') ?? '';
+      break;
+    }
   }
-  return refuse('mime_mismatch');
+  if (mainType === null) {
+    const extension = mainPart.split('.').pop() ?? '';
+    for (const tag of raw.match(/<(?:[a-z0-9_.-]+:)?default\b[^>]*>/gi) ?? []) {
+      if ((xmlAttribute(tag, 'Extension') ?? '').toLowerCase() === extension) {
+        mainType = xmlAttribute(tag, 'ContentType') ?? '';
+        break;
+      }
+    }
+  }
+  return mainType !== null && mainType.trim().toLowerCase() === MAIN_CONTENT_TYPE[kind]
+    ? OK
+    : refuse('mime_mismatch');
+}
+
+/**
+ * Relationship types that make Office fetch and load something from the
+ * Target when it is external: a remote template (macros), a linked OLE object
+ * (the Follina route), a remote frame, or a remote sub-document. Matched on the
+ * last path segment so transitional and strict namespaces both count.
+ */
+const REMOTE_LOADING_TYPES: ReadonlySet<string> = new Set([
+  'attachedtemplate',
+  'oleobject',
+  'frame',
+  'subdocument',
+]);
+
+/** A Windows protocol handler such as ms-msdt: (Follina) or msdt:. */
+const PROTOCOL_HANDLER = /(^|[^a-z0-9+.-])(ms-[a-z0-9+.-]*|msdt|search-ms):/i;
+
+/**
+ * .rels rules: an external relationship of a remote-loading type, or any Target
+ * naming an ms-* / msdt protocol handler, is refused. Ordinary external
+ * hyperlinks (and every internal relationship) pass.
+ */
+function checkRelationships(raw: string): FileSafetyResult {
+  for (const tag of raw.match(/<(?:[a-z0-9_.-]+:)?relationship\b[^>]*>/gi) ?? []) {
+    const target = xmlAttribute(tag, 'Target') ?? '';
+    if (PROTOCOL_HANDLER.test(target.trim())) return refuse('external_content');
+    const mode = (xmlAttribute(tag, 'TargetMode') ?? '').trim().toLowerCase();
+    if (mode !== 'external') continue;
+    const type = (xmlAttribute(tag, 'Type') ?? '').trim().toLowerCase();
+    const kind = type.split('/').pop() ?? '';
+    if (REMOTE_LOADING_TYPES.has(kind)) return refuse('external_content');
+  }
+  return OK;
 }
 
 /**
@@ -615,7 +1162,7 @@ async function inspectOoxml(
     const lower = entry.name.toLowerCase();
     const name = basename(lower);
     if (name.startsWith('vbaproject') || name === 'vbadata.xml') return refuse('blocked_type');
-    if (name.endsWith('.bin') && !PRINTER_SETTINGS.test(name)) return refuse('embedded_content');
+    if (name.endsWith('.bin') && !DATA_BLOB_BIN.test(name)) return refuse('embedded_content');
     if (name.startsWith('oleobject')) return refuse('embedded_content');
     if (lower.includes('embeddings/') && ooxmlKindForName(lower) === null) {
       return refuse('embedded_content');
@@ -657,7 +1204,8 @@ async function inspectOoxml(
     const lower = entry.name.toLowerCase();
     const embedKind = ooxmlKindForName(lower);
     const isContentTypes = lower === CONTENT_TYPES_PART;
-    const keep = isContentTypes || embedKind !== null;
+    const isRelationships = lower.endsWith('.rels');
+    const keep = isContentTypes || isRelationships || embedKind !== null;
     if (keep && entry.uncompressedSize > MAX_INSPECTED_PART_BYTES) {
       return refuse('archive_limits');
     }
@@ -665,9 +1213,17 @@ async function inspectOoxml(
     if (!inflated.ok) return refuse(inflated.code);
 
     if (isContentTypes) {
-      const text = decodeContentTypes(inflated.body ?? new Uint8Array());
+      const text = decodeStrictXml(inflated.body ?? new Uint8Array());
       if (text === null) return refuse('mime_mismatch');
       const checked = checkContentTypes(text, kind);
+      if (!checked.ok) return checked;
+      continue;
+    }
+
+    if (isRelationships) {
+      const text = decodeStrictXml(inflated.body ?? new Uint8Array());
+      if (text === null) return refuse('mime_mismatch');
+      const checked = checkRelationships(text);
       if (!checked.ok) return checked;
       continue;
     }
@@ -704,7 +1260,7 @@ export async function inspectUpload(input: {
   const name = checkFilename(input.filename, mime);
   if (!name.ok) return name;
 
-  if (mime === 'application/pdf' && isEncryptedPdf(input.bytes)) {
+  if (mime === 'application/pdf' && (await pdfNeedsPassword(input.bytes))) {
     return refuse('encrypted_file');
   }
 

@@ -26,6 +26,7 @@ export type UploadErrorCode =
   | 'encrypted_file'
   | 'embedded_content'
   | 'archive_limits'
+  | 'external_content'
   | 'mime_mismatch'
   | 'file_too_large'
   | 'virus_detected'

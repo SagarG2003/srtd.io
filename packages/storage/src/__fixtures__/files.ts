@@ -2,6 +2,7 @@
 // from small strings: no files on disk, no network, and no real malware (a
 // "macro" is an empty vbaProject.bin entry; an "executable" is just a name).
 
+import { createCipheriv, createHash } from 'node:crypto';
 import { deflateRawSync } from 'node:zlib';
 
 const encoder = new TextEncoder();
@@ -289,4 +290,184 @@ export function jpeg(): Uint8Array {
 
 export function svg(): Uint8Array {
   return encoder.encode('<svg xmlns="http://www.w3.org/2000/svg"><script>x()</script></svg>');
+}
+
+// ---------------------------------------------------------------------------
+// Encrypted PDFs (standard security handler), built with node:crypto as an
+// independent implementation of ISO 32000 Algorithms 2-5 and 2.A/2.B.
+// ---------------------------------------------------------------------------
+
+const PDF_PAD = Buffer.from(
+  '28bf4e5e4e758a4164004e56fffa01082e2e00b6d0683e802f0ca9fe6453697a',
+  'hex',
+);
+
+function md5(...parts: Uint8Array[]): Buffer {
+  const hash = createHash('md5');
+  for (const part of parts) hash.update(part);
+  return hash.digest();
+}
+
+function rc4(key: Uint8Array, data: Uint8Array): Buffer {
+  const s = Array.from({ length: 256 }, (_, i) => i);
+  let j = 0;
+  for (let i = 0; i < 256; i += 1) {
+    j = (j + (s[i] ?? 0) + (key[i % key.length] ?? 0)) & 0xff;
+    [s[i], s[j]] = [s[j] ?? 0, s[i] ?? 0];
+  }
+  const out = Buffer.alloc(data.length);
+  let i = 0;
+  j = 0;
+  for (let k = 0; k < data.length; k += 1) {
+    i = (i + 1) & 0xff;
+    j = (j + (s[i] ?? 0)) & 0xff;
+    [s[i], s[j]] = [s[j] ?? 0, s[i] ?? 0];
+    out[k] = (data[k] ?? 0) ^ (s[((s[i] ?? 0) + (s[j] ?? 0)) & 0xff] ?? 0);
+  }
+  return out;
+}
+
+function padPassword(password: string): Buffer {
+  return Buffer.concat([Buffer.from(password, 'latin1'), PDF_PAD]).subarray(0, 32);
+}
+
+function hash2b(password: Buffer, salt: Buffer, udata: Buffer): Buffer {
+  let k = createHash('sha256')
+    .update(Buffer.concat([password, salt, udata]))
+    .digest();
+  let e = Buffer.alloc(0);
+  for (let round = 0; round < 64 || (e.at(-1) ?? 0) > round - 32; round += 1) {
+    const k1 = Buffer.concat(Array.from({ length: 64 }, () => Buffer.concat([password, k, udata])));
+    const cipher = createCipheriv('aes-128-cbc', k.subarray(0, 16), k.subarray(16, 32));
+    cipher.setAutoPadding(false);
+    e = Buffer.concat([cipher.update(k1), cipher.final()]);
+    const sum = [...e.subarray(0, 16)].reduce((a, b) => a + b, 0) % 3;
+    k = createHash(sum === 0 ? 'sha256' : sum === 1 ? 'sha384' : 'sha512')
+      .update(e)
+      .digest();
+  }
+  return k.subarray(0, 32);
+}
+
+export type PdfRevision = 2 | 3 | 4 | 5 | 6;
+
+export interface EncryptedPdfOptions {
+  revision: PdfRevision;
+  /** '' is an owner-only lock: the file opens without a password. */
+  userPassword: string;
+  /** Write /O and /U as escaped literal strings instead of hex. */
+  literalStrings?: boolean;
+  /** Use another security handler (public-key /Adobe.PubSec). */
+  filter?: string;
+}
+
+function pdfLiteral(bytes: Uint8Array): string {
+  let out = '(';
+  for (const byte of bytes) {
+    if (byte === 0x28 || byte === 0x29 || byte === 0x5c) out += `\\${String.fromCharCode(byte)}`;
+    else if (byte === 0x0d) out += '\\r';
+    else if (byte === 0x0a) out += '\\n';
+    else out += String.fromCharCode(byte);
+  }
+  return `${out})`;
+}
+
+/** A one-page PDF locked with the given revision of the standard handler. */
+export function encryptedPdf(options: EncryptedPdfOptions): Uint8Array {
+  const { revision, userPassword } = options;
+  const id0 = Buffer.from('00112233445566778899aabbccddeeff', 'hex');
+  const permissions = -3904;
+  const p = Buffer.alloc(4);
+  p.writeInt32LE(permissions);
+  const n = revision === 2 ? 5 : 16;
+  let o: Buffer;
+  let u: Buffer;
+  let header: string;
+  if (revision <= 4) {
+    let ownerHash = md5(padPassword('ownerpw'));
+    if (revision >= 3) for (let i = 0; i < 50; i += 1) ownerHash = md5(ownerHash.subarray(0, n));
+    const ownerKey = ownerHash.subarray(0, n);
+    o = rc4(ownerKey, padPassword(userPassword));
+    if (revision >= 3) {
+      for (let i = 1; i <= 19; i += 1)
+        o = rc4(
+          ownerKey.map((b) => b ^ i),
+          o,
+        );
+    }
+    let keyHash = md5(padPassword(userPassword), o, p, id0);
+    if (revision >= 3) for (let i = 0; i < 50; i += 1) keyHash = md5(keyHash.subarray(0, n));
+    const key = keyHash.subarray(0, n);
+    if (revision === 2) {
+      u = rc4(key, PDF_PAD);
+    } else {
+      let x = rc4(key, md5(PDF_PAD, id0));
+      for (let i = 1; i <= 19; i += 1)
+        x = rc4(
+          key.map((b) => b ^ i),
+          x,
+        );
+      u = Buffer.concat([x, Buffer.alloc(16)]);
+    }
+    header =
+      revision === 2
+        ? '/V 1 /R 2 /Length 40'
+        : revision === 3
+          ? '/V 2 /R 3 /Length 128'
+          : '/V 4 /R 4 /Length 128 /CF << /StdCF << /CFM /AESV2 /AuthEvent /DocOpen /Length 16 >> >> /StmF /StdCF /StrF /StdCF';
+  } else {
+    const validationSalt = Buffer.from('0102030405060708', 'hex');
+    const keySalt = Buffer.from('1112131415161718', 'hex');
+    const password = Buffer.from(userPassword, 'utf8');
+    const hash =
+      revision === 5
+        ? createHash('sha256')
+            .update(Buffer.concat([password, validationSalt]))
+            .digest()
+        : hash2b(password, validationSalt, Buffer.alloc(0));
+    u = Buffer.concat([hash, validationSalt, keySalt]);
+    o = Buffer.alloc(48, 0x5a);
+    header = `/V 5 /R ${revision} /Length 256 /CF << /StdCF << /CFM /AESV3 /AuthEvent /DocOpen /Length 32 >> >> /StmF /StdCF /StrF /StdCF /OE <${'00'.repeat(32)}> /UE <${'00'.repeat(32)}> /Perms <${'00'.repeat(16)}>`;
+  }
+  const str = (bytes: Buffer) =>
+    options.literalStrings ? pdfLiteral(bytes) : `<${bytes.toString('hex')}>`;
+  const filter = options.filter ?? 'Standard';
+  const encrypt =
+    filter === 'Standard'
+      ? `<< /Filter /Standard ${header} /O ${str(o)} /U ${str(u)} /P ${permissions} >>`
+      : `<< /Filter /${filter} /SubFilter /adbe.pkcs7.s5 /V 4 /R 4 /Recipients [<3082>] >>`;
+  const text = [
+    '%PDF-1.7',
+    '1 0 obj',
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    'endobj',
+    '7 0 obj',
+    encrypt,
+    'endobj',
+    'trailer',
+    `<< /Root 1 0 R /Encrypt 7 0 R /ID [<${id0.toString('hex')}><${id0.toString('hex')}>] >>`,
+    '%%EOF',
+    '',
+  ].join('\n');
+  return Uint8Array.from(Buffer.from(text, 'latin1'));
+}
+
+/** Relationship XML for a .rels part, from {Type, Target, TargetMode?} rows. */
+export function relationships(
+  rows: ReadonlyArray<{ type: string; target: string; external?: boolean }>,
+  prefix = '',
+): string {
+  const tag = prefix === '' ? 'Relationship' : `${prefix}:Relationship`;
+  const root = prefix === '' ? 'Relationships' : `${prefix}:Relationships`;
+  const ns =
+    prefix === ''
+      ? 'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"'
+      : `xmlns:${prefix}="http://schemas.openxmlformats.org/package/2006/relationships"`;
+  const body = rows
+    .map(
+      (row, i) =>
+        `<${tag} Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${row.type}" Target="${row.target}"${row.external ? ' TargetMode="External"' : ''}/>`,
+    )
+    .join('');
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><${root} ${ns}>${body}</${root}>`;
 }

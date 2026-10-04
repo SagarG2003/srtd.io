@@ -7,12 +7,15 @@ import {
   checkFilename,
   inspectUpload,
   isEncryptedPdf,
+  pdfNeedsPassword,
   type FileSafetyCode,
 } from './file-safety';
 import {
   MIME,
   buildZip,
   contentTypesFor,
+  encryptedPdf,
+  relationships,
   storedLocalHeader,
   jpeg,
   mp4,
@@ -506,5 +509,202 @@ describe('audit regressions', () => {
       { name: 'word/document.xml', data: '<w/>' },
     ]);
     expect(await codeOf('report.docx', MIME.docx, bytes)).toBe('ok');
+  });
+});
+
+describe('F1 PDFs are refused only when a password is needed to open them', () => {
+  const revisions = [
+    [2, 'RC4 40-bit'],
+    [3, 'RC4 128-bit'],
+    [4, 'AES-128'],
+    [5, 'AES-256 R5'],
+    [6, 'AES-256 R6'],
+  ] as const;
+
+  it.each(revisions)('passes an owner-only lock, revision %i (%s)', async (revision) => {
+    const bytes = encryptedPdf({ revision, userPassword: '' });
+    expect(isEncryptedPdf(bytes)).toBe(true);
+    expect(await pdfNeedsPassword(bytes)).toBe(false);
+    expect(await codeOf('statement.pdf', MIME.pdf, bytes)).toBe('ok');
+  });
+
+  it.each(revisions)('refuses a user password, revision %i (%s)', async (revision) => {
+    const bytes = encryptedPdf({ revision, userPassword: 'secret' });
+    expect(await codeOf('statement.pdf', MIME.pdf, bytes)).toBe('encrypted_file');
+  });
+
+  it.each([2, 3, 4] as const)(
+    'reads /O and /U written as escaped literal strings, revision %i',
+    async (revision) => {
+      const open = encryptedPdf({ revision, userPassword: '', literalStrings: true });
+      const locked = encryptedPdf({ revision, userPassword: 'secret', literalStrings: true });
+      expect(await codeOf('a.pdf', MIME.pdf, open)).toBe('ok');
+      expect(await codeOf('a.pdf', MIME.pdf, locked)).toBe('encrypted_file');
+    },
+  );
+
+  it('refuses the public-key handler (/Adobe.PubSec)', async () => {
+    const bytes = encryptedPdf({ revision: 4, userPassword: '', filter: 'Adobe.PubSec' });
+    expect(await codeOf('a.pdf', MIME.pdf, bytes)).toBe('encrypted_file');
+  });
+
+  it('refuses an /Encrypt reference whose dictionary cannot be read', async () => {
+    expect(await codeOf('a.pdf', MIME.pdf, pdf({ encrypted: true }))).toBe('encrypted_file');
+  });
+
+  it('passes a PDF with no /Encrypt at all', async () => {
+    expect(await pdfNeedsPassword(pdf())).toBe(false);
+  });
+});
+
+describe('F2 Office files that load content from the internet', () => {
+  const docxWithRels = (rels: string, name = 'word/_rels/settings.xml.rels') =>
+    office('docx', { extra: [{ name, data: rels }] });
+
+  it('refuses a remote attachedTemplate', async () => {
+    const rels = relationships([
+      { type: 'attachedTemplate', target: 'http://example.test/t.dotm', external: true },
+    ]);
+    const result = await inspectUpload({
+      filename: 'report.docx',
+      mimeType: MIME.docx,
+      bytes: docxWithRels(rels),
+    });
+    expect(result).toEqual({
+      ok: false,
+      code: 'external_content',
+      message: "This file loads content from the internet and can't be shared.",
+    });
+  });
+
+  it.each(['oleObject', 'frame', 'subDocument'])('refuses an external %s', async (type) => {
+    const rels = relationships([{ type, target: 'http://example.test/x', external: true }]);
+    expect(
+      await codeOf('report.docx', MIME.docx, docxWithRels(rels, 'word/_rels/document.xml.rels')),
+    ).toBe('external_content');
+  });
+
+  it.each([
+    'ms-msdt:/id PCWDiagnostic',
+    'MS-MSDT:x',
+    'ms-word:ofe|u|http://x',
+    'msdt:x',
+    'search-ms:query=x',
+  ])('refuses a protocol-handler target %j even as a hyperlink', async (target) => {
+    const rels = relationships([{ type: 'hyperlink', target, external: true }]);
+    expect(
+      await codeOf('report.docx', MIME.docx, docxWithRels(rels, 'word/_rels/document.xml.rels')),
+    ).toBe('external_content');
+  });
+
+  it('refuses an entity-escaped ms-msdt target', async () => {
+    const rels = relationships([
+      { type: 'oleObject', target: 'ms&#45;msdt&#58;/id x', external: false },
+    ]);
+    expect(await codeOf('report.docx', MIME.docx, docxWithRels(rels))).toBe('external_content');
+  });
+
+  it('refuses a remote template inside an embedded workbook', async () => {
+    const workbook = office('xlsx', {
+      extra: [
+        {
+          name: 'xl/_rels/workbook.xml.rels',
+          data: relationships([
+            { type: 'oleObject', target: 'https://example.test/x.bin', external: true },
+          ]),
+        },
+      ],
+    });
+    const bytes = office('pptx', { extra: [{ name: 'ppt/embeddings/book.xlsx', data: workbook }] });
+    expect(await codeOf('deck.pptx', MIME.pptx, bytes)).toBe('external_content');
+  });
+
+  it('passes ordinary external web links and internal relationships', async () => {
+    const rels = relationships([
+      { type: 'hyperlink', target: 'https://srtd.io/brief?x=1', external: true },
+      { type: 'hyperlink', target: 'mailto:hello@example.test', external: true },
+      { type: 'image', target: 'media/image1.png' },
+      { type: 'attachedTemplate', target: 'Normal.dotm' },
+    ]);
+    expect(
+      await codeOf('report.docx', MIME.docx, docxWithRels(rels, 'word/_rels/document.xml.rels')),
+    ).toBe('ok');
+  });
+});
+
+describe('F3 regressions from the real-file dry run (synthetic)', () => {
+  it('passes Excel worksheet customProperty .bin data blobs', async () => {
+    const bytes = office('xlsx', {
+      extra: [{ name: 'xl/customProperty1.bin', data: Uint8Array.from([0x41, 0x00, 0x42, 0x00]) }],
+    });
+    expect(await codeOf('budget.xlsx', MIME.xlsx, bytes)).toBe('ok');
+  });
+
+  it('still refuses a container hidden in a customProperty .bin', async () => {
+    const bytes = office('xlsx', {
+      extra: [{ name: 'xl/customProperty1.bin', data: ole2() }],
+    });
+    expect(await codeOf('budget.xlsx', MIME.xlsx, bytes)).toBe('embedded_content');
+  });
+
+  it('accepts the main type declared through <Default Extension="xml"> (.NET writers)', async () => {
+    const xml =
+      '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '</Types>';
+    const bom = '\uFEFF' + xml;
+    expect(await codeOf('report.docx', MIME.docx, office('docx', { contentTypesXml: bom }))).toBe(
+      'ok',
+    );
+  });
+
+  it('still refuses a wrong main type declared through <Default>', async () => {
+    const xml =
+      '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"/>' +
+      '</Types>';
+    expect(await codeOf('report.docx', MIME.docx, office('docx', { contentTypesXml: xml }))).toBe(
+      'mime_mismatch',
+    );
+  });
+
+  it('accepts namespace-prefixed package XML (<ns0:Types>, <ns0:Relationship>)', async () => {
+    const xml =
+      '<ns0:Types xmlns:ns0="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<ns0:Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '</ns0:Types>';
+    const bytes = office('xlsx', {
+      contentTypesXml: xml,
+      extra: [
+        {
+          name: 'xl/_rels/workbook.xml.rels',
+          data: relationships([{ type: 'worksheet', target: 'worksheets/sheet1.xml' }], 'ns0'),
+        },
+      ],
+    });
+    expect(await codeOf('budget.xlsx', MIME.xlsx, bytes)).toBe('ok');
+  });
+
+  it('still refuses a prefixed remote template', async () => {
+    const rels = relationships(
+      [{ type: 'attachedTemplate', target: 'http://example.test/t.dotm', external: true }],
+      'ns0',
+    );
+    const bytes = office('docx', { extra: [{ name: 'word/_rels/settings.xml.rels', data: rels }] });
+    expect(await codeOf('report.docx', MIME.docx, bytes)).toBe('external_content');
+  });
+
+  it('accepts backslash path separators and still applies every path rule to them', async () => {
+    const ok = buildZip([
+      { name: '[Content_Types].xml', data: contentTypesFor('xlsx') },
+      { name: '_rels\\.rels', data: '<Relationships/>' },
+      { name: 'xl\\workbook.xml', data: '<workbook/>' },
+    ]);
+    expect(await codeOf('budget.xlsx', MIME.xlsx, ok)).toBe('ok');
+    const hidden = office('xlsx', {
+      extra: [{ name: 'xl\\embeddings\\x.zip', data: buildZip([{ name: 'a', data: 'a' }]) }],
+    });
+    expect(await codeOf('budget.xlsx', MIME.xlsx, hidden)).toBe('embedded_content');
   });
 });
