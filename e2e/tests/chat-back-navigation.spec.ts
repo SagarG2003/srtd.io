@@ -266,3 +266,43 @@ test('8: a draft typed in a chat survives back and reopen', async ({ page }) => 
   await shot(page, 'back-8-draft-kept');
   expectClean(network);
 });
+
+test('F2: Pipeline -> Chat tab -> group -> Leave group: list at once, back = Pipeline', async ({
+  page,
+}) => {
+  const network = await installHarnessNetwork(page);
+  // Leaving is accepted (this test's world only): I drop out of the group.
+  await page.route(/\/rest\/v1\/rpc\/group_leave/, async (route: Route) => {
+    const cors = {
+      'access-control-allow-origin': '*',
+      'access-control-allow-headers': '*',
+      'access-control-allow-methods': 'POST, OPTIONS',
+    };
+    if (route.request().method() === 'OPTIONS') {
+      await route.fulfill({ status: 204, headers: cors });
+      return;
+    }
+    const tables = network.world.tables;
+    tables.group_members = (tables.group_members ?? []).filter(
+      (m) => !(m.group_id === GROUP_ID && m.user_id === ME),
+    );
+    await route.fulfill({
+      status: 200,
+      headers: { ...cors, 'content-type': 'application/json' },
+      body: 'null',
+    });
+  });
+  await page.goto('/pipeline');
+  await page.getByRole('link', { name: 'Chat' }).first().click();
+  await expect(page).toHaveURL(/\/chat$/);
+  await openFromList(page, GROUP_NAME);
+  await page.locator('[data-group-info-open]').first().click();
+  await page.locator('[data-row="leave-group"]').click();
+  await page.getByRole('button', { name: 'Leave', exact: true }).click();
+  await expect(page).toHaveURL(/\/chat$/);
+  await expectList(page);
+  await shot(page, 'back-f2-left-group');
+  // No duplicate list entry: one back leaves Chat.
+  await page.goBack();
+  await expect(page).toHaveURL(/\/pipeline$/);
+});

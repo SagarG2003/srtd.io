@@ -10,12 +10,18 @@ import {
   enterHistoryStep,
   hasPreviousEntry,
   HISTORY_STEP_KEYS,
+  chatEntryFrom,
   isBuriedStep,
+  openedFromList,
   resetHistorySteps,
   stepMarkerOf,
   type HistoryStepWindow,
 } from '@/lib/chat/use-history-step';
+import { openChannelAfterRoster } from '@/lib/chat/roster-signal';
+import type { ChannelSummary } from '@/lib/chat-reads';
+import { incomingToastStep } from '@/components/chat/ChatStoreProvider';
 import {
+  autoCloseAction,
   channelWriteFor,
   chatBackAction,
   closesOnParamLoss,
@@ -334,5 +340,92 @@ describe('N3: the bell is part of history', () => {
     win.flush();
     expect(win.index()).toBe(0);
     expect(win.listeners()).toBe(0);
+  });
+});
+
+// Router writes with location state (usr), as React Router stores them.
+function writeWith(
+  win: ReturnType<typeof queuedWindow>,
+  to: string,
+  mode: ChannelWrite,
+  usr: unknown,
+): void {
+  win.write(to, mode);
+  const state = win.history.state as Record<string, unknown>;
+  state.usr = usr;
+}
+
+describe('F2: auto-close never leaves two list entries in a row', () => {
+  it('opened from the bare list: pops back to it; back again = the screen before the list', () => {
+    const win = queuedWindow([PIPELINE, LIST]);
+    writeWith(win, CHAT_A, 'push', chatEntryFrom(true, win.history.state));
+    expect(openedFromList(win.history.state)).toBe(true);
+    expect(autoCloseAction(win.history.state)).toBe('pop');
+    win.history.back();
+    win.flush();
+    expect(win.url()).toBe(LIST);
+    win.history.back();
+    win.flush();
+    expect(win.url()).toBe(PIPELINE);
+  });
+
+  it('opened from elsewhere (Activity, another chat, the bell, a cold link): replaces', () => {
+    const activity = queuedWindow([ACTIVITY]);
+    writeWith(activity, CHAT_A, 'push', undefined);
+    expect(autoCloseAction(activity.history.state)).toBe('replace');
+    const chat = queuedWindow([LIST, CHAT_A]);
+    writeWith(chat, CHAT_B, 'push', chatEntryFrom(false, chat.history.state));
+    expect(autoCloseAction(chat.history.state)).toBe('replace');
+    expect(autoCloseAction({ idx: 0, usr: { chatBelow: 'list' } })).toBe('replace');
+    // The bell open over chat home is a step, not the bare list.
+    const bell = queuedWindow([LIST]);
+    enterHistoryStep(bell, HISTORY_STEP_KEYS.bell, vi.fn()).detach();
+    expect(chatEntryFrom(true, bell.history.state)).toBeUndefined();
+  });
+});
+
+describe('F3: a toast for the chat already open adds no step', () => {
+  it('jumps in place for the open chat, opens any other', () => {
+    expect(incomingToastStep('a', 'a')).toBe('jump');
+    expect(incomingToastStep('a', 'b')).toBe('open');
+    expect(incomingToastStep(null, 'a')).toBe('open');
+  });
+
+  it('the jump replaces the chat entry (keeping its record): back still = the list', () => {
+    const win = queuedWindow([LIST]);
+    writeWith(win, CHAT_A, 'push', chatEntryFrom(true, win.history.state));
+    const depth = win.index();
+    writeWith(win, `${CHAT_A}&message=m9`, 'replace', { chatBelow: 'list' });
+    // The ?message= strip replaces too.
+    writeWith(win, CHAT_A, 'replace', { chatBelow: 'list' });
+    expect(win.index()).toBe(depth);
+    expect(openedFromList(win.history.state)).toBe(true);
+    win.history.back();
+    win.flush();
+    expect(win.url()).toBe(LIST);
+  });
+});
+
+describe('F4: a late roster re-read never reopens a chat the user left', () => {
+  it('with no chat open, a re-read keeps chat home (no open, no push)', () => {
+    const row = { channelId: 'a', title: 'Launch crew' } as unknown as ChannelSummary;
+    expect(openChannelAfterRoster(null, [row], true)).toEqual({ kind: 'keep' });
+    expect(openChannelAfterRoster(null, [row], false)).toEqual({ kind: 'keep' });
+  });
+});
+
+describe('a close flushed inside the popstate that lands it', () => {
+  it('a dispose that runs after the pop landed still runs the waiting switch', () => {
+    const win = queuedWindow([LIST, CHAT_A]);
+    // React flushes the sheet's close (dispose) from the router's popstate
+    // listener, which was added before the step's own (so it runs first).
+    let step: { dispose: () => void } | null = null;
+    win.addEventListener('popstate', () => step?.dispose());
+    step = enterHistoryStep(win, HISTORY_STEP_KEYS.groupInfo, vi.fn());
+    const run = vi.fn();
+    leaveSelectionThen(run);
+    win.flush();
+    expect(run).toHaveBeenCalledOnce();
+    expect(win.url()).toBe(CHAT_A);
   });
 });

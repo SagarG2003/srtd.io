@@ -78,7 +78,14 @@ import { useChatLayout } from '@/components/chat/chat-type';
 import { NewChatSheet } from '@/components/chat/NewChatSheet';
 import { GroupInfoSheet, type GroupInfoTabsWiring } from '@/components/chat/GroupInfoSheet';
 import { leaveSelectionThen } from '@/lib/chat/forward';
-import { hasPreviousEntry, HISTORY_STEP_KEYS, useHistoryStep } from '@/lib/chat/use-history-step';
+import {
+  chatEntryFrom,
+  entryUsr,
+  hasPreviousEntry,
+  HISTORY_STEP_KEYS,
+  openedFromList,
+  useHistoryStep,
+} from '@/lib/chat/use-history-step';
 import { startDmChannel } from '@/components/chat/chat-actions';
 import { mentionGone, useChannelMembersState } from '@/components/chat/use-channel-members';
 import {
@@ -510,6 +517,16 @@ export function chatBackAction(historyState: unknown): 'pop' | 'list' {
   return hasPreviousEntry(historyState) ? 'pop' : 'list';
 }
 
+/**
+ * A chat closing on its own (left, removed, deleted, unknown link): opened
+ * from the bare chat list (the entry below), it pops back to that entry, so
+ * no two list entries sit in a row; otherwise it replaces its own entry with
+ * the list. Pure.
+ */
+export function autoCloseAction(historyState: unknown): 'pop' | 'replace' {
+  return openedFromList(historyState) ? 'pop' : 'replace';
+}
+
 export function ChatConnected(props: ChatConnectedProps): ReactElement {
   const { client, status, workspaceId, currentUserId } = props;
   const isDesktop = useMediaQuery(DESKTOP_QUERY);
@@ -600,7 +617,14 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     (channelId: string | null, mode: ChannelWrite) => {
       // Already there: no entry (a push would leave a duplicate step).
       if ((channelParamRef.current || null) === channelId) return;
+      const fromBareList = (channelParamRef.current || null) === null;
       channelParamRef.current = channelId;
+      // A push records whether it came from the bare list; a replace keeps the
+      // entry's own record.
+      const state =
+        mode === 'push'
+          ? chatEntryFrom(fromBareList, window.history.state)
+          : entryUsr(window.history.state);
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -608,7 +632,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
           else next.set('channel', channelId);
           return next;
         },
-        { replace: mode === 'replace' },
+        { replace: mode === 'replace', state },
       );
     },
     [setSearchParams],
@@ -639,16 +663,31 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     seq: number;
     jumpOnly?: boolean;
   } | null>(null);
+  // Leave the chat's entry for the list without a dead or duplicate step:
+  // pop to the bare list it was opened from, else replace it with the list.
+  // A pop closes the chat when it lands (the param-loss effect below).
+  const dropChannelEntry = useCallback(() => {
+    if (autoCloseAction(window.history.state) === 'pop') {
+      navigate(-1);
+      return;
+    }
+    setSelected(null);
+    writeChannelParam(null, channelWriteFor('autoClose'));
+  }, [navigate, writeChannelParam]);
   // The chat closing on its own (left, removed, deleted) or a cold open's back
-  // arrow: the chat list in place of the chat's entry, never a dead step.
+  // arrow. Once per chat: a second close while the first is still landing (a
+  // leave, then the roster re-read that drops the group) would pop twice.
+  const closingRef = useRef<string | null>(null);
   const closeChannel = useCallback(() => {
+    const closing = selectedRef.current?.channelId ?? null;
+    if (closing !== null && closingRef.current === closing) return;
+    closingRef.current = closing;
     leaveSelectionThen(() => {
       // A hit's jump not taken yet (backed out while loading) never fires later.
       setSearchRequest(null);
-      setSelected(null);
-      writeChannelParam(null, channelWriteFor('autoClose'));
+      dropChannelEntry();
     });
-  }, [writeChannelParam]);
+  }, [dropChannelEntry]);
   // Only ever counts up: a taken request goes back to null, and the next tap
   // in the same open chat must still read as new.
   const searchSeqRef = useRef(0);
@@ -686,6 +725,17 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // roster is ready, once per distinct id. The param stays while the thread is
   // open; an id not in the roster is stripped so the chrome comes back.
   const selectedFromParam = useRef<string | null>(null);
+  // ?message= is consumed once: a replace that keeps the entry's own record.
+  const stripMessageParam = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('message');
+        return next;
+      },
+      { replace: true, state: entryUsr(window.history.state) },
+    );
+  }, [setSearchParams]);
   const toastRef = useRef(toast);
   toastRef.current = toast;
   // A layout effect: back or forward onto another chat's entry selects it
@@ -698,23 +748,30 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
       selectedFromParam.current = null;
       return;
     }
-    if (selectedFromParam.current === channel) return;
+    if (selectedFromParam.current === channel) {
+      // The open chat's own link with a ?message= (a toast for this chat):
+      // jump to it in place, then drop the param; no step added.
+      const messageId = searchParams.get('message');
+      if (messageId !== null && messageId !== '' && selectedRef.current?.channelId === channel) {
+        searchSeqRef.current += 1;
+        setSearchRequest({
+          channelId: channel,
+          messageId,
+          query: '',
+          seq: searchSeqRef.current,
+          jumpOnly: true,
+        });
+        stripMessageParam();
+      }
+      return;
+    }
     selectedFromParam.current = channel;
     const step = deepLinkStep(searchParams, chatRoster);
     const linkParams = new URLSearchParams(searchParams);
     // ?message= is consumed once: the thread takes it, the url drops it. A link
     // to a chat not (yet) in my list keeps no earlier jump.
     setPendingJump(step.jump);
-    if (searchParams.has('message')) {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          next.delete('message');
-          return next;
-        },
-        { replace: true },
-      );
-    }
+    if (searchParams.has('message')) stripMessageParam();
     if (selectedRef.current?.channelId === channel) return;
     if (step.open !== null) {
       setSelected(step.open);
@@ -741,7 +798,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
           setSelected(again.open);
           return;
         }
-        writeChannelParam(null, channelWriteFor('unknown'));
+        dropChannelEntry();
         toastRef.current.show({ title: CHAT_UNAVAILABLE_TOAST });
       },
     );
@@ -750,8 +807,8 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     chatRoster,
     notesChat,
     searchParams,
-    setSearchParams,
-    writeChannelParam,
+    dropChannelEntry,
+    stripMessageParam,
     reloadRoster,
     workspaceId,
   ]);
@@ -855,9 +912,11 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     [reloadRoster, signalRoster],
   );
 
+  // A group edit only refreshes data: the open chat's row follows the re-read
+  // (the roster effect below); a re-read never opens a chat the user has left.
   const onGroupChanged = useCallback(() => {
-    void refreshChannels(selected?.channelId ?? null);
-  }, [refreshChannels, selected]);
+    void refreshChannels(null);
+  }, [refreshChannels]);
 
   const onGroupLeft = useCallback(() => {
     setGroupInfoOpen(false);
@@ -913,6 +972,10 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   }
   // A pending Activity jump belongs to one chat: switching away or closing
   // before it ran drops it, so reopening that chat later never jumps.
+  // A close in flight belongs to the chat it closes: any open or close ends it.
+  useEffect(() => {
+    closingRef.current = null;
+  }, [selectedChannelId]);
   const jumpChannelRef = useRef(selectedChannelId);
   useEffect(() => {
     if (jumpChannelRef.current === selectedChannelId) return;

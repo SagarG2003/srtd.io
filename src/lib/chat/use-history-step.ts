@@ -226,6 +226,12 @@ export function enterHistoryStep(
       forget(handle);
       if (leaving) {
         // A switch waiting on history.back() still runs once that pop lands.
+        // Landed already: this dispose runs inside that popstate (React
+        // flushes the close there), where a listener added now would miss it.
+        if (pending !== null && !onTop()) {
+          pending();
+          return;
+        }
         if (pending !== null) {
           const onLanded = (): void => {
             win.removeEventListener('popstate', onLanded);
@@ -356,3 +362,41 @@ export const HISTORY_STEP_KEYS = {
   bell: 'chatBell',
   bellScheduled: 'chatBellScheduled',
 } as const;
+
+/**
+ * Whether the entry is a layer's step (any key in use), not a screen's own
+ * entry. The bell open over chat home is a step, not the bare list. Pure.
+ */
+export function isStepEntry(state: unknown): boolean {
+  for (const key of stepKeys) if (stepMarkerOf(state, key) !== null) return true;
+  return false;
+}
+
+/** What a chat entry remembers about the entry below it (React Router's location state). */
+export interface ChatEntryState {
+  /** The chat was pushed from the bare chat list (no chat open, no layer). */
+  chatBelow: 'list';
+}
+
+/** React Router's location state on a history entry (`usr`), or undefined. */
+export function entryUsr(state: unknown): unknown {
+  if (typeof state !== 'object' || state === null) return undefined;
+  return (state as Record<string, unknown>).usr;
+}
+
+/**
+ * The location state for an entry pushed from the current one: marks it as
+ * opened from the bare chat list when that is where it was pushed from. Pure.
+ */
+export function chatEntryFrom(onBareList: boolean, state: unknown): ChatEntryState | undefined {
+  return onBareList && !isStepEntry(state) ? { chatBelow: 'list' } : undefined;
+}
+
+/** Whether the current entry was pushed from the bare chat list (one step below). Pure. */
+export function openedFromList(state: unknown): boolean {
+  if (!hasPreviousEntry(state)) return false;
+  const usr = entryUsr(state);
+  return (
+    typeof usr === 'object' && usr !== null && (usr as Record<string, unknown>).chatBelow === 'list'
+  );
+}
