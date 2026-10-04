@@ -363,6 +363,11 @@ export const HISTORY_STEP_KEYS = {
   bellScheduled: 'chatBellScheduled',
 } as const;
 
+// Every layer key is known from load, so an entry a layer left before a reload
+// still reads as a step (never as the bare list). Selection's own key
+// ('chatSelection', MessageThread's SELECTION_HISTORY_KEY) included.
+for (const key of [...Object.values(HISTORY_STEP_KEYS), 'chatSelection']) stepKeys.add(key);
+
 /**
  * Whether the entry is a layer's step (any key in use), not a screen's own
  * entry. The bell open over chat home is a step, not the bare list. Pure.

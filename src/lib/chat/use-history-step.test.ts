@@ -429,3 +429,13 @@ describe('a close flushed inside the popstate that lands it', () => {
     expect(win.url()).toBe(CHAT_A);
   });
 });
+
+describe('an entry a layer left before a reload', () => {
+  it('reads as a step from load (never the bare list)', () => {
+    resetHistorySteps();
+    for (const key of [...Object.values(HISTORY_STEP_KEYS), 'chatSelection']) {
+      expect(chatEntryFrom(true, { idx: 1, [key]: 123 })).toBeUndefined();
+    }
+    expect(chatEntryFrom(true, { idx: 1 })).toEqual({ chatBelow: 'list' });
+  });
+});
