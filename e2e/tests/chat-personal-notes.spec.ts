@@ -157,6 +157,9 @@ test('personal notes: phone', async ({ page }, testInfo) => {
   await shot('7-saved-copy');
 
   // The Photos chip alone lists photo messages (empty query, p_kind photo).
+  // Back returns where notes were opened from: the DM, then the list.
+  await page.getByRole('button', { name: 'Back to conversations' }).click();
+  await expect(page.locator('[data-contact-open]', { hasText: PEER_NAME })).toBeVisible();
   await page.getByRole('button', { name: 'Back to conversations' }).click();
   await page.locator('[data-search-chip="photo"]').click();
   await expect(page.locator('[data-search-chip="photo"]')).toHaveAttribute('aria-pressed', 'true');
