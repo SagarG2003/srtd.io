@@ -894,4 +894,50 @@ describe('fix-round audit regressions', () => {
       await codeOf('a.docx', MIME.docx, relsDocx(`${RELS_OPEN}${commentOnly}</Relationships>`)),
     ).toBe('ok');
   });
+
+  const within = async (ms: number, work: () => Promise<unknown>) => {
+    const started = Date.now();
+    await work();
+    expect(Date.now() - started).toBeLessThan(ms);
+  };
+
+  it('stays fast on many /First keys inside unclosed strings (no /Encrypt)', async () => {
+    await within(2000, async () => {
+      expect(
+        await codeOf('a.pdf', MIME.pdf, fromLatin1(`%PDF-1.7\n${'/First ('.repeat(200_000)}`)),
+      ).toBe('ok');
+    });
+  });
+
+  it('refuses an object 0 encryption reference without scanning a zero run', async () => {
+    await within(2000, async () => {
+      const objects = `0 0 obj ${ownerOnly} endobj\n${'0'.repeat(4_000_000)}`;
+      expect(await codeOf('a.pdf', MIME.pdf, pdfWith(objects, '0 0 R'))).toBe('encrypted_file');
+    });
+  });
+
+  it('stays fast on a long zero run before a candidate object number', async () => {
+    await within(2000, async () => {
+      const objects = `10 0 obj ${ownerOnly} endobj\n${'0'.repeat(4_000_000)}`;
+      expect(await codeOf('a.pdf', MIME.pdf, pdfWith(objects, '10 0 R'))).toBe('ok');
+    });
+  });
+
+  it('inflates only object stream headers, however long the streams are', async () => {
+    const headers = Array.from(
+      { length: 500 },
+      (_, i) =>
+        `${100 + i} 0 obj<</Type/ObjStm/N 1/First 4/Filter/FlateDecode>>stream\n\x78\x9c\xff\xff`,
+    ).join('\n');
+    await within(3000, async () => {
+      const objects = `7 0 obj ${ownerOnly} endobj\n${headers}\n${'A'.repeat(8_000_000)}\nendstream`;
+      expect(await codeOf('a.pdf', MIME.pdf, pdfWith(objects))).toBe('ok');
+    });
+  });
+
+  it('passes an owner-only PDF when a structure element carries a later /ID', async () => {
+    const owner = latin1(pdfWith(`7 0 obj ${ownerOnly} endobj`));
+    const tagged = `${owner}20 0 obj << /Type /StructElem /ID (abc) >> endobj\ntrailer << /Size 21 >>\n%%EOF\n`;
+    expect(await codeOf('a.pdf', MIME.pdf, fromLatin1(tagged))).toBe('ok');
+  });
 });

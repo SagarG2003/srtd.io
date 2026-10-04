@@ -234,31 +234,56 @@ function readPdfName(bytes: Uint8Array, start: number, max: number): { name: str
   return { name, end: j };
 }
 
-/** Byte offsets just after every /Encrypt name, and after the last /ID name. */
+/** /ID arrays tried as the document identifier (the last ones in the file). */
+const PDF_MAX_ID_CANDIDATES = 16;
+
+/**
+ * True when `/First` at `at` is followed by a plain number (an object stream
+ * header length) rather than an "n g R" reference (an outline's /First). Reads
+ * only whitespace and digits, so it costs a few bytes per key.
+ */
+function isNumericFirst(bytes: Uint8Array, at: number): boolean {
+  let i = at;
+  const skip = () => {
+    while (PDF_WHITESPACE.has(bytes[i] as number)) i += 1;
+  };
+  const digits = (): number => {
+    const start = i;
+    while (isAsciiDigit(bytes[i])) i += 1;
+    return i - start;
+  };
+  skip();
+  if (digits() === 0) return false;
+  skip();
+  if (digits() === 0) return true;
+  skip();
+  const after = bytes[i + 1];
+  return !(bytes[i] === 0x52 && (after === undefined || PDF_NAME_TERMINATORS.has(after)));
+}
+
+/**
+ * Byte offsets just after every /Encrypt name and every /ID name, and the
+ * positions of object streams.
+ */
 function scanPdfNames(bytes: Uint8Array): {
   encrypt: number[];
-  lastId: number;
+  ids: number[];
   objectStreams: number[];
 } {
   const encrypt: number[] = [];
   const objectStreams: number[] = [];
-  const firstKeys: number[] = [];
-  let lastId = -1;
+  const ids: number[] = [];
   for (let i = 0; i < bytes.length; i += 1) {
     if (bytes[i] !== 0x2f) continue;
     const { name, end } = readPdfName(bytes, i + 1, PDF_NAME_SCAN);
     if (name === 'Encrypt') encrypt.push(end);
-    else if (name === 'ID') lastId = end;
+    else if (name === 'ID') ids.push(end);
     else if (name === 'ObjStm') objectStreams.push(i);
-    else if (name === 'First') firstKeys.push(end);
+    // Readers take an object stream by its /First and /N, not its /Type, so a
+    // dictionary with a numeric /First counts as one too.
+    else if (name === 'First' && isNumericFirst(bytes, end)) objectStreams.push(i);
   }
-  // Readers take an object stream by its /First and /N, not its /Type, so a
-  // dictionary with a numeric /First counts as one too (an outline's /First
-  // is a reference and is skipped).
-  for (const at of firstKeys) {
-    if (new PdfObjectReader(bytes, at).read()?.t === 'num') objectStreams.push(at);
-  }
-  return { encrypt, lastId, objectStreams };
+  return { encrypt, ids: ids.slice(-PDF_MAX_ID_CANDIDATES), objectStreams };
 }
 
 /**
@@ -295,9 +320,10 @@ class PdfObjectReader {
   constructor(
     private readonly bytes: Uint8Array,
     start: number,
+    maxBytes = PDF_MAX_OBJECT_BYTES,
   ) {
     this.pos = start;
-    this.limit = Math.min(bytes.length, start + PDF_MAX_OBJECT_BYTES);
+    this.limit = Math.min(bytes.length, start + maxBytes);
   }
 
   /** Byte offset just after the last value read. */
@@ -511,8 +537,10 @@ class PdfObjectReader {
 }
 
 const PDF_OBJ = new TextEncoder().encode('obj');
+const PDF_MAX_LEADING_ZEROS = 16;
+/** An object stream's dictionary sits just before its /Type or /First key. */
+const PDF_OBJECT_STREAM_DICT_WINDOW = 4096;
 const PDF_STREAM = new TextEncoder().encode('stream');
-const PDF_ENDSTREAM = new TextEncoder().encode('endstream');
 /** More distinct encryption dictionaries than this is refused, not computed. */
 const PDF_MAX_ENCRYPT_DICTS = 4;
 /** Object streams inspected for a hidden encryption dictionary. */
@@ -575,9 +603,13 @@ function findObjectDefinitions(
       at = indexOfBytes(bytes, needle, at + 1)
     ) {
       // Leading zeros are the same number; any other digit before is not.
+      // A long zero run counts as leading zeros (a possible definition), so
+      // the walk-back stays bounded without hiding one.
       let start = at;
-      while (start > 0 && bytes[start - 1] === 0x30) start -= 1;
-      if (isAsciiDigit(bytes[start - 1])) continue;
+      while (start > 0 && at - start < PDF_MAX_LEADING_ZEROS && bytes[start - 1] === 0x30) {
+        start -= 1;
+      }
+      if (bytes[start - 1] !== 0x30 && isAsciiDigit(bytes[start - 1])) continue;
       let i = at + needle.length;
       if (isAsciiDigit(bytes[i])) continue;
       const afterNumber = skipPdfSpace(bytes, i, cache);
@@ -660,7 +692,7 @@ async function objectStreamMembers(
   budget: { headerBytes: number },
 ): Promise<number[] | 'encrypted' | 'unchecked'> {
   if (objAt === -1) return 'unchecked';
-  const reader = new PdfObjectReader(bytes, objAt + 3);
+  const reader = new PdfObjectReader(bytes, objAt + 3, PDF_OBJECT_STREAM_DICT_WINDOW);
   const dict = reader.read();
   if (dict?.t !== 'dict') return 'unchecked';
   const filter = dict.v.get('Filter');
@@ -685,13 +717,16 @@ async function objectStreamMembers(
   start += PDF_STREAM.length;
   if (bytes[start] === 0x0d) start += 1;
   if (bytes[start] === 0x0a) start += 1;
+  // Only the header is needed: deflate never needs more than its output plus
+  // block overhead, so a bounded prefix is inflated (no copy of the stream).
   const length = dict.v.get('Length');
-  const end = length?.t === 'num' ? start + length.v : indexOfBytes(bytes, PDF_ENDSTREAM, start);
-  if (end < start || end > bytes.length) return 'unchecked';
+  const available = bytes.length - start;
+  const declared = length?.t === 'num' && length.v >= 0 ? length.v : available;
+  const prefix = Math.min(declared, available, first.v + Math.ceil(first.v / 1024) * 8 + 1024);
   const raw =
     filter === undefined
       ? bytes.subarray(start, start + first.v)
-      : await inflateZlibHead(bytes.subarray(start, end), first.v);
+      : await inflateZlibHead(bytes.subarray(start, start + prefix), first.v);
   if (raw === null) return filter === undefined ? 'unchecked' : 'encrypted';
   const numbers = new TextDecoder('latin1').decode(raw).trim().split(/\s+/).map(Number);
   if (numbers.length < count.v * 2 || numbers.some((value) => !Number.isInteger(value)))
@@ -876,7 +911,7 @@ async function revision6Hash(salt: Uint8Array): Promise<Uint8Array> {
  */
 async function emptyUserPasswordOpens(
   dict: Map<string, PdfValue>,
-  id0: Uint8Array,
+  idCandidates: readonly Uint8Array[],
 ): Promise<boolean> {
   const filter = dict.get('Filter');
   if (filter?.t !== 'name' || filter.v !== 'Standard') return false;
@@ -886,7 +921,11 @@ async function emptyUserPasswordOpens(
   const p = dict.get('P');
   if (revision?.t !== 'num' || o?.t !== 'str' || u?.t !== 'str') return false;
   if (revision.v >= 2 && revision.v <= 4) {
-    return p?.t === 'num' && emptyPasswordOpensRc4(revision.v, o.v, u.v, p.v, id0);
+    const permissions = p?.t === 'num' ? p.v : null;
+    return (
+      permissions !== null &&
+      idCandidates.some((id0) => emptyPasswordOpensRc4(revision.v, o.v, u.v, permissions, id0))
+    );
   }
   if ((revision.v === 5 || revision.v === 6) && u.v.length >= 40) {
     const salt = u.v.subarray(32, 40);
@@ -896,13 +935,19 @@ async function emptyUserPasswordOpens(
   return false;
 }
 
-/** The first /ID string from the last trailer, or empty when absent. */
-function pdfFirstId(bytes: Uint8Array, lastId: number): Uint8Array {
-  if (lastId < 0) return new Uint8Array(0);
-  const value = new PdfObjectReader(bytes, lastId).read();
-  if (value?.t !== 'arr') return new Uint8Array(0);
-  const first = value.v[0];
-  return first?.t === 'str' ? first.v : new Uint8Array(0);
+/**
+ * Candidate document identifiers: the first string of each /ID array (other
+ * objects such as tagged-PDF structure elements also carry /ID, so the trailer's
+ * cannot be told apart by position), plus the empty identifier.
+ */
+function pdfIdCandidates(bytes: Uint8Array, ids: readonly number[]): Uint8Array[] {
+  const out: Uint8Array[] = [new Uint8Array(0)];
+  for (const at of ids) {
+    const value = new PdfObjectReader(bytes, at, PDF_OBJECT_STREAM_DICT_WINDOW).read();
+    const first = value?.t === 'arr' ? value.v[0] : undefined;
+    if (first?.t === 'str') out.push(first.v);
+  }
+  return out;
 }
 
 /**
@@ -912,7 +957,7 @@ function pdfFirstId(bytes: Uint8Array, lastId: number): Uint8Array {
  * unsupported revision counts as password-protected.
  */
 export async function pdfNeedsPassword(bytes: Uint8Array): Promise<boolean> {
-  const { encrypt, lastId, objectStreams } = scanPdfNames(bytes);
+  const { encrypt, ids, objectStreams } = scanPdfNames(bytes);
   if (encrypt.length === 0) return false;
 
   // Each distinct dictionary is checked once; a pile of them is refused
@@ -929,6 +974,8 @@ export async function pdfNeedsPassword(bytes: Uint8Array): Promise<boolean> {
 
   const dicts = [...inline];
   if (refs.size > 0) {
+    // Object 0 is the free-list head; it can never hold a dictionary.
+    if ([...refs].some((key) => key.startsWith('0 '))) return true;
     const definitions = findObjectDefinitions(bytes, refs);
     for (const key of refs) {
       const offsets = definitions.get(key) ?? [];
@@ -945,7 +992,9 @@ export async function pdfNeedsPassword(bytes: Uint8Array): Promise<boolean> {
     const budget = { headerBytes: 0 };
     const anchors = new Set<number>();
     for (const at of objectStreams) {
-      anchors.add(lastIndexOfBytes(bytes, PDF_OBJ, at, Math.max(0, at - PDF_MAX_OBJECT_BYTES)));
+      anchors.add(
+        lastIndexOfBytes(bytes, PDF_OBJ, at, Math.max(0, at - PDF_OBJECT_STREAM_DICT_WINDOW)),
+      );
     }
     for (const objAt of anchors) {
       const members = await objectStreamMembers(bytes, objAt, budget);
@@ -954,9 +1003,9 @@ export async function pdfNeedsPassword(bytes: Uint8Array): Promise<boolean> {
     }
   }
 
-  const id0 = pdfFirstId(bytes, lastId);
+  const idCandidates = pdfIdCandidates(bytes, ids);
   for (const dict of dicts) {
-    if (!(await emptyUserPasswordOpens(dict, id0))) return true;
+    if (!(await emptyUserPasswordOpens(dict, idCandidates))) return true;
   }
   return false;
 }
