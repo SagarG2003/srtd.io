@@ -68,6 +68,8 @@ import { clearAllDrafts, pruneDrafts, setDraftScope, stripDeletedReplies } from 
 import { clearEmojiRecents } from '@/lib/chat/emoji-list';
 import { clearVoiceTranscripts } from '@/lib/chat/transcript-store';
 import { leaveSelectionThen } from '@/lib/chat/forward';
+import { chatEntryFrom, entryUsr } from '@/lib/chat/use-history-step';
+import { chatMessageHref } from '@/lib/inbox/bell-types';
 import { generateTraceId } from '@/lib/trace';
 import { useChat } from '@/lib/chat/chat-context';
 import { createTextMessage } from '@/lib/chat/message-factory';
@@ -715,6 +717,17 @@ export async function loadChatList(
   return (prev) => store.loadFailed(prev, scope);
 }
 
+/**
+ * What an incoming-message toast's tap does: for the chat already open, a jump
+ * to the message in place (no history step); else open that chat (one step). Pure.
+ */
+export function incomingToastStep(
+  activeChannelId: string | null,
+  channelId: string,
+): 'jump' | 'open' {
+  return activeChannelId === channelId ? 'jump' : 'open';
+}
+
 export function ChatStoreProvider({ children }: { children: ReactNode }): ReactElement {
   const { status, client } = useChat();
   const { session } = useSession();
@@ -1343,11 +1356,26 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
           {...(summary.avatarUrl !== null ? { src: summary.avatarUrl } : {})}
         />
       ),
-      // A thread selecting messages exits that first (history.back()).
+      // A thread selecting messages exits that first (history.back()). One
+      // step: /chat here, the chat then takes that entry. The chat already
+      // open: no step, only a jump to the message in place.
       onPress: () =>
         leaveSelectionThen(() => {
+          if (incomingToastStep(activeRef.current, row.channel_id) === 'jump') {
+            navigate(chatMessageHref(row.channel_id, row.id), {
+              replace: true,
+              state: entryUsr(window.history.state),
+            });
+            return;
+          }
           requestOpen(row.channel_id);
-          navigate('/chat');
+          const here = new URLSearchParams(window.location.search);
+          navigate('/chat', {
+            state: chatEntryFrom(
+              window.location.pathname === '/chat' && !here.get('channel'),
+              window.history.state,
+            ),
+          });
         }),
     });
   };
