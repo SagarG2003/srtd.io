@@ -626,6 +626,38 @@ const NO_FRAME = (tabs: ReactElement): ReactElement => tabs;
 const NO_CHANNELS: ReadonlyMap<string, ChannelSummary> = new Map();
 
 /**
+ * The Starred tab's list: this chat's stars, no "› Chat", no Edit. Preview
+ * mode (Group info) caps it at PREVIEW_COUNT.starred rows with See all until
+ * that is tapped; full mode (the DM Contact sheet) lists them all. Pure.
+ */
+export function starredTab(input: {
+  mode: ChatInfoMode;
+  expanded: ReadonlySet<ContactTab>;
+  channelId: string;
+  profiles: Map<string, ChatProfile>;
+  currentUserId: string;
+  timeZone: string;
+  onJump: (messageId: string) => void;
+  onSeeAll: () => void;
+}): ReactElement {
+  const limit = previewLimit(input.mode, 'starred', input.expanded);
+  return (
+    <StarredList
+      channelId={input.channelId}
+      showChat={false}
+      channelsById={NO_CHANNELS}
+      profiles={input.profiles}
+      currentUserId={input.currentUserId}
+      timeZone={input.timeZone}
+      onOpen={(row) => input.onJump(row.id)}
+      {...(limit !== null
+        ? { preview: { rows: limit, seeAll: <SeeAllRow onClick={input.onSeeAll} /> } }
+        : {})}
+    />
+  );
+}
+
+/**
  * The stateful tabs: the selected tab, each tab's See-all state, the two
  * feeds, the batched sender names and the Media lightbox. Key it by channel.
  */
@@ -705,29 +737,19 @@ export function ChatInfoTabs(props: ChatInfoTabsProps): ReactElement {
 
   // The Starred tab mounts its list only while it shows: its first page is
   // read when the tab opens. No Edit here; a row closes the surface and jumps.
-  const starredLimit = previewLimit(props.mode, 'starred', expanded);
   const starred =
-    open && tab === 'starred' ? (
-      <StarredList
-        channelId={channelId}
-        showChat={false}
-        channelsById={NO_CHANNELS}
-        profiles={known}
-        currentUserId={currentUserId}
-        timeZone={props.timeZone}
-        onOpen={(row) => props.onJump(row.id)}
-        {...(starredLimit !== null
-          ? {
-              preview: {
-                rows: starredLimit,
-                seeAll: (
-                  <SeeAllRow onClick={() => setExpanded((prev) => new Set(prev).add('starred'))} />
-                ),
-              },
-            }
-          : {})}
-      />
-    ) : null;
+    open && tab === 'starred'
+      ? starredTab({
+          mode: props.mode,
+          expanded,
+          channelId,
+          profiles: known,
+          currentUserId,
+          timeZone: props.timeZone,
+          onJump: props.onJump,
+          onSeeAll: () => setExpanded((prev) => new Set(prev).add('starred')),
+        })
+      : null;
 
   const tabs = (
     <ChatInfoTabsView

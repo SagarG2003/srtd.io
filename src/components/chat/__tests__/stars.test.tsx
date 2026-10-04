@@ -49,6 +49,7 @@ import {
   ChatInfoTabs,
   ChatInfoTabsView,
   PREVIEW_COUNT,
+  starredTab,
   type ChatInfoTabsViewProps,
 } from '@/components/chat/ChatInfoTabs';
 import { starredListView } from '@/components/chat/StarredList';
@@ -438,6 +439,68 @@ describe('Contact sheet and Group info: Starred tab', () => {
       expect(out).toContain('data-contact-tab="starred"');
       expect(out).toContain('data-probe');
     }
+  });
+
+  it('Group info (preview, via shared ChatInfoTabs): 3 rows then See all; Contact sheet (full): all', () => {
+    const base = {
+      expanded: new Set<never>(),
+      channelId: 'c1',
+      profiles: new Map(),
+      currentUserId: 'me',
+      timeZone: 'UTC',
+      onJump: noop,
+      onSeeAll: noop,
+    };
+    const preview = starredTab({ ...base, mode: 'preview' });
+    const pv = (preview.props as { preview?: { rows: number; seeAll: ReactElement } }).preview;
+    expect(pv?.rows).toBe(3);
+    const rows = ['a', 'b', 'c', 'd'].map((id) => ({
+      id,
+      channelId: 'c1',
+      senderUserId: 'peer',
+      body: id,
+      createdAt: CREATED_AT,
+      mediaLine: '',
+    }));
+    const out = renderToStaticMarkup(
+      starredListView({
+        listId: 'c1',
+        available: true,
+        feed: { status: 'ready', rows, next: null, loadingMore: false, moreFailed: false },
+        snapshot: EMPTY_STARS,
+        rowProps: (r) => ({
+          sender: 'Priya',
+          chat: null,
+          avatarUrl: null,
+          mine: false,
+          date: '9:30 AM',
+          text: r.body,
+        }),
+        editing: false,
+        selected: new Set(),
+        onToggle: noop,
+        onOpen: noop,
+        busy: false,
+        onUnstar: noop,
+        onRetry: noop,
+        ...(pv !== undefined ? { preview: pv } : {}),
+      }),
+    );
+    expect(out.match(/data-starred-row=/g)).toHaveLength(3);
+    expect(out).toContain('data-see-all');
+    expect(out).toContain('See all');
+    // Full mode (Contact sheet) and an expanded preview list everything.
+    const full = starredTab({ ...base, mode: 'full' });
+    expect((full.props as { preview?: unknown }).preview).toBeUndefined();
+    const opened = starredTab({
+      ...base,
+      mode: 'preview',
+      expanded: new Set(['starred'] as const),
+    });
+    expect((opened.props as { preview?: unknown }).preview).toBeUndefined();
+    // No "› Chat" in the per-chat tab, and no Edit.
+    expect((preview.props as { showChat: boolean }).showChat).toBe(false);
+    expect((preview.props as { onEditingChange?: unknown }).onEditingChange).toBeUndefined();
   });
 
   it('lazy: nothing is read until the tab is opened (opens on Media)', () => {
