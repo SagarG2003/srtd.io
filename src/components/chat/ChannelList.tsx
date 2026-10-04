@@ -18,7 +18,7 @@ import { SelectCheck } from '@/components/ui/SelectCheck';
 import { popoverClass } from '@/components/ui/popover-classes';
 import { SectionHeader } from '@/components/shell/SectionHeader';
 import { ActionRow, useLongPress } from '@/components/ui';
-import { IconChat, IconEllipsis, IconPlus, IconTrash } from '@/components/ui/icons';
+import { IconChat, IconEllipsis, IconPlus, IconStarFilled, IconTrash } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { useMediaQuery } from '@/lib/use-media-query';
@@ -45,11 +45,12 @@ import { leaveSelectionThen } from '@/lib/chat/forward';
 import { summaryIconOfLine } from '@/lib/chat/thread';
 import { SummaryGlyph } from '@/components/chat/ReplyQuote';
 import { SearchResults, useMessageSearch } from '@/components/chat/SearchResults';
+import { StarredList } from '@/components/chat/StarredList';
+import { STARRED_TITLE } from '@/lib/chat/stars';
 import {
   normalizeQuery,
   SEARCH_CHIPS,
   SEARCH_MIN_CHARS,
-  toggleSearchKind,
   type SearchHit,
   type SearchKind,
 } from '@/lib/chat/search';
@@ -143,6 +144,8 @@ interface ChannelListProps {
   workspaceId?: string | null;
   /** A message search hit tapped: open that chat at that message, the bar on the query. */
   onOpenSearchHit?: (channel: ChannelSummary, messageId: string, query: string) => void;
+  /** A starred row tapped: open that chat at that message (no search bar). */
+  onOpenStarred?: (channel: ChannelSummary, messageId: string) => void;
   /**
    * The caller's Personal notes (built from the session, never read): its
    * tile is pinned above Groups from the first paint, and search hits in it
@@ -784,18 +787,44 @@ export function notesTile(props: {
   );
 }
 
+/** A chat home chip: Starred, or one of the message search kinds. */
+export type HomeChip = SearchKind | 'starred';
+
+/** The chat home chips in order: Starred first, then the search kinds. */
+export const HOME_CHIPS: readonly { kind: HomeChip; label: string }[] = [
+  { kind: 'starred', label: STARRED_TITLE },
+  ...SEARCH_CHIPS,
+];
+
+/** One chip at a time: tapping the active one clears it, another replaces it. Pure. */
+export function toggleHomeChip(current: HomeChip | null, tapped: HomeChip): HomeChip | null {
+  return current === tapped ? null : tapped;
+}
+
+/** The message search kind a chip runs (Starred runs none). Pure. */
+export function searchKindOf(chip: HomeChip | null): SearchKind | null {
+  return chip === null || chip === 'starred' ? null : chip;
+}
+
 /**
- * The filter chips under the search box: Photos, Links, Files, Voice notes.
- * One at a time (tap again to clear). Each is a 44px tall target around a
- * 32px pill. Tokens only, no motion. Hook-free.
+ * The chips under the search box: Starred (a filled star in accent), then
+ * Photos, Links, Files, Voice notes. One at a time (tap again to clear). Each
+ * is a 44px tall target around a 32px pill; the row scrolls on X when it
+ * overflows (no scrollbar), chips never wrap or shrink. Tokens only, no
+ * motion. Hook-free.
  */
 export function searchChips(props: {
-  kind: SearchKind | null;
-  onChange: (kind: SearchKind | null) => void;
+  kind: HomeChip | null;
+  onChange: (kind: HomeChip | null) => void;
 }): ReactElement {
   return (
-    <div data-search-chips="" role="group" aria-label="Filter messages" className="flex gap-2">
-      {SEARCH_CHIPS.map((chip) => {
+    <div
+      data-search-chips=""
+      role="group"
+      aria-label="Filter messages"
+      className="flex min-w-0 flex-1 touch-pan-x flex-nowrap gap-2 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+    >
+      {HOME_CHIPS.map((chip) => {
         const on = props.kind === chip.kind;
         return (
           <button
@@ -803,7 +832,7 @@ export function searchChips(props: {
             type="button"
             data-search-chip={chip.kind}
             aria-pressed={on}
-            onClick={() => props.onChange(toggleSearchKind(props.kind, chip.kind))}
+            onClick={() => props.onChange(toggleHomeChip(props.kind, chip.kind))}
             className={cn(
               'group/chip flex min-h-[44px] shrink-0 items-center focus-visible:outline-none',
               NO_TOUCH_SELECT,
@@ -811,12 +840,16 @@ export function searchChips(props: {
           >
             <span
               className={cn(
-                'flex h-8 items-center rounded-full border px-3 text-sm group-focus-visible/chip:ring-2 group-focus-visible/chip:ring-accent',
+                'flex h-8 items-center gap-1.5 whitespace-nowrap rounded-full border px-3 text-sm group-focus-visible/chip:ring-2 group-focus-visible/chip:ring-accent',
+                chip.kind === 'starred' && 'pl-2.5',
                 on
                   ? 'border-accent-line bg-accent-soft font-medium text-accent'
                   : 'border-border bg-panel text-fg-2 hover:bg-panel-2',
               )}
             >
+              {chip.kind === 'starred' ? (
+                <IconStarFilled size={14} className="shrink-0 text-accent" />
+              ) : null}
               {chip.label}
             </span>
           </button>
@@ -851,12 +884,12 @@ interface ChannelListContentProps extends ChannelListProps {
    */
   searchResults?: ReactNode;
   /** The active filter chip and its setter; absent shows no chips. */
-  kind?: SearchKind | null;
-  onKindChange?: (kind: SearchKind | null) => void;
+  kind?: HomeChip | null;
+  onKindChange?: (kind: HomeChip | null) => void;
 }
 
 /** Whether the search box (or a chip) holds enough to show the message results. Pure. */
-export function showSearchResults(search: string, kind: SearchKind | null = null): boolean {
+export function showSearchResults(search: string, kind: HomeChip | null = null): boolean {
   return kind !== null || normalizeQuery(search).length >= SEARCH_MIN_CHARS;
 }
 
@@ -1167,7 +1200,10 @@ export function ChannelList(props: ChannelListProps): ReactElement {
   const listWorkspaceId = props.workspaceId ?? null;
   const [search, setSearch] = useState('');
   // The filter chip: one at a time, tap again to clear.
-  const [kind, setKind] = useState<SearchKind | null>(null);
+  const [kind, setKind] = useState<HomeChip | null>(null);
+  // The Starred list's Edit mode; any chip change leaves it.
+  const [starEditing, setStarEditing] = useState(false);
+  useEffect(() => setStarEditing(false), [kind]);
   const [selecting, setSelecting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [menu, setMenu] = useState<{ channel: ChannelSummary; rect: DOMRect | null } | null>(null);
@@ -1224,8 +1260,10 @@ export function ChannelList(props: ChannelListProps): ReactElement {
   const { state: searchState, runner: searchRunner } = useMessageSearch({
     workspaceId: listWorkspaceId,
   });
+  // Starred lists stars, never message hits: the search stays idle under it.
   useEffect(() => {
-    searchRunner?.setQuery(search, kind);
+    if (kind === 'starred') searchRunner?.setQuery('', null);
+    else searchRunner?.setQuery(search, searchKindOf(kind));
   }, [searchRunner, search, kind]);
   // Hits in notes carry its name ("Personal notes") and notebook.
   const notes = props.notes;
@@ -1251,23 +1289,49 @@ export function ChannelList(props: ChannelListProps): ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [props.onSelect],
   );
+  const onOpenStarred = props.onOpenStarred;
   const nowMs = Date.now();
-  const searchResults = showSearchResults(search, kind) ? (
-    <SearchResults
-      query={search}
-      kind={kind}
-      chats={visibleChannels(props.channels, summaryFor, isHidden, search)}
-      state={searchState}
-      runner={searchRunner}
-      channelsById={channelsById}
-      currentUserId={currentUserId}
-      nameOf={nameOf}
-      nowMs={nowMs}
-      timeZone={workspaceTimeZone(props.timeZone)}
-      onOpenChat={openChat}
-      onOpenHit={openHit}
-    />
-  ) : undefined;
+  const searchResults =
+    kind === 'starred' ? (
+      <div data-starred-home="" className="px-[14px] pb-4 pt-1">
+        <StarredList
+          channelId={null}
+          query={search}
+          showChat
+          channelsById={channelsById}
+          currentUserId={currentUserId ?? ''}
+          timeZone={workspaceTimeZone(props.timeZone)}
+          nowMs={nowMs}
+          inlineEdit
+          editing={starEditing}
+          onEditingChange={setStarEditing}
+          onOpen={(row) => {
+            const channel = channelsById.get(row.channelId);
+            if (channel === undefined) return;
+            leaveSelectionThen(() =>
+              onOpenStarred !== undefined
+                ? onOpenStarred(channel, row.id)
+                : props.onSelect(channel),
+            );
+          }}
+        />
+      </div>
+    ) : showSearchResults(search, kind) ? (
+      <SearchResults
+        query={search}
+        kind={searchKindOf(kind)}
+        chats={visibleChannels(props.channels, summaryFor, isHidden, search)}
+        state={searchState}
+        runner={searchRunner}
+        channelsById={channelsById}
+        currentUserId={currentUserId}
+        nameOf={nameOf}
+        nowMs={nowMs}
+        timeZone={workspaceTimeZone(props.timeZone)}
+        onOpenChat={openChat}
+        onOpenHit={openHit}
+      />
+    ) : undefined;
   return (
     <>
       {channelListContent({

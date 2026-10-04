@@ -17,6 +17,7 @@ import {
   IconPin,
   IconPlus,
   IconReply,
+  IconStar,
   IconTrash,
   IconX,
 } from '@/components/ui/icons';
@@ -32,6 +33,7 @@ import { TYPE_LABEL, type ChatMark, type MarkType } from '@/lib/chat/marks';
 import type { ThreadMessage } from '@/lib/chat/thread';
 import { formatClock, formatSendLabel } from '@/lib/chat/scheduled';
 import { cn } from '@/lib/cn';
+import { STAR_LABEL, UNSTAR_LABEL } from '@/lib/chat/stars';
 
 /** Quick-react row offered when a message's action menu is opened; "+" opens the picker after it. */
 export const QUICK_REACTIONS = ['👍', '❤️', '😂', '🆗', '🙏'] as const;
@@ -144,6 +146,14 @@ interface MessageActionMenuProps {
    */
   canTranscribe?: boolean;
   onTranscribe?: () => void;
+  /**
+   * Offers "Star" (or "Unstar" when `starred`), after Copy or Transcribe: any
+   * recorded, live message, own or not, in every chat.
+   */
+  canStar?: boolean;
+  /** The message is starred: the row reads "Unstar". */
+  starred?: boolean;
+  onStar?: () => void;
   onReact: (emoji: string) => void;
   onReply: () => void;
   onCopy: () => void;
@@ -217,6 +227,9 @@ type MenuItemProps = Pick<
   | 'onCopy'
   | 'canTranscribe'
   | 'onTranscribe'
+  | 'canStar'
+  | 'starred'
+  | 'onStar'
   | 'markOptions'
   | 'onMark'
   | 'markedAs'
@@ -302,7 +315,8 @@ export function TranscribeGlyph(props: { size?: number }): ReactElement {
 }
 
 /**
- * The main view in display order: Reply, Forward, Copy or Transcribe, "Save to notes",
+ * The main view in display order: Reply, Forward, Copy or Transcribe, Star (or
+ * Unstar), "Save to notes",
  * "Mark as" (or the static "Marked as <type>"), "Remind me", Edit, Delete (or the locked
  * line), then Select
  * under a divider. Rows that do not apply are not rendered. Pure (no hooks) so
@@ -337,6 +351,15 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
       label: 'Transcribe',
       icon: <TranscribeGlyph />,
       run: () => props.onTranscribe?.(),
+    });
+  }
+  if (props.canStar === true) {
+    items.push({
+      kind: 'action',
+      key: 'star',
+      label: props.starred === true ? UNSTAR_LABEL : STAR_LABEL,
+      icon: <IconStar />,
+      run: () => props.onStar?.(),
     });
   }
   if (props.canSaveToNotes === true) {

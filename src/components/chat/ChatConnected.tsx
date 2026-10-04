@@ -40,6 +40,7 @@ import { runClearChannels, type ClearRunResult } from '@/lib/chat/clear-flow';
 import { workspaceTimeZone } from '@/lib/chat/time-format';
 import { useChatThread } from '@/lib/chat/use-chat-thread';
 import { useChatMarks } from '@/lib/chat/use-chat-marks';
+import { createStarStore, StarStoreContext, useChannelStars } from '@/lib/chat/stars';
 import { useChatTyping } from '@/lib/chat/use-chat-typing';
 import { visibleTypingIds } from '@/lib/chat/typing';
 import { useChatPresence } from '@/lib/chat/use-chat-presence';
@@ -582,6 +583,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     messageId: string;
     query: string;
     seq: number;
+    jumpOnly?: boolean;
   } | null>(null);
   const closeChannel = useCallback(() => {
     // A hit's jump not taken yet (backed out while loading) never fires later.
@@ -600,6 +602,22 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
         messageId,
         query,
         seq: searchSeqRef.current,
+      });
+      openChannel(channel);
+    },
+    [openChannel],
+  );
+  // A starred row: the chat opens at that message (the same jump and
+  // highlight as a search hit), without the in-chat search bar.
+  const openStarredMessage = useCallback(
+    (channel: ChannelSummary, messageId: string) => {
+      searchSeqRef.current += 1;
+      setSearchRequest({
+        channelId: channel.channelId,
+        messageId,
+        query: '',
+        seq: searchSeqRef.current,
+        jumpOnly: true,
       });
       openChannel(channel);
     },
@@ -955,11 +973,18 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     currentUserId,
   });
   const refetchMarks = marks.refetch;
-  // Every catch-up refreshes the unread counts and re-reads the channel's marks.
+  // Stars: one store per workspace (nothing carries across), the open chat's
+  // starred ids read with its first page (the thread waits for both), again
+  // on focus, the tab turning visible and every catch-up.
+  const starStore = useMemo(() => createStarStore({ workspaceId }), [workspaceId]);
+  const stars = useChannelStars({ store: starStore, channelId: selectedChannelId });
+  const refetchStars = stars.refetch;
+  // Every catch-up refreshes the unread counts and re-reads the channel's marks and stars.
   const onCaughtUp = useCallback(() => {
     refreshUnreadCounts();
     refetchMarks();
-  }, [refreshUnreadCounts, refetchMarks]);
+    refetchStars();
+  }, [refreshUnreadCounts, refetchMarks, refetchStars]);
   const onMessagesDeleted = useCallback(() => refreshPreviews(), [refreshPreviews]);
   const thread = useChatThread({
     client: liveClient,
@@ -1222,9 +1247,15 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     (!notesFailed &&
       (thread.loading ||
         !namesReady ||
+        !stars.settled ||
         !scheduledSettled ||
         (notesOpen && notes.status !== 'ready') ||
         (notesReady && !savedReady)));
+  // A message turned tombstone (deleted here or by its sender) loses its star.
+  useEffect(() => {
+    const gone = thread.messages.filter((m) => m.deleted === true).map((m) => m.id);
+    if (gone.length > 0) starStore.drop(gone);
+  }, [thread.messages, starStore]);
   const [scheduledListOpen, setScheduledListOpen] = useState(false);
   useEffect(() => setScheduledListOpen(false), [selectedChannelId]);
   // The last one sent or cancelled: nothing left to show.
@@ -1528,6 +1559,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
             onDeleteChats={onDeleteChats}
             workspaceId={workspaceId}
             onOpenSearchHit={openSearchHit}
+            onOpenStarred={openStarredMessage}
             notes={notesChat}
           />
         </div>
@@ -1677,16 +1709,18 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
 
   // The chat bell (Chat home), its sheets and the message menu's Remind me.
   return (
-    <BellProvider
-      workspaceId={workspaceId}
-      currentUserId={currentUserId}
-      roster={chatRoster}
-      openChannelId={selected?.channelId ?? null}
-      messages={threadCurrent ? threadMessages : NO_MESSAGES}
-      nameOf={scheduleNameOf}
-    >
-      {surface}
-      <NotificationsSheets />
-    </BellProvider>
+    <StarStoreContext.Provider value={starStore}>
+      <BellProvider
+        workspaceId={workspaceId}
+        currentUserId={currentUserId}
+        roster={chatRoster}
+        openChannelId={selected?.channelId ?? null}
+        messages={threadCurrent ? threadMessages : NO_MESSAGES}
+        nameOf={scheduleNameOf}
+      >
+        {surface}
+        <NotificationsSheets />
+      </BellProvider>
+    </StarStoreContext.Provider>
   );
 }

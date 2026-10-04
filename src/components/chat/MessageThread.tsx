@@ -64,6 +64,8 @@ import {
   IconForward,
   IconSearch,
   IconSettings,
+  IconStar,
+  IconStarFilled,
   IconTrash,
 } from '@/components/ui/icons';
 import { useLongPress } from '@/components/ui';
@@ -168,6 +170,16 @@ import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { ContactSheet } from '@/components/chat/ContactSheet';
 import type { GroupInfoTabsWiring } from '@/components/chat/GroupInfoSheet';
 import { SelectionBar, SelectionHeader } from '@/components/chat/SelectionBar';
+import { StarredSheet, useStarToggle } from '@/components/chat/StarredList';
+import {
+  canStar,
+  isStarredIn,
+  selectionStarAction,
+  STARRED_HEADER_LABEL,
+  useIsStarred,
+  useStarSnapshot,
+  useStarStore,
+} from '@/lib/chat/stars';
 import { quoteMedia, ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { withDaySeparators } from '@/components/chat/day-separators';
 import { ForwardPicker, type ForwardSendResult } from '@/components/chat/ForwardPicker';
@@ -387,7 +399,13 @@ interface MessageThreadProps {
    * A message search hit: jump to the message and open the in-chat bar on the
    * query. seq makes a repeat in the same chat run again.
    */
-  searchRequest?: { messageId: string; query: string; seq: number } | null;
+  searchRequest?: {
+    messageId: string;
+    query: string;
+    seq: number;
+    /** A starred row: the jump and its highlight only, no in-chat bar. */
+    jumpOnly?: boolean;
+  } | null;
   /** The thread took searchRequest: the caller drops it. */
   onSearchRequestTaken?: () => void;
   /** The channel's read cursors (Seen, Read by, the unread divider); absent: none of them. */
@@ -933,11 +951,30 @@ export function bubbleStatus(
   return message.status === 'read' ? 'read' : 'delivered';
 }
 
-/** What every bubble shows at its bottom-right: "edited", the time, the tick. */
+/** What every bubble shows at its bottom-right: the star, "edited", the time, the tick. */
 export interface BubbleMeta {
   time: string;
   edited: boolean;
   status: BubbleStatus | null;
+  /** The viewer starred it: a small filled star before "edited" and the time. */
+  starred?: boolean;
+}
+
+/**
+ * The meta's 12px filled star. Own bubbles: the meta ink (white, as the
+ * time); peer bubbles: fg-3. No motion.
+ */
+export function MetaStar({ mine }: { mine: boolean }): ReactElement {
+  return (
+    <span
+      role="img"
+      aria-label="Starred"
+      data-meta-star=""
+      className={cn('inline-flex', !mine && 'text-fg-3')}
+    >
+      <IconStarFilled size={12} />
+    </span>
+  );
 }
 
 /** A message's in-bubble meta, on the workspace clock in the device hour cycle. Pure. */
@@ -1028,11 +1065,20 @@ export function FailedGlyph(): ReactElement {
   );
 }
 
-/** The meta's inner run: "edited", time, glyph. Shared by the meta and its spacer. */
-function metaParts(meta: BubbleMeta): ReactElement {
+/** The meta's inner run: star, "edited", time, glyph. Shared by the meta and its spacer. */
+function metaParts(meta: BubbleMeta, mine = true, spacer = false): ReactElement {
   const tick = metaTick(meta.status);
   return (
     <>
+      {meta.starred === true ? (
+        spacer ? (
+          <span className="inline-flex">
+            <IconStarFilled size={12} />
+          </span>
+        ) : (
+          <MetaStar mine={mine} />
+        )
+      ) : null}
       {meta.edited ? <span data-edited="">{EDITED_LABEL}</span> : null}
       {meta.time !== '' ? <span aria-hidden="true">{meta.time}</span> : null}
       {tick !== null ? <MetaGlyph status={tick} /> : null}
@@ -1084,7 +1130,7 @@ export function BubbleMetaView(props: {
         props.className,
       )}
     >
-      {metaParts(props.meta)}
+      {metaParts(props.meta, props.mine || props.placement === 'pill')}
     </span>
   );
 }
@@ -1104,7 +1150,7 @@ export function MetaSpacer({ meta }: { meta: BubbleMeta }): ReactElement {
         BUBBLE_META_TYPE,
       )}
     >
-      {metaParts(meta)}
+      {metaParts(meta, true, true)}
     </span>
   );
 }
@@ -2393,6 +2439,9 @@ function MessageRow(props: {
   // The in-chat search's words: matched words in this bubble draw as <mark>.
   const searchWords = useContext(SearchHighlightContext);
   const savedFrom = useSavedFrom();
+  // The viewer's star: read from the one star store, painted with the row.
+  const starred = useIsStarred(props.message.id) && canStar(props.message);
+  const meta = starred ? { ...props.meta, starred: true } : props.meta;
   return (
     <MessageBubble
       searchWords={searchWords}
@@ -2411,7 +2460,7 @@ function MessageRow(props: {
       viewerUserId={props.viewerUserId}
       mentions={props.mentions}
       workspaceId={props.workspaceId}
-      meta={props.meta}
+      meta={meta}
       nextVoiceId={props.nextVoiceId}
       {...(props.onTranscribe !== undefined
         ? { onTranscribe: () => props.onTranscribe?.(props.message) }
@@ -2787,6 +2836,8 @@ function ThreadBody(
     notes?: boolean;
     /** Menu "Save to notes" picked; absent hides it. */
     onSaveToNotes?: (message: ThreadMessage) => void;
+    /** Menu "Star" / "Unstar" picked (the new value); absent hides the row. */
+    onStar?: (message: ThreadMessage, starred: boolean) => void;
   },
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
@@ -2835,6 +2886,8 @@ function ThreadBody(
   const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
   const reducedMotion = useMediaQuery(REDUCED_MOTION_QUERY);
   const toast = useToast();
+  // The open menu's star reads the one star store.
+  const menuStarred = useIsStarred(menu?.message.id ?? '');
   const listRef = useRef<HTMLUListElement>(null);
   // Stick-to-bottom: the intent to stay on the latest message (true on open,
   // after an own send; only the reader's gestures let go of it), and who moved
@@ -3515,6 +3568,11 @@ function ThreadBody(
         onTranscribe={() => {
           if (menu) props.onTranscribe?.(menu.message);
         }}
+        canStar={menu !== null && props.onStar !== undefined && canStar(menu.message)}
+        starred={menuStarred}
+        onStar={() => {
+          if (menu) props.onStar?.(menu.message, !menuStarred);
+        }}
         markOptions={
           menu && props.onMark !== undefined
             ? markMenuOptions(menu.message, props.marks.get(menu.message.id))
@@ -4171,6 +4229,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   const [forwardFor, setForwardFor] = useState<ThreadMessage[] | null>(null);
   // The own message being edited in the composer.
   const [editing, setEditing] = useState<EditingDraft | null>(null);
+  // Stars: the one store (absent outside the chat page: no star UI at all).
+  const starStore = useStarStore();
+  const starSnapshot = useStarSnapshot(starStore);
+  const toggleStar = useStarToggle();
+  const [starredOpen, setStarredOpen] = useState(false);
   // Server time for the delete window (device clock plus the store's offset).
   const serverNow = useServerNow();
 
@@ -4216,6 +4279,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   };
   const onForward = props.onForward;
   const forwardChannels = props.forwardChannels;
+  // Chat names for the Starred sheet's rows (already loaded, never read).
+  const starChannels = useMemo(
+    () => new Map((forwardChannels ?? []).map((c) => [c.channelId, c] as const)),
+    [forwardChannels],
+  );
   const canForwardHere = onForward !== undefined && forwardChannels !== undefined;
   const exitSelection = (): void => {
     setSelecting(false);
@@ -4450,7 +4518,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     if (searchSeqRef.current === searchRequest.seq) return;
     searchSeqRef.current = searchRequest.seq;
     const { messageId, query, seq } = searchRequest;
-    setChatSearch({ query, anchor: messageId, key: seq });
+    if (searchRequest.jumpOnly !== true) setChatSearch({ query, anchor: messageId, key: seq });
     setJumpRequest((prev) => ({ id: messageId, seq: (prev?.seq ?? 0) + 1 }));
     onSearchRequestTaken?.();
   }, [searchRequest, bodyLoading, onSearchRequestTaken]);
@@ -4824,6 +4892,31 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     ? deleteSelectionBlock(selected, selectable, marks, serverNow(), notes)
     : null;
   const stripSlot = threadStripSlot({ hasMarks: props.marks !== undefined, selecting });
+  // Star or Unstar the selection: Unstar only when every one is starred. One
+  // write for the batch; selection ends once it is accepted, as Forward does.
+  const starTargets =
+    selecting && starStore !== null && channelId !== undefined
+      ? selectable.filter((m) => selected.has(m.id) && canStar(m))
+      : [];
+  const starAction = selectionStarAction(
+    starTargets.map((m) => m.id),
+    (id) => isStarredIn(starSnapshot, id),
+  );
+  const selectionStar =
+    selecting && starStore !== null && channelId !== undefined
+      ? {
+          action: starAction ?? 'star',
+          onRun: () => {
+            if (starAction === null) return;
+            void toggleStar(
+              starTargets.map((m) => ({ id: m.id, channelId })),
+              starAction === 'star',
+            ).then((result) => {
+              if (result.ok) exitSelection();
+            });
+          },
+        }
+      : null;
   // Selection mode's bar: in place of the composer, in the chat or the open thread.
   const selectionBar =
     selecting && onDeleteMessages !== undefined ? (
@@ -4834,6 +4927,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         {...(canForwardHere
           ? { onForward: () => setForwardFor(selectedForForward(selected, selectable)) }
           : {})}
+        {...(selectionStar !== null ? { star: selectionStar } : {})}
         onDelete={async () => {
           // Committed chunks become tombstones (and leave the selection);
           // a failed chunk's ids stay selected for another try.
@@ -4949,6 +5043,12 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     ...(props.onSaveToNotes !== undefined && !notes && !selecting
       ? { onSaveToNotes: props.onSaveToNotes }
       : {}),
+    ...(starStore !== null && channelId !== undefined && !selecting
+      ? {
+          onStar: (message: ThreadMessage, starred: boolean) =>
+            void toggleStar([{ id: message.id, channelId }], starred),
+        }
+      : {}),
   };
   return (
     <div className="relative flex h-full flex-col bg-bg">
@@ -4999,6 +5099,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
                   ? { onOpenContact: props.onOpenInfo }
                   : {})}
             />
+            {channelId !== undefined && starStore !== null ? (
+              <IconButton label={STARRED_HEADER_LABEL} onClick={() => setStarredOpen(true)}>
+                <IconStar size={20} />
+              </IconButton>
+            ) : null}
             {channelId !== undefined ? (
               <IconButton
                 label="Search this chat"
@@ -5165,6 +5270,20 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           cache={presignCache}
           presignEnabled={presignEnabled}
           marks={infoMarks}
+          onJump={jumpTo}
+        />
+      ) : null}
+      {starStore !== null && props.channelId !== undefined ? (
+        <StarredSheet
+          key={`starred:${props.channelId}`}
+          open={starredOpen}
+          onClose={() => setStarredOpen(false)}
+          channelId={props.channelId}
+          chatName={props.title}
+          channelsById={starChannels}
+          profiles={props.profiles}
+          currentUserId={props.currentUserId ?? ''}
+          timeZone={props.timeZone}
           onJump={jumpTo}
         />
       ) : null}
