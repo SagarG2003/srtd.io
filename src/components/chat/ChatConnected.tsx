@@ -140,14 +140,17 @@ export const MENTION_DM_FAILED = "Couldn't open that chat, try again";
 
 /**
  * The user ids a thread's first paint needs names for: every sender, the DM
- * peer, and every @mention in a body or a reply quote, minus the ones already
- * held. One batched read covers them all (no per-token fetch). Pure.
+ * peer, and every @mention in a body or a reply quote, plus anyone shown as
+ * typing, minus the ones already held. One batched read covers them all (no
+ * per-token fetch). Pure.
  */
-export function profileIdsNeeded(
-  messages: readonly ThreadMessage[],
-  peerUserId: string | null,
-  held: ReadonlyMap<string, unknown>,
-): string[] {
+export function profileIdsNeeded(input: {
+  messages: readonly ThreadMessage[];
+  peerUserId: string | null;
+  held: ReadonlyMap<string, unknown>;
+  typingUserIds?: readonly string[];
+}): string[] {
+  const { messages, peerUserId, held, typingUserIds = [] } = input;
   const needed = new Set<string>();
   const add = (id: string | null): void => {
     if (id !== null && !held.has(id)) needed.add(id);
@@ -156,6 +159,7 @@ export function profileIdsNeeded(
     add(message.senderUserId);
     for (const id of rowNameIds(message)) add(id);
   }
+  for (const id of typingUserIds) add(id);
   add(peerUserId);
   return [...needed];
 }
@@ -1020,12 +1024,18 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     currentUserId,
   });
 
-  const typingUserIds = visibleTypingIds({
-    ids: typing.typingUserIds,
-    isGroup: selected?.channelType === 'group',
-    peerUserId: selected?.peerUserId ?? null,
-    memberIds: openMemberIds,
-  });
+  const typingChannelType = selected?.channelType;
+  const typingPeerUserId = selected?.peerUserId ?? null;
+  const typingUserIds = useMemo(
+    () =>
+      visibleTypingIds({
+        ids: typing.typingUserIds,
+        isGroup: typingChannelType === 'group',
+        peerUserId: typingPeerUserId,
+        memberIds: openMemberIds,
+      }),
+    [typing.typingUserIds, typingChannelType, typingPeerUserId, openMemberIds],
+  );
   const presence = useChatPresence({ client, peerUserId: selected?.peerUserId ?? null });
 
   // Resolve sender and @mention display info in one batched read per set of
@@ -1051,7 +1061,13 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   // failed (their rows stay painted, inert) until the read answers.
   const [retryFailedFor, setRetryFailedFor] = useState<string | null>(null);
   useEffect(() => setRetryFailedFor(selectedChannelId), [selectedChannelId]);
-  const needed = profileIdsNeeded(thread.messages, selected?.peerUserId ?? null, profiles);
+  // The hold (unsettled) counts messages and the DM peer only: a typing-only id
+  // is read in the same batch below but never holds the first page.
+  const needed = profileIdsNeeded({
+    messages: thread.messages,
+    peerUserId: selected?.peerUserId ?? null,
+    held: profiles,
+  });
   const unsettled = needed.filter((id) => !nameReads.unknown.has(id) && !nameReads.failed.has(id));
   useEffect(() => {
     const retry = retryFailedFor !== null && retryFailedFor === selectedChannelId;
@@ -1061,7 +1077,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     }
     const flight = inFlight.current.ids;
     const ids = idsToRead(
-      profileIdsNeeded(thread.messages, selected?.peerUserId ?? null, profiles),
+      profileIdsNeeded({
+        messages: thread.messages,
+        peerUserId: selected?.peerUserId ?? null,
+        held: profiles,
+        typingUserIds,
+      }),
       nameReads,
       flight,
       retry,
@@ -1105,6 +1126,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     thread.messages,
     selected,
     profiles,
+    typingUserIds,
     nameReads,
     retryFailedFor,
     selectedChannelId,
