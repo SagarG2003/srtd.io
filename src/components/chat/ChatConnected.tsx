@@ -615,6 +615,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   );
   const openChannel = useCallback(
     (channel: ChannelSummary, mode: ChannelWrite = channelWriteFor('open')) => {
+      // The chat already open (a group edit's re-read): update its row only;
+      // its layers (group info) stay open and no step is written.
+      if (selectedRef.current?.channelId === channel.channelId) {
+        setSelected(channel);
+        return;
+      }
       leaveSelectionThen(() => {
         setSelected(channel);
         writeChannelParam(channel.channelId, mode);
