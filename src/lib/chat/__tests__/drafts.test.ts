@@ -379,3 +379,49 @@ describe('persisted drafts (per user + workspace)', () => {
     }).not.toThrow();
   });
 });
+
+describe('a new user never inherits in-memory drafts', () => {
+  afterEach(() => {
+    resetDrafts();
+    setDraftStorage(undefined);
+  });
+
+  it("user B after a null scope (no sign-out event) sees and stores nothing of A's", () => {
+    const storage = memoryStorage();
+    setDraftStorage(storage);
+    setDraftScope(U1);
+    setDraft(A, { text: "A's secret", reply: REPLY });
+    setDraftScope(null);
+    setDraftScope({ userId: 'u2', workspaceId: 'ws-a' });
+    expect(getDraft(A)).toBe(EMPTY_DRAFT);
+    expect(draftText(A)).toBe('');
+    expect(storage.data.has(DRAFTS_STORAGE_KEY)).toBe(false);
+    setDraft(B, { text: "B's" });
+    setDraftScope(null);
+    const blob = stored(storage);
+    expect(blob?.userId).toBe('u2');
+    expect(Object.keys(blob?.byWorkspace['ws-a'] ?? {})).toEqual([B]);
+  });
+
+  it('the same user after a null scope keeps the in-memory drafts', () => {
+    setDraftStorage(memoryStorage());
+    setDraftScope(U1);
+    setDraft(A, { text: 'mine', pendingFiles: [FILE] });
+    setDraftScope(null);
+    setDraftScope(U1);
+    expect(getDraft(A).text).toBe('mine');
+    expect(getDraft(A).pendingFiles).toEqual([FILE]);
+  });
+
+  it('clearAllDrafts then a new user: nothing carried', () => {
+    const storage = memoryStorage();
+    setDraftStorage(storage);
+    setDraftScope(U1);
+    setDraft(A, { text: 'gone' });
+    clearAllDrafts();
+    setDraftScope(null);
+    setDraftScope({ userId: 'u2', workspaceId: 'ws-a' });
+    expect(getDraft(A)).toBe(EMPTY_DRAFT);
+    expect(storage.data.has(DRAFTS_STORAGE_KEY)).toBe(false);
+  });
+});

@@ -95,6 +95,9 @@ const owners = new Map<string, string | null>();
 const listeners = new Set<() => void>();
 let version = 0;
 let scope: DraftScope | null = null;
+// The last user a scope was set for; survives setDraftScope(null) so the next
+// user is compared with it (only clearAllDrafts and resetDrafts forget it).
+let lastUserId: string | null = null;
 // undefined: window.localStorage (looked up at call time).
 let storageOverride: DraftStorage | null | undefined;
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -267,20 +270,23 @@ function scheduleWrite(): void {
 /**
  * Whose drafts persist: on a scope, another user's stored blob is removed;
  * otherwise this workspace's stored drafts are hydrated for the channels the
- * map does not already hold (an in-memory draft always wins). A change of user
- * forgets the previous user's in-memory drafts. null (teardown) writes what is
+ * map does not already hold (an in-memory draft always wins). A user other
+ * than the last one scoped (a null scope in between included) forgets the
+ * previous user's in-memory drafts first. null (teardown) writes what is
  * pending first, then keeps drafts in memory only.
  */
 export function setDraftScope(next: DraftScope | null): void {
   if (writeTimer !== null) flushDrafts();
-  const previousUser = scope?.userId ?? null;
   scope = next;
   listenForFlush(next !== null);
   if (next === null) return;
-  if (previousUser !== null && previousUser !== next.userId) {
+  // Another user in this tab (any sign-out, even one that never fired the
+  // sign-out event): the previous user's in-memory drafts go before hydrating.
+  if (lastUserId !== null && lastUserId !== next.userId) {
     drafts.clear();
     owners.clear();
   }
+  lastUserId = next.userId;
   const storage = browserStorage();
   const stored = storage !== null ? readBlob(storage) : null;
   if (stored !== null && stored.userId !== next.userId) {
@@ -382,6 +388,7 @@ export function stripDeletedReplies(messageIds: readonly string[]): void {
 export function clearAllDrafts(): void {
   drafts.clear();
   owners.clear();
+  lastUserId = null;
   cancelWrite();
   removeBlob(browserStorage());
   bump();
@@ -440,6 +447,7 @@ export function resetDrafts(): void {
   owners.clear();
   cancelWrite();
   scope = null;
+  lastUserId = null;
   listenForFlush(false);
   bump();
 }
