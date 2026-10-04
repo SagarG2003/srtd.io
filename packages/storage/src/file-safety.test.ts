@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BLOCKED_EXTENSIONS,
   FILE_SAFETY_MESSAGES,
+  MAX_INSPECTED_PART_BYTES,
   ZIP_LIMITS,
   checkFilename,
   inspectUpload,
@@ -11,6 +12,8 @@ import {
 import {
   MIME,
   buildZip,
+  contentTypesFor,
+  storedLocalHeader,
   jpeg,
   mp4,
   office,
@@ -292,5 +295,119 @@ describe('R6 refusal copy', () => {
     expect(FILE_SAFETY_MESSAGES.embedded_content).toBe(
       "This file contains embedded content that can't be checked.",
     );
+  });
+});
+
+describe('audit regressions', () => {
+  it('refuses a macro content type hidden behind XML character references', async () => {
+    const xml = [
+      '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.ms-word.document.&#109;acroEnabled.main+xml"/>',
+      '<Override PartName="/decoy.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
+      '<Default Extension="dat" ContentType="application/vnd.ms-office.&#x76;baProject"/>',
+      '</Types>',
+    ].join('');
+    const bytes = office('docx', {
+      contentTypesXml: xml,
+      extra: [{ name: 'word/vba.dat', data: 'x' }],
+    });
+    expect(await codeOf('report.docx', MIME.docx, bytes)).toBe('blocked_type');
+  });
+
+  it('refuses a docx whose main part is declared with another type (decoy override)', async () => {
+    const xml = contentTypesFor('docx').replace(
+      'PartName="/word/document.xml"',
+      'PartName="/decoy.xml"',
+    );
+    expect(await codeOf('report.docx', MIME.docx, office('docx', { contentTypesXml: xml }))).toBe(
+      'mime_mismatch',
+    );
+  });
+
+  it('refuses a pdf whose /Encrypt name is #-escaped', () => {
+    const escaped = new TextEncoder().encode(
+      '%PDF-1.7\ntrailer\n<< /Root 1 0 R /Encr#79pt 5 0 R >>\n%%EOF\n',
+    );
+    expect(isEncryptedPdf(escaped)).toBe(true);
+  });
+
+  it.each([
+    ['a rar archive', 'word/media/x.dat', [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00]],
+    ['a 7z archive', 'word/media/x.dat', [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]],
+    ['a gzip stream', 'word/media/x.dat', [0x1f, 0x8b, 0x08, 0x00]],
+    ['a self-extracting exe', 'word/media/x.png', [0x4d, 0x5a, 0x90, 0x00, 0x50, 0x4b]],
+  ])('refuses %s hidden inside the package', async (_label, name, head) => {
+    const bytes = office('docx', { extra: [{ name, data: Uint8Array.from(head) }] });
+    expect(await codeOf('report.docx', MIME.docx, bytes)).toBe('embedded_content');
+  });
+
+  it('refuses a non-Office file in an embeddings folder', async () => {
+    const bytes = office('docx', {
+      extra: [{ name: 'word/embeddings/Microsoft_PowerPoint_Slide.sldx', data: office('pptx') }],
+    });
+    expect(await codeOf('report.docx', MIME.docx, bytes)).toBe('embedded_content');
+  });
+
+  it('allows emoji and Indic/Persian names that use joiners and direction marks', () => {
+    for (const name of [
+      'Diwali \u{1F468}\u200D\u{1F469}\u200D\u{1F467} post.png',
+      '\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645.png',
+      '\u0915\u094D\u200D\u0937 poster.png',
+      '\u200Freport\u200E.png',
+    ]) {
+      expect(checkFilename(name, MIME.png)).toEqual({ ok: true });
+    }
+  });
+
+  it('refuses a local header whose name differs from the central directory', async () => {
+    const bytes = office('docx', {
+      extra: [{ name: 'word/media/a.png', localName: 'word/vbaProject.bin.x', data: 'x' }],
+    });
+    expect(await codeOf('report.docx', MIME.docx, bytes)).toBe('mime_mismatch');
+  });
+
+  it('refuses overlapping entries (non-recursive zip bomb shape)', async () => {
+    const payload = new Uint8Array(64);
+    const bytes = office(
+      'docx',
+      {
+        extra: [
+          {
+            name: 'word/media/a.png',
+            method: 'store',
+            data: storedLocalHeader('word/media/b.png', payload),
+          },
+        ],
+      },
+      [{ name: 'word/media/b.png', into: 'word/media/a.png', size: payload.length }],
+    );
+    expect(await codeOf('report.docx', MIME.docx, bytes)).toBe('archive_limits');
+  });
+
+  it('refuses an embedded package too large to inspect in memory', async () => {
+    const workbook = office('xlsx', {
+      extra: [
+        // Stored, so only the in-memory part cap (not the ratio cap) can refuse it.
+        {
+          name: 'xl/media/big.png',
+          data: new Uint8Array(MAX_INSPECTED_PART_BYTES),
+          method: 'store',
+        },
+      ],
+    });
+    const bytes = office('pptx', {
+      extra: [{ name: 'ppt/embeddings/book.xlsx', data: workbook, method: 'store' }],
+    });
+    expect(await codeOf('deck.pptx', MIME.pptx, bytes)).toBe('archive_limits');
+  });
+
+  it.each([
+    ['anim.gif', 'image/gif', [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]],
+    ['photo.webp', 'image/webp', [0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]],
+    ['clip.mov', 'video/quicktime', [0, 0, 0, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74]],
+    ['voice-note.webm', 'audio/webm', [0x1a, 0x45, 0xdf, 0xa3]],
+    ['voice-note.mp3', 'audio/mpeg', [0x49, 0x44, 0x33, 0x03]],
+  ])('still allows %s', async (name, mime, head) => {
+    expect(await codeOf(name, mime, Uint8Array.from(head))).toBe('ok');
   });
 });

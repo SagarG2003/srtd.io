@@ -25,6 +25,35 @@ export interface ZipFile {
   encrypted?: boolean;
   /** Overrides the uncompressed size written to both headers (a lying header). */
   declaredSize?: number;
+  /** Writes a different name into the local header than the central directory. */
+  localName?: string;
+}
+
+/**
+ * A central-directory entry with no local header of its own: it points at the
+ * data of entry `into`, which must itself hold a stored local header for `name`
+ * (see {@link storedLocalHeader}). Builds the overlapping-entry zip bomb shape.
+ */
+export interface ZipAlias {
+  name: string;
+  into: string;
+  size: number;
+}
+
+/** A stored (method 0) local header plus data, for use inside another entry. */
+export function storedLocalHeader(name: string, data: Uint8Array): Uint8Array {
+  const nameBytes = encoder.encode(name);
+  const out = new Uint8Array(30 + nameBytes.length + data.length);
+  const v = new DataView(out.buffer);
+  v.setUint32(0, 0x04034b50, true);
+  v.setUint16(4, 20, true);
+  v.setUint32(14, crc32(data), true);
+  v.setUint32(18, data.length, true);
+  v.setUint32(22, data.length, true);
+  v.setUint16(26, nameBytes.length, true);
+  out.set(nameBytes, 30);
+  out.set(data, 30 + nameBytes.length);
+  return out;
 }
 
 const CRC_TABLE = (() => {
@@ -48,21 +77,23 @@ function toBytes(data: Uint8Array | string): Uint8Array {
 }
 
 /** A spec-shaped ZIP: local headers + data, central directory, EOCD. */
-export function buildZip(files: readonly ZipFile[]): Uint8Array {
+export function buildZip(files: readonly ZipFile[], aliases: readonly ZipAlias[] = []): Uint8Array {
   const locals: Uint8Array[] = [];
   const centrals: Uint8Array[] = [];
+  const dataStart = new Map<string, number>();
   let offset = 0;
   for (const file of files) {
     const raw = toBytes(file.data);
     const deflate = (file.method ?? 'deflate') === 'deflate';
     const body = deflate ? new Uint8Array(deflateRawSync(raw, { level: 9 })) : raw;
     const name = encoder.encode(file.name);
+    const localName = encoder.encode(file.localName ?? file.name);
     const flags = file.encrypted ? 0x1 : 0;
     const method = deflate ? 8 : 0;
     const size = file.declaredSize ?? raw.length;
     const crc = crc32(raw);
 
-    const local = new Uint8Array(30 + name.length + body.length);
+    const local = new Uint8Array(30 + localName.length + body.length);
     const lv = new DataView(local.buffer);
     lv.setUint32(0, 0x04034b50, true);
     lv.setUint16(4, 20, true);
@@ -71,9 +102,10 @@ export function buildZip(files: readonly ZipFile[]): Uint8Array {
     lv.setUint32(14, crc, true);
     lv.setUint32(18, body.length, true);
     lv.setUint32(22, size, true);
-    lv.setUint16(26, name.length, true);
-    local.set(name, 30);
-    local.set(body, 30 + name.length);
+    lv.setUint16(26, localName.length, true);
+    local.set(localName, 30);
+    local.set(body, 30 + localName.length);
+    dataStart.set(file.name, offset + 30 + localName.length);
 
     const central = new Uint8Array(46 + name.length);
     const cv = new DataView(central.buffer);
@@ -93,12 +125,27 @@ export function buildZip(files: readonly ZipFile[]): Uint8Array {
     centrals.push(central);
     offset += local.length;
   }
+  for (const alias of aliases) {
+    const name = encoder.encode(alias.name);
+    const central = new Uint8Array(46 + name.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint32(20, alias.size, true);
+    cv.setUint32(24, alias.size, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint32(42, dataStart.get(alias.into) ?? 0, true);
+    central.set(name, 46);
+    centrals.push(central);
+  }
+  const count = files.length + aliases.length;
   const cdSize = centrals.reduce((sum, c) => sum + c.length, 0);
   const eocd = new Uint8Array(22);
   const ev = new DataView(eocd.buffer);
   ev.setUint32(0, 0x06054b50, true);
-  ev.setUint16(8, files.length, true);
-  ev.setUint16(10, files.length, true);
+  ev.setUint16(8, count, true);
+  ev.setUint16(10, count, true);
   ev.setUint32(12, cdSize, true);
   ev.setUint32(16, offset, true);
 
@@ -134,13 +181,13 @@ const MACRO_MAIN: Record<Kind, string> = {
   pptx: 'application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml',
 };
 
-function contentTypes(mainType: string, extra = ''): string {
+function contentTypes(mainPart: string, mainType: string, extra = ''): string {
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
     '<Default Extension="xml" ContentType="application/xml"/>',
-    `<Override PartName="/main" ContentType="${mainType}"/>`,
+    `<Override PartName="/${mainPart}" ContentType="${mainType}"/>`,
     extra,
     '</Types>',
   ].join('');
@@ -154,22 +201,38 @@ export interface OfficeOptions {
   macroContentType?: boolean;
   /** Extra entries placed in the package. */
   extra?: readonly ZipFile[];
+  /** Replace [Content_Types].xml entirely. */
+  contentTypesXml?: string;
   /** Override the main part's body (e.g. a large sheet). */
   mainBody?: Uint8Array | string;
 }
 
 /** A minimal, valid Office Open XML package of the given kind. */
-export function office(kind: Kind, options: OfficeOptions = {}): Uint8Array {
+export function office(
+  kind: Kind,
+  options: OfficeOptions = {},
+  aliases: readonly ZipAlias[] = [],
+): Uint8Array {
   const main = MAIN[kind];
-  return buildZip([
-    {
-      name: '[Content_Types].xml',
-      data: contentTypes(options.macroContentType ? MACRO_MAIN[kind] : main.type),
-    },
-    { name: '_rels/.rels', data: RELS },
-    { name: main.part, data: options.mainBody ?? `<root kind="${kind}">Hello</root>` },
-    ...(options.extra ?? []),
-  ]);
+  return buildZip(
+    [
+      {
+        name: '[Content_Types].xml',
+        data:
+          options.contentTypesXml ??
+          contentTypes(main.part, options.macroContentType ? MACRO_MAIN[kind] : main.type),
+      },
+      { name: '_rels/.rels', data: RELS },
+      { name: main.part, data: options.mainBody ?? `<root kind="${kind}">Hello</root>` },
+      ...(options.extra ?? []),
+    ],
+    aliases,
+  );
+}
+
+/** Valid [Content_Types].xml text for a kind, with optional extra markup. */
+export function contentTypesFor(kind: Kind, extra = ''): string {
+  return contentTypes(MAIN[kind].part, MAIN[kind].type, extra);
 }
 
 /** Bytes of the repeated cell in {@link repetitiveXlsx}. */

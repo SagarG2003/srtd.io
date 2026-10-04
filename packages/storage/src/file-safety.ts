@@ -90,15 +90,17 @@ const KNOWN_EXTENSIONS: ReadonlySet<string> = new Set([
     .split(' '),
 ]);
 
-/** Inclusive code-point ranges: C0/C1 controls and the bidi/format marks used to disguise extensions. */
+/**
+ * Inclusive code-point ranges refused in a filename: C0/C1 controls and the
+ * bidi embedding/override/isolate controls that reorder text to disguise an
+ * extension ("invoice<RLO>fdp.exe"). Joiners (ZWJ/ZWNJ, used by emoji and
+ * Indic/Persian text) and plain direction marks stay allowed.
+ */
 const UNSAFE_NAME_RANGES: ReadonlyArray<readonly [number, number]> = [
   [0x0000, 0x001f],
   [0x007f, 0x009f],
-  [0x061c, 0x061c],
-  [0x200b, 0x200f],
   [0x202a, 0x202e],
   [0x2066, 0x2069],
-  [0xfeff, 0xfeff],
 ];
 
 function hasUnsafeNameChar(name: string): boolean {
@@ -169,35 +171,55 @@ function indexOfBytes(haystack: Uint8Array, needle: Uint8Array, from = 0): numbe
   return -1;
 }
 
-const ascii = (text: string): Uint8Array => new TextEncoder().encode(text);
 const utf16le = (text: string): Uint8Array => {
   const out = new Uint8Array(text.length * 2);
   for (let i = 0; i < text.length; i += 1) out[i * 2] = text.charCodeAt(i);
   return out;
 };
 
-const PDF_ENCRYPT = ascii('/Encrypt');
 const OLE_ENCRYPTED_PACKAGE = utf16le('EncryptedPackage');
 
-/** A PDF name token ends at whitespace, a delimiter, or end of data. */
-function isPdfNameEnd(byte: number | undefined): boolean {
-  if (byte === undefined) return true;
-  return !(
-    (byte >= 0x30 && byte <= 0x39) ||
-    (byte >= 0x41 && byte <= 0x5a) ||
-    (byte >= 0x61 && byte <= 0x7a) ||
-    byte === 0x5f ||
-    byte === 0x2d ||
-    byte === 0x2e
-  );
+/** PDF whitespace and delimiters end a name token (ISO 32000 7.2.2). */
+const PDF_NAME_TERMINATORS: ReadonlySet<number> = new Set([
+  0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20, 0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25,
+]);
+/** Longer than any spelling of /Encrypt, even with every byte #-escaped. */
+const PDF_NAME_SCAN = 24;
+
+function hexValue(byte: number | undefined): number {
+  if (byte === undefined) return -1;
+  if (byte >= 0x30 && byte <= 0x39) return byte - 0x30;
+  if (byte >= 0x41 && byte <= 0x46) return byte - 0x37;
+  if (byte >= 0x61 && byte <= 0x66) return byte - 0x57;
+  return -1;
 }
 
-/** True when the PDF carries an /Encrypt entry (not /EncryptMetadata etc.). */
+/**
+ * True when the PDF carries an /Encrypt entry. Every name token is decoded,
+ * including #xx escapes, so "/Encr#79pt" is caught; "/EncryptMetadata" is not
+ * a match.
+ */
 export function isEncryptedPdf(bytes: Uint8Array): boolean {
-  let at = indexOfBytes(bytes, PDF_ENCRYPT);
-  while (at !== -1) {
-    if (isPdfNameEnd(bytes[at + PDF_ENCRYPT.length])) return true;
-    at = indexOfBytes(bytes, PDF_ENCRYPT, at + 1);
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (bytes[i] !== 0x2f) continue;
+    let name = '';
+    let j = i + 1;
+    while (j < bytes.length && name.length <= PDF_NAME_SCAN) {
+      const byte = bytes[j] as number;
+      if (PDF_NAME_TERMINATORS.has(byte)) break;
+      if (byte === 0x23) {
+        const hi = hexValue(bytes[j + 1]);
+        const lo = hexValue(bytes[j + 2]);
+        if (hi >= 0 && lo >= 0) {
+          name += String.fromCharCode(hi * 16 + lo);
+          j += 3;
+          continue;
+        }
+      }
+      name += String.fromCharCode(byte);
+      j += 1;
+    }
+    if (name === 'Encrypt') return true;
   }
   return false;
 }
@@ -225,6 +247,8 @@ const METHOD_AES = 99;
 
 interface ZipEntry {
   name: string;
+  /** Raw name bytes from the central directory, compared to the local header. */
+  nameBytes: Uint8Array;
   flags: number;
   method: number;
   compressedSize: number;
@@ -232,7 +256,9 @@ interface ZipEntry {
   localOffset: number;
 }
 
-type ZipRead = { ok: true; entries: ZipEntry[] } | { ok: false; code: FileSafetyCode };
+type ZipRead =
+  | { ok: true; entries: ZipEntry[]; cdOffset: number }
+  | { ok: false; code: FileSafetyCode };
 
 function u16(view: DataView, at: number): number {
   return view.getUint16(at, true);
@@ -283,6 +309,7 @@ function readCentralDirectory(bytes: Uint8Array): ZipRead {
       uncompressedSize: u32(view, at + 24),
       localOffset: u32(view, at + 42),
       name: decoder.decode(bytes.subarray(at + 46, at + 46 + nameLen)),
+      nameBytes: bytes.subarray(at + 46, at + 46 + nameLen),
     };
     if (
       entry.compressedSize === 0xffffffff ||
@@ -294,7 +321,7 @@ function readCentralDirectory(bytes: Uint8Array): ZipRead {
     entries.push(entry);
     at += 46 + nameLen + extraLen + commentLen;
   }
-  return { ok: true, entries };
+  return { ok: true, entries, cdOffset };
 }
 
 /** Shared budget for the outer package and everything embedded in it. */
@@ -327,7 +354,8 @@ async function inflateEntry(entry: ZipEntry, data: Uint8Array, keep: boolean): P
     .then(() => writer.close())
     .catch(() => undefined);
   const reader = stream.readable.getReader();
-  const chunks: Uint8Array[] = [];
+  // The declared size is already capped, so the kept buffer is sized once.
+  const body = keep ? new Uint8Array(entry.uncompressedSize) : null;
   const head = new Uint8Array(HEAD_BYTES);
   let total = 0;
   try {
@@ -343,7 +371,7 @@ async function inflateEntry(entry: ZipEntry, data: Uint8Array, keep: boolean): P
         await written;
         return { ok: false, code: 'archive_limits' };
       }
-      if (keep) chunks.push(value);
+      if (body !== null) body.set(value, total - value.byteLength);
     }
   } catch {
     await written;
@@ -352,15 +380,6 @@ async function inflateEntry(entry: ZipEntry, data: Uint8Array, keep: boolean): P
   await written;
   if (total !== entry.uncompressedSize) return { ok: false, code: 'mime_mismatch' };
 
-  let body: Uint8Array | null = null;
-  if (keep) {
-    body = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      body.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-  }
   return { ok: true, head: head.subarray(0, Math.min(total, HEAD_BYTES)), body };
 }
 
@@ -394,6 +413,39 @@ const CONTENT_TYPES_PART = '[content_types].xml';
 /** Printer setup blobs (DEVMODE) are plain data, not OLE objects. */
 const PRINTER_SETTINGS = /^printersettings\d*\.bin$/;
 
+/**
+ * Largest part inflated into memory for inspection: an embedded docx/xlsx/pptx
+ * or [Content_Types].xml. Keeps a Worker well inside its memory limit; a chart
+ * workbook is typically kilobytes.
+ */
+export const MAX_INSPECTED_PART_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Leading bytes of containers and executables that may not hide inside an
+ * Office package under any name (zip variants, OLE2, rar, 7z, gzip, bzip2,
+ * xz, cab, PE/DOS executables, ELF).
+ */
+const NESTED_SIGNATURES: ReadonlyArray<readonly number[]> = [
+  [0x50, 0x4b, 0x03, 0x04],
+  [0x50, 0x4b, 0x05, 0x06],
+  [0x50, 0x4b, 0x07, 0x08],
+  [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1],
+  [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07],
+  [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c],
+  [0x1f, 0x8b],
+  [0x42, 0x5a, 0x68],
+  [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00],
+  [0x4d, 0x53, 0x43, 0x46],
+  [0x4d, 0x5a],
+  [0x7f, 0x45, 0x4c, 0x46],
+];
+
+function isNestedContainer(head: Uint8Array): boolean {
+  return NESTED_SIGNATURES.some(
+    (sig) => head.length >= sig.length && sig.every((byte, i) => head[i] === byte),
+  );
+}
+
 export function ooxmlKindForMime(mimeType: string): OoxmlKind | null {
   return OOXML_BY_MIME[normalizeMime(mimeType)] ?? null;
 }
@@ -409,6 +461,50 @@ function basename(name: string): string {
   return name.split('/').pop() ?? name;
 }
 
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((byte, i) => byte === b[i]);
+}
+
+/** Decode XML character and predefined entity references ("&#109;" -> "m"). */
+function decodeXmlEntities(text: string): string {
+  return text.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|lt|gt|quot|apos);/gi, (_whole, ref: string) => {
+    const lower = ref.toLowerCase();
+    if (lower.startsWith('#x'))
+      return String.fromCodePoint(parseInt(lower.slice(2), 16) % 0x110000);
+    if (lower.startsWith('#')) return String.fromCodePoint(parseInt(lower.slice(1), 10) % 0x110000);
+    return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[lower] ?? '';
+  });
+}
+
+/** Attribute value from one XML start tag, or null. */
+function xmlAttribute(tag: string, name: string): string | null {
+  const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i').exec(tag);
+  if (match === null) return null;
+  return decodeXmlEntities(match[1] ?? match[2] ?? '');
+}
+
+/**
+ * [Content_Types].xml rules: no macro or VBA content type anywhere (checked on
+ * the entity-decoded text), and the main part must be declared with exactly the
+ * claimed type's main content type.
+ */
+function checkContentTypes(raw: string, kind: OoxmlKind): FileSafetyResult {
+  const decoded = decodeXmlEntities(raw).toLowerCase();
+  if (decoded.includes('macroenabled') || decoded.includes('vbaproject')) {
+    return refuse('blocked_type');
+  }
+  const mainPart = `/${MAIN_PART[kind]}`;
+  for (const tag of raw.match(/<override\b[^>]*>/gi) ?? []) {
+    const part = xmlAttribute(tag, 'PartName');
+    if (part === null || part.toLowerCase() !== mainPart) continue;
+    const type = xmlAttribute(tag, 'ContentType');
+    return type !== null && type.toLowerCase() === MAIN_CONTENT_TYPE[kind]
+      ? OK
+      : refuse('mime_mismatch');
+  }
+  return refuse('mime_mismatch');
+}
+
 /**
  * Open an OOXML package and apply every rule. `depth` is 0 for the upload and 1
  * for an embedded package; the budget is shared so embeds count toward the caps.
@@ -422,7 +518,7 @@ async function inspectOoxml(
   if (!isZipSignature(bytes)) return refuse('mime_mismatch');
   const read = readCentralDirectory(bytes);
   if (!read.ok) return refuse(read.code);
-  const { entries } = read;
+  const { entries, cdOffset } = read;
 
   // Declared-size caps first: no inflating a package that already says it is too big.
   budget.entries += entries.length;
@@ -460,50 +556,81 @@ async function inspectOoxml(
     return refuse('mime_mismatch');
   }
 
-  // Macros and OLE objects, by name, before any inflating.
+  // Macros, OLE objects and stray embeddings, by name, before any inflating.
   for (const entry of entries) {
-    const name = basename(entry.name.toLowerCase());
+    const lower = entry.name.toLowerCase();
+    const name = basename(lower);
     if (name.startsWith('vbaproject') || name === 'vbadata.xml') return refuse('blocked_type');
     if (name.endsWith('.bin') && !PRINTER_SETTINGS.test(name)) return refuse('embedded_content');
     if (name.startsWith('oleobject')) return refuse('embedded_content');
+    if (lower.includes('embeddings/') && ooxmlKindForName(lower) === null) {
+      return refuse('embedded_content');
+    }
   }
 
+  // Local headers: each must match its central entry, and entry data may not
+  // overlap (overlapping entries are the classic non-recursive zip bomb).
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const spans: Array<{ entry: ZipEntry; start: number; end: number }> = [];
   for (const entry of entries) {
-    const lower = entry.name.toLowerCase();
     const local = entry.localOffset;
-    if (local + 30 > bytes.length || u32(view, local) !== SIG_LOCAL) return refuse('mime_mismatch');
+    if (local + 30 > cdOffset || u32(view, local) !== SIG_LOCAL) return refuse('mime_mismatch');
     if ((u16(view, local + 6) & 0x1) !== 0) return refuse('encrypted_file');
-    const start = local + 30 + u16(view, local + 26) + u16(view, local + 28);
+    if (u16(view, local + 8) !== entry.method) return refuse('mime_mismatch');
+    const nameLen = u16(view, local + 26);
+    if (!sameBytes(bytes.subarray(local + 30, local + 30 + nameLen), entry.nameBytes)) {
+      return refuse('mime_mismatch');
+    }
+    const start = local + 30 + nameLen + u16(view, local + 28);
     const end = start + entry.compressedSize;
-    if (end > bytes.length) return refuse('mime_mismatch');
+    if (end > cdOffset) return refuse('mime_mismatch');
+    spans.push({ entry, start, end });
+  }
+  const ordered = [...spans].sort((x, y) => x.entry.localOffset - y.entry.localOffset);
+  for (let i = 1; i < ordered.length; i += 1) {
+    const previous = ordered[i - 1];
+    const current = ordered[i];
+    if (
+      previous !== undefined &&
+      current !== undefined &&
+      current.entry.localOffset < previous.end
+    ) {
+      return refuse('archive_limits');
+    }
+  }
 
+  for (const { entry, start, end } of spans) {
+    const lower = entry.name.toLowerCase();
     const embedKind = ooxmlKindForName(lower);
     const isContentTypes = lower === CONTENT_TYPES_PART;
-    const inflated = await inflateEntry(
-      entry,
-      bytes.subarray(start, end),
-      isContentTypes || embedKind !== null,
-    );
+    const keep = isContentTypes || embedKind !== null;
+    if (keep && entry.uncompressedSize > MAX_INSPECTED_PART_BYTES) {
+      return refuse('archive_limits');
+    }
+    const inflated = await inflateEntry(entry, bytes.subarray(start, end), keep);
     if (!inflated.ok) return refuse(inflated.code);
 
     if (isContentTypes) {
-      const xml = new TextDecoder().decode(inflated.body ?? new Uint8Array()).toLowerCase();
-      if (xml.includes('macroenabled') || xml.includes('vbaproject')) return refuse('blocked_type');
-      if (!xml.includes(MAIN_CONTENT_TYPE[kind])) return refuse('mime_mismatch');
+      const checked = checkContentTypes(
+        new TextDecoder().decode(inflated.body ?? new Uint8Array()),
+        kind,
+      );
+      if (!checked.ok) return checked;
       continue;
     }
 
-    const nested = isZipSignature(inflated.head) || isOle2Signature(inflated.head);
-    if (embedKind !== null || nested) {
+    if (embedKind !== null) {
       // Only a docx/xlsx/pptx may be embedded, and only in the uploaded package.
-      if (embedKind === null || depth >= ZIP_LIMITS.maxEmbedDepth || inflated.body === null) {
+      if (depth >= ZIP_LIMITS.maxEmbedDepth || inflated.body === null) {
         return refuse('embedded_content');
       }
       if (!isZipSignature(inflated.body)) return refuse('embedded_content');
       const inner = await inspectOoxml(inflated.body, embedKind, depth + 1, budget);
       if (!inner.ok) return inner;
+      continue;
     }
+
+    if (isNestedContainer(inflated.head)) return refuse('embedded_content');
   }
   return OK;
 }
