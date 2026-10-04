@@ -1,3 +1,4 @@
+import { deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {
   BLOCKED_EXTENSIONS,
@@ -706,5 +707,136 @@ describe('F3 regressions from the real-file dry run (synthetic)', () => {
       extra: [{ name: 'xl\\embeddings\\x.zip', data: buildZip([{ name: 'a', data: 'a' }]) }],
     });
     expect(await codeOf('budget.xlsx', MIME.xlsx, hidden)).toBe('embedded_content');
+  });
+});
+
+describe('fix-round audit regressions', () => {
+  const latin1 = (bytes: Uint8Array) => Buffer.from(bytes).toString('latin1');
+  const fromLatin1 = (text: string) => Uint8Array.from(Buffer.from(text, 'latin1'));
+  /** The "<< ... >>" body of object 7 in an encryptedPdf() fixture. */
+  const encryptBody = (bytes: Uint8Array) => {
+    const text = latin1(bytes);
+    const start = text.indexOf('7 0 obj\n') + '7 0 obj\n'.length;
+    return text.slice(start, text.indexOf('\nendobj', start));
+  };
+  const ownerOnly = encryptBody(encryptedPdf({ revision: 3, userPassword: '' }));
+
+  it('refuses a password PDF with an owner-only decoy object after %%EOF', async () => {
+    const locked = latin1(encryptedPdf({ revision: 3, userPassword: 'secret' }));
+    const bytes = fromLatin1(`${locked}%7 0 obj\n${ownerOnly}\n`);
+    expect(await codeOf('a.pdf', MIME.pdf, bytes)).toBe('encrypted_file');
+  });
+
+  it('refuses when the real definition uses other whitespace and a decoy uses spaces', async () => {
+    const locked = latin1(encryptedPdf({ revision: 3, userPassword: 'secret' })).replace(
+      '7 0 obj',
+      '7\r\n0\nobj',
+    );
+    const bytes = fromLatin1(locked.replace('%%EOF', `%%EOF\n%7 0 obj ${ownerOnly}`));
+    expect(await codeOf('a.pdf', MIME.pdf, bytes)).toBe('encrypted_file');
+  });
+
+  it('refuses a password dictionary hidden in an object stream behind a text decoy', async () => {
+    const realDict = encryptBody(encryptedPdf({ revision: 3, userPassword: 'secret' }));
+    const header = '7 0 ';
+    const packed = deflateSync(Buffer.from(header + realDict, 'latin1'));
+    const text = [
+      '%PDF-1.7',
+      '1 0 obj << /Type /Catalog >> endobj',
+      `9 0 obj << /Type /ObjStm /N 1 /First ${header.length} /Filter /FlateDecode /Length ${packed.length} >>`,
+      'stream',
+      packed.toString('latin1'),
+      'endstream',
+      'endobj',
+      `7 0 obj ${ownerOnly} endobj`,
+      'trailer << /Root 1 0 R /Encrypt 7 0 R /ID [<00112233445566778899aabbccddeeff><00112233445566778899aabbccddeeff>] >>',
+      '%%EOF',
+    ].join('\n');
+    expect(await codeOf('a.pdf', MIME.pdf, fromLatin1(text))).toBe('encrypted_file');
+  });
+
+  it('passes an owner-only PDF that also has an unrelated object stream', async () => {
+    const header = '3 0 ';
+    const packed = deflateSync(Buffer.from(`${header}<< /Producer (x) >>`, 'latin1'));
+    const owner = latin1(encryptedPdf({ revision: 3, userPassword: '' })).replace(
+      'trailer',
+      `9 0 obj << /Type /ObjStm /N 1 /First ${header.length} /Filter /FlateDecode /Length ${packed.length} >>\nstream\n${packed.toString('latin1')}\nendstream\nendobj\ntrailer`,
+    );
+    expect(await codeOf('a.pdf', MIME.pdf, fromLatin1(owner))).toBe('ok');
+  });
+
+  it('refuses many distinct encryption dictionaries without computing them', async () => {
+    const dicts = Array.from(
+      { length: 50 },
+      (_, i) => `/Encrypt ${ownerOnly.replace('/P', `/X ${i} /P`)}`,
+    );
+    const text = `%PDF-1.7\n${dicts.join('\n')}\ntrailer << /ID [<00112233445566778899aabbccddeeff>] >>\n%%EOF`;
+    const started = Date.now();
+    expect(await codeOf('a.pdf', MIME.pdf, fromLatin1(text))).toBe('encrypted_file');
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('checks a repeated reference to one dictionary once (fast, still passes)', async () => {
+    const owner = latin1(encryptedPdf({ revision: 6, userPassword: '' }));
+    const padding = '/Encrypt 7 0 R\n'.repeat(2000);
+    const started = Date.now();
+    expect(
+      await codeOf('a.pdf', MIME.pdf, fromLatin1(owner.replace('trailer', `${padding}trailer`))),
+    ).toBe('ok');
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  const relsDocx = (rels: string) =>
+    office('docx', { extra: [{ name: 'word/_rels/settings.xml.rels', data: rels }] });
+  const RELS_OPEN =
+    '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+
+  it("refuses a remote template whose Target holds a raw '>'", async () => {
+    const rels = `${RELS_OPEN}<Relationship Id="r1" Target="http://evil.test/t.dotm#>" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" TargetMode="External"/></Relationships>`;
+    expect(await codeOf('a.docx', MIME.docx, relsDocx(rels))).toBe('external_content');
+  });
+
+  it("refuses an ms-msdt target holding a raw '>'", async () => {
+    const rels = `${RELS_OPEN}<Relationship Id="r1" Target="ms-msdt:/id PCWDiagnostic>x" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject"/></Relationships>`;
+    expect(await codeOf('a.docx', MIME.docx, relsDocx(rels))).toBe('external_content');
+  });
+
+  it('refuses a decoy TargetMode written inside another attribute value', async () => {
+    const rels = `${RELS_OPEN}<Relationship Id="r1" Target="http://evil.test/t.dotm? TargetMode='Internal'" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" TargetMode="External"/></Relationships>`;
+    expect(await codeOf('a.docx', MIME.docx, relsDocx(rels))).toBe('external_content');
+  });
+
+  it('refuses malformed package XML (unterminated quote, duplicate attribute)', async () => {
+    for (const rel of [
+      '<Relationship Id="r1 Target="x"/>',
+      '<Relationship Id="r1" Id="r2" Target="x"/>',
+    ]) {
+      expect(
+        await codeOf('a.docx', MIME.docx, relsDocx(`${RELS_OPEN}${rel}</Relationships>`)),
+      ).toBe('mime_mismatch');
+    }
+  });
+
+  const withObjectStream = (filter: string, data: string) =>
+    fromLatin1(
+      latin1(encryptedPdf({ revision: 3, userPassword: '' })).replace(
+        'trailer',
+        `9 0 obj << /Type /ObjStm /N 1 /First 4 /Filter /${filter} /Length ${data.length} >>\nstream\n${data}\nendstream\nendobj\ntrailer`,
+      ),
+    );
+
+  it('passes an owner-only PDF whose object streams are encrypted (do not inflate)', async () => {
+    const encryptedLooking = String.fromCharCode(
+      ...Array.from({ length: 64 }, (_, i) => (i * 97 + 13) & 0xff),
+    );
+    expect(await codeOf('a.pdf', MIME.pdf, withObjectStream('FlateDecode', encryptedLooking))).toBe(
+      'ok',
+    );
+  });
+
+  it('refuses an owner-only PDF with an object stream it cannot check (other filter)', async () => {
+    expect(await codeOf('a.pdf', MIME.pdf, withObjectStream('LZWDecode', 'xxxx'))).toBe(
+      'encrypted_file',
+    );
   });
 });

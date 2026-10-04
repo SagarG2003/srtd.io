@@ -231,16 +231,22 @@ function readPdfName(bytes: Uint8Array, start: number, max: number): { name: str
 }
 
 /** Byte offsets just after every /Encrypt name, and after the last /ID name. */
-function scanPdfNames(bytes: Uint8Array): { encrypt: number[]; lastId: number } {
+function scanPdfNames(bytes: Uint8Array): {
+  encrypt: number[];
+  lastId: number;
+  objectStreams: number[];
+} {
   const encrypt: number[] = [];
+  const objectStreams: number[] = [];
   let lastId = -1;
   for (let i = 0; i < bytes.length; i += 1) {
     if (bytes[i] !== 0x2f) continue;
     const { name, end } = readPdfName(bytes, i + 1, PDF_NAME_SCAN);
     if (name === 'Encrypt') encrypt.push(end);
     else if (name === 'ID') lastId = end;
+    else if (name === 'ObjStm') objectStreams.push(i);
   }
-  return { encrypt, lastId };
+  return { encrypt, lastId, objectStreams };
 }
 
 /**
@@ -280,6 +286,11 @@ class PdfObjectReader {
   ) {
     this.pos = start;
     this.limit = Math.min(bytes.length, start + PDF_MAX_OBJECT_BYTES);
+  }
+
+  /** Byte offset just after the last value read. */
+  get offset(): number {
+    return this.pos;
   }
 
   private peek(offset = 0): number | undefined {
@@ -487,15 +498,164 @@ class PdfObjectReader {
   }
 }
 
-/** The body of the last "n g obj" in the file, or null. */
-function readIndirectObject(bytes: Uint8Array, n: number, g: number): PdfValue | null {
-  const needle = new TextEncoder().encode(`${n} ${g} obj`);
-  let found = -1;
-  for (let at = indexOfBytes(bytes, needle); at !== -1; at = indexOfBytes(bytes, needle, at + 1)) {
-    const before = bytes[at - 1];
-    if (at === 0 || (before !== undefined && PDF_NAME_TERMINATORS.has(before))) found = at;
+const PDF_OBJ = new TextEncoder().encode('obj');
+const PDF_STREAM = new TextEncoder().encode('stream');
+const PDF_ENDSTREAM = new TextEncoder().encode('endstream');
+/** More distinct encryption dictionaries than this is refused, not computed. */
+const PDF_MAX_ENCRYPT_DICTS = 4;
+/** Object streams inspected for a hidden encryption dictionary. */
+const PDF_MAX_OBJECT_STREAMS = 4096;
+const PDF_MAX_OBJECT_STREAM_HEADER = 1024 * 1024;
+/** Total object-stream header bytes inflated per file. */
+const PDF_MAX_OBJECT_STREAM_HEADERS_TOTAL = 8 * 1024 * 1024;
+
+function isAsciiDigit(byte: number | undefined): boolean {
+  return byte !== undefined && byte >= 0x30 && byte <= 0x39;
+}
+
+/**
+ * Every plain-text definition "n g obj" (any whitespace between the parts,
+ * comments included) of the wanted objects, as offsets just after "obj".
+ * Readers resolve objects through the xref, so a reference is trusted only
+ * when exactly one definition exists; a second (decoy) definition anywhere
+ * makes the answer unknown.
+ */
+function findObjectDefinitions(
+  bytes: Uint8Array,
+  wanted: ReadonlySet<string>,
+): Map<string, number[]> {
+  const found = new Map<string, number[]>();
+  for (
+    let at = indexOfBytes(bytes, PDF_OBJ);
+    at !== -1;
+    at = indexOfBytes(bytes, PDF_OBJ, at + 3)
+  ) {
+    const after = bytes[at + 3];
+    if (after !== undefined && !PDF_NAME_TERMINATORS.has(after)) continue;
+    let i = at - 1;
+    const spaces = (): number => {
+      const start = i;
+      while (i >= 0 && PDF_WHITESPACE.has(bytes[i] as number)) i -= 1;
+      return start - i;
+    };
+    const digits = (): string | null => {
+      const end = i;
+      while (i >= 0 && isAsciiDigit(bytes[i]) && end - i < 10) i -= 1;
+      if (i === end) return null;
+      return String.fromCharCode(...bytes.subarray(i + 1, end + 1));
+    };
+    if (spaces() === 0) continue;
+    const g = digits();
+    if (g === null || spaces() === 0) continue;
+    const n = digits();
+    if (n === null) continue;
+    const before = bytes[i];
+    if (i >= 0 && before !== undefined && !PDF_NAME_TERMINATORS.has(before)) continue;
+    const key = `${Number(n)} ${Number(g)}`;
+    if (!wanted.has(key)) continue;
+    const list = found.get(key) ?? [];
+    list.push(at + 3);
+    found.set(key, list);
   }
-  return found === -1 ? null : new PdfObjectReader(bytes, found + needle.length).read();
+  return found;
+}
+
+/** Offset of the last `needle` that starts before `from`, or -1. */
+function lastIndexOfBytes(
+  haystack: Uint8Array,
+  needle: Uint8Array,
+  from: number,
+  floor: number,
+): number {
+  outer: for (let i = Math.min(from, haystack.length - needle.length); i >= floor; i -= 1) {
+    for (let j = 0; j < needle.length; j += 1) {
+      if (haystack[i + j] !== needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+/** The first `limit` bytes a zlib (FlateDecode) stream inflates to, or null. */
+async function inflateZlibHead(data: Uint8Array, limit: number): Promise<Uint8Array | null> {
+  const stream = new DecompressionStream('deflate');
+  const writer = stream.writable.getWriter();
+  const written = writer
+    .write(data.slice())
+    .then(() => writer.close())
+    .catch(() => undefined);
+  const reader = stream.readable.getReader();
+  const out = new Uint8Array(limit);
+  let total = 0;
+  try {
+    while (total < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const take = Math.min(value.byteLength, limit - total);
+      out.set(value.subarray(0, take), total);
+      total += take;
+    }
+  } catch {
+    // A truncated or corrupt tail after the header is fine; the header is not.
+  }
+  await reader.cancel().catch(() => undefined);
+  await written;
+  return total >= limit ? out : null;
+}
+
+/**
+ * What an object stream (its /ObjStm name at `at`) holds:
+ * - 'encrypted': FlateDecode data that does not inflate. In an encrypted PDF
+ *   object streams are encrypted with the document key, so a reader cannot
+ *   take the encryption dictionary itself from one; nothing to check.
+ * - 'unchecked': anything else unreadable (another filter, DecodeParms, a
+ *   malformed dictionary, an oversized header). Treated as unknown.
+ * - the object numbers it stores, when it is readable plaintext.
+ */
+async function objectStreamMembers(
+  bytes: Uint8Array,
+  at: number,
+  budget: { headerBytes: number },
+): Promise<number[] | 'encrypted' | 'unchecked'> {
+  const objAt = lastIndexOfBytes(bytes, PDF_OBJ, at, Math.max(0, at - PDF_MAX_OBJECT_BYTES));
+  if (objAt === -1) return 'unchecked';
+  const reader = new PdfObjectReader(bytes, objAt + 3);
+  const dict = reader.read();
+  if (dict?.t !== 'dict') return 'unchecked';
+  const filter = dict.v.get('Filter');
+  const flate =
+    filter === undefined ||
+    (filter.t === 'name' && filter.v === 'FlateDecode') ||
+    (filter.t === 'arr' &&
+      filter.v.length === 1 &&
+      filter.v[0]?.t === 'name' &&
+      filter.v[0].v === 'FlateDecode');
+  const first = dict.v.get('First');
+  const count = dict.v.get('N');
+  if (!flate || dict.v.has('DecodeParms') || first?.t !== 'num' || count?.t !== 'num')
+    return 'unchecked';
+  if (first.v <= 0 || first.v > PDF_MAX_OBJECT_STREAM_HEADER) return 'unchecked';
+  budget.headerBytes += first.v;
+  if (budget.headerBytes > PDF_MAX_OBJECT_STREAM_HEADERS_TOTAL) return 'unchecked';
+  let start = reader.offset;
+  while (start < bytes.length && PDF_WHITESPACE.has(bytes[start] as number)) start += 1;
+  if (indexOfBytes(bytes.subarray(start, start + PDF_STREAM.length), PDF_STREAM) !== 0)
+    return 'unchecked';
+  start += PDF_STREAM.length;
+  if (bytes[start] === 0x0d) start += 1;
+  if (bytes[start] === 0x0a) start += 1;
+  const length = dict.v.get('Length');
+  const end = length?.t === 'num' ? start + length.v : indexOfBytes(bytes, PDF_ENDSTREAM, start);
+  if (end < start || end > bytes.length) return 'unchecked';
+  const raw =
+    filter === undefined
+      ? bytes.subarray(start, start + first.v)
+      : await inflateZlibHead(bytes.subarray(start, end), first.v);
+  if (raw === null) return filter === undefined ? 'unchecked' : 'encrypted';
+  const numbers = new TextDecoder('latin1').decode(raw).trim().split(/\s+/).map(Number);
+  if (numbers.length < count.v * 2 || numbers.some((value) => !Number.isInteger(value)))
+    return 'unchecked';
+  return numbers.filter((_, i) => i % 2 === 0).slice(0, count.v);
 }
 
 // MD5 (RFC 1321) and RC4: the PDF standard security handler for revisions 2-4
@@ -711,14 +871,47 @@ function pdfFirstId(bytes: Uint8Array, lastId: number): Uint8Array {
  * unsupported revision counts as password-protected.
  */
 export async function pdfNeedsPassword(bytes: Uint8Array): Promise<boolean> {
-  const { encrypt, lastId } = scanPdfNames(bytes);
+  const { encrypt, lastId, objectStreams } = scanPdfNames(bytes);
   if (encrypt.length === 0) return false;
-  const id0 = pdfFirstId(bytes, lastId);
+
+  // Each distinct dictionary is checked once; a pile of them is refused
+  // rather than computed (each check costs key derivation or the R6 hash).
+  const inline: Array<Map<string, PdfValue>> = [];
+  const refs = new Set<string>();
   for (const at of encrypt) {
-    let value = new PdfObjectReader(bytes, at).read();
-    if (value?.t === 'ref') value = readIndirectObject(bytes, value.n, value.g);
-    if (value?.t !== 'dict') return true;
-    if (!(await emptyUserPasswordOpens(value.v, id0))) return true;
+    const value = new PdfObjectReader(bytes, at).read();
+    if (value?.t === 'ref') refs.add(`${value.n} ${value.g}`);
+    else if (value?.t === 'dict') inline.push(value.v);
+    else return true;
+    if (refs.size + inline.length > PDF_MAX_ENCRYPT_DICTS) return true;
+  }
+
+  const dicts = [...inline];
+  if (refs.size > 0) {
+    const definitions = findObjectDefinitions(bytes, refs);
+    for (const key of refs) {
+      const offsets = definitions.get(key) ?? [];
+      if (offsets.length !== 1) return true;
+      const value = new PdfObjectReader(bytes, offsets[0] as number).read();
+      if (value?.t !== 'dict') return true;
+      dicts.push(value.v);
+    }
+    // A reader could also find the object inside an object stream (where no
+    // text definition is visible), so every object stream must be readable and
+    // must not contain a referenced encryption dictionary.
+    if (objectStreams.length > PDF_MAX_OBJECT_STREAMS) return true;
+    const numbers = new Set([...refs].map((key) => Number(key.split(' ')[0])));
+    const budget = { headerBytes: 0 };
+    for (const at of objectStreams) {
+      const members = await objectStreamMembers(bytes, at, budget);
+      if (members === 'encrypted') continue;
+      if (members === 'unchecked' || members.some((n) => numbers.has(n))) return true;
+    }
+  }
+
+  const id0 = pdfFirstId(bytes, lastId);
+  for (const dict of dicts) {
+    if (!(await emptyUserPasswordOpens(dict, id0))) return true;
   }
   return false;
 }
@@ -1003,11 +1196,83 @@ function decodeXmlEntities(text: string): string {
   });
 }
 
-/** Attribute value from one XML start tag, or null. */
-function xmlAttribute(tag: string, name: string): string | null {
-  const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i').exec(tag);
-  if (match === null) return null;
-  return decodeXmlEntities(match[1] ?? match[2] ?? '');
+interface XmlTag {
+  /** Element local name (prefix dropped), lowercased. */
+  name: string;
+  /** Attributes by lowercased name, values entity-decoded. */
+  attrs: Map<string, string>;
+}
+
+/**
+ * Every start tag of an XML document with its attributes, read in order and
+ * honouring quotes, so a '>' or a lookalike "TargetMode=..." inside another
+ * attribute's value can neither end a tag early nor spoof an attribute.
+ * Returns null for anything malformed (unterminated quotes, '<' in a value,
+ * duplicate attributes, a DTD), which callers refuse.
+ */
+function xmlStartTags(text: string): XmlTag[] | null {
+  const tags: XmlTag[] = [];
+  const isSpace = (char: string | undefined): boolean =>
+    char === ' ' || char === '\t' || char === '\n' || char === '\r';
+  let i = 0;
+  for (;;) {
+    const lt = text.indexOf('<', i);
+    if (lt === -1) return tags;
+    const skipTo = (open: string, close: string): number | null => {
+      if (!text.startsWith(open, lt)) return null;
+      const end = text.indexOf(close, lt + open.length);
+      return end === -1 ? -1 : end + close.length;
+    };
+    const skipped = skipTo('<!--', '-->') ?? skipTo('<![CDATA[', ']]>') ?? skipTo('<?', '?>');
+    if (skipped !== null) {
+      if (skipped === -1) return null;
+      i = skipped;
+      continue;
+    }
+    if (text[lt + 1] === '!') return null;
+    if (text[lt + 1] === '/') {
+      const end = text.indexOf('>', lt);
+      if (end === -1) return null;
+      i = end + 1;
+      continue;
+    }
+    let j = lt + 1;
+    while (j < text.length && !isSpace(text[j]) && text[j] !== '/' && text[j] !== '>') j += 1;
+    const qualified = text.slice(lt + 1, j);
+    if (qualified === '') return null;
+    const attrs = new Map<string, string>();
+    for (;;) {
+      while (isSpace(text[j])) j += 1;
+      const char = text[j];
+      if (char === undefined) return null;
+      if (char === '>') {
+        j += 1;
+        break;
+      }
+      if (char === '/' && text[j + 1] === '>') {
+        j += 2;
+        break;
+      }
+      const nameStart = j;
+      while (j < text.length && !isSpace(text[j]) && !'=/>'.includes(text[j] as string)) j += 1;
+      const attrName = text.slice(nameStart, j).toLowerCase();
+      if (attrName === '') return null;
+      while (isSpace(text[j])) j += 1;
+      if (text[j] !== '=') return null;
+      j += 1;
+      while (isSpace(text[j])) j += 1;
+      const quote = text[j];
+      if (quote !== '"' && quote !== "'") return null;
+      const end = text.indexOf(quote, j + 1);
+      if (end === -1) return null;
+      const raw = text.slice(j + 1, end);
+      if (raw.includes('<') || attrs.has(attrName)) return null;
+      attrs.set(attrName, decodeXmlEntities(raw));
+      j = end + 1;
+    }
+    tags.push({ name: (qualified.split(':').pop() ?? '').toLowerCase(), attrs });
+    i = j;
+  }
 }
 
 /**
@@ -1044,20 +1309,26 @@ function checkContentTypes(raw: string, kind: OoxmlKind): FileSafetyResult {
   // OPC: a part's type is its Override, else the Default for its extension
   // (the .NET packaging writers declare the main part through Default). Tags
   // may carry a namespace prefix (<ns0:Override>).
+  const tags = xmlStartTags(raw);
+  if (tags === null) return refuse('mime_mismatch');
   const mainPart = `/${MAIN_PART[kind]}`;
   let mainType: string | null = null;
-  for (const tag of raw.match(/<(?:[a-z0-9_.-]+:)?override\b[^>]*>/gi) ?? []) {
-    const part = xmlAttribute(tag, 'PartName');
-    if (part !== null && part.replace(/\\/g, '/').toLowerCase() === mainPart) {
-      mainType = xmlAttribute(tag, 'ContentType') ?? '';
+  for (const tag of tags) {
+    if (tag.name !== 'override') continue;
+    const part = tag.attrs.get('partname');
+    if (part !== undefined && part.replace(/\\/g, '/').toLowerCase() === mainPart) {
+      mainType = tag.attrs.get('contenttype') ?? '';
       break;
     }
   }
   if (mainType === null) {
     const extension = mainPart.split('.').pop() ?? '';
-    for (const tag of raw.match(/<(?:[a-z0-9_.-]+:)?default\b[^>]*>/gi) ?? []) {
-      if ((xmlAttribute(tag, 'Extension') ?? '').toLowerCase() === extension) {
-        mainType = xmlAttribute(tag, 'ContentType') ?? '';
+    for (const tag of tags) {
+      if (
+        tag.name === 'default' &&
+        (tag.attrs.get('extension') ?? '').toLowerCase() === extension
+      ) {
+        mainType = tag.attrs.get('contenttype') ?? '';
         break;
       }
     }
@@ -1089,14 +1360,16 @@ const PROTOCOL_HANDLER = /(^|[^a-z0-9+.-])(ms-[a-z0-9+.-]*|msdt|search-ms):/i;
  * hyperlinks (and every internal relationship) pass.
  */
 function checkRelationships(raw: string): FileSafetyResult {
-  for (const tag of raw.match(/<(?:[a-z0-9_.-]+:)?relationship\b[^>]*>/gi) ?? []) {
-    const target = xmlAttribute(tag, 'Target') ?? '';
+  const tags = xmlStartTags(raw);
+  if (tags === null) return refuse('mime_mismatch');
+  for (const tag of tags) {
+    if (tag.name !== 'relationship') continue;
+    const target = tag.attrs.get('target') ?? '';
     if (PROTOCOL_HANDLER.test(target.trim())) return refuse('external_content');
-    const mode = (xmlAttribute(tag, 'TargetMode') ?? '').trim().toLowerCase();
+    const mode = (tag.attrs.get('targetmode') ?? '').trim().toLowerCase();
     if (mode !== 'external') continue;
-    const type = (xmlAttribute(tag, 'Type') ?? '').trim().toLowerCase();
-    const kind = type.split('/').pop() ?? '';
-    if (REMOTE_LOADING_TYPES.has(kind)) return refuse('external_content');
+    const type = (tag.attrs.get('type') ?? '').trim().toLowerCase();
+    if (REMOTE_LOADING_TYPES.has(type.split('/').pop() ?? '')) return refuse('external_content');
   }
   return OK;
 }
