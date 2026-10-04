@@ -328,6 +328,8 @@ function readCentralDirectory(bytes: Uint8Array): ZipRead {
 interface ZipBudget {
   entries: number;
   uncompressedBytes: number;
+  /** Byte length of the uploaded file, for the whole-upload ratio cap. */
+  uploadBytes: number;
 }
 
 type Inflated =
@@ -503,6 +505,26 @@ function xmlAttribute(tag: string, name: string): string | null {
 }
 
 /**
+ * [Content_Types].xml as text, or null when it cannot be read the way the
+ * checks read it: anything but strict UTF-8 (a UTF-16 BOM, NUL bytes, invalid
+ * sequences, another declared encoding) or a DTD, whose entities could spell a
+ * macro type the text search would not see. Office writes UTF-8 without a DTD.
+ */
+function decodeContentTypes(bytes: Uint8Array): string | null {
+  if (bytes.includes(0)) return null;
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch {
+    return null;
+  }
+  const declared = /^\s*<\?xml[^>]*\sencoding\s*=\s*["']([^"']*)["']/i.exec(text)?.[1];
+  if (declared !== undefined && !/^utf-?8$/i.test(declared)) return null;
+  if (/<!doctype|<!entity/i.test(text)) return null;
+  return text;
+}
+
+/**
  * [Content_Types].xml rules: no macro or VBA content type anywhere (checked on
  * the entity-decoded text), and the main part must be declared with exactly the
  * claimed type's main content type.
@@ -566,8 +588,13 @@ async function inspectOoxml(
       return refuse('archive_limits');
     }
   }
+  // Overall ratio: this package against its own bytes, and everything counted
+  // so far (embeds included) against the uploaded file.
   const declaredTotal = entries.reduce((sum, entry) => sum + entry.uncompressedSize, 0);
-  if (declaredTotal > ZIP_LIMITS.maxCompressionRatio * bytes.length) {
+  if (
+    declaredTotal > ZIP_LIMITS.maxCompressionRatio * bytes.length ||
+    budget.uncompressedBytes > ZIP_LIMITS.maxCompressionRatio * budget.uploadBytes
+  ) {
     return refuse('archive_limits');
   }
 
@@ -631,10 +658,9 @@ async function inspectOoxml(
     if (!inflated.ok) return refuse(inflated.code);
 
     if (isContentTypes) {
-      const checked = checkContentTypes(
-        new TextDecoder().decode(inflated.body ?? new Uint8Array()),
-        kind,
-      );
+      const text = decodeContentTypes(inflated.body ?? new Uint8Array());
+      if (text === null) return refuse('mime_mismatch');
+      const checked = checkContentTypes(text, kind);
       if (!checked.ok) return checked;
       continue;
     }
@@ -677,7 +703,11 @@ export async function inspectUpload(input: {
 
   const kind = ooxmlKindForMime(mime);
   if (kind !== null) {
-    return inspectOoxml(input.bytes, kind, 0, { entries: 0, uncompressedBytes: 0 });
+    return inspectOoxml(input.bytes, kind, 0, {
+      entries: 0,
+      uncompressedBytes: 0,
+      uploadBytes: input.bytes.length,
+    });
   }
   return OK;
 }

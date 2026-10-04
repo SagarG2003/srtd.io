@@ -446,4 +446,42 @@ describe('audit regressions', () => {
     });
     expect(await codeOf('deck.pptx', MIME.pptx, bytes)).toBe('embedded_content');
   });
+
+  it('refuses a UTF-16 [Content_Types].xml that could hide a macro type', async () => {
+    const text = contentTypesFor('docx').replace('encoding="UTF-8"', 'encoding="UTF-16"');
+    const utf16 = new Uint8Array(2 + text.length * 2);
+    utf16.set([0xff, 0xfe], 0);
+    for (let i = 0; i < text.length; i += 1) utf16[2 + i * 2] = text.charCodeAt(i);
+    const swapped = buildZip([
+      { name: '[Content_Types].xml', data: utf16 },
+      { name: '_rels/.rels', data: '<Relationships/>' },
+      { name: 'word/document.xml', data: '<w/>' },
+    ]);
+    expect(await codeOf('report.docx', MIME.docx, swapped)).toBe('mime_mismatch');
+  });
+
+  it('refuses a [Content_Types].xml with a DTD', async () => {
+    const xml = contentTypesFor('xlsx').replace(
+      '<Types',
+      '<!DOCTYPE Types [<!ENTITY m "macro">]><Types',
+    );
+    expect(await codeOf('budget.xlsx', MIME.xlsx, office('xlsx', { contentTypesXml: xml }))).toBe(
+      'mime_mismatch',
+    );
+  });
+
+  it('caps the overall ratio across the upload and its embeds', async () => {
+    // The embed stores its sheet uncompressed (1:1) and the outer package
+    // deflates the embed at about 690:1: every entry is under 1000:1, but the
+    // embed and its contents together reach about 1380x the upload.
+    const sheet = '<v>0</v>'.repeat((8 * 1024 * 1024) / 8);
+    const workbook = office('xlsx', {
+      extra: [{ name: 'xl/worksheets/sheet1.xml', data: sheet, method: 'store' }],
+    });
+    const bytes = office('pptx', {
+      extra: [{ name: 'ppt/embeddings/book.xlsx', data: workbook }],
+    });
+    expect(await codeOf('deck.pptx', MIME.pptx, bytes)).toBe('archive_limits');
+    expect(await codeOf('book.xlsx', MIME.xlsx, workbook)).toBe('ok');
+  });
 });
