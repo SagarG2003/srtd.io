@@ -3,7 +3,8 @@
 // is a 16px-radius panel card: a 28px avatar, "Sender › Chat" (the chat part
 // left out in a per-chat view and for DMs), the mono date and a chevron, then
 // the message as a bubble (own on the accent fill, others on panel-2), text
-// clamped to 3 lines, media as the compact summary search rows use. A tap
+// clamped to 3 lines (the chat home's all-chats list shows it whole), media as
+// the compact summary search rows use. A tap
 // opens the chat at the message. Pages are 30 rows, keyset, the next one read
 // as the end scrolls in. Sender names come from what is loaded; the missing
 // ones of a page are read in ONE batched read. Edit mode puts a select circle
@@ -280,6 +281,8 @@ export interface StarredRowViewProps {
   date: string;
   /** The body with mentions as "@Name". */
   text: string;
+  /** The whole text, the bubble growing to fit (chat home); else 3 lines. */
+  fullText?: boolean;
   /** Edit mode: the row toggles its select circle instead of opening. */
   selecting?: { checked: boolean; onToggle: () => void } | undefined;
   onOpen: () => void;
@@ -326,7 +329,10 @@ export function StarredRowView(props: StarredRowViewProps): ReactElement {
           <span
             data-starred-bubble={props.mine ? 'own' : 'peer'}
             className={cn(
-              'line-clamp-3 max-w-[92%] self-start whitespace-pre-wrap break-words rounded-[18px] px-3 py-2 text-[15px] leading-5',
+              'max-w-[92%] self-start whitespace-pre-wrap rounded-[18px] px-3 py-2 text-[15px] leading-5',
+              props.fullText === true
+                ? 'min-w-0 [overflow-wrap:anywhere]'
+                : 'line-clamp-3 break-words',
               props.mine ? 'bg-bubble-own text-accent-fg' : 'bg-panel-2 text-fg',
             )}
           >
@@ -482,6 +488,8 @@ export function StarredList(props: StarredListProps): ReactElement {
         mine: row.senderUserId !== null && row.senderUserId === currentUserId,
         date: searchDateLabel(row.createdAt, nowMs, zone),
         text: row.body.trim() !== '' ? resolveMentionText(row.body, nameOf) : row.mediaLine,
+        // The all-chats list (chat home's Starred chip) shows every line.
+        fullText: props.channelId === null,
       };
     },
     editing,
