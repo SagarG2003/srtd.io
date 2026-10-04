@@ -24,7 +24,7 @@ function cmd(over: Partial<AgoraChat.CmdMsgBody>): AgoraChat.CmdMsgBody {
     to: toAgoraUsername(ME),
     from: toAgoraUsername(PEER),
     action: TYPING_ACTION,
-    time: 1000,
+    time: Date.now(),
     ...over,
   } as AgoraChat.CmdMsgBody;
 }
@@ -55,6 +55,7 @@ describe('sendTyping', () => {
       type: 'cmd',
       to: 'agora-group-1',
       action: 'typing',
+      deliverOnlineOnly: true,
     });
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith(created);
@@ -92,6 +93,7 @@ describe('subscribeTyping', () => {
       target: DM_TARGET,
       currentUserId: ME,
       onTypingFrom,
+      onMessageFrom: vi.fn(),
     });
     return { handlers, connection, onTypingFrom, teardown };
   }

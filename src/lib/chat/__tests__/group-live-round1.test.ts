@@ -358,6 +358,7 @@ describe('J3 inbound typing without an Agora target', () => {
       channelId: CHANNEL,
       currentUserId: ME,
       onTypingFrom,
+      onMessageFrom: vi.fn(),
     });
     handlers[0]?.onCmdMessage?.({
       action: TYPING_ACTION,

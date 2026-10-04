@@ -24,8 +24,10 @@ export const createTextMessage: CreateTextMessage = (options) =>
 
 /**
  * Bind `AgoraChat.message.create` to the command-message option shape, the live
- * carrier for typing, reaction and read signals. Command messages hold no body
- * and are never recorded; they exist only for the open session.
+ * carrier for typing, reaction and read signals. Command messages hold no body,
+ * but by the SDK default (deliverOnlineOnly false) Agora queues them for an
+ * offline recipient and delivers them on reconnect. A caller passes
+ * deliverOnlineOnly: true to drop them for offline recipients instead.
  */
 export const createCmdMessage: CreateCmdMessage = (options) =>
   websdk.message.create({
@@ -34,4 +36,7 @@ export const createCmdMessage: CreateCmdMessage = (options) =>
     to: options.to,
     action: options.action,
     ...(options.ext !== undefined ? { ext: options.ext } : {}),
+    ...(options.deliverOnlineOnly !== undefined
+      ? { deliverOnlineOnly: options.deliverOnlineOnly }
+      : {}),
   });
