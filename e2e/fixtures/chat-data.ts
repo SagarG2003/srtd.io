@@ -521,6 +521,7 @@ export function buildWorld(now: number = Date.now()): ChatWorld {
     chat_scheduled_messages: [],
     // The viewer's message reminders (RLS: own rows only); specs seed rows.
     chat_message_reminders: [],
+    chat_message_stars: [],
     posts,
     briefs: [],
     inbox_entries: [

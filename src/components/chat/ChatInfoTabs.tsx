@@ -1,7 +1,8 @@
-// The chat info tabs: Media, Files, Links and Marks for one channel, DM or
-// group. Media and Files share ONE attachments read per page (split
-// client-side, voice notes in neither); Links is one read per page; Marks is
-// the pin board list MarksSheet renders. A tab's first page loads the first
+// The chat info tabs: Media, Files, Links, Starred and Marks for one channel,
+// DM or group. Media and Files share ONE attachments read per page (split
+// client-side, voice notes in neither); Links is one read per page; Starred is
+// the viewer's starred messages in this chat (StarredList, read the first time
+// the tab opens, no Edit here); Marks is the pin board list MarksSheet renders. A tab's first page loads the first
 // time it is shown and shows its loading state until that page resolves (first
 // paint is final), then "Load more" reads the next keyset page while a page
 // comes back full. Presigns go through the thread's PresignCache; sender names
@@ -15,14 +16,15 @@ import type { ReactElement, ReactNode } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { IconFile, IconImage, IconLink, IconPin } from '@/components/ui/icons';
+import { IconFile, IconImage, IconLink, IconPin, IconStar } from '@/components/ui/icons';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useAttachmentUrl } from '@/components/chat/MessageAttachments';
 import { MarksList, type MarksListProps } from '@/components/chat/MarksSheet';
+import { StarredList } from '@/components/chat/StarredList';
 import { cn } from '@/lib/cn';
 import { humanizeSize } from '@/lib/assets';
 import { supabase } from '@/lib/supabase';
-import { readProfiles, type ChatProfile } from '@/lib/chat-reads';
+import { readProfiles, type ChannelSummary, type ChatProfile } from '@/lib/chat-reads';
 import type { PresignCache } from '@/lib/asset-presign';
 import type { Result } from '@srtdio/rpc';
 import type { MessageCursor } from '@/lib/chat/thread';
@@ -37,7 +39,7 @@ import {
   type ChannelPage,
 } from '@/lib/chat/channel-media';
 
-export type ContactTab = 'media' | 'files' | 'links' | 'marks';
+export type ContactTab = 'media' | 'files' | 'links' | 'starred' | 'marks';
 
 /** 'full' is the DM Contact page; 'preview' caps each tab until its See all. */
 export type ChatInfoMode = 'full' | 'preview';
@@ -46,6 +48,7 @@ export const CONTACT_TABS: ReadonlyArray<{ key: ContactTab; label: string }> = [
   { key: 'media', label: 'Media' },
   { key: 'files', label: 'Files' },
   { key: 'links', label: 'Links' },
+  { key: 'starred', label: 'Starred' },
   { key: 'marks', label: 'Marks' },
 ];
 
@@ -53,6 +56,7 @@ export const CONTACT_EMPTY: Record<Exclude<ContactTab, 'marks'>, string> = {
   media: 'No photos yet',
   files: 'No files yet',
   links: 'No links yet',
+  starred: 'No starred messages',
 };
 
 /** How many items each tab shows in preview mode before See all. */
@@ -60,6 +64,7 @@ export const PREVIEW_COUNT: Readonly<Record<ContactTab, number>> = {
   media: 6,
   files: 3,
   links: 3,
+  starred: 3,
   marks: 3,
 };
 
@@ -456,6 +461,11 @@ export interface ChatInfoTabsViewProps {
   timeZone: string;
   senderName: (userId: string | null) => string;
   onOpenImage: (index: number) => void;
+  /**
+   * The Starred tab's list (built by ChatInfoTabs only while that tab shows,
+   * so its first page is read when the tab opens); absent reads empty.
+   */
+  starred?: ReactNode;
   /** Marks tab props, or null when the thread has no marks wiring. */
   marks: Omit<MarksListProps, 'open' | 'onJump'> | null;
   /** The surface showing the tabs is open (gates the Marks list's reads). */
@@ -548,6 +558,14 @@ export function ChatInfoTabsView(props: ChatInfoTabsViewProps): ReactElement {
         </ul>
       </FeedBody>
     );
+  } else if (props.tab === 'starred') {
+    body = (
+      <div data-starred-tab="">
+        {props.starred ?? (
+          <EmptyState icon={<IconStar size={22} />} title={CONTACT_EMPTY.starred} />
+        )}
+      </div>
+    );
   } else {
     body =
       props.marks !== null ? (
@@ -604,6 +622,40 @@ export interface ChatInfoTabsProps {
 }
 
 const NO_FRAME = (tabs: ReactElement): ReactElement => tabs;
+
+const NO_CHANNELS: ReadonlyMap<string, ChannelSummary> = new Map();
+
+/**
+ * The Starred tab's list: this chat's stars, no "› Chat", no Edit. Preview
+ * mode (Group info) caps it at PREVIEW_COUNT.starred rows with See all until
+ * that is tapped; full mode (the DM Contact sheet) lists them all. Pure.
+ */
+export function starredTab(input: {
+  mode: ChatInfoMode;
+  expanded: ReadonlySet<ContactTab>;
+  channelId: string;
+  profiles: Map<string, ChatProfile>;
+  currentUserId: string;
+  timeZone: string;
+  onJump: (messageId: string) => void;
+  onSeeAll: () => void;
+}): ReactElement {
+  const limit = previewLimit(input.mode, 'starred', input.expanded);
+  return (
+    <StarredList
+      channelId={input.channelId}
+      showChat={false}
+      channelsById={NO_CHANNELS}
+      profiles={input.profiles}
+      currentUserId={input.currentUserId}
+      timeZone={input.timeZone}
+      onOpen={(row) => input.onJump(row.id)}
+      {...(limit !== null
+        ? { preview: { rows: limit, seeAll: <SeeAllRow onClick={input.onSeeAll} /> } }
+        : {})}
+    />
+  );
+}
 
 /**
  * The stateful tabs: the selected tab, each tab's See-all state, the two
@@ -683,9 +735,26 @@ export function ChatInfoTabs(props: ChatInfoTabsProps): ReactElement {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [open, viewer, onEscape]);
 
+  // The Starred tab mounts its list only while it shows: its first page is
+  // read when the tab opens. No Edit here; a row closes the surface and jumps.
+  const starred =
+    open && tab === 'starred'
+      ? starredTab({
+          mode: props.mode,
+          expanded,
+          channelId,
+          profiles: known,
+          currentUserId,
+          timeZone: props.timeZone,
+          onJump: props.onJump,
+          onSeeAll: () => setExpanded((prev) => new Set(prev).add('starred')),
+        })
+      : null;
+
   const tabs = (
     <ChatInfoTabsView
       tab={tab}
+      starred={starred}
       onTab={setTab}
       attachments={attachments.feed}
       links={links.feed}

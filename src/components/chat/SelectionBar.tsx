@@ -1,6 +1,8 @@
 // Selection mode's two bars. The header bar replaces the thread header: "N
 // selected" and a 44x44 Cancel. The bottom bar replaces the composer: Forward
-// (any recorded message) and Delete (own, unmarked, inside 30 minutes). When
+// (any recorded message), Star or Unstar (Unstar only when every selected
+// message is already starred; one write for the batch) and Delete (own,
+// unmarked, inside 30 minutes). When
 // Delete cannot apply it stays visible but disabled, with one line saying why.
 // Delete opens the confirm dialog; a failure shows the mapped copy as a toast
 // (never raw proc text) and the selection is kept (the caller only clears it
@@ -11,10 +13,11 @@ import { useState } from 'react';
 import type { ReactElement } from 'react';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
-import { IconForward, IconTrash } from '@/components/ui/icons';
+import { IconForward, IconStar, IconTrash } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/cn';
 import { DELETE_BLOCK_COPY, type DeleteBlock } from '@/lib/chat/forward';
+import { STAR_LABEL, UNSTAR_LABEL } from '@/lib/chat/stars';
 import {
   HEADER_NAME_TYPE,
   SELECTION_REASON_TYPE,
@@ -57,8 +60,15 @@ export function SelectionHeader(props: {
   );
 }
 
+/** The selection bar's Star action: which way it goes, and the run. */
+export interface SelectionStar {
+  /** 'unstar' when every selected message is already starred. */
+  action: 'star' | 'unstar';
+  onRun: () => void;
+}
+
 /**
- * The bottom bar's view: Forward, then Delete, with the reason line under the
+ * The bottom bar's view: Forward, Star or Unstar, then Delete, with the reason line under the
  * pair when Delete is blocked. Hook-free so the tests call it directly.
  */
 export function SelectionBarView(props: {
@@ -69,9 +79,12 @@ export function SelectionBarView(props: {
   canDelete: boolean;
   /** Opens the forward picker; absent hides Forward. */
   onForward?: (() => void) | undefined;
+  /** Star or Unstar the selection; absent hides it. */
+  star?: SelectionStar | undefined;
   /** Opens the delete confirm. */
   onDeleteTap: () => void;
 }): ReactElement {
+  const star = props.star;
   return (
     <div
       data-selection-bar=""
@@ -92,6 +105,18 @@ export function SelectionBarView(props: {
         ) : (
           <span />
         )}
+        {star !== undefined ? (
+          <Button
+            variant="ghost"
+            size="lg"
+            data-selection-star={star.action}
+            disabled={props.count === 0}
+            onClick={star.onRun}
+          >
+            <IconStar size={18} />
+            {star.action === 'unstar' ? UNSTAR_LABEL : STAR_LABEL}
+          </Button>
+        ) : null}
         <Button
           variant="ghost"
           size="lg"
@@ -126,6 +151,8 @@ export function SelectionBar(props: {
   canDelete: boolean;
   /** Opens the forward picker for the selection; absent hides Forward. */
   onForward?: (() => void) | undefined;
+  /** Star or Unstar the selection; absent hides it. */
+  star?: SelectionStar | undefined;
   /** Runs the delete; resolves ok, or the user copy to toast. */
   onDelete: () => Promise<{ ok: true } | { ok: false; message: string }>;
 }): ReactElement {
@@ -149,6 +176,7 @@ export function SelectionBar(props: {
         block={props.block}
         canDelete={props.canDelete}
         onForward={props.onForward}
+        star={props.star}
         onDeleteTap={() => setConfirming(true)}
       />
       {deleteMessagesConfirm({
