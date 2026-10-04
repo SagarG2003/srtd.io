@@ -133,16 +133,11 @@ export async function runUploadPipeline(
     });
   }
 
-  // 2b. Magic-byte check (after the allowlist, before sanitize): the declared
-  // MIME type must match the file's actual leading bytes, so a renamed
-  // executable cannot ride in under an allowed type.
-  if (!verifyMagicBytes(input.bytes, mimeType)) {
-    return err({ code: 'mime_mismatch', message: 'File contents do not match the file type.' });
-  }
-
-  // 2c. File-safety rules on the raw bytes and the client filename: disguised
+  // 2b. File-safety rules on the raw bytes and the client filename: disguised
   // or executable names, OLE2, encrypted files, and Office package inspection
-  // (macros, embedded content, archive caps). Refusals are permanent 4xx.
+  // (macros, embedded content, archive caps). Refusals are permanent 4xx. Runs
+  // before the signature check so a password-protected Office file (OLE2 bytes
+  // under a docx/xlsx/pptx MIME) gets the password copy, not a mismatch.
   const safety = await inspectUpload({
     filename: input.filename,
     mimeType,
@@ -150,6 +145,13 @@ export async function runUploadPipeline(
   });
   if (!safety.ok) {
     return err({ code: safety.code, message: safety.message });
+  }
+
+  // 2c. Magic-byte check (after the allowlist, before sanitize): the declared
+  // MIME type must match the file's actual leading bytes, so a renamed
+  // executable cannot ride in under an allowed type.
+  if (!verifyMagicBytes(input.bytes, mimeType)) {
+    return err({ code: 'mime_mismatch', message: 'File contents do not match the file type.' });
   }
 
   // If a target asset is named, it must exist in this workspace (cross-tenant

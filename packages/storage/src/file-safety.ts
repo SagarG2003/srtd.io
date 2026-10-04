@@ -440,9 +440,24 @@ const NESTED_SIGNATURES: ReadonlyArray<readonly number[]> = [
   [0x7f, 0x45, 0x4c, 0x46],
 ];
 
-function isNestedContainer(head: Uint8Array): boolean {
+/**
+ * Parts whose leading bytes are legitimately compressed or obfuscated:
+ * gzip-wrapped metafiles (.emz, .wmz) and embedded fonts (.odttf, .fntdata).
+ * They are still counted, capped and checked for ZIP/OLE2/RAR/7z content.
+ */
+const COMPRESSED_MEDIA = /\.(emz|wmz)$/;
+const OBFUSCATED_FONT = /\.(odttf|fntdata)$/;
+const STRONG_SIGNATURE_MIN = 4;
+
+function isNestedContainer(head: Uint8Array, name: string): boolean {
+  const gzipOk = COMPRESSED_MEDIA.test(name);
+  const shortOk = OBFUSCATED_FONT.test(name);
   return NESTED_SIGNATURES.some(
-    (sig) => head.length >= sig.length && sig.every((byte, i) => head[i] === byte),
+    (sig) =>
+      !(shortOk && sig.length < STRONG_SIGNATURE_MIN) &&
+      !(gzipOk && sig[0] === 0x1f && sig[1] === 0x8b) &&
+      head.length >= sig.length &&
+      sig.every((byte, i) => head[i] === byte),
   );
 }
 
@@ -469,9 +484,13 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 function decodeXmlEntities(text: string): string {
   return text.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|lt|gt|quot|apos);/gi, (_whole, ref: string) => {
     const lower = ref.toLowerCase();
-    if (lower.startsWith('#x'))
-      return String.fromCodePoint(parseInt(lower.slice(2), 16) % 0x110000);
-    if (lower.startsWith('#')) return String.fromCodePoint(parseInt(lower.slice(1), 10) % 0x110000);
+    if (lower.startsWith('#')) {
+      const code = lower.startsWith('#x')
+        ? parseInt(lower.slice(2), 16)
+        : parseInt(lower.slice(1), 10);
+      // An out-of-range reference decodes to U+FFFD instead of throwing (a 500).
+      return Number.isFinite(code) && code <= 0x10ffff ? String.fromCodePoint(code) : '\ufffd';
+    }
     return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[lower] ?? '';
   });
 }
@@ -490,7 +509,8 @@ function xmlAttribute(tag: string, name: string): string | null {
  */
 function checkContentTypes(raw: string, kind: OoxmlKind): FileSafetyResult {
   const decoded = decodeXmlEntities(raw).toLowerCase();
-  if (decoded.includes('macroenabled') || decoded.includes('vbaproject')) {
+  // macrosheet also covers intlmacrosheet (Excel 4.0 XLM macro sheets).
+  if (['macroenabled', 'vbaproject', 'macrosheet'].some((token) => decoded.includes(token))) {
     return refuse('blocked_type');
   }
   const mainPart = `/${MAIN_PART[kind]}`;
@@ -630,7 +650,7 @@ async function inspectOoxml(
       continue;
     }
 
-    if (isNestedContainer(inflated.head)) return refuse('embedded_content');
+    if (isNestedContainer(inflated.head, lower)) return refuse('embedded_content');
   }
   return OK;
 }

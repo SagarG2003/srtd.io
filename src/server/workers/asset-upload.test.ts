@@ -85,6 +85,7 @@ import { InMemoryAssetRepository, type UploadInput } from '@/server/assets';
 import {
   MIME,
   buildZip,
+  jpeg,
   mp4,
   office,
   ole2,
@@ -1045,6 +1046,14 @@ describe('asset-upload file-safety refusals (real pipeline)', () => {
       'archive_limits',
     ],
     ['encrypted pdf', 'a.pdf', MIME.pdf, () => pdf({ encrypted: true }), 422, 'encrypted_file'],
+    [
+      'password-protected docx (OLE2 bytes)',
+      'a.docx',
+      MIME.docx,
+      () => ole2({ encryptedPackage: true }),
+      422,
+      'encrypted_file',
+    ],
     ['encrypted zip entry', 'a.docx', MIME.docx, zipEncrypted, 422, 'encrypted_file'],
   ];
 
@@ -1071,6 +1080,21 @@ describe('asset-upload file-safety refusals (real pipeline)', () => {
     ['a.pdf', MIME.pdf, () => pdf()],
     ['a.mp4', MIME.mp4, () => mp4()],
     ['a.png', MIME.png, () => png()],
+    ['a.jpg', MIME.jpeg, () => jpeg()],
+    ['a.gif', 'image/gif', () => Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])],
+    [
+      'a.webp',
+      'image/webp',
+      () => Uint8Array.from([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]),
+    ],
+    [
+      'a.mov',
+      'video/quicktime',
+      () => Uint8Array.from([0, 0, 0, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74]),
+    ],
+    ['voice-note.webm', 'audio/webm', () => Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3, 0x01])],
+    ['voice-note.m4a', 'audio/mp4', () => mp4()],
+    ['voice-note.mp3', 'audio/mpeg', () => Uint8Array.from([0x49, 0x44, 0x33, 0x03, 0x00])],
   ];
   for (const [name, type, bytes] of allowed) {
     it(`still stores an allowed ${name}`, async () => {

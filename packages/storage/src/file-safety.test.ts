@@ -410,4 +410,40 @@ describe('audit regressions', () => {
   ])('still allows %s', async (name, mime, head) => {
     expect(await codeOf(name, mime, Uint8Array.from(head))).toBe('ok');
   });
+
+  it('does not throw on an out-of-range character reference', async () => {
+    const xml = contentTypesFor('docx', `<!-- &#x${'f'.repeat(300)}; &#${'9'.repeat(400)}; -->`);
+    expect(await codeOf('report.docx', MIME.docx, office('docx', { contentTypesXml: xml }))).toBe(
+      'ok',
+    );
+  });
+
+  it('refuses an Excel 4.0 macro sheet', async () => {
+    const xml = contentTypesFor(
+      'xlsx',
+      '<Override PartName="/xl/macrosheets/sheet1.xml" ContentType="application/vnd.ms-excel.macrosheet+xml"/>',
+    );
+    const bytes = office('xlsx', {
+      contentTypesXml: xml,
+      extra: [{ name: 'xl/macrosheets/sheet1.xml', data: '<xm/>' }],
+    });
+    expect(await codeOf('budget.xlsx', MIME.xlsx, bytes)).toBe('blocked_type');
+  });
+
+  it('allows gzip-wrapped metafiles and fonts whose first bytes look like MZ', async () => {
+    const bytes = office('pptx', {
+      extra: [
+        { name: 'ppt/media/image1.emz', data: Uint8Array.from([0x1f, 0x8b, 0x08, 0x00, 1, 2]) },
+        { name: 'ppt/fonts/font1.fntdata', data: Uint8Array.from([0x4d, 0x5a, 0x01, 0x02, 3]) },
+      ],
+    });
+    expect(await codeOf('deck.pptx', MIME.pptx, bytes)).toBe('ok');
+  });
+
+  it('still refuses a zip hidden under a metafile name', async () => {
+    const bytes = office('pptx', {
+      extra: [{ name: 'ppt/media/image1.emz', data: buildZip([{ name: 'a', data: 'a' }]) }],
+    });
+    expect(await codeOf('deck.pptx', MIME.pptx, bytes)).toBe('embedded_content');
+  });
 });
