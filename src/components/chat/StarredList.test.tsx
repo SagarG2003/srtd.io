@@ -137,6 +137,23 @@ describe('StarredRowView', () => {
     expect(out).toContain('min-h-[44px]');
   });
 
+  it('chat home (fullText): a 600-char body renders whole, no clamp, no ellipsis', () => {
+    const long = `${'Line one of the brief.\n'}${'word '.repeat(110)}https://example.com/${'a'.repeat(60)} END`;
+    expect(long.length).toBeGreaterThanOrEqual(600);
+    const out = html(<ul>{StarredRowView({ ...base, text: long, fullText: true })}</ul>);
+    expect(out).toContain(long);
+    expect(out).not.toMatch(/line-clamp|max-h-|text-ellipsis|\u2026|\.\.\./);
+    const bubble = /<span data-starred-bubble="peer" class="([^"]*)"/.exec(out)?.[1] ?? '';
+    expect(bubble).toContain('whitespace-pre-wrap');
+    expect(bubble).toContain('[overflow-wrap:anywhere]');
+    expect(bubble).not.toMatch(/line-clamp|max-h|overflow-hidden|truncate|\bh-\d/);
+  });
+
+  it('the per-chat lists keep the 3-line clamp', () => {
+    const out = html(<ul>{StarredRowView({ ...base, fullText: false })}</ul>);
+    expect(out).toContain('line-clamp-3 break-words');
+  });
+
   it('own messages sit on the accent fill; no chat part draws none', () => {
     const out = html(<ul>{StarredRowView({ ...base, mine: true, chat: null, sender: 'You' })}</ul>);
     expect(out).toContain('data-starred-bubble="own"');

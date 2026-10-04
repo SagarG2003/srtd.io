@@ -1,6 +1,6 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { installHarnessNetwork } from '../fixtures/harness-routes';
-import { ME, PEER_NAME, WORKSPACE_ID } from '../fixtures/chat-data';
+import { DM_CHANNEL, ME, PEER, PEER_NAME, WORKSPACE_ID } from '../fixtures/chat-data';
 import type { Row, Tables } from '../fixtures/postgrest';
 
 // Message stars: long-press Star puts a star on the bubble, the header's
@@ -84,8 +84,12 @@ function starProcs(tables: Tables): Record<string, (args: Record<string, unknown
   };
 }
 
-async function installStars(page: Page): Promise<Array<Record<string, unknown>>> {
+async function installStars(
+  page: Page,
+  seed?: (tables: Tables) => void,
+): Promise<Array<Record<string, unknown>>> {
   const { world } = await installHarnessNetwork(page);
+  seed?.(world.tables);
   const procs = starProcs(world.tables);
   const calls: Array<Record<string, unknown>> = [];
   // Registered after the harness, so these answer first.
@@ -232,4 +236,121 @@ test('chat stars: star, list everywhere, jump, unstar from Edit', async ({ page 
   await page.getByRole('button', { name: 'Starred', exact: true }).click();
   await expect(page.locator('[data-starred-tab] [data-starred-empty]')).toBeVisible();
   await shot('8-all-clear');
+});
+
+// One long starred message: 9 lines, a line break, a long unbroken URL.
+const LONG_ID = '0190b000-0000-7000-8000-00000000f001';
+const LONG_URL = `https://cdn.example.com/briefs/diwali/${'storyboard-final-v'.repeat(6)}7.pdf`;
+const LONG_LAST = 'Thanksgivingwrapup';
+const LONG_BODY = [
+  'Brief notes for the Diwali shoot, please read before Monday.',
+  'One: the hook on slide one needs a tighter first line and a clearer promise.',
+  'Two: the cover shot should use the warm light from the second take, not the first.',
+  'Three: captions stay under 120 characters and lead with the offer.',
+  '',
+  `Reference deck: ${LONG_URL}`,
+  'Four: the reel cuts at 0:12 and 0:24, keep the logo off the first frame.',
+  'Five: alt text on every image, written for screen readers, plain words only.',
+  `Six: send the final set to the client by Friday 5pm, then we close the brief ${LONG_LAST}`,
+].join('\n');
+
+test('chat home Starred chip: the card shows the whole message', async ({ page }, testInfo) => {
+  await installStars(page, (tables) => {
+    const created = new Date(Date.now() - 60_000).toISOString();
+    (tables.chat_messages ??= []).push({
+      id: LONG_ID,
+      channel_id: DM_CHANNEL,
+      workspace_id: WORKSPACE_ID,
+      sender_user_id: PEER,
+      body: LONG_BODY,
+      mentions: null,
+      attachment_asset_ids: null,
+      shared_post_ids: null,
+      shared_brief_ids: null,
+      reply_to_message_id: null,
+      forwarded_from_message_id: null,
+      attachment_meta: null,
+      agora_event_id: null,
+      created_at: created,
+      edited_at: null,
+      deleted_at: null,
+      thread_root_message_id: null,
+    });
+    (tables.chat_message_stars ??= []).push({
+      user_id: ME,
+      message_id: LONG_ID,
+      message_created_at: created,
+      channel_id: DM_CHANNEL,
+      workspace_id: WORKSPACE_ID,
+      starred_at: created,
+    });
+  });
+  await page.goto('/chat');
+  await page.locator('[data-search-chip="starred"]').click();
+  const home = page.locator('[data-starred-home]');
+  const row = home.locator(`[data-starred-row="${LONG_ID}"]`);
+  const bubble = row.locator('[data-starred-bubble]');
+  await expect(bubble).toBeVisible();
+
+  // Every line is there, line breaks kept, nothing hidden inside the bubble.
+  const text = await bubble.evaluate((el) => (el as HTMLElement).innerText);
+  expect(text).toBe(LONG_BODY);
+  const box = await bubble.evaluate((el) => {
+    const style = getComputedStyle(el);
+    return {
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      clamp: style.getPropertyValue('-webkit-line-clamp'),
+      maxHeight: style.maxHeight,
+      whiteSpace: style.whiteSpace,
+      lineHeight: parseFloat(style.lineHeight),
+    };
+  });
+  expect(box.scrollHeight).toBe(box.clientHeight);
+  expect(box.scrollWidth).toBeLessThanOrEqual(box.clientWidth);
+  expect(['', 'none']).toContain(box.clamp);
+  expect(box.maxHeight).toBe('none');
+  expect(box.whiteSpace).toBe('pre-wrap');
+  // 9 source lines (one blank) wrap to at least 9 rendered lines.
+  expect(box.clientHeight).toBeGreaterThanOrEqual(9 * box.lineHeight);
+
+  // No horizontal overflow anywhere on the page.
+  const pageOverflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(pageOverflow).toBeLessThanOrEqual(0);
+
+  // The card's last word is on screen once the list scrolls to the end (the
+  // list scrolls as a whole; the bubble never scrolls on its own).
+  const lastWord = await bubble.evaluate((el, word) => {
+    let list: HTMLElement | null = el.parentElement;
+    while (list !== null && !/(auto|scroll)/.test(getComputedStyle(list).overflowY)) {
+      list = list.parentElement;
+    }
+    if (list === null) return null;
+    list.scrollTop = list.scrollHeight;
+    const node = [...el.childNodes].find((n) => n.textContent?.includes(word));
+    if (node === undefined) return null;
+    const range = document.createRange();
+    const at = (node.textContent ?? '').lastIndexOf(word);
+    range.setStart(node, at);
+    range.setEnd(node, at + word.length);
+    const r = range.getBoundingClientRect();
+    const view = list.getBoundingClientRect();
+    return {
+      inList: r.top >= view.top && r.bottom <= view.bottom,
+      inScreen: r.top >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth,
+      bubbleScrolls: el.scrollTop !== 0,
+    };
+  }, LONG_LAST);
+  expect(lastWord).toEqual({ inList: true, inScreen: true, bubbleScrolls: false });
+  await page.screenshot({ path: testInfo.outputPath('starred-home-full-text.png') });
+
+  // A tap still opens the chat at that message.
+  await row.click();
+  await expect(home).toHaveCount(0);
+  await expect(page.locator('[data-bubble].ring-2', { hasText: LONG_LAST })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('starred-home-jumped.png') });
 });
