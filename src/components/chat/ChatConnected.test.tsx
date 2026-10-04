@@ -87,14 +87,14 @@ function message(over: Partial<ThreadMessage>): ThreadMessage {
 
 describe('profileIdsNeeded', () => {
   it('one batch covers senders, the DM peer and every mention (body and quote)', () => {
-    const ids = profileIdsNeeded(
-      [
+    const ids = profileIdsNeeded({
+      messages: [
         message({ body: `hi @[${ANA}]` }),
         message({ id: 'm2', reply: { id: 'm1', authorUserId: null, preview: `@[${BEN}]` } }),
       ],
-      'peer',
-      new Map(),
-    );
+      peerUserId: 'peer',
+      held: new Map(),
+    });
     expect(ids.sort()).toEqual([ANA, BEN, 'peer', 'sender'].sort());
   });
 
@@ -103,7 +103,44 @@ describe('profileIdsNeeded', () => {
       [ANA, {}],
       ['sender', {}],
     ]);
-    expect(profileIdsNeeded([message({ body: `@[${ANA}]` })], null, held)).toEqual([]);
+    expect(
+      profileIdsNeeded({ messages: [message({ body: `@[${ANA}]` })], peerUserId: null, held }),
+    ).toEqual([]);
+  });
+
+  it('includes a typing id that is not among the senders', () => {
+    const ids = profileIdsNeeded({
+      messages: [message({})],
+      peerUserId: null,
+      held: new Map(),
+      typingUserIds: [ANA],
+    });
+    expect(ids.sort()).toEqual([ANA, 'sender'].sort());
+  });
+
+  it('skips a typing id already held', () => {
+    const ids = profileIdsNeeded({
+      messages: [message({})],
+      peerUserId: null,
+      held: new Map([[ANA, {}]]),
+      typingUserIds: [ANA],
+    });
+    expect(ids).toEqual(['sender']);
+  });
+
+  it('a typing-only id does not hold the first page', () => {
+    // The hold is computed from messages and the peer only; typing ids join
+    // the read request alone.
+    const held = new Map([['sender', {}]]);
+    const hold = profileIdsNeeded({ messages: [message({})], peerUserId: null, held });
+    const read = profileIdsNeeded({
+      messages: [message({})],
+      peerUserId: null,
+      held,
+      typingUserIds: [ANA],
+    });
+    expect(hold).toEqual([]);
+    expect(idsToRead(read, NO_NAME_READS, new Set())).toEqual([ANA]);
   });
 });
 
@@ -183,7 +220,11 @@ async function readOnce(
   reads: NameReads,
   read: (ids: string[]) => Promise<Result<ChatProfile[]>>,
 ): Promise<{ asked: string[]; profiles: Profiles; reads: NameReads }> {
-  const asked = idsToRead(profileIdsNeeded(messages, null, profiles), reads, new Set());
+  const asked = idsToRead(
+    profileIdsNeeded({ messages, peerUserId: null, held: profiles }),
+    reads,
+    new Set(),
+  );
   if (asked.length === 0) return { asked, profiles, reads };
   const result = await read(asked);
   const next = new Map(profiles);
@@ -261,7 +302,11 @@ describe('F2 live and older-page mentions paint final', () => {
     expect(html).not.toContain('<button');
     // Never read again: no swap later.
     expect(
-      idsToRead(profileIdsNeeded(messages, null, after.profiles), after.reads, new Set()),
+      idsToRead(
+        profileIdsNeeded({ messages, peerUserId: null, held: after.profiles }),
+        after.reads,
+        new Set(),
+      ),
     ).toEqual([]);
   });
 });
@@ -282,9 +327,13 @@ describe('F3 a failed profile read is not cached as unknown', () => {
     expect(inert).toContain('@Unknown member');
     expect(inert).not.toContain('<button');
     // No retry loop on its own.
-    expect(idsToRead(profileIdsNeeded([first], null, one.profiles), one.reads, new Set())).toEqual(
-      [],
-    );
+    expect(
+      idsToRead(
+        profileIdsNeeded({ messages: [first], peerUserId: null, held: one.profiles }),
+        one.reads,
+        new Set(),
+      ),
+    ).toEqual([]);
     // The next profile read (a live row) retries it alongside the new id.
     const next = message({ id: 'm2', body: `and @[${BEN}]` });
     const read = vi.fn(async (ids: string[]) =>
@@ -375,7 +424,11 @@ describe('H1 hanging or throwing name reads settle as failed', () => {
       const live = message({ id: 'm2', body: `ping @[${ANA}]` });
       const messages = [message({ id: 'm1', body: 'hi' }), live];
       expect(paint(messages, known, NO_NAME_READS).map((m) => m.id)).toEqual(['m1']);
-      const asked = idsToRead(profileIdsNeeded(messages, null, known), NO_NAME_READS, new Set());
+      const asked = idsToRead(
+        profileIdsNeeded({ messages, peerUserId: null, held: known }),
+        NO_NAME_READS,
+        new Set(),
+      );
       const pending = withReadTimeout<ChatProfile[]>(() => new Promise(() => undefined));
       await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
       const result = await pending;
@@ -522,7 +575,7 @@ describe('H5 a chat switch never re-holds painted rows', () => {
     const onScreen = new Set(shown.map((m) => m.id));
     // Switch away and back: the failed id is retried in place, still failed meanwhile.
     const retry = idsToRead(
-      profileIdsNeeded([row], null, one.profiles),
+      profileIdsNeeded({ messages: [row], peerUserId: null, held: one.profiles }),
       one.reads,
       new Set(),
       true,
