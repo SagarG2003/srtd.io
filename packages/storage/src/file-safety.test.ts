@@ -1,4 +1,4 @@
-import { deflateSync } from 'node:zlib';
+import { deflateRawSync, deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import {
   BLOCKED_EXTENSIONS,
@@ -924,16 +924,54 @@ describe('fix-round audit regressions', () => {
   });
 
   it('inflates only object stream headers, however long the streams are', async () => {
+    // Ciphertext-like stream data (no zlib header), as in an encrypted PDF.
     const headers = Array.from(
       { length: 500 },
       (_, i) =>
-        `${100 + i} 0 obj<</Type/ObjStm/N 1/First 4/Filter/FlateDecode>>stream\n\x78\x9c\xff\xff`,
+        `${100 + i} 0 obj<</Type/ObjStm/N 1/First 4/Filter/FlateDecode>>stream\n\x8f\x13\xa2\x07`,
     ).join('\n');
     await within(3000, async () => {
       const objects = `7 0 obj ${ownerOnly} endobj\n${headers}\n${'A'.repeat(8_000_000)}\nendstream`;
       expect(await codeOf('a.pdf', MIME.pdf, pdfWith(objects))).toBe('ok');
     });
   });
+
+  it('refuses an object stream with a zlib header that does not inflate to its header', async () => {
+    const objects = `7 0 obj ${ownerOnly} endobj\n9 0 obj<</Type/ObjStm/N 1/First 4/Filter/FlateDecode>>stream\n\x78\x9c\xff\xff\nendstream`;
+    expect(await codeOf('a.pdf', MIME.pdf, pdfWith(objects))).toBe('encrypted_file');
+  });
+
+  it('refuses a decoy when the real dictionary sits after empty stored deflate blocks', async () => {
+    const raw = deflateRawSync(Buffer.from(`7 0 ${userOnly}`, 'latin1'));
+    const padded = Buffer.concat([
+      Buffer.from([0x78, 0x01]),
+      Buffer.from('000000ffff'.repeat(400), 'hex'),
+      raw,
+    ]);
+    const stream = `9 0 obj << /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length ${padded.length} >>\nstream\n${padded.toString('latin1')}\nendstream\nendobj`;
+    expect(await codeOf('a.pdf', MIME.pdf, pdfWith(`${stream}\n7 0 obj ${ownerOnly} endobj`))).toBe(
+      'encrypted_file',
+    );
+  });
+
+  it('refuses a decoy "obj << ... >> stream" hidden in a string of the real object stream', async () => {
+    const packed = deflateSync(Buffer.from(`7 0 ${userOnly}`, 'latin1'));
+    const stream = `9 0 obj << /X (obj << /N 1 /First 4 >>\nstream\n1 0 ) /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length ${packed.length} >>\nstream\n${packed.toString('latin1')}\nendstream\nendobj`;
+    expect(await codeOf('a.pdf', MIME.pdf, pdfWith(`${stream}\n7 0 obj ${ownerOnly} endobj`))).toBe(
+      'encrypted_file',
+    );
+  });
+
+  it.each(['/First %c\n4', '/First +4'])(
+    'finds an untyped object stream whose header length is written %j',
+    async (first) => {
+      const packed = deflateSync(Buffer.from(`7 0 ${userOnly}`, 'latin1'));
+      const stream = `9 0 obj << /N 1 ${first} /Filter /FlateDecode /Length ${packed.length} >>\nstream\n${packed.toString('latin1')}\nendstream\nendobj`;
+      expect(
+        await codeOf('a.pdf', MIME.pdf, pdfWith(`${stream}\n7 0 obj ${ownerOnly} endobj`)),
+      ).toBe('encrypted_file');
+    },
+  );
 
   it('passes an owner-only PDF when a structure element carries a later /ID', async () => {
     const owner = latin1(pdfWith(`7 0 obj ${ownerOnly} endobj`));

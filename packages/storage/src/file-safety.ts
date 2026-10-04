@@ -238,25 +238,31 @@ function readPdfName(bytes: Uint8Array, start: number, max: number): { name: str
 const PDF_MAX_ID_CANDIDATES = 16;
 
 /**
- * True when `/First` at `at` is followed by a plain number (an object stream
- * header length) rather than an "n g R" reference (an outline's /First). Reads
- * only whitespace and digits, so it costs a few bytes per key.
+ * True when `/First` at `at` is followed by a number (an object stream header
+ * length) rather than an "n g R" reference (an outline's /First). Lexes like a
+ * reader: whitespace and comments between tokens, an optional sign or decimal
+ * point. `cache` keeps comment skipping linear across the whole scan.
  */
-function isNumericFirst(bytes: Uint8Array, at: number): boolean {
-  let i = at;
-  const skip = () => {
-    while (PDF_WHITESPACE.has(bytes[i] as number)) i += 1;
-  };
-  const digits = (): number => {
+function isNumericFirst(
+  bytes: Uint8Array,
+  at: number,
+  cache: { from: number; to: number },
+): boolean {
+  let i = skipPdfSpace(bytes, at, cache);
+  const number = (allowSign: boolean): number => {
     const start = i;
-    while (isAsciiDigit(bytes[i])) i += 1;
+    if (allowSign && (bytes[i] === 0x2b || bytes[i] === 0x2d)) i += 1;
+    while (isAsciiDigit(bytes[i]) || (allowSign && bytes[i] === 0x2e)) i += 1;
     return i - start;
   };
-  skip();
-  if (digits() === 0) return false;
-  skip();
-  if (digits() === 0) return true;
-  skip();
+  const first = i;
+  if (number(true) === 0) return false;
+  // A sign or decimal point cannot start a reference; it is a number.
+  const token = String.fromCharCode(...bytes.subarray(first, i));
+  if (!/^\d+$/.test(token)) return /\d/.test(token);
+  i = skipPdfSpace(bytes, i, cache);
+  if (number(false) === 0) return true;
+  i = skipPdfSpace(bytes, i, cache);
   const after = bytes[i + 1];
   return !(bytes[i] === 0x52 && (after === undefined || PDF_NAME_TERMINATORS.has(after)));
 }
@@ -273,6 +279,7 @@ function scanPdfNames(bytes: Uint8Array): {
   const encrypt: number[] = [];
   const objectStreams: number[] = [];
   const ids: number[] = [];
+  const commentCache = { from: 0, to: 0 };
   for (let i = 0; i < bytes.length; i += 1) {
     if (bytes[i] !== 0x2f) continue;
     const { name, end } = readPdfName(bytes, i + 1, PDF_NAME_SCAN);
@@ -281,7 +288,7 @@ function scanPdfNames(bytes: Uint8Array): {
     else if (name === 'ObjStm') objectStreams.push(i);
     // Readers take an object stream by its /First and /N, not its /Type, so a
     // dictionary with a numeric /First counts as one too.
-    else if (name === 'First' && isNumericFirst(bytes, end)) objectStreams.push(i);
+    else if (name === 'First' && isNumericFirst(bytes, end, commentCache)) objectStreams.push(i);
   }
   return { encrypt, ids: ids.slice(-PDF_MAX_ID_CANDIDATES), objectStreams };
 }
@@ -540,6 +547,8 @@ const PDF_OBJ = new TextEncoder().encode('obj');
 const PDF_MAX_LEADING_ZEROS = 16;
 /** An object stream's dictionary sits just before its /Type or /First key. */
 const PDF_OBJECT_STREAM_DICT_WINDOW = 4096;
+/** "obj" anchors tried as object-stream starts, per file. */
+const PDF_MAX_OBJECT_STREAM_ANCHORS = 20_000;
 const PDF_STREAM = new TextEncoder().encode('stream');
 /** More distinct encryption dictionaries than this is refused, not computed. */
 const PDF_MAX_ENCRYPT_DICTS = 4;
@@ -650,35 +659,76 @@ function lastIndexOfBytes(
   return -1;
 }
 
-/** The first `limit` bytes a zlib (FlateDecode) stream inflates to, or null. */
-async function inflateZlibHead(data: Uint8Array, limit: number): Promise<Uint8Array | null> {
+/** RFC 1950 header check: deflate method, valid check bits, no preset dictionary. */
+function isZlibHeader(cmf: number | undefined, flg: number | undefined): boolean {
+  if (cmf === undefined || flg === undefined) return false;
+  return (cmf & 0x0f) === 8 && cmf >> 4 <= 7 && ((cmf << 8) | flg) % 31 === 0 && (flg & 0x20) === 0;
+}
+
+/** Compressed bytes fed to object-stream header inflation, per file. */
+const PDF_MAX_OBJECT_STREAM_INPUT_TOTAL = 64 * 1024 * 1024;
+/** Inflate input chunks start small and grow, so a stream that fails fast costs little. */
+const PDF_INFLATE_FIRST_CHUNK = 512;
+const PDF_INFLATE_MAX_CHUNK = 64 * 1024;
+
+/**
+ * The first `limit` bytes a zlib (FlateDecode) stream inflates to: 'short' when
+ * the data ends or fails first, 'budget' when the per-file input budget runs
+ * out. The data is fed in chunks and feeding stops as soon as the header is
+ * out, so padding (e.g. empty stored blocks) costs only the bytes it occupies.
+ */
+async function inflateZlibHead(
+  data: Uint8Array,
+  limit: number,
+  budget: { inputBytes: number },
+): Promise<Uint8Array | 'short' | 'budget'> {
+  const view =
+    data.buffer instanceof ArrayBuffer ? (data as Uint8Array<ArrayBuffer>) : data.slice();
   const stream = new DecompressionStream('deflate');
   const writer = stream.writable.getWriter();
-  const written = writer
-    .write(data.slice())
-    .then(() => writer.close())
-    .catch(() => undefined);
+  let outOfBudget = false;
+  const pump = (async () => {
+    for (let at = 0, size = PDF_INFLATE_FIRST_CHUNK; at < view.length; at += size) {
+      size = Math.min(size * 2, PDF_INFLATE_MAX_CHUNK);
+      const chunk = view.subarray(at, at + size);
+      budget.inputBytes += chunk.length;
+      if (budget.inputBytes > PDF_MAX_OBJECT_STREAM_INPUT_TOTAL) {
+        outOfBudget = true;
+        return;
+      }
+      await writer.write(chunk);
+    }
+    await writer.close();
+  })().catch(() => undefined);
   const reader = stream.readable.getReader();
   const out = new Uint8Array(limit);
   let total = 0;
   try {
     while (total < limit) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const take = Math.min(value.byteLength, limit - total);
-      out.set(value.subarray(0, take), total);
+      const next = await reader.read();
+      if (next.done) break;
+      const take = Math.min(next.value.byteLength, limit - total);
+      out.set(next.value.subarray(0, take), total);
       total += take;
     }
   } catch {
-    // A truncated or corrupt tail after the header is fine; the header is not.
+    // A corrupt tail after the header is fine; the header is not.
   }
   await reader.cancel().catch(() => undefined);
-  await written;
-  return total >= limit ? out : null;
+  await writer.abort().catch(() => undefined);
+  await pump;
+  if (total >= limit) return out;
+  return outOfBudget ? 'budget' : 'short';
 }
 
+type ObjectStreamCheck =
+  | { kind: 'not_object_stream' }
+  | { kind: 'unchecked' | 'encrypted'; dictEnd: number }
+  | { kind: 'members'; members: number[]; dictEnd: number };
+
 /**
- * What an object stream (its /ObjStm name at `at`) holds:
+ * What the object starting at the "obj" at `objAt` holds, when its dictionary
+ * is an object stream's (/Type /ObjStm or a numeric /First):
  * - 'encrypted': FlateDecode data that does not inflate. In an encrypted PDF
  *   object streams are encrypted with the document key, so a reader cannot
  *   take the encryption dictionary itself from one; nothing to check.
@@ -689,12 +739,18 @@ async function inflateZlibHead(data: Uint8Array, limit: number): Promise<Uint8Ar
 async function objectStreamMembers(
   bytes: Uint8Array,
   objAt: number,
-  budget: { headerBytes: number },
-): Promise<number[] | 'encrypted' | 'unchecked'> {
-  if (objAt === -1) return 'unchecked';
+  budget: { headerBytes: number; inputBytes: number },
+): Promise<ObjectStreamCheck> {
   const reader = new PdfObjectReader(bytes, objAt + 3, PDF_OBJECT_STREAM_DICT_WINDOW);
   const dict = reader.read();
-  if (dict?.t !== 'dict') return 'unchecked';
+  if (dict?.t !== 'dict') return { kind: 'not_object_stream' };
+  const dictEnd = reader.offset;
+  const type = dict.v.get('Type');
+  const firstValue = dict.v.get('First');
+  if (firstValue?.t !== 'num' && !(type?.t === 'name' && type.v === 'ObjStm')) {
+    return { kind: 'not_object_stream' };
+  }
+  const unchecked: ObjectStreamCheck = { kind: 'unchecked', dictEnd };
   const filter = dict.v.get('Filter');
   const flate =
     filter === undefined ||
@@ -706,32 +762,46 @@ async function objectStreamMembers(
   const first = dict.v.get('First');
   const count = dict.v.get('N');
   if (!flate || dict.v.has('DecodeParms') || first?.t !== 'num' || count?.t !== 'num')
-    return 'unchecked';
-  if (first.v <= 0 || first.v > PDF_MAX_OBJECT_STREAM_HEADER) return 'unchecked';
+    return unchecked;
+  if (first.v <= 0 || first.v > PDF_MAX_OBJECT_STREAM_HEADER) return unchecked;
   budget.headerBytes += first.v;
-  if (budget.headerBytes > PDF_MAX_OBJECT_STREAM_HEADERS_TOTAL) return 'unchecked';
+  if (budget.headerBytes > PDF_MAX_OBJECT_STREAM_HEADERS_TOTAL) return unchecked;
   let start = reader.offset;
   while (start < bytes.length && PDF_WHITESPACE.has(bytes[start] as number)) start += 1;
   if (indexOfBytes(bytes.subarray(start, start + PDF_STREAM.length), PDF_STREAM) !== 0)
-    return 'unchecked';
+    return unchecked;
   start += PDF_STREAM.length;
   if (bytes[start] === 0x0d) start += 1;
   if (bytes[start] === 0x0a) start += 1;
-  // Only the header is needed: deflate never needs more than its output plus
-  // block overhead, so a bounded prefix is inflated (no copy of the stream).
+  // Only the header is needed; inflation stops once it is out (no copy of the
+  // stream, no search for endstream), within a per-file input budget.
   const length = dict.v.get('Length');
   const available = bytes.length - start;
-  const declared = length?.t === 'num' && length.v >= 0 ? length.v : available;
-  const prefix = Math.min(declared, available, first.v + Math.ceil(first.v / 1024) * 8 + 1024);
-  const raw =
-    filter === undefined
-      ? bytes.subarray(start, start + first.v)
-      : await inflateZlibHead(bytes.subarray(start, start + prefix), first.v);
-  if (raw === null) return filter === undefined ? 'unchecked' : 'encrypted';
+  const declared = length?.t === 'num' && length.v >= 0 ? Math.min(length.v, available) : available;
+  let raw: Uint8Array;
+  if (filter === undefined) {
+    if (declared < first.v) return unchecked;
+    raw = bytes.subarray(start, start + first.v);
+  } else {
+    const head = await inflateZlibHead(bytes.subarray(start, start + declared), first.v, budget);
+    if (head === 'budget') return unchecked;
+    // Encrypted object streams do not even start with a valid zlib header.
+    // A valid header that does not inflate to the full header is unknown.
+    if (head === 'short') {
+      return isZlibHeader(bytes[start], bytes[start + 1])
+        ? unchecked
+        : { kind: 'encrypted', dictEnd };
+    }
+    raw = head;
+  }
   const numbers = new TextDecoder('latin1').decode(raw).trim().split(/\s+/).map(Number);
   if (numbers.length < count.v * 2 || numbers.some((value) => !Number.isInteger(value)))
-    return 'unchecked';
-  return numbers.filter((_, i) => i % 2 === 0).slice(0, count.v);
+    return unchecked;
+  return {
+    kind: 'members',
+    members: numbers.filter((_, i) => i % 2 === 0).slice(0, count.v),
+    dictEnd,
+  };
 }
 
 // MD5 (RFC 1321) and RC4: the PDF standard security handler for revisions 2-4
@@ -989,17 +1059,29 @@ export async function pdfNeedsPassword(bytes: Uint8Array): Promise<boolean> {
     // must not contain a referenced encryption dictionary.
     if (objectStreams.length > PDF_MAX_OBJECT_STREAMS) return true;
     const numbers = new Set([...refs].map((key) => Number(key.split(' ')[0])));
-    const budget = { headerBytes: 0 };
-    const anchors = new Set<number>();
+    const budget = { headerBytes: 0, inputBytes: 0 };
+    // The object's own "obj" is not always the nearest one before /Type or
+    // /First (a string in the dictionary can hold a decoy "obj << ... >>
+    // stream"), so every "obj" in the window is tried, and each /ObjStm or
+    // numeric /First must sit inside a dictionary that was checked as an
+    // object stream. Attempts are capped per file.
+    const checks = new Map<number, ObjectStreamCheck>();
     for (const at of objectStreams) {
-      anchors.add(
-        lastIndexOfBytes(bytes, PDF_OBJ, at, Math.max(0, at - PDF_OBJECT_STREAM_DICT_WINDOW)),
-      );
-    }
-    for (const objAt of anchors) {
-      const members = await objectStreamMembers(bytes, objAt, budget);
-      if (members === 'encrypted') continue;
-      if (members === 'unchecked' || members.some((n) => numbers.has(n))) return true;
+      const floor = Math.max(0, at - PDF_OBJECT_STREAM_DICT_WINDOW);
+      let covered = false;
+      for (let objAt = lastIndexOfBytes(bytes, PDF_OBJ, at, floor); objAt !== -1; ) {
+        let check = checks.get(objAt);
+        if (check === undefined) {
+          if (checks.size >= PDF_MAX_OBJECT_STREAM_ANCHORS) return true;
+          check = await objectStreamMembers(bytes, objAt, budget);
+          checks.set(objAt, check);
+        }
+        if (check.kind === 'unchecked') return true;
+        if (check.kind === 'members' && check.members.some((n) => numbers.has(n))) return true;
+        if (check.kind !== 'not_object_stream' && at < check.dictEnd) covered = true;
+        objAt = objAt > floor ? lastIndexOfBytes(bytes, PDF_OBJ, objAt - 1, floor) : -1;
+      }
+      if (!covered) return true;
     }
   }
 
