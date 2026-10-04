@@ -117,10 +117,17 @@ function refuse(code: FileSafetyCode): FileSafetyResult {
 
 const OK: FileSafetyResult = { ok: true };
 
-/** Basename of a client filename, NFKC-normalized and lowercased. */
+/**
+ * Basename of a client filename, NFKC-normalized, lowercased, and stripped of
+ * invisible (default-ignorable) characters so "invoice.pdf.ex<ZWSP>e" is read as
+ * ending in "exe". Only the checked copy is stripped; the name itself is kept.
+ */
 function normalizeName(filename: string): string {
   const base = filename.split(/[/\\]/).pop() ?? '';
-  return base.normalize('NFKC').toLowerCase();
+  return base
+    .normalize('NFKC')
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '')
+    .toLowerCase();
 }
 
 /** Dot segments after the first, each trimmed of the spaces and dots Windows drops. */

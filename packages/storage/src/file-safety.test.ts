@@ -484,4 +484,27 @@ describe('audit regressions', () => {
     expect(await codeOf('deck.pptx', MIME.pptx, bytes)).toBe('archive_limits');
     expect(await codeOf('book.xlsx', MIME.xlsx, workbook)).toBe('ok');
   });
+
+  it.each([
+    'invoice.pdf.exe\u200B',
+    'invoice.pdf.ex\u200Be',
+    'invoice.pdf.e\u00ADxe',
+    'invoice.pdf.exe\u2060',
+    'invoice.pdf.e\u200Dxe',
+  ])('refuses a blocked extension hidden by invisible characters: %j', (name) => {
+    expect(checkFilename(name, MIME.pdf)).toMatchObject({ code: 'blocked_type' });
+  });
+
+  it('accepts a [Content_Types].xml that starts with a UTF-8 BOM', async () => {
+    const text = new TextEncoder().encode(contentTypesFor('docx'));
+    const bom = new Uint8Array(3 + text.length);
+    bom.set([0xef, 0xbb, 0xbf], 0);
+    bom.set(text, 3);
+    const bytes = buildZip([
+      { name: '[Content_Types].xml', data: bom },
+      { name: '_rels/.rels', data: '<Relationships/>' },
+      { name: 'word/document.xml', data: '<w/>' },
+    ]);
+    expect(await codeOf('report.docx', MIME.docx, bytes)).toBe('ok');
+  });
 });
