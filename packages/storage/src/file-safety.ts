@@ -7,13 +7,17 @@
 //      extension (when it is a known one) must belong to the declared MIME type.
 //   2. OLE2 compound files are refused whatever their claimed type: they cover
 //      legacy doc/xls/ppt and password-protected Office files.
-//   3. PDF: an /Encrypt dictionary means the file cannot be inspected; refused.
+//   3. PDF: refused only when a password is needed to open it. An /Encrypt
+//      dictionary that opens with an empty user password (an owner-only lock)
+//      passes; any other handler or an unreadable dictionary is refused.
 //   4. Office Open XML: the ZIP central directory is read and every entry is
 //      inflated under hard caps (see ZIP_LIMITS). The package must carry
 //      [Content_Types].xml and the main part for its claimed type, and may not
 //      carry macros (vbaProject.bin or a macroEnabled content type), encrypted
-//      entries, OLE objects, or any embedded archive other than a docx, xlsx or
-//      pptx, which is checked by the same rules one level deep only.
+//      entries, OLE objects, any embedded archive other than a docx, xlsx or
+//      pptx (checked by the same rules one level deep only), or relationships
+//      that load a template, OLE object, frame or sub-document from outside
+//      the file or name an ms-*/msdt protocol handler.
 
 import { BLOCKED_MIME_TYPES, EXTENSIONS_BY_MIME, normalizeMime } from './mime';
 import { isOle2Signature, isZipSignature } from './magic-bytes';
@@ -238,6 +242,7 @@ function scanPdfNames(bytes: Uint8Array): {
 } {
   const encrypt: number[] = [];
   const objectStreams: number[] = [];
+  const firstKeys: number[] = [];
   let lastId = -1;
   for (let i = 0; i < bytes.length; i += 1) {
     if (bytes[i] !== 0x2f) continue;
@@ -245,6 +250,13 @@ function scanPdfNames(bytes: Uint8Array): {
     if (name === 'Encrypt') encrypt.push(end);
     else if (name === 'ID') lastId = end;
     else if (name === 'ObjStm') objectStreams.push(i);
+    else if (name === 'First') firstKeys.push(end);
+  }
+  // Readers take an object stream by its /First and /N, not its /Type, so a
+  // dictionary with a numeric /First counts as one too (an outline's /First
+  // is a reference and is skipped).
+  for (const at of firstKeys) {
+    if (new PdfObjectReader(bytes, at).read()?.t === 'num') objectStreams.push(at);
   }
   return { encrypt, lastId, objectStreams };
 }
@@ -514,48 +526,78 @@ function isAsciiDigit(byte: number | undefined): boolean {
 }
 
 /**
- * Every plain-text definition "n g obj" (any whitespace between the parts,
- * comments included) of the wanted objects, as offsets just after "obj".
- * Readers resolve objects through the xref, so a reference is trusted only
- * when exactly one definition exists; a second (decoy) definition anywhere
- * makes the answer unknown.
+ * Skip PDF whitespace and comments forward from `at`; returns the new offset.
+ * `cache` remembers the end of the last comment line scanned, so repeated
+ * probes inside one long comment stay linear overall.
+ */
+function skipPdfSpace(bytes: Uint8Array, at: number, cache: { from: number; to: number }): number {
+  let i = at;
+  for (;;) {
+    const byte = bytes[i];
+    if (byte === undefined) return i;
+    if (PDF_WHITESPACE.has(byte)) {
+      i += 1;
+    } else if (byte === 0x25) {
+      if (i >= cache.from && i < cache.to) {
+        i = cache.to;
+        continue;
+      }
+      const start = i;
+      while (i < bytes.length && bytes[i] !== 0x0a && bytes[i] !== 0x0d) i += 1;
+      cache.from = start;
+      cache.to = i;
+    } else {
+      return i;
+    }
+  }
+}
+
+/**
+ * Every plain-text definition "n g obj" of the wanted objects, read forward
+ * the way a reader's lexer does (any whitespace or comments between the parts,
+ * any byte before the number), as offsets just after "obj". Readers resolve
+ * objects through the xref, so a reference is trusted only when exactly one
+ * definition exists; a second (decoy) definition anywhere makes it unknown.
  */
 function findObjectDefinitions(
   bytes: Uint8Array,
   wanted: ReadonlySet<string>,
 ): Map<string, number[]> {
   const found = new Map<string, number[]>();
-  for (
-    let at = indexOfBytes(bytes, PDF_OBJ);
-    at !== -1;
-    at = indexOfBytes(bytes, PDF_OBJ, at + 3)
-  ) {
-    const after = bytes[at + 3];
-    if (after !== undefined && !PDF_NAME_TERMINATORS.has(after)) continue;
-    let i = at - 1;
-    const spaces = (): number => {
-      const start = i;
-      while (i >= 0 && PDF_WHITESPACE.has(bytes[i] as number)) i -= 1;
-      return start - i;
-    };
-    const digits = (): string | null => {
-      const end = i;
-      while (i >= 0 && isAsciiDigit(bytes[i]) && end - i < 10) i -= 1;
-      if (i === end) return null;
-      return String.fromCharCode(...bytes.subarray(i + 1, end + 1));
-    };
-    if (spaces() === 0) continue;
-    const g = digits();
-    if (g === null || spaces() === 0) continue;
-    const n = digits();
-    if (n === null) continue;
-    const before = bytes[i];
-    if (i >= 0 && before !== undefined && !PDF_NAME_TERMINATORS.has(before)) continue;
-    const key = `${Number(n)} ${Number(g)}`;
-    if (!wanted.has(key)) continue;
-    const list = found.get(key) ?? [];
-    list.push(at + 3);
-    found.set(key, list);
+  for (const key of wanted) {
+    const [n, g] = key.split(' ').map(Number) as [number, number];
+    const needle = new TextEncoder().encode(String(n));
+    const offsets: number[] = [];
+    const cache = { from: 0, to: 0 };
+    for (
+      let at = indexOfBytes(bytes, needle);
+      at !== -1;
+      at = indexOfBytes(bytes, needle, at + 1)
+    ) {
+      // Leading zeros are the same number; any other digit before is not.
+      let start = at;
+      while (start > 0 && bytes[start - 1] === 0x30) start -= 1;
+      if (isAsciiDigit(bytes[start - 1])) continue;
+      let i = at + needle.length;
+      if (isAsciiDigit(bytes[i])) continue;
+      const afterNumber = skipPdfSpace(bytes, i, cache);
+      if (afterNumber === i) continue;
+      i = afterNumber;
+      let generation = '';
+      while (isAsciiDigit(bytes[i]) && generation.length < 10) {
+        generation += String.fromCharCode(bytes[i] as number);
+        i += 1;
+      }
+      if (generation === '' || Number(generation) !== g || isAsciiDigit(bytes[i])) continue;
+      const afterGeneration = skipPdfSpace(bytes, i, cache);
+      if (afterGeneration === i) continue;
+      i = afterGeneration;
+      if (indexOfBytes(bytes.subarray(i, i + 3), PDF_OBJ) !== 0) continue;
+      const after = bytes[i + 3];
+      if (after !== undefined && !PDF_NAME_TERMINATORS.has(after)) continue;
+      offsets.push(i + 3);
+    }
+    found.set(key, offsets);
   }
   return found;
 }
@@ -614,10 +656,9 @@ async function inflateZlibHead(data: Uint8Array, limit: number): Promise<Uint8Ar
  */
 async function objectStreamMembers(
   bytes: Uint8Array,
-  at: number,
+  objAt: number,
   budget: { headerBytes: number },
 ): Promise<number[] | 'encrypted' | 'unchecked'> {
-  const objAt = lastIndexOfBytes(bytes, PDF_OBJ, at, Math.max(0, at - PDF_MAX_OBJECT_BYTES));
   if (objAt === -1) return 'unchecked';
   const reader = new PdfObjectReader(bytes, objAt + 3);
   const dict = reader.read();
@@ -902,8 +943,12 @@ export async function pdfNeedsPassword(bytes: Uint8Array): Promise<boolean> {
     if (objectStreams.length > PDF_MAX_OBJECT_STREAMS) return true;
     const numbers = new Set([...refs].map((key) => Number(key.split(' ')[0])));
     const budget = { headerBytes: 0 };
+    const anchors = new Set<number>();
     for (const at of objectStreams) {
-      const members = await objectStreamMembers(bytes, at, budget);
+      anchors.add(lastIndexOfBytes(bytes, PDF_OBJ, at, Math.max(0, at - PDF_MAX_OBJECT_BYTES)));
+    }
+    for (const objAt of anchors) {
+      const members = await objectStreamMembers(bytes, objAt, budget);
       if (members === 'encrypted') continue;
       if (members === 'unchecked' || members.some((n) => numbers.has(n))) return true;
     }
@@ -1106,7 +1151,6 @@ const MAIN_CONTENT_TYPE: Readonly<Record<OoxmlKind, string>> = {
 
 const CONTENT_TYPES_PART = '[content_types].xml';
 
-/** Printer setup blobs (DEVMODE) are plain data, not OLE objects. */
 /**
  * Plain data blobs Office stores as .bin: printer setup (DEVMODE) and Excel
  * worksheet custom properties. Not OLE objects; still checked for nested

@@ -839,4 +839,59 @@ describe('fix-round audit regressions', () => {
       'encrypted_file',
     );
   });
+
+  const ID = '/ID [<00112233445566778899aabbccddeeff><00112233445566778899aabbccddeeff>]';
+  const userOnly = encryptBody(encryptedPdf({ revision: 3, userPassword: 'secret' }));
+  const pdfWith = (objects: string, ref = '7 0 R') =>
+    fromLatin1(
+      `%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n${objects}\ntrailer << /Root 1 0 R /Encrypt ${ref} ${ID} >>\n%%EOF\n`,
+    );
+
+  it.each([
+    [
+      'a comment inside the real definition',
+      `7 0 %c\nobj ${userOnly} endobj\n%7 0 obj ${ownerOnly}`,
+    ],
+    ['a letter before the real definition', `x7 0 obj ${userOnly} endobj\n%7 0 obj ${ownerOnly}`],
+    ['leading zeros on the real definition', `007 0 obj ${userOnly} endobj\n%7 0 obj ${ownerOnly}`],
+  ])('refuses a decoy when the real definition has %s', async (_label, objects) => {
+    expect(await codeOf('a.pdf', MIME.pdf, pdfWith(objects))).toBe('encrypted_file');
+  });
+
+  it('refuses a decoy when an object stream without /Type holds the real dictionary', async () => {
+    const header = '7 0 ';
+    const packed = deflateSync(Buffer.from(header + userOnly, 'latin1'));
+    const stream = `9 0 obj << /N 1 /First ${header.length} /Filter /FlateDecode /Length ${packed.length} >>\nstream\n${packed.toString('latin1')}\nendstream\nendobj`;
+    expect(await codeOf('a.pdf', MIME.pdf, pdfWith(`${stream}\n7 0 obj ${ownerOnly} endobj`))).toBe(
+      'encrypted_file',
+    );
+  });
+
+  it('matches the generation: a gen-0 decoy cannot stand in for a gen-1 dictionary', async () => {
+    const objects = `7 1 obj ${userOnly} endobj\n7 0 obj ${ownerOnly} endobj`;
+    expect(await codeOf('a.pdf', MIME.pdf, pdfWith(objects, '7 1 R'))).toBe('encrypted_file');
+  });
+
+  it('ignores an outline /First reference when looking for object streams', async () => {
+    const objects = `7 0 obj ${ownerOnly} endobj\n3 0 obj << /Type /Outlines /First 4 0 R /Last 4 0 R >> endobj`;
+    expect(await codeOf('a.pdf', MIME.pdf, pdfWith(objects))).toBe('ok');
+  });
+
+  it('stays fast on a long comment line full of candidate numbers', async () => {
+    const objects = `7 0 obj ${ownerOnly} endobj\n%${'7 %'.repeat(2_000_000)}\n`;
+    const started = Date.now();
+    expect(await codeOf('a.pdf', MIME.pdf, pdfWith(objects))).toBe('ok');
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it('skips CDATA and comments in .rels but still sees the real relationship', async () => {
+    const inner = `<![CDATA[<x/>]]><!-- <Relationship Id="c" Target="ms-msdt:x"/> --><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="http://evil.test/t.dotm" TargetMode="External"/>`;
+    expect(
+      await codeOf('a.docx', MIME.docx, relsDocx(`${RELS_OPEN}${inner}</Relationships>`)),
+    ).toBe('external_content');
+    const commentOnly = `<!-- <Relationship Id="c" Target="ms-msdt:x"/> -->`;
+    expect(
+      await codeOf('a.docx', MIME.docx, relsDocx(`${RELS_OPEN}${commentOnly}</Relationships>`)),
+    ).toBe('ok');
+  });
 });
