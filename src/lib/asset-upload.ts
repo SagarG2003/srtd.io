@@ -40,8 +40,8 @@ export function precheckFile(file: File): Precheck {
 
 /**
  * Map a worker error code (or a transport failure, code 'network') to the copy
- * shown in a toast. Unknown codes fall back to the generic retry line. No
- * em-dashes in any string (CLAUDE.md).
+ * shown in a toast. Unknown codes fall back to the generic retry line, which
+ * never mentions the connection. No em-dashes in any string (CLAUDE.md).
  */
 export function uploadErrorMessage(code: string): string {
   switch (code) {
@@ -53,8 +53,16 @@ export function uploadErrorMessage(code: string): string {
       return "File contents don't match the file type";
     case 'virus_detected':
       return 'This file was blocked for safety';
+    case 'blocked_type':
+      return "This file type isn't allowed";
+    case 'encrypted_file':
+      return "Password-protected files can't be shared";
+    case 'embedded_content':
+      return "This file contains embedded content that can't be checked.";
+    case 'archive_limits':
+      return 'This file is too complex to check';
     default:
-      return 'Upload failed. Check your connection and retry';
+      return "Couldn't upload. Try again.";
   }
 }
 

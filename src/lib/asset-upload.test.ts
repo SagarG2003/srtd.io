@@ -97,10 +97,32 @@ describe('uploadErrorMessage maps worker codes to plain English', () => {
     expect(uploadErrorMessage('unsupported_mime')).toBe("This file type isn't supported");
     expect(uploadErrorMessage('mime_mismatch')).toBe("File contents don't match the file type");
     expect(uploadErrorMessage('virus_detected')).toBe('This file was blocked for safety');
-    expect(uploadErrorMessage('network')).toBe('Upload failed. Check your connection and retry');
-    expect(uploadErrorMessage('internal_error')).toBe(
-      'Upload failed. Check your connection and retry',
+    expect(uploadErrorMessage('blocked_type')).toBe("This file type isn't allowed");
+    expect(uploadErrorMessage('encrypted_file')).toBe("Password-protected files can't be shared");
+    expect(uploadErrorMessage('embedded_content')).toBe(
+      "This file contains embedded content that can't be checked.",
     );
+    expect(uploadErrorMessage('archive_limits')).toBe('This file is too complex to check');
+    expect(uploadErrorMessage('network')).toBe("Couldn't upload. Try again.");
+    expect(uploadErrorMessage('internal_error')).toBe("Couldn't upload. Try again.");
+  });
+
+  it('never mentions the connection, network or offline in any upload copy', () => {
+    const codes = [
+      'file_too_large',
+      'unsupported_mime',
+      'mime_mismatch',
+      'virus_detected',
+      'blocked_type',
+      'encrypted_file',
+      'embedded_content',
+      'archive_limits',
+      'network',
+      'internal_error',
+    ];
+    for (const code of codes) {
+      expect(uploadErrorMessage(code)).not.toMatch(/connect|network|offline/i);
+    }
   });
 });
 
@@ -210,7 +232,7 @@ describe('uploadAssetFile', () => {
   it('maps a transport failure to the retry message', async () => {
     const fetcher = vi.fn().mockRejectedValue(new Error('offline'));
     const out = await uploadAssetFile(fakeFile('a.png', 'image/png', 1), baseConfig(fetcher));
-    expect(out).toEqual({ ok: false, message: 'Upload failed. Check your connection and retry' });
+    expect(out).toEqual({ ok: false, message: "Couldn't upload. Try again." });
   });
 });
 

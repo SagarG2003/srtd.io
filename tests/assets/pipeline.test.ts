@@ -16,6 +16,7 @@ import {
 } from '@/server/assets';
 import { InMemoryStorageClient } from '@srtdio/storage';
 import { GPS_SENTINEL, makeJpeg, svgBytes } from './fixtures';
+import { MIME, office } from '../../packages/storage/src/__fixtures__/files';
 
 const WORKSPACE_A = '11111111-1111-7111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-7222-8222-222222222222';
@@ -167,22 +168,29 @@ describe('runUploadPipeline', () => {
     expect(d.repository.versions).toHaveLength(0);
   });
 
-  it('accepts a docx by its ZIP signature without parsing the archive', async () => {
-    // ZIP local file header (50 4B 03 04) is sufficient for an OOXML claim.
-    const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00]);
+  it('accepts a real docx package after opening the archive', async () => {
     const res = await runUploadPipeline(
       d,
-      input({
-        contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        filename: 'brief.docx',
-        bytes: zipBytes,
-      }),
+      input({ contentType: MIME.docx, filename: 'brief.docx', bytes: office('docx') }),
     );
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.value.versionNumber).toBe(1);
     expect(d.repository.versions).toHaveLength(1);
     expect(d.repository.versions[0]?.kind).toBe('document');
+  });
+
+  it('rejects bytes that only carry a ZIP signature as a docx', async () => {
+    // A ZIP local file header alone no longer passes: the archive is opened.
+    const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00]);
+    const res = await runUploadPipeline(
+      d,
+      input({ contentType: MIME.docx, filename: 'brief.docx', bytes: zipBytes }),
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error.code).toBe('mime_mismatch');
+    expect(d.repository.versions).toHaveLength(0);
   });
 
   it('rejects a macro-enabled Office type as unsupported', async () => {
@@ -211,20 +219,16 @@ describe('runUploadPipeline', () => {
     expect(res.error.code).toBe('file_too_large');
   });
 
-  it('sanitizes an SVG with an embedded <script> before storing it', async () => {
+  it('refuses an SVG outright instead of sanitizing it', async () => {
     const res = await runUploadPipeline(
       d,
       input({ contentType: 'image/svg+xml', filename: 'logo.svg', bytes: svgBytes() }),
     );
-    expect(res.ok).toBe(true);
-    if (!res.ok) return;
-
-    const stored = d.storage.get(d.repository.assetBucket, res.value.r2Key);
-    const text = new TextDecoder().decode(stored?.body ?? new Uint8Array());
-    expect(text).not.toMatch(/<script/i);
-    expect(text).not.toMatch(/onload=/i);
-    expect(text).not.toMatch(/javascript:/i);
-    expect(text).not.toMatch(/http:\/\/evil/i);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.error.code).toBe('blocked_type');
+    expect(res.error.message).toBe("This file type isn't allowed");
+    expect(d.repository.versions).toHaveLength(0);
   });
 
   it('strips EXIF GPS data from a stored jpeg', async () => {
