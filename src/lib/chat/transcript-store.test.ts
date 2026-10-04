@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   VOICE_STORE_KEY,
   canOfferTranscribe,
+  clearVoiceTranscripts,
   createVoiceStore,
   parseVoiceRecords,
   transcribeVoiceNote,
@@ -209,5 +210,44 @@ describe('transcribeVoiceNote', () => {
     await transcribeVoiceNote({ messageId: 'm1', fetchAudio: async () => blob, transcribe, store });
     await first;
     expect(transcribe).toHaveBeenCalledOnce();
+  });
+});
+
+describe('clearVoiceTranscripts', () => {
+  it('removes the stored key, the in-memory records and pending flags, and notifies', () => {
+    const data = new Map<string, string>();
+    const storage: VoiceStorage = {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => void data.set(key, value),
+      removeItem: (key) => void data.delete(key),
+    };
+    const store = createVoiceStore(storage);
+    store.update('m1', { transcript: 'hello' });
+    store.setPending('m2', true);
+    expect(data.has(VOICE_STORE_KEY)).toBe(true);
+    const listener = vi.fn();
+    store.subscribe(listener);
+    clearVoiceTranscripts(store);
+    expect(data.has(VOICE_STORE_KEY)).toBe(false);
+    expect(store.get('m1')).toBeUndefined();
+    expect(store.isPending('m2')).toBe(false);
+    expect(listener).toHaveBeenCalled();
+    // A fresh store over the same storage reads nothing back.
+    expect(createVoiceStore(storage).get('m1')).toBeUndefined();
+  });
+
+  it('never throws on blocked storage', () => {
+    const store = createVoiceStore({
+      getItem: () => null,
+      setItem: () => {
+        throw new Error('blocked');
+      },
+      removeItem: () => {
+        throw new Error('blocked');
+      },
+    });
+    store.update('m1', { transcript: 'x' });
+    expect(() => clearVoiceTranscripts(store)).not.toThrow();
+    expect(store.get('m1')).toBeUndefined();
   });
 });

@@ -274,6 +274,7 @@ export const EMOJI_RECENTS_KEY = 'srtd.chat.emoji-recents';
 export interface RecentsStorage {
   getItem: (key: string) => string | null;
   setItem: (key: string, value: string) => void;
+  removeItem?: (key: string) => void;
 }
 
 /** A pick goes first; an earlier copy is dropped; the row is capped at 16. Pure. */
@@ -318,6 +319,17 @@ export function rememberRecent(
     // Blocked or full storage: the pick still inserts; only the row is not kept.
   }
   return next;
+}
+
+/** Sign-out: forget the recents row. Never throws. */
+export function clearEmojiRecents(storage: RecentsStorage | null = defaultStorage()): void {
+  if (storage === null) return;
+  try {
+    if (storage.removeItem !== undefined) storage.removeItem(EMOJI_RECENTS_KEY);
+    else storage.setItem(EMOJI_RECENTS_KEY, '[]');
+  } catch {
+    // Blocked storage has nothing to clear.
+  }
 }
 
 /**

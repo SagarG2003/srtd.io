@@ -11,9 +11,12 @@ vi.mock('agora-chat', () => ({
 
 import {
   handleMessagesDeleted,
+  listenForChatSignout,
   loadChatList,
   previewMentionText,
+  pruneDraftsFromRoster,
   releaseCancelled,
+  ROSTER_ROW_CAP,
   resolvePreviewMentions,
   routeGlobalCmd,
   type ChatListReaders,
@@ -563,5 +566,60 @@ describe('T7: a cancelled send releases its stored files and object URLs', () =>
 
   it('no file store: nothing throws', async () => {
     await expect(releaseCancelled(null, entry)).resolves.toBeUndefined();
+  });
+});
+
+describe('drafts and on-device chat data', () => {
+  it('a sign-out event clears drafts, emoji recents and voice transcripts', async () => {
+    const drafts = await import('@/lib/chat/drafts');
+    const { EMOJI_RECENTS_KEY } = await import('@/lib/chat/emoji-list');
+    const { voiceStore } = await import('@/lib/chat/transcript-store');
+    const { SIGNOUT_EVENT } = await import('@/lib/events');
+    const data = new Map<string, string>([[EMOJI_RECENTS_KEY, '["😀"]']]);
+    const localStorage = {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, v),
+      removeItem: (k: string) => void data.delete(k),
+    };
+    const win = Object.assign(new EventTarget(), { localStorage });
+    vi.stubGlobal('window', win);
+    try {
+      drafts.setDraftScope({ userId: ME, workspaceId: 'ws-1' });
+      drafts.setDraft('chan-a', { text: 'left behind' });
+      drafts.setDraftScope(null);
+      expect(data.has(drafts.DRAFTS_STORAGE_KEY)).toBe(true);
+      voiceStore.update('m1', { transcript: 'private' });
+      const off = listenForChatSignout(win);
+      win.dispatchEvent(new Event(SIGNOUT_EVENT));
+      off();
+      expect(drafts.getDraft('chan-a')).toBe(drafts.EMPTY_DRAFT);
+      expect(data.has(drafts.DRAFTS_STORAGE_KEY)).toBe(false);
+      expect(data.has(EMOJI_RECENTS_KEY)).toBe(false);
+      expect(voiceStore.get('m1')).toBeUndefined();
+    } finally {
+      drafts.resetDrafts();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a successful complete roster read prunes with its channel ids', () => {
+    const prune = vi.fn();
+    const roster = [{ channelId: 'a' }, { channelId: 'b' }];
+    expect(pruneDraftsFromRoster('ws-1', { ok: true, data: roster }, prune)).toBe(true);
+    expect(prune).toHaveBeenCalledWith('ws-1', new Set(['a', 'b']));
+  });
+
+  it('a failed roster read does not prune', () => {
+    const prune = vi.fn();
+    const failed = { ok: false, error: { message: 'timeout' } } as Result<{ channelId: string }[]>;
+    expect(pruneDraftsFromRoster('ws-1', failed, prune)).toBe(false);
+    expect(prune).not.toHaveBeenCalled();
+  });
+
+  it('a roster read that may have hit the row cap does not prune', () => {
+    const prune = vi.fn();
+    const roster = Array.from({ length: ROSTER_ROW_CAP - 1 }, (_, i) => ({ channelId: `c${i}` }));
+    expect(pruneDraftsFromRoster('ws-1', { ok: true, data: roster }, prune)).toBe(false);
+    expect(prune).not.toHaveBeenCalled();
   });
 });

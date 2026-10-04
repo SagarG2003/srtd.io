@@ -13,7 +13,10 @@
 // reconnect, tab visible and online; only a server refusal reads "Not sent"),
 // persist to localStorage for this workspace and user, their picked files and
 // voice notes to IndexedDB (outbox-files.ts), so a reload resumes them, and
-// are wiped from both on sign-out. A channel switch or
+// are wiped from both on sign-out. Composer drafts persist per user and
+// workspace (drafts.ts scope set here); sign-out also clears them, the emoji
+// recents and the voice transcripts, and a complete roster read drops the
+// drafts of chats the user no longer has. A channel switch or
 // leaving the chat page never drops a sending or failed bubble. A message for a
 // conversation the user is not viewing fires a toast and stays unread; a message for the open
 // conversation is marked read locally (the thread writes the cursor). All store
@@ -61,7 +64,9 @@ import {
   resolveMentionPreview,
 } from '@/lib/chat/mentions';
 import { SIGNOUT_EVENT } from '@/lib/events';
-import { stripDeletedReplies } from '@/lib/chat/drafts';
+import { clearAllDrafts, pruneDrafts, setDraftScope, stripDeletedReplies } from '@/lib/chat/drafts';
+import { clearEmojiRecents } from '@/lib/chat/emoji-list';
+import { clearVoiceTranscripts } from '@/lib/chat/transcript-store';
 import { leaveSelectionThen } from '@/lib/chat/forward';
 import { generateTraceId } from '@/lib/trace';
 import { useChat } from '@/lib/chat/chat-context';
@@ -250,6 +255,43 @@ export function releaseCancelled(
 export function useCancelUpload(): ((channelId: string, id: string) => boolean) | null {
   const outbox = useContext(ChatStoreContext)?.outbox ?? null;
   return outbox !== null ? outbox.cancel : null;
+}
+
+/** Sign-out: no draft, emoji recent or voice transcript outlives the session. */
+export function clearChatDeviceData(): void {
+  clearAllDrafts();
+  clearEmojiRecents();
+  clearVoiceTranscripts();
+}
+
+/** Wipe on-device chat data on every sign-out event; returns the unsubscribe. */
+export function listenForChatSignout(target: EventTarget): () => void {
+  const onSignout = (): void => clearChatDeviceData();
+  target.addEventListener(SIGNOUT_EVENT, onSignout);
+  return () => target.removeEventListener(SIGNOUT_EVENT, onSignout);
+}
+
+/**
+ * PostgREST's max_rows (supabase/config.toml): the roster's one channel query
+ * returns at most this many rows, so a read near it may have been cut short.
+ */
+export const ROSTER_ROW_CAP = 1000;
+
+/**
+ * Drop the drafts of chats a roster read no longer lists. Only a read that
+ * succeeded prunes: it is one unpaged query of this workspace's chat_channels,
+ * so a success is the whole roster, unless it may have hit the row cap (the
+ * notes row is filtered out of the summaries, hence the one-row margin). A
+ * failed or possibly capped read prunes nothing. True when it pruned.
+ */
+export function pruneDraftsFromRoster(
+  workspaceId: string,
+  result: Result<readonly Pick<ChannelSummary, 'channelId'>[]>,
+  prune: (workspaceId: string, keep: ReadonlySet<string>) => void = pruneDrafts,
+): boolean {
+  if (!result.ok || result.data.length >= ROSTER_ROW_CAP - 1) return false;
+  prune(workspaceId, new Set(result.data.map((summary) => summary.channelId)));
+  return true;
 }
 
 /** A verified message held for a roster re-read, with the list update it commits. */
@@ -940,13 +982,18 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       {
         // The registry trip runs up to the late grace (the load's own abort
         // still cancels it) so a slow roster still lands; names stay at 5s.
+        // A roster that landed (on time or late) for this load prunes drafts;
+        // a failed read prunes nothing.
         roster: (signal) =>
           listChannelSummaries(
             supabase,
             { workspaceId, currentUserId },
             signal,
             LATE_READ_GRACE_MS,
-          ),
+          ).then((result) => {
+            if (!cancelled) pruneDraftsFromRoster(workspaceId, result);
+            return result;
+          }),
         clears: (signal) => readChannelClears(supabase, { workspaceId }, signal),
         previews: (signal) => readConversationPreviews(supabase, workspaceId, signal),
         counts: (signal) => readUnreadCounts(supabase, workspaceId, signal),
@@ -993,6 +1040,7 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
       return null;
     }
     if (stateRef.current.scope !== scope) return null;
+    pruneDraftsFromRoster(workspaceId, result);
     const listed = indexSummaries(result.data);
     summariesRef.current = listed;
     groupMembers.clear();
@@ -1018,6 +1066,16 @@ export function ChatStoreProvider({ children }: { children: ReactNode }): ReactE
     for (const held of ready) afterIncomingRef.current(held.row, held.incoming.text);
     return result.data;
   }, [scope, workspaceId, currentUserId, groupMembers]);
+
+  // Drafts persist for this user and workspace; teardown writes what is pending.
+  useEffect(() => {
+    if (!workspaceId || currentUserId === null) return;
+    setDraftScope({ userId: currentUserId, workspaceId });
+    return () => setDraftScope(null);
+  }, [workspaceId, currentUserId]);
+
+  // Sign-out wipes drafts, emoji recents and voice transcripts, signed in or not.
+  useEffect(() => listenForChatSignout(window), []);
 
   // Every live send is stamped with this workspace (receivers elsewhere skip it).
   useEffect(() => {
