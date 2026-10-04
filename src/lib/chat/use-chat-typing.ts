@@ -59,6 +59,54 @@ export function removeTypingId(state: TypingState, channelId: string, userId: st
   return { channelId, ids: state.ids.filter((id) => id !== userId) };
 }
 
+/**
+ * Subscribe one open channel's typing into state and return the teardown. Each
+ * peer signal (re)arms a clear timer; a peer's own message clears their row and
+ * timer at once. Teardown clears every timer and the handler. The hook's inbound
+ * effect, extracted so it runs under the node test job without a DOM.
+ */
+export function trackChannelTyping(params: {
+  connection: TypingConnection;
+  target: ChannelTarget | null;
+  channelId: string;
+  currentUserId: string;
+  setState: (update: (prev: TypingState) => TypingState) => void;
+}): () => void {
+  const { connection, target, channelId, currentUserId, setState } = params;
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const clearTimer = (userId: string): void => {
+    const existing = timers.get(userId);
+    if (existing !== undefined) clearTimeout(existing);
+    timers.delete(userId);
+  };
+  const teardown = subscribeTyping({
+    connection,
+    target,
+    channelId,
+    currentUserId,
+    onTypingFrom: (userId) => {
+      setState((prev) => addTypingId(prev, channelId, userId));
+      clearTimer(userId);
+      timers.set(
+        userId,
+        setTimeout(() => {
+          timers.delete(userId);
+          setState((prev) => removeTypingId(prev, channelId, userId));
+        }, INBOUND_CLEAR_MS),
+      );
+    },
+    onMessageFrom: (userId) => {
+      clearTimer(userId);
+      setState((prev) => removeTypingId(prev, channelId, userId));
+    },
+  });
+  return () => {
+    for (const timer of timers.values()) clearTimeout(timer);
+    timers.clear();
+    teardown();
+  };
+}
+
 const NO_IDS: string[] = [];
 const EMPTY: TypingState = { channelId: null, ids: NO_IDS };
 
@@ -102,35 +150,19 @@ export function useChatTyping(params: {
   // Inbound: subscribe per open channel, with or without an Agora target
   // (commands route by their channel id, so an unsynced or large group still
   // shows typing); each peer signal (re)arms a clear timer so the row stays
-  // while they type and disappears INBOUND_CLEAR_MS after they stop. Switching
-  // channels or unmounting clears every timer and the handler.
+  // while they type and disappears INBOUND_CLEAR_MS after they stop, or at once
+  // when their message lands. Switching channels or unmounting clears every
+  // timer and the handler.
   useEffect(() => {
     setState(EMPTY);
     if (client === null || channelId === null) return;
-    const timers = new Map<string, ReturnType<typeof setTimeout>>();
-    const teardown = subscribeTyping({
+    return trackChannelTyping({
       connection: asTypingConnection(client),
       target: targetRef.current,
       channelId,
       currentUserId,
-      onTypingFrom: (userId) => {
-        setState((prev) => addTypingId(prev, channelId, userId));
-        const existing = timers.get(userId);
-        if (existing !== undefined) clearTimeout(existing);
-        timers.set(
-          userId,
-          setTimeout(() => {
-            timers.delete(userId);
-            setState((prev) => removeTypingId(prev, channelId, userId));
-          }, INBOUND_CLEAR_MS),
-        );
-      },
+      setState,
     });
-    return () => {
-      for (const timer of timers.values()) clearTimeout(timer);
-      timers.clear();
-      teardown();
-    };
   }, [client, channelId, currentUserId]);
 
   return { typingUserIds, notifyTyping };
