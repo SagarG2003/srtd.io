@@ -1808,6 +1808,8 @@ export function Composer(props: ComposerProps): ReactElement {
 
               <Textarea
                 ref={setTextarea}
+                // Not a form field: off stops the iOS AutoFill bar above the keyboard.
+                autoComplete="off"
                 value={held ? resolveMentionText(text, nameOf) : text}
                 readOnly={held || scheduleBusy}
                 onChange={(event) => {
