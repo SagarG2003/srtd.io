@@ -9,8 +9,10 @@ import {
   clearBodySelection,
   MessageBubble,
   outOfView,
+  SELECT_TEXT_HANDLE_SLOP_PX,
   selectBodyText,
   SELECTING_TEXT_BODY,
+  tapEndsTextSelect,
   THREAD_LIST_CLASS,
 } from '@/components/chat/MessageThread';
 import { NO_TOUCH_SELECT } from '@/components/chat/chat-type';
@@ -250,5 +252,37 @@ describe('selectBodyText and clearBodySelection', () => {
     expect(outOfView({ top: 40, bottom: 100 }, list)).toBe(true);
     expect(outOfView({ top: 700, bottom: 760 }, list)).toBe(true);
     expect(outOfView({ top: 90, bottom: 120 }, list)).toBe(false);
+  });
+});
+
+describe('tapEndsTextSelect: only a real tap away from the text ends Select', () => {
+  const body = { top: 200, bottom: 260, left: 40, right: 300 };
+  const at = (x: number, y: number) => ({ x, y });
+
+  it('a tap far from the body ends it', () => {
+    expect(tapEndsTextSelect({ down: at(200, 600), up: at(202, 601), body })).toBe(true);
+    expect(tapEndsTextSelect({ down: at(200, 20), up: at(200, 20), body })).toBe(true);
+  });
+
+  it('a handle grabbed just outside the text (padding, knob below the last line) keeps it', () => {
+    const slop = SELECT_TEXT_HANDLE_SLOP_PX;
+    expect(tapEndsTextSelect({ down: at(300 + slop, 260), up: at(300 + slop, 260), body })).toBe(
+      false,
+    );
+    expect(tapEndsTextSelect({ down: at(120, 260 + slop), up: at(120, 260 + slop), body })).toBe(
+      false,
+    );
+    expect(
+      tapEndsTextSelect({ down: at(40 - slop, 200 - slop), up: at(40 - slop, 200 - slop), body }),
+    ).toBe(false);
+  });
+
+  it('dragging (a handle, or scrolling the list) never ends it, wherever it starts', () => {
+    expect(tapEndsTextSelect({ down: at(120, 275), up: at(160, 330), body })).toBe(false);
+    expect(tapEndsTextSelect({ down: at(200, 600), up: at(200, 450), body })).toBe(false);
+  });
+
+  it('a tap on the text itself keeps it', () => {
+    expect(tapEndsTextSelect({ down: at(150, 230), up: at(150, 230), body })).toBe(false);
   });
 });

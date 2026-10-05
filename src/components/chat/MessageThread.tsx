@@ -631,6 +631,39 @@ export function clearBodySelection(body: Element | null): void {
   }
 }
 
+/**
+ * How far around the selecting body a touch still counts as on it: the iOS
+ * drag handles (and their knobs) reach past the text into the bubble's
+ * padding and below the last line.
+ */
+export const SELECT_TEXT_HANDLE_SLOP_PX = 24;
+
+/** A press that moves further than this is a drag (a handle, a scroll), never a tap. */
+export const SELECT_TEXT_TAP_MOVE_PX = 10;
+
+/**
+ * Whether a finished press ends text selection: only a tap (released within
+ * SELECT_TEXT_TAP_MOVE_PX of where it went down) that went down clearly
+ * outside the body (beyond SELECT_TEXT_HANDLE_SLOP_PX). Dragging a handle,
+ * scrolling, or a press the browser cancelled (a native handle drag) never
+ * ends it. Pure.
+ */
+export function tapEndsTextSelect(input: {
+  down: { x: number; y: number };
+  up: { x: number; y: number };
+  body: Pick<DOMRect, 'top' | 'bottom' | 'left' | 'right'>;
+}): boolean {
+  const { down, up, body } = input;
+  if (Math.hypot(up.x - down.x, up.y - down.y) > SELECT_TEXT_TAP_MOVE_PX) return false;
+  const slop = SELECT_TEXT_HANDLE_SLOP_PX;
+  const near =
+    down.x >= body.left - slop &&
+    down.x <= body.right + slop &&
+    down.y >= body.top - slop &&
+    down.y <= body.bottom + slop;
+  return !near;
+}
+
 /** Whether an element has scrolled fully out of the list's visible box. */
 export function outOfView(
   el: Pick<DOMRect, 'top' | 'bottom'>,
@@ -3032,7 +3065,8 @@ function ThreadBody(
   const exitTextSelect = useCallback((): void => setSelectingTextId(null), []);
   // Back leaves text selection first, staying in the chat.
   useHistoryStep(selectingTextId !== null, SELECT_TEXT_HISTORY_KEY, exitTextSelect);
-  // Text selection ends on a tap outside the body, Escape, or a scroll that
+  // Text selection ends on a tap outside the body (tapEndsTextSelect: never a
+  // handle drag, a scroll or a cancelled press), Escape, or a scroll that
   // takes the bubble out of view; leaving drops the selection. Every listener
   // goes with one abort.
   useEffect(() => {
@@ -3042,15 +3076,30 @@ function ThreadBody(
     const started = selectingBody(id);
     const controller = new AbortController();
     const { signal } = controller;
+    // The press in progress (by pointer id): where it went down.
+    const presses = new Map<number, { x: number; y: number }>();
     document.addEventListener(
       'pointerdown',
+      (event) => presses.set(event.pointerId, { x: event.clientX, y: event.clientY }),
+      { capture: true, signal },
+    );
+    document.addEventListener(
+      'pointerup',
       (event) => {
+        const down = presses.get(event.pointerId);
+        presses.delete(event.pointerId);
+        if (down === undefined) return;
         const body = selectingBody(id);
-        if (body !== null && event.target instanceof Node && body.contains(event.target)) return;
-        exitTextSelect();
+        if (body === null) return;
+        const up = { x: event.clientX, y: event.clientY };
+        if (tapEndsTextSelect({ down, up, body: body.getBoundingClientRect() })) exitTextSelect();
       },
       { capture: true, signal },
     );
+    document.addEventListener('pointercancel', (event) => presses.delete(event.pointerId), {
+      capture: true,
+      signal,
+    });
     document.addEventListener(
       'keydown',
       (event) => {

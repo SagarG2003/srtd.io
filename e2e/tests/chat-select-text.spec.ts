@@ -209,6 +209,51 @@ test.describe('iPhone', () => {
     expect(await userSelect(target)).toBe('none');
   });
 
+  test('selection stays while the user takes their time and drags the handles', async ({
+    page,
+  }) => {
+    await openDm(page);
+    const target = bubbleWith(page, MENTION_PREVIEW);
+    await hold(page, target);
+    await pickSelect(page);
+    const displayed = (await displayedBody(target)).trim();
+    expect((await selectionText(page)).trim()).toBe(displayed);
+    // Taking their time: nothing ends it on its own.
+    await page.waitForTimeout(2500);
+    await expect(page.locator('[data-selecting-text]')).toHaveCount(1);
+    expect((await selectionText(page)).trim()).toBe(displayed);
+    const body = await target.locator('[data-msg-body]').boundingBox();
+    if (body === null) throw new Error('no box');
+    const touch = (x: number, y: number) => ({
+      clientX: x,
+      clientY: y,
+      pointerType: 'touch',
+      isPrimary: true,
+      pointerId: 11,
+      bubbles: true,
+    });
+    // Grab the end handle's knob just under the last line (outside the text)
+    // and drag it up and back, slowly: a drag never ends Select.
+    const knobX = body.x + body.width - 4;
+    const knobY = body.y + body.height + 12;
+    await target.dispatchEvent('pointerdown', touch(knobX, knobY));
+    for (const dy of [-4, -10, -16, -10, -4]) {
+      await target.dispatchEvent('pointermove', touch(knobX - 20, knobY + dy));
+      await page.waitForTimeout(150);
+    }
+    await target.dispatchEvent('pointerup', touch(knobX - 20, knobY - 4));
+    await expect(page.locator('[data-selecting-text]')).toHaveCount(1);
+    // iOS cancels the page's press when its native handle drag takes over.
+    await target.dispatchEvent('pointerdown', touch(knobX, knobY));
+    await target.dispatchEvent('pointercancel', touch(knobX, knobY));
+    // A tap on the handle itself (still, just outside the text) keeps it too.
+    await target.dispatchEvent('pointerdown', touch(body.x - 10, body.y - 10));
+    await target.dispatchEvent('pointerup', touch(body.x - 10, body.y - 10));
+    await page.waitForTimeout(300);
+    await expect(page.locator('[data-selecting-text]')).toHaveCount(1);
+    expect((await selectionText(page)).trim()).toBe(displayed);
+  });
+
   test('back leaves text selection and stays in the chat', async ({ page }) => {
     await openDm(page);
     const target = bubbleWith(page, PEER_LINE);
