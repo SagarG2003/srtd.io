@@ -1,15 +1,15 @@
 // F8 conversation picker: pick one of the user's existing chat conversations and
 // send the current post into it. The list comes verbatim from the existing
-// listChannelSummaries (the same read the Chat page uses); sending goes through
-// the existing Agora sendText with sharedPostIds set to [postId], which is NOT a
-// Sorted RPC, so this surface makes no Postgres write and starts no new trace.
-// The Agora connection is provided by a ChatProvider mounted around this picker
-// (see PostActionSheet), exactly as the Chat page scopes its own connection.
-// The list renders from Postgres whatever the connection state (no
-// connection-gated UI); while the read is in flight, skeleton rows hold the
-// final row height, and the body keeps one fixed height in every state.
+// listChannelSummaries (the same read the Chat page uses). Sending is Postgres
+// first, like every chat send: the message is recorded through
+// chat_message_send (sharePostToChannel), and only then published over Agora
+// when the shell-level connection is open and the conversation has a live
+// target. A closed connection, a Notes channel or an unsynced group never
+// blocks the send: the row exists and receivers catch up from Postgres. No
+// connection-gated UI anywhere; while the read is in flight, skeleton rows
+// hold the final row height, and the body keeps one fixed height in every state.
 
-import { useEffect, useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { ReactElement } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useChat } from '@/lib/chat';
@@ -21,6 +21,12 @@ import {
   type ThreadConnection,
 } from '@/lib/chat/thread';
 import { createTextMessage } from '@/lib/chat/message-factory';
+import { newMessageId } from '@/lib/chat/message-id';
+import { sendMessageRecord } from '@/lib/chat/record';
+import { sharePostToChannel } from '@/lib/chat/share-post';
+import { createInFlightGuard } from '@/lib/chat/thread-actions';
+import { generateTraceId } from '@/lib/trace';
+import { logger } from '@/lib/logger';
 import { ActionRow } from '@/components/ui/ActionRow';
 import { IconChat } from '@/components/ui/icons';
 
@@ -55,6 +61,8 @@ export function ConversationPicker({
   const { client } = useChat();
   const [load, setLoad] = useState<LoadState>({ status: 'loading' });
   const [sendingId, setSendingId] = useState<string | null>(null);
+  // Synchronous double-tap guard (state updates land a render later).
+  const [guard] = useState(createInFlightGuard);
 
   // Populate the list from the existing channel read. An empty workspace/user id
   // (no active workspace) simply yields no conversations, handled by the empty
@@ -72,30 +80,54 @@ export function ConversationPicker({
   }, [workspaceId, currentUserId]);
 
   async function send(channel: ChannelSummary): Promise<void> {
-    if (sendingId !== null) return;
     const target: ChannelTarget | null = targetFromSummary(channel);
-    if (target === null || client === null) {
-      onToast('That conversation is not ready yet. Try again in a moment.');
-      return;
-    }
-    setSendingId(channel.channelId);
-    try {
-      await sendText({
-        connection: client as ThreadConnection,
-        target,
-        text: '',
-        attachments: [],
-        sharedPostIds: [postId],
-        reply: null,
-        createMessage: createTextMessage,
-      });
+    const connection = client;
+    const result = await sharePostToChannel(
+      {
+        guard,
+        // Runs only once the guard admits this tap, so a busy tap never
+        // touches the row label.
+        record: (input) => {
+          setSendingId(channel.channelId);
+          return sendMessageRecord({ client: supabase, ...input });
+        },
+        publish:
+          connection !== null && target !== null
+            ? (liveIds) =>
+                sendText({
+                  connection: connection as ThreadConnection,
+                  target,
+                  text: '',
+                  attachments: [],
+                  sharedPostIds: [postId],
+                  reply: null,
+                  createMessage: createTextMessage,
+                  liveIds,
+                })
+            : null,
+        newMessageId,
+        newTraceId: generateTraceId,
+        onPublishFailed: ({ error, traceId, messageId }) =>
+          logger.warn('chat: shared post live publish did not complete', {
+            trace_id: traceId,
+            message_id: messageId,
+            error,
+          }),
+      },
+      { channelId: channel.channelId, postId },
+    );
+    if (!result.ok && result.reason === 'busy') return;
+    setSendingId(null);
+    if (result.ok) {
       onToast('Post sent to chat.');
       onSent();
-    } catch {
-      onToast('Could not send the post. Please try again.');
-    } finally {
-      setSendingId(null);
+      return;
     }
+    logger.error('chat: shared post record failed', {
+      channel_id: channel.channelId,
+      error: result.message,
+    });
+    onToast('Could not send the post. Please try again.');
   }
 
   return conversationPickerBody(load, sendingId, (channel) => void send(channel));
