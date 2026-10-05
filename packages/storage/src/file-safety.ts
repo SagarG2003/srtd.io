@@ -1530,6 +1530,9 @@ const REMOTE_LOADING_TYPES: ReadonlySet<string> = new Set([
 /** A Windows protocol handler such as ms-msdt: (Follina) or msdt:. */
 const PROTOCOL_HANDLER = /(^|[^a-z0-9+.-])(ms-[a-z0-9+.-]*|msdt|search-ms):/i;
 
+/** \\??\\UNC\\ (after backslashes read as slashes), optionally after a leading slash. */
+const NT_UNC_PREFIX = /^\/?\/\?\?\/unc\//i;
+
 /** Decode %xx escapes without throwing on malformed ones. */
 function percentDecode(text: string): string {
   return text.replace(/%([0-9a-f]{2})/gi, (_whole, hex: string) =>
@@ -1546,23 +1549,30 @@ function percentDecode(text: string): string {
  * Backslashes read as slashes and %xx escapes are decoded first.
  */
 function targetLocation(rawTarget: string): 'share' | 'web' | 'local' {
-  const target = percentDecode(rawTarget.trim()).replace(/\\/g, '/');
+  // Trim again after decoding: %20 or %09 before \\server must not hide it.
+  const target = percentDecode(rawTarget.trim()).trim().replace(/\\/g, '/');
   if (target.startsWith('//')) return 'share';
+  // The NT object-manager prefix \??\UNC\server\share is a share too.
+  if (NT_UNC_PREFIX.test(target)) return 'share';
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(target)?.[1]?.toLowerCase();
   // No scheme, or a single letter (a drive such as C:), is a local path.
   if (scheme === undefined || scheme.length === 1) return 'local';
   if (scheme !== 'file') return 'web';
   const rest = target.slice('file:'.length);
-  if (!rest.startsWith('//')) return 'local';
-  const authority = rest.slice(2);
-  if (authority.startsWith('/')) {
-    // file:/// is a local path; a fourth slash starts a share path.
-    return authority.startsWith('//') ? 'share' : 'local';
+  let path = rest;
+  if (rest.startsWith('//')) {
+    const authority = rest.slice(2);
+    const host = authority.split('/')[0]?.toLowerCase() ?? '';
+    if (host !== '' && host !== 'localhost') return 'share';
+    path = authority.slice(host.length);
   }
-  const host = authority.split('/')[0]?.toLowerCase() ?? '';
-  if (host !== '' && host !== 'localhost') return 'share';
-  // file://localhost//server/share converts to \\server\share: still a share.
-  return authority.slice(host.length).startsWith('//') ? 'share' : 'local';
+  // Windows collapses "." and ".." and repeated separators when it turns a
+  // file: URL into a path, which can leave a share (\\server\share). So any
+  // "//" in the path, any "." or ".." segment, or an NT UNC prefix counts as
+  // a share.
+  if (path.includes('//') || NT_UNC_PREFIX.test(path)) return 'share';
+  if (path.split('/').some((segment) => segment === '.' || segment === '..')) return 'share';
+  return 'local';
 }
 
 /**

@@ -1081,3 +1081,60 @@ describe('G1/G2 external relationships by target location', () => {
     ).toBe('ok');
   });
 });
+
+describe('H1-H3 share targets hidden by path tricks', () => {
+  const T = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const docxWith = (type: string, target: string) =>
+    office('docx', {
+      extra: [
+        {
+          name: 'word/_rels/document.xml.rels',
+          data: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="${T}/${type}" Target="${target.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" TargetMode="External"/></Relationships>`,
+        },
+      ],
+    });
+
+  const hidden = [
+    // H1: "//" inside a file: path, or "." / ".." segments.
+    'file:///.//server/share/t.dotm',
+    'file:///./\\\\server\\share\\t.dotm',
+    'file:///x/..//server/share/t.dotm',
+    'file:///x/../\\\\server\\share\\t.dotm',
+    'file://localhost/./\\\\server\\share\\t.dotm',
+    'file://localhost/.//server/share/t.dotm',
+    'file://localhost/%2e//server/share/t.dotm',
+    'file://localhost/x/..//server/share/t.dotm',
+    'file:///C:/docs/../t.dotm',
+    'file:/./x/t.dotm',
+    // H2: NT object-manager UNC prefix.
+    '\\??\\UNC\\server\\share\\t.dotm',
+    '\\??\\unc\\server\\share\\t.dotm',
+    'file:///\\??\\UNC\\server\\share\\t.dotm',
+    // H3: whitespace that only appears after %-decoding.
+    '%20\\\\server\\share\\t.dotm',
+    '%09\\\\server\\share\\t.dotm',
+    '%0A//server/share/t.dotm',
+    '%20%20file://server/share/t.dotm',
+  ];
+
+  for (const type of ['attachedTemplate', 'oleObject', 'frame', 'subDocument', 'image', 'audio']) {
+    it.each(hidden)(`refuses an external ${type} at %j`, async (target) => {
+      expect(await codeOf('a.docx', MIME.docx, docxWith(type, target))).toBe('external_content');
+    });
+  }
+
+  it.each([
+    'file:///C:/Users/me/Templates/Normal.dotm',
+    'file:///C:\\Program Files\\Office\\Normal.dotm',
+    'file://localhost/C:/t.dotm',
+    '\\??\\C:\\Templates\\t.dotm',
+    '%20Normal.dotm',
+    'templates/report.dotm',
+  ])('still passes the local template %j', async (target) => {
+    expect(await codeOf('a.docx', MIME.docx, docxWith('attachedTemplate', target))).toBe('ok');
+  });
+
+  it.each(hidden)('still passes a hyperlink to %j', async (target) => {
+    expect(await codeOf('a.docx', MIME.docx, docxWith('hyperlink', target))).toBe('ok');
+  });
+});
