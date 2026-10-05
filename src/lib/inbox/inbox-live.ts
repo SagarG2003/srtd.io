@@ -33,8 +33,8 @@ interface EnrichedLead {
   title: string | null;
   /**
    * Display names for the ids mentioned in `body`, from the same batched read as
-   * the actor. Null when that read failed or timed out: a body carrying tokens
-   * then shows no line 2 at all, never a raw token.
+   * the actor. Null when that read failed or timed out: the toast then shows no
+   * line 2 at all, never a raw token.
    */
   mentionNames: ReadonlyMap<string, string> | null;
 }
@@ -140,17 +140,15 @@ function trimSnippet(text: string): string {
  * The toast's line 2 for a comment body: every mention token becomes "@Name"
  * (an unknown id reads as resolveMentionText's "@Unknown member"), then the text
  * is trimmed, so the cut never lands inside a token. Null for an empty body, or
- * for a body with tokens when the name read failed (no raw token is ever shown).
+ * whenever the name read failed or timed out (no raw token is ever shown).
  */
 function commentSnippet(
   body: string | null,
   names: ReadonlyMap<string, string> | null,
 ): string | null {
   if (body === null || body.trim().length === 0) return null;
-  if (names === null) {
-    // Any token in the body changes under the resolver; without names, drop it.
-    return resolveMentionText(body, () => undefined) === body ? trimSnippet(body) : null;
-  }
+  // The name read failed or timed out: no body line at all (never a raw token).
+  if (names === null) return null;
   return trimSnippet(resolveMentionText(body, (id) => names.get(id)));
 }
 

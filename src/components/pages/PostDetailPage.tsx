@@ -65,6 +65,7 @@ import { AssetUploadSheet } from '@/components/pages/assets/AssetUploadSheet';
 import { Toasts } from '@/components/pages/assets/Toasts';
 import { useToasts } from '@/components/pages/assets/useToasts';
 import { supabase } from '@/lib/supabase';
+import { logger } from '@/lib/logger';
 import { listBuckets, type BucketOption } from '@/lib/buckets';
 import { fetchWithTrace } from '@/lib/fetch';
 import { env } from '@/lib/env';
@@ -357,14 +358,21 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
   const uploadedVersionIds = useRef<string[]>([]);
   // Root library labels, read when the upload sheet opens, so a bulk upload named
   // after the post continues numbering past "<title> N" already in the library.
-  // A failed read leaves the list empty (numbering starts at 1).
+  // Cleared on close so a reopen never numbers from a stale list. A failed read
+  // leaves the list empty (numbering starts at 1).
   const [rootLabels, setRootLabels] = useState<string[]>([]);
   const uploadOpen = addTarget !== null;
   useEffect(() => {
-    if (!uploadOpen || workspaceId === null) return;
+    if (!uploadOpen || workspaceId === null) {
+      setRootLabels([]);
+      return;
+    }
     let active = true;
     void listAssets(supabase, workspaceId).then((result) => {
       if (!active) return;
+      if (!result.ok) {
+        logger.warn('post page: root asset labels read failed', { error: result.error.message });
+      }
       setRootLabels(
         result.ok ? result.data.filter((item) => item.folderId === null).map(displayLabel) : [],
       );

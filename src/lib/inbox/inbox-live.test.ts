@@ -221,9 +221,9 @@ describe('comment toast names and title', () => {
     expect(JSON.stringify(spec)).not.toContain('@[');
   });
 
-  it('keeps a token-free body when the name read failed', () => {
+  it('drops line 2 for a token-free body too when the name read failed', () => {
     const spec = toastFromEnriched(comment({ body: 'Ship it', mentionNames: null }));
-    expect(spec?.description).toBe('Ship it');
+    expect(spec && 'description' in spec).toBe(false);
   });
 
   it('reads "<actor> commented" when the title is missing', () => {
