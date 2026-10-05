@@ -238,6 +238,24 @@ test.describe('laptop', () => {
     await typeLands(page, '');
   });
 
+  test('card hold released on the card: focus, and its click never opens the sheet', async ({
+    page,
+  }) => {
+    await openMaya(page);
+    await leaveDraft(page, '');
+    const card = page.locator('[role="button"][aria-label^="Open post"]').last();
+    await settle(page, card);
+    const { clientX, clientY } = await centre(card);
+    await page.mouse.move(clientX, clientY);
+    await page.mouse.down();
+    await page.mouse.move(clientX + 3, clientY + 1, { steps: 2 });
+    await page.waitForTimeout(700);
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+    await expect(page.getByRole('button', { name: /^Talk about/ })).toHaveCount(0);
+    await expectFocusedAtEnd(page);
+  });
+
   test('card hold with the mouse moved off the card still focuses the composer', async ({
     page,
   }, testInfo) => {
