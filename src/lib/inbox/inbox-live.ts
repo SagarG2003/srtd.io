@@ -175,15 +175,21 @@ export function toastFromEnriched(enriched: EnrichedNew): ToastSpec | null {
     return { title: 'New activity', actorName: null, actorAvatarUrl: null };
   }
   const snippet = commentSnippet(lead.body, lead.mentionNames);
-  const named = lead.eventType === 'comment' && lead.actorName !== null;
+  const isComment = lead.eventType === 'comment';
+  const named = isComment && lead.actorName !== null;
+  // The name read failed or timed out: the actor is unknown and no body shows.
+  const namesFailed = isComment && lead.mentionNames === null;
   const leadTitle = lead.title !== null && lead.title.trim().length > 0 ? lead.title.trim() : null;
   const title = named
     ? leadTitle !== null
       ? `${lead.actorName} commented on ${leadTitle}`
       : `${lead.actorName} commented`
-    : eventLabel(lead.eventType);
-  // A named comment already carries the title on line 1; do not repeat it.
-  const description = snippet ?? (named ? null : leadTitle);
+    : namesFailed && leadTitle !== null
+      ? `New comment on ${leadTitle}`
+      : eventLabel(lead.eventType);
+  // A named comment, or a failed name read, already carries the title on line 1
+  // (or has no line 2 at all); do not repeat it.
+  const description = snippet ?? (named || namesFailed ? null : leadTitle);
   const base: ToastSpec = {
     title,
     actorName: lead.actorName,

@@ -221,6 +221,28 @@ describe('comment toast names and title', () => {
     expect(JSON.stringify(spec)).not.toContain('@[');
   });
 
+  it('reads "New comment on <title>" with no line 2 when the name read failed', () => {
+    const spec = toastFromEnriched(
+      comment({
+        actorName: null,
+        body: `@[${MANISHA}] can we post this today`,
+        mentionNames: null,
+      }),
+    );
+    expect(spec?.title).toBe('New comment on Ethyl Acetate - The Ferrari Story');
+    expect(spec && 'description' in spec).toBe(false);
+    expect(JSON.stringify(spec)).not.toContain('@[');
+    expect(JSON.stringify(spec)).not.toContain('can we post');
+  });
+
+  it('keeps the generic label when the name read failed and the title is missing', () => {
+    const spec = toastFromEnriched(
+      comment({ actorName: null, title: null, body: 'Ship it', mentionNames: null }),
+    );
+    expect(spec?.title).toBe('New comment');
+    expect(spec && 'description' in spec).toBe(false);
+  });
+
   it('drops line 2 for a token-free body too when the name read failed', () => {
     const spec = toastFromEnriched(comment({ body: 'Ship it', mentionNames: null }));
     expect(spec && 'description' in spec).toBe(false);
