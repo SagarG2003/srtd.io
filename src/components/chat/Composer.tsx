@@ -1808,7 +1808,7 @@ export function Composer(props: ComposerProps): ReactElement {
 
               <Textarea
                 ref={setTextarea}
-                // Not a form field: off stops the iOS AutoFill bar above the keyboard.
+                // A chat message, not an AutoFill target: off stops the iOS AutoFill bar.
                 autoComplete="off"
                 value={held ? resolveMentionText(text, nameOf) : text}
                 readOnly={held || scheduleBusy}

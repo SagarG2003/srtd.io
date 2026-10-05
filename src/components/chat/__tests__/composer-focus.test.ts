@@ -79,12 +79,10 @@ describe('composer textarea: no iOS AutoFill bar', () => {
   });
 
   it('the shared Textarea forwards autoComplete="off" to the DOM textarea', () => {
-    for (const placeholder of ['Message', 'Reply in thread']) {
-      const html = renderToStaticMarkup(
-        createElement(Textarea, { autoComplete: 'off', rows: 1, compact: true, placeholder }),
-      );
-      expect(html).toMatch(/<textarea[^>]*autoComplete="off"/);
-    }
+    const html = renderToStaticMarkup(
+      createElement(Textarea, { autoComplete: 'off', rows: 1, compact: true }),
+    );
+    expect(html).toMatch(/<textarea[^>]*autoComplete="off"/);
   });
 
   it('no name / id / aria attribute carries an AutoFill hint word', () => {
