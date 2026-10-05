@@ -1,5 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent, KeyboardEvent, ReactElement, SyntheticEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type {
+  FormEvent,
+  KeyboardEvent,
+  MutableRefObject,
+  ReactElement,
+  SyntheticEvent,
+} from 'react';
 import { logger } from '@/lib/logger';
 import { Button } from '@/components/ui/Button';
 import { IconButton } from '@/components/ui/IconButton';
@@ -109,6 +115,11 @@ export interface ComposerProps {
    * a menu, sheet or lightbox is open over the thread.
    */
   focusOnMount?: boolean | undefined;
+  /**
+   * Handed the input element (null on unmount) so a Reply can focus it inside
+   * the user's own tap or click (decision 128).
+   */
+  inputRef?: MutableRefObject<HTMLTextAreaElement | null> | undefined;
   /** Personal notes: no Schedule tile (the hold and the chevron need schedule wiring). */
   noSchedule?: boolean | undefined;
   /**
@@ -501,6 +512,26 @@ export function shouldFocusComposer(input: {
   overlayOpen: boolean;
 }): boolean {
   return input.finePointer && !input.editing && !input.hashOpen && !input.overlayOpen;
+}
+
+/** The slice of the composer's input a Reply focuses (a test fake satisfies it). */
+export interface ComposerInput {
+  readonly value: string;
+  focus: (options?: FocusOptions) => void;
+  setSelectionRange: (start: number, end: number) => void;
+}
+
+/**
+ * Decision 128: a Reply puts the cursor in the composer, after any draft text.
+ * Call it synchronously inside the user's tap, click or pointerup: iOS WebKit
+ * opens the keyboard only then, never from an effect, timer or frame. No
+ * scroll, so the thread keeps its bottom pin; the draft is left as it is.
+ */
+export function focusComposerInput(el: ComposerInput | null): void {
+  if (el === null) return;
+  el.focus({ preventScroll: true });
+  const end = el.value.length;
+  el.setSelectionRange(end, end);
 }
 
 /** Whether a menu, sheet or lightbox is open in the document. */
@@ -951,6 +982,14 @@ export function Composer(props: ComposerProps): ReactElement {
   const [editBusy, setEditBusy] = useState(false);
   const editing = props.editing;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const inputRef = props.inputRef;
+  const setTextarea = useCallback(
+    (el: HTMLTextAreaElement | null): void => {
+      textareaRef.current = el;
+      if (inputRef !== undefined) inputRef.current = el;
+    },
+    [inputRef],
+  );
   const recorder = useAudioRecorder();
   const toast = useToast();
   // 17px on every touch device (never under 16, so iOS never zooms), 15px on a laptop.
@@ -1768,7 +1807,7 @@ export function Composer(props: ComposerProps): ReactElement {
               ) : null}
 
               <Textarea
-                ref={textareaRef}
+                ref={setTextarea}
                 value={held ? resolveMentionText(text, nameOf) : text}
                 readOnly={held || scheduleBusy}
                 onChange={(event) => {

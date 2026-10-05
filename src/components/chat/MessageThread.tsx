@@ -124,6 +124,8 @@ import type { PresignCache } from '@/lib/asset-presign';
 import { roleLabel } from '@/components/pages/settings/members-data';
 import {
   Composer,
+  focusComposerInput,
+  type ComposerInput,
   type ComposerProps,
   type ComposerSend,
   type EditingDraft,
@@ -614,8 +616,25 @@ export interface BubblePostRefs {
   chip?: BubbleChip | undefined;
   /** Hold on a card or the sheet's "Talk about". */
   onTalkAbout?: ((postId: string, messageId: string) => void) | undefined;
+  /** Inside the gesture that ends a Talk about: focus the composer (decision 128). */
+  onTalkAboutFocus?: (() => void) | undefined;
   /** Tap on a root card's KEY: open that card's thread. */
   onOpenThread?: ((messageId: string) => void) | undefined;
+}
+
+/**
+ * Decision 128: a Reply (menu, swipe, laptop chevron, right-click) focuses the
+ * composer first, synchronously inside the same user event (iOS WebKit opens
+ * the keyboard only then), and only then sets the reply. Pure.
+ */
+export function replyWithFocus<T>(
+  input: () => ComposerInput | null,
+  setReply: (target: T) => void,
+): (target: T) => void {
+  return (target) => {
+    focusComposerInput(input());
+    setReply(target);
+  };
 }
 
 /** The chip for a message, from its target and the batch lookup; undefined keeps the quote. */
@@ -710,12 +729,14 @@ export function cardRefsFor(
 ): {
   messageId: string;
   onTalkAbout: BubblePostRefs['onTalkAbout'];
+  onTalkAboutFocus: BubblePostRefs['onTalkAboutFocus'];
   onOpenThread: (() => void) | undefined;
 } {
   const open = postRefs?.onOpenThread;
   return {
     messageId,
     onTalkAbout: selection === undefined ? postRefs?.onTalkAbout : undefined,
+    onTalkAboutFocus: selection === undefined ? postRefs?.onTalkAboutFocus : undefined,
     onOpenThread: open !== undefined ? () => open(messageId) : undefined,
   };
 }
@@ -2819,6 +2840,8 @@ function ThreadBody(
     /** A message's KEY chip (undefined keeps its quote). */
     chipFor?: (message: ThreadMessage) => BubbleChip | undefined;
     onTalkAbout?: (postId: string, messageId: string) => void;
+    /** Inside the gesture that ends a Talk about: focus the composer. */
+    onTalkAboutFocus?: () => void;
     /** Tap on a root card's KEY: open its thread. */
     onOpenThread?: (messageId: string) => void;
     /** The thread view: a "Load older" row at the top instead of scroll-to-top paging. */
@@ -3464,6 +3487,7 @@ function ThreadBody(
                     postRefs={{
                       chip: props.chipFor?.(row.message),
                       onTalkAbout: props.onTalkAbout,
+                      onTalkAboutFocus: props.onTalkAboutFocus,
                       onOpenThread: rootCard ? props.onOpenThread : undefined,
                     }}
                     threadMember={memberOf?.(row.message) != null}
@@ -4224,13 +4248,19 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [selecting]);
-  const handleReply = (message: ThreadMessage): void => {
-    const preview = replyPreview(message);
-    setReplyDraft({
-      authorName: senderName(message, props.profiles),
-      quote: { id: message.id, authorUserId: message.senderUserId, preview },
-    });
-  };
+  // The composers' inputs: a Reply focuses them inside the user's own event.
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const viewComposerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const handleReply = replyWithFocus(
+    () => composerInputRef.current,
+    (message: ThreadMessage) => {
+      const preview = replyPreview(message);
+      setReplyDraft({
+        authorName: senderName(message, props.profiles),
+        quote: { id: message.id, authorUserId: message.senderUserId, preview },
+      });
+    },
+  );
   // The quoted message became a tombstone: the reply chip loses its text and
   // reads the deleted label (the draft map is stripped by the store too).
   const replyQuoteId =
@@ -4730,12 +4760,19 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         }
       : undefined;
   /** Swipe or menu Reply inside the view: the reply bar names that member. */
-  const viewHandleReply = (message: ThreadMessage): void => {
-    setViewReply({
-      authorName: senderName(message, props.profiles),
-      quote: { id: message.id, authorUserId: message.senderUserId, preview: replyPreview(message) },
-    });
-  };
+  const viewHandleReply = replyWithFocus(
+    () => viewComposerInputRef.current,
+    (message: ThreadMessage) => {
+      setViewReply({
+        authorName: senderName(message, props.profiles),
+        quote: {
+          id: message.id,
+          authorUserId: message.senderUserId,
+          preview: replyPreview(message),
+        },
+      });
+    },
+  );
   /** A send from the view replies to the root (or the member its reply bar names). */
   const viewSend: ComposerSend = (text, attachments, sharedPostIds, reply, sharedBriefIds) => {
     if (viewRoot === undefined) return;
@@ -5060,6 +5097,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           messages={shownMessages}
           chipFor={chipFor}
           onTalkAbout={talkAbout}
+          onTalkAboutFocus={() => focusComposerInput(composerInputRef.current)}
           onOpenThread={openThread}
           threads={mainThreads}
           loading={bodyLoading}
@@ -5110,6 +5148,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         <Composer
           key={channelKey}
           channelId={channelId}
+          inputRef={composerInputRef}
           focusOnMount={finePointer && view === null}
           onSend={composerSend}
           onTyping={props.onTyping}
@@ -5271,6 +5310,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           {selectionBar ?? (
             <Composer
               key={`thread:${view.rootId}`}
+              inputRef={viewComposerInputRef}
               focusOnMount={finePointer}
               onSend={viewSend}
               placeholder={THREAD_REPLY_PLACEHOLDER}
