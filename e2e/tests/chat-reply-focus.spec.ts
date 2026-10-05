@@ -259,6 +259,9 @@ test.describe('laptop', () => {
     await expectFocusedAtEnd(page);
     await expect(composer(page)).toHaveValue('about ');
     await page.screenshot({ path: testInfo.outputPath('talk-about-mouse-hold.png') });
+    // The next plain click on that card still opens its sheet.
+    await card.click();
+    await expect(page.getByRole('button', { name: /^Talk about/ })).toBeVisible();
   });
 });
 

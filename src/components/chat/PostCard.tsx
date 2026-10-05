@@ -733,6 +733,9 @@ export function PostCardItem(
                 touchPress.current = e.pointerType !== 'mouse';
                 pressPointer.current = e.pointerType;
                 talk.reset();
+                // A hold released off the card left its click guard set: a new
+                // press is never the tail of that hold.
+                hold.clearClickSuppression();
                 hold.handlers.onPointerDown(e);
               },
               // The hold fired on a timer, where iOS opens no keyboard: the
