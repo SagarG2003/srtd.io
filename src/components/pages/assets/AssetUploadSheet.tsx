@@ -129,6 +129,21 @@ interface AssetUploadSheetProps {
   folderName?: string | null;
   /** Display labels of the assets already in this scope, to continue numbering. */
   siblingLabels?: readonly string[];
+  /**
+   * Seed for the root name box in place of the first file's name (the post page
+   * passes the post title). Still editable; ignored in folder mode.
+   */
+  defaultBaseName?: string | null;
+}
+
+/**
+ * The name box once the queue first fills: a name already typed is kept; else the
+ * caller's default when set, else the first file's name.
+ */
+export function seedName(prev: string, defaultBaseName: string | null, filename: string): string {
+  if (prev !== '') return prev;
+  const preset = defaultBaseName?.trim() ?? '';
+  return preset !== '' ? preset.slice(0, DISPLAY_NAME_MAX) : baseName(filename);
 }
 
 /** Strip the extension from a filename to seed the editable display name. */
@@ -148,6 +163,7 @@ export function AssetUploadSheet({
   folderId = null,
   folderName = null,
   siblingLabels = [],
+  defaultBaseName = null,
 }: AssetUploadSheetProps) {
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
   const [statuses, setStatuses] = useState<Record<string, FileStatus>>({});
@@ -203,10 +219,11 @@ export function AssetUploadSheet({
       });
     }
     if (accepted.length === 0) return;
-    // Seed the name field from the first file the first time the queue fills, so
-    // a root single upload starts with a sensible name (ignored in folder mode).
+    // Seed the name field the first time the queue fills (the caller's default, or
+    // the first file's name), so a root upload starts with a sensible name. A name
+    // the user already typed is kept. Ignored in folder mode.
     if (uploads.length === 0) {
-      setNameInput((prev) => (prev === '' ? baseName(accepted[0]!.file.name) : prev));
+      setNameInput((prev) => seedName(prev, defaultBaseName, accepted[0]!.file.name));
     }
     setUploads((prev) => [...prev, ...accepted]);
   }

@@ -211,7 +211,80 @@ describe('enrichNewRows', () => {
       actorAvatarUrl: 'https://cdn/a.png',
       body: 'Ship it!',
       title: 'Q3 Launch',
+      mentionNames: new Map(),
     });
+  });
+
+  const MANISHA = '0b9d7c1e-1f2a-4c3b-9d8e-7f6a5b4c3d2e';
+  const RAHUL = '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+  const mentionBody = `@[${MANISHA}] and @[${RAHUL}] can we post this today`;
+
+  it('reads authors and mentioned ids in one batched profile read', async () => {
+    const users: { cols: string; ids: unknown[] }[] = [];
+    const client = {
+      from(table: string) {
+        if (table === 'users') {
+          let cols = '';
+          const b = {
+            select: (c: string) => ((cols = c), b),
+            in: (_col: string, ids: unknown[]) => {
+              users.push({ cols, ids });
+              return builder(
+                okData([
+                  { id: 'u-alice', display_name: 'Alice', avatar_url: null },
+                  { id: MANISHA, display_name: 'Manisha', avatar_url: null },
+                  { id: RAHUL, display_name: 'Rahul', avatar_url: null },
+                ]),
+              );
+            },
+          };
+          return b;
+        }
+        if (table === 'comments')
+          return builder(okData([{ id: 'c1', author_user_id: 'u-alice', body: mentionBody }]));
+        if (table === 'posts') return builder(okData([{ id: 'p1', title: 'Q3 Launch' }]));
+        return builder(okData([]));
+      },
+    } as unknown as Parameters<typeof enrichNewRows>[0];
+    const res = await enrichNewRows(client, newRows);
+    expect(users).toHaveLength(1);
+    expect(users[0]?.ids).toEqual(['u-alice', MANISHA, RAHUL]);
+    expect(res.lead?.actorName).toBe('Alice');
+    expect(res.lead?.mentionNames).toEqual(
+      new Map([
+        [MANISHA, 'Manisha'],
+        [RAHUL, 'Rahul'],
+      ]),
+    );
+  });
+
+  it('marks names unknown (null) when the profile read fails', async () => {
+    const client = fakeClient({
+      comments: okData([{ id: 'c1', author_user_id: 'u-alice', body: mentionBody }]),
+      posts: okData([{ id: 'p1', title: 'Q3 Launch' }]),
+      users: err('users down'),
+    });
+    const res = await enrichNewRows(client, newRows);
+    expect(res.lead?.mentionNames).toBeNull();
+    expect(res.lead?.title).toBe('Q3 Launch');
+  });
+
+  it('marks names unknown (null) when the profile read times out', async () => {
+    const hung = {
+      from(table: string) {
+        if (table === 'users') {
+          const never: PromiseLike<QueryResult> = { then: () => new Promise(() => undefined) };
+          const b = { select: () => b, in: () => never };
+          return b;
+        }
+        if (table === 'comments')
+          return builder(okData([{ id: 'c1', author_user_id: 'u-alice', body: mentionBody }]));
+        return builder(okData([{ id: 'p1', title: 'Q3 Launch' }]));
+      },
+    } as unknown as Parameters<typeof enrichNewRows>[0];
+    const res = await enrichNewRows(hung, newRows, 10);
+    expect(res.lead?.mentionNames).toBeNull();
+    expect(res.lead?.actorName).toBeNull();
   });
 
   it('degrades a failed sub-query to null without failing the batch', async () => {

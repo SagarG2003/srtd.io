@@ -10,6 +10,7 @@ import {
   chatMessageHref,
   isBellRow,
 } from '@/lib/inbox/bell-types';
+import { resolveMentionText } from '@/lib/chat/mentions';
 
 /** The raw inbox_entries row, reused from the generated schema (never redefined). */
 export type InboxRow = Database['public']['Tables']['inbox_entries']['Row'];
@@ -27,8 +28,15 @@ interface EnrichedLead {
   eventType: string;
   actorName: string | null;
   actorAvatarUrl: string | null;
+  /** The raw comment body: mention tokens are still `@[uuid]` here. */
   body: string | null;
   title: string | null;
+  /**
+   * Display names for the ids mentioned in `body`, from the same batched read as
+   * the actor. Null when that read failed or timed out: a body carrying tokens
+   * then shows no line 2 at all, never a raw token.
+   */
+  mentionNames: ReadonlyMap<string, string> | null;
 }
 
 /** A batch of new rows reduced to a count plus its enriched lead. */
@@ -129,11 +137,31 @@ function trimSnippet(text: string): string {
 }
 
 /**
+ * The toast's line 2 for a comment body: every mention token becomes "@Name"
+ * (an unknown id reads as resolveMentionText's "@Unknown member"), then the text
+ * is trimmed, so the cut never lands inside a token. Null for an empty body, or
+ * for a body with tokens when the name read failed (no raw token is ever shown).
+ */
+function commentSnippet(
+  body: string | null,
+  names: ReadonlyMap<string, string> | null,
+): string | null {
+  if (body === null || body.trim().length === 0) return null;
+  if (names === null) {
+    // Any token in the body changes under the resolver; without names, drop it.
+    return resolveMentionText(body, () => undefined) === body ? trimSnippet(body) : null;
+  }
+  return trimSnippet(resolveMentionText(body, (id) => names.get(id)));
+}
+
+/**
  * Build the toast content for an enriched batch, or null when there is nothing to
- * show. A single comment with a known actor reads "{name} commented"; any other
- * single event takes its neutral label. The description is the trimmed body, then
- * the resolved title, then nothing. Many new rows coalesce to "N new updates" with
- * no actor. Pure; produces no JSX.
+ * show. A single comment with a known actor reads "{name} commented on {title}"
+ * (the post's or brief's title), or "{name} commented" when the title is missing;
+ * its description is the body with mentions resolved, else nothing. Any other
+ * single event takes its neutral label, with the body, then the title, as its
+ * description. Many new rows coalesce to "N new updates" with no actor. Pure;
+ * produces no JSX.
  */
 export function toastFromEnriched(enriched: EnrichedNew): ToastSpec | null {
   if (enriched.count === 0) return null;
@@ -148,18 +176,22 @@ export function toastFromEnriched(enriched: EnrichedNew): ToastSpec | null {
   if (lead === null) {
     return { title: 'New activity', actorName: null, actorAvatarUrl: null };
   }
-  const title =
-    lead.eventType === 'comment' && lead.actorName !== null
-      ? `${lead.actorName} commented`
-      : eventLabel(lead.eventType);
-  const snippet = lead.body !== null && lead.body.trim().length > 0 ? trimSnippet(lead.body) : null;
-  const description = snippet ?? lead.title ?? undefined;
+  const snippet = commentSnippet(lead.body, lead.mentionNames);
+  const named = lead.eventType === 'comment' && lead.actorName !== null;
+  const leadTitle = lead.title !== null && lead.title.trim().length > 0 ? lead.title.trim() : null;
+  const title = named
+    ? leadTitle !== null
+      ? `${lead.actorName} commented on ${leadTitle}`
+      : `${lead.actorName} commented`
+    : eventLabel(lead.eventType);
+  // A named comment already carries the title on line 1; do not repeat it.
+  const description = snippet ?? (named ? null : leadTitle);
   const base: ToastSpec = {
     title,
     actorName: lead.actorName,
     actorAvatarUrl: lead.actorAvatarUrl,
   };
-  return description !== undefined ? { ...base, description } : base;
+  return description !== null ? { ...base, description } : base;
 }
 
 /** A batch of new rows split between the two surfaces. */
