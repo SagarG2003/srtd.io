@@ -170,19 +170,34 @@ test.describe('iPhone', () => {
     expect(displayed).not.toContain('@[');
     expect((await selectionText(page)).trim()).toBe(displayed.trim());
     expect(await userSelect(target.locator('[data-msg-body]'))).toBe('text');
-    // Every other bubble (and its body) stays unselectable.
-    const others = await page.evaluate(() => {
+    // Every bubble and the list are user-select none. Every other body is not
+    // made selectable: its computed value is none (Chromium) or auto (WebKit
+    // does not inherit the value; per CSS, auto inside a none box acts as
+    // none). Only the active body is text.
+    const state = await page.evaluate(() => {
       const read = (el: Element): string => {
         const s = getComputedStyle(el) as CSSStyleDeclaration & { webkitUserSelect?: string };
         return s.userSelect !== '' ? s.userSelect : (s.webkitUserSelect ?? '');
       };
-      return Array.from(document.querySelectorAll('[data-bubble]')).flatMap((b) => {
-        const body = b.querySelector('[data-msg-body]');
-        if (body?.hasAttribute('data-selecting-text')) return [read(b)];
-        return body !== null ? [read(b), read(body)] : [read(b)];
-      });
+      const bubbles = Array.from(document.querySelectorAll('[data-bubble]'));
+      const list = document.querySelector('[data-msg-id]')?.closest('ul');
+      return {
+        list: list != null ? read(list) : '',
+        bubbles: bubbles.map(read),
+        textBodies: bubbles
+          .map((b) => b.querySelector('[data-msg-body]'))
+          .filter((body): body is Element => body !== null && read(body) === 'text').length,
+        otherBodies: bubbles
+          .map((b) => b.querySelector('[data-msg-body]'))
+          .filter((body) => body !== null && !body.hasAttribute('data-selecting-text'))
+          .map((body) => (body !== null ? read(body) : '')),
+      };
     });
-    expect(new Set(others)).toEqual(new Set(['none']));
+    expect(state.list).toBe('none');
+    expect(new Set(state.bubbles)).toEqual(new Set(['none']));
+    expect(state.textBodies).toBe(1);
+    expect(state.otherBodies.length).toBeGreaterThan(3);
+    for (const value of state.otherBodies) expect(['none', 'auto']).toContain(value);
     // Tap outside: the selection and the selectable body go.
     const other = bubbleWith(page, PEER_LINE);
     const box = await other.boundingBox();
@@ -190,7 +205,8 @@ test.describe('iPhone', () => {
     await page.mouse.click(box.x + 8, box.y + box.height / 2);
     await expect(page.locator('[data-selecting-text]')).toHaveCount(0);
     expect(await selectionText(page)).toBe('');
-    expect(await userSelect(target.locator('[data-msg-body]'))).toBe('none');
+    expect(['none', 'auto']).toContain(await userSelect(target.locator('[data-msg-body]')));
+    expect(await userSelect(target)).toBe('none');
   });
 
   test('back leaves text selection and stays in the chat', async ({ page }) => {

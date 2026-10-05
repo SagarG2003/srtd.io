@@ -97,8 +97,9 @@ test('Remind me from a held message, then Upcoming', async ({ page }) => {
     .evaluateAll((els) =>
       els.map((el) => el.getAttribute('data-menu-item') ?? el.getAttribute('data-menu-note')),
     );
+  // Remind me sits directly before Mark as.
   const markAt = rows.findIndex((r) => r === 'mark' || r === 'marked');
-  expect(rows[markAt + 1]).toBe('remind');
+  expect(rows[markAt - 1]).toBe('remind');
   await shot(page, 'remind-1-menu');
 
   await menu.locator('[data-menu-item="remind"]').click();
