@@ -154,29 +154,31 @@ describe('menu row', () => {
     canRemind: true,
     canEdit: true,
     canDelete: true,
-    canSelect: true,
+    canSelectText: true,
   };
 
-  it('Star sits after Copy, before Save to notes, in the locked order', () => {
+  it('Star sits after Copy and Select, before Save to notes, in the locked order', () => {
     expect(messageMenuItems(base).map((i) => i.key)).toEqual([
       'reply',
       'forward',
       'copy',
+      'select-text',
       'star',
       'save-notes',
-      'mark',
       'remind',
+      'mark',
       'edit',
       'delete',
-      'select-divider',
-      'select',
     ]);
   });
 
   it('after Transcribe on a voice note', () => {
-    const keys = messageMenuItems({ ...base, canCopy: false, canTranscribe: true }).map(
-      (i) => i.key,
-    );
+    const keys = messageMenuItems({
+      ...base,
+      canCopy: false,
+      canTranscribe: true,
+      canSelectText: false,
+    }).map((i) => i.key);
     expect(keys.slice(0, 4)).toEqual(['reply', 'forward', 'transcribe', 'star']);
   });
 

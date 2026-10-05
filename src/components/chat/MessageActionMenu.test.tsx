@@ -38,7 +38,7 @@ import type { ThreadMessage } from '@/lib/chat/thread';
 type ItemProps = Parameters<typeof messageMenuItems>[0];
 
 function labels(items: MessageMenuItem[]): string[] {
-  return items.map((item) => (item.kind === 'divider' ? '---' : item.label));
+  return items.map((item) => item.label);
 }
 
 function menu(over: Partial<ItemProps> = {}): string[] {
@@ -51,8 +51,8 @@ function menu(over: Partial<ItemProps> = {}): string[] {
       onMark: () => {},
       canForward: true,
       onForward: () => {},
-      canSelect: true,
-      onSelect: () => {},
+      canSelectText: true,
+      onSelectText: () => {},
       ...over,
     }),
   );
@@ -103,6 +103,7 @@ function rowsFor(message: ThreadMessage, mark?: ChatMark): string[] {
   const own = ownMessageActions(message, mark, NOW);
   return menu({
     canCopy: message.body.trim() !== '',
+    canSelectText: message.state === 'sent' && message.body.trim() !== '',
     markOptions: mark === undefined ? ['commitment', 'decision', 'pending'] : [],
     markedAs: mark?.type ?? null,
     canEdit: own.canEdit,
@@ -178,15 +179,15 @@ describe('ownMessageActions: the edit and delete windows', () => {
 });
 
 describe('messageMenuItems: Remind me', () => {
-  it('sits directly after "Mark as"', () => {
+  it('sits directly before "Mark as"', () => {
     const rows = menu({ canRemind: true, onRemind: () => {} });
-    expect(rows.indexOf('Remind me')).toBe(rows.indexOf('Mark as') + 1);
+    expect(rows.indexOf('Remind me')).toBe(rows.indexOf('Mark as') - 1);
   });
 
-  it('sits directly after "Marked as <type>" on a marked message', () => {
+  it('sits directly before "Marked as <type>" on a marked message', () => {
     const rows = menu({ markedAs: 'decision', canRemind: true, onRemind: () => {} });
     const marked = rows.findIndex((r) => r.startsWith('Marked as'));
-    expect(rows[marked + 1]).toBe('Remind me');
+    expect(rows[marked - 1]).toBe('Remind me');
   });
 
   it('is absent without the wiring', () => {
@@ -200,11 +201,10 @@ describe('messageMenuItems: row set per case', () => {
       'Reply',
       'Forward',
       'Copy',
+      'Select',
       'Mark as',
       'Edit',
       'Delete',
-      '---',
-      'Select',
     ]);
   });
 
@@ -213,15 +213,14 @@ describe('messageMenuItems: row set per case', () => {
       'Reply',
       'Forward',
       'Copy',
+      'Select',
       'Mark as',
       'Delete',
-      '---',
-      'Select',
     ]);
   });
 
   it('own at 40 min: neither Edit nor Delete', () => {
-    expect(rowsFor(msg(ago(40)))).toEqual(['Reply', 'Forward', 'Copy', 'Mark as', '---', 'Select']);
+    expect(rowsFor(msg(ago(40)))).toEqual(['Reply', 'Forward', 'Copy', 'Select', 'Mark as']);
   });
 
   it('marked own: "Marked as <type>" and the single locked line', () => {
@@ -229,10 +228,9 @@ describe('messageMenuItems: row set per case', () => {
       'Reply',
       'Forward',
       'Copy',
+      'Select',
       'Marked as Decision',
       MARKED_LOCKED_LABEL,
-      '---',
-      'Select',
     ]);
   });
 
@@ -241,17 +239,15 @@ describe('messageMenuItems: row set per case', () => {
       'Reply',
       'Forward',
       'Copy',
-      'Mark as',
-      '---',
       'Select',
+      'Mark as',
     ]);
     expect(rowsFor(msg({ ...ago(1), mine: false }), MARK)).toEqual([
       'Reply',
       'Forward',
       'Copy',
-      'Marked as Decision',
-      '---',
       'Select',
+      'Marked as Decision',
     ]);
   });
 
@@ -265,15 +261,15 @@ describe('messageMenuItems: row set per case', () => {
         canEdit: own.canEdit,
         canDelete: own.canDelete,
         lockedByMark: own.lockedByMark,
-        canSelect: false,
+        canSelectText: false,
       }),
     ).toEqual(['Reply', 'Copy']);
   });
 
   it('hides rows that do not apply (never greyed)', () => {
-    expect(menu({ canForward: false, canCopy: false, markOptions: [], canSelect: false })).toEqual([
-      'Reply',
-    ]);
+    expect(
+      menu({ canForward: false, canCopy: false, markOptions: [], canSelectText: false }),
+    ).toEqual(['Reply']);
   });
 
   it('the marked note and locked line are not interactive; Delete is danger with its hint', () => {
@@ -631,14 +627,9 @@ describe('F5: picker focus', () => {
 
 describe('messageMenuItems: Transcribe', () => {
   it('shows Transcribe after Forward for a voice note (no Copy row: the body is empty)', () => {
-    expect(menu({ canCopy: false, canTranscribe: true, onTranscribe: () => {} })).toEqual([
-      'Reply',
-      'Forward',
-      'Transcribe',
-      'Mark as',
-      '---',
-      'Select',
-    ]);
+    expect(
+      menu({ canCopy: false, canSelectText: false, canTranscribe: true, onTranscribe: () => {} }),
+    ).toEqual(['Reply', 'Forward', 'Transcribe', 'Mark as']);
   });
 
   it('hides Transcribe when not offered (loading, or a transcript exists)', () => {

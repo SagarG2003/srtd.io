@@ -16,7 +16,7 @@ import type { ReactElement, ReactNode } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Chip } from '@/components/ui/Chip';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { IconFile, IconImage, IconLink, IconPin, IconStar } from '@/components/ui/icons';
+import { IconBookmark, IconFile, IconImage, IconLink, IconStar } from '@/components/ui/icons';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useAttachmentUrl } from '@/components/chat/MessageAttachments';
 import { MarksList, type MarksListProps } from '@/components/chat/MarksSheet';
@@ -578,7 +578,7 @@ export function ChatInfoTabsView(props: ChatInfoTabsViewProps): ReactElement {
             : {})}
         />
       ) : (
-        <EmptyState icon={<IconPin size={22} />} title="Nothing here" />
+        <EmptyState icon={<IconBookmark size={22} />} title="Nothing here" />
       );
   }
 

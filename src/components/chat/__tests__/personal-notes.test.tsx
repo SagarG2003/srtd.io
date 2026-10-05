@@ -305,12 +305,12 @@ function labels(props: Partial<Parameters<typeof messageMenuItems>[0]>): string[
     onCopy: () => {},
     canForward: true,
     onForward: () => {},
-    canSelect: true,
-    onSelect: () => {},
+    canSelectText: true,
+    onSelectText: () => {},
     canRemind: true,
     onRemind: () => {},
     ...props,
-  }).map((item) => (item.kind === 'divider' ? '---' : item.label));
+  }).map((item) => item.label);
 }
 
 describe('menu matrix', () => {
@@ -341,7 +341,7 @@ describe('menu matrix', () => {
       onDelete: () => {},
       notes: true,
     });
-    const rows = items.map((i) => (i.kind === 'divider' ? '---' : i.label));
+    const rows = items.map((i) => i.label);
     expect(rows).not.toContain('Mark as');
     expect(rows).not.toContain('Save to notes');
     const del = items.find((i) => i.kind === 'action' && i.key === 'delete');

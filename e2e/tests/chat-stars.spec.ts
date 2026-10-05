@@ -150,14 +150,15 @@ test('chat stars: star, list everywhere, jump, unstar from Edit', async ({ page 
   await page.goto('/chat');
   await openDm(page);
 
-  // Long-press: Star sits after Copy and before Save to notes.
+  // Long-press: Copy, Select, Star, then Save to notes.
   await holdBubble(page, PEER_LINE);
   const menu = page.getByRole('menu');
   await expect(menu).toBeVisible();
   const keys = await menu
     .locator('[data-menu-item]')
     .evaluateAll((els) => els.map((el) => el.getAttribute('data-menu-item')));
-  expect(keys.indexOf('star')).toBe(keys.indexOf('copy') + 1);
+  expect(keys.indexOf('select-text')).toBe(keys.indexOf('copy') + 1);
+  expect(keys.indexOf('star')).toBe(keys.indexOf('select-text') + 1);
   expect(keys.indexOf('save-notes')).toBe(keys.indexOf('star') + 1);
   await expect(menu.locator('[data-menu-item="star"]')).toHaveText(/Star/);
   await noCallout(page, '[data-bubble]');

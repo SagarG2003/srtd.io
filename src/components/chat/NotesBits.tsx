@@ -8,7 +8,7 @@ import type { ReactElement, RefObject } from 'react';
 import { cn } from '@/lib/cn';
 import type { ThreadMessage } from '@/lib/chat/thread';
 import type { SavedFromLine } from '@/lib/chat/saved-from';
-import { SaveToNotesGlyph } from '@/components/chat/MessageActionMenu';
+import { IconNotePage } from '@/components/ui/icons';
 
 /** The notebook glyph (stroke 1.7, like the icon set). */
 export function NotesGlyph(props: { size?: number }): ReactElement {
@@ -222,7 +222,7 @@ export function SavedFromLabel(props: {
   const ink = props.mine ? 'text-accent-fg' : 'text-fg-2';
   const body = (
     <>
-      <SaveToNotesGlyph size={14} />
+      <IconNotePage size={14} />
       <span className="min-w-0 truncate">{line.label}</span>
     </>
   );

@@ -726,3 +726,34 @@ export function IconStarFilled(props: IconProps) {
     </Svg>
   );
 }
+
+/** Select text: an iMessage-style crop, a handle dot at either end. */
+export function IconSelectText(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="6" cy="4.5" r="1.3" fill="currentColor" />
+      <path d="M6 6.5V16a1 1 0 0 0 1 1h10.5" />
+      <path d="M3 7h13a1 1 0 0 1 1 1v10.5" />
+      <circle cx="17" cy="20" r="1.3" fill="currentColor" />
+    </Svg>
+  );
+}
+
+/** A page with a folded corner and two lines (Save to notes, the notes tile). */
+export function IconNotePage(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3h9l4 4v14H6z" />
+      <path d="M15 3v4h4M9 12h7M9 16h5" />
+    </Svg>
+  );
+}
+
+/** A bookmark (Mark as, the marks empty states). */
+export function IconBookmark(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3h12v18l-6-4-6 4z" />
+    </Svg>
+  );
+}
