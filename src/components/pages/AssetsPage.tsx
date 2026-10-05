@@ -419,7 +419,7 @@ export function AssetsPage() {
   const handleAddLink = useCallback(
     async (url: string, name: string): Promise<LinkOutcome> => {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
-        return { ok: false, message: "Couldn't add the link. Check your connection and retry" };
+        return { ok: false, message: "Couldn't add the link. Try again." };
       }
       if (workspaceId === null) {
         return { ok: false, message: 'No workspace selected.' };
@@ -449,7 +449,7 @@ export function AssetsPage() {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
         return {
           ok: false,
-          message: "Couldn't create the folder. Check your connection and retry",
+          message: "Couldn't create the folder. Try again.",
         };
       }
       if (workspaceId === null) {
@@ -478,7 +478,7 @@ export function AssetsPage() {
   const handleMoveAssets = useCallback(
     async (targetFolderId: string | null): Promise<MoveAssetsOutcome> => {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
-        return { ok: false, message: "Couldn't move the files. Check your connection and retry" };
+        return { ok: false, message: "Couldn't move the files. Try again." };
       }
       if (workspaceId === null) {
         return { ok: false, message: 'No workspace selected.' };
@@ -508,7 +508,7 @@ export function AssetsPage() {
         return {
           ok: false,
           nameTaken: false,
-          message: "Couldn't rename the folder. Check your connection and retry",
+          message: "Couldn't rename the folder. Try again.",
         };
       }
       if (workspaceId === null) {
@@ -540,7 +540,7 @@ export function AssetsPage() {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
         return {
           ok: false,
-          message: "Couldn't delete the folder. Check your connection and retry",
+          message: "Couldn't delete the folder. Try again.",
         };
       }
       if (workspaceId === null) {
@@ -574,7 +574,7 @@ export function AssetsPage() {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
         return {
           ok: false,
-          message: "Couldn't rename this asset. Check your connection and retry",
+          message: "Couldn't rename this asset. Try again.",
         };
       }
       if (workspaceId === null) {

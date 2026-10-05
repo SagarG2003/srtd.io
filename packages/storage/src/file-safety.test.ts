@@ -979,3 +979,101 @@ describe('fix-round audit regressions', () => {
     expect(await codeOf('a.pdf', MIME.pdf, fromLatin1(tagged))).toBe('ok');
   });
 });
+
+describe('G1/G2 external relationships by target location', () => {
+  const T = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const docxWith = (type: string, target: string, external = true) =>
+    office('docx', {
+      extra: [
+        {
+          name: 'word/_rels/document.xml.rels',
+          data: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="${T}/${type}" Target="${target.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"${external ? ' TargetMode="External"' : ''}/></Relationships>`,
+        },
+      ],
+    });
+
+  const network = [
+    'http://evil.test/t.dotm',
+    'HTTPS://evil.test/t.dotm',
+    'ftp://evil.test/t.dotm',
+    '\\\\server\\share\\t.dotm',
+    '//server/share/t.dotm',
+    '\\\\?\\UNC\\server\\share\\t.dotm',
+    'file://server/share/t.dotm',
+    'file:////server/share/t.dotm',
+    'file:\\\\server\\share\\t.dotm',
+    'file://%5C%5Cserver/t.dotm',
+    '%5C%5Cserver%5Cshare%5Ct.dotm',
+    'smb://server/share/t.dotm',
+    'ms-msdt:/id PCWDiagnostic',
+    'search-ms:query=x',
+  ];
+  const local = [
+    'file:///C:\\Users\\me\\Templates\\Normal.dotm',
+    'file:///C:/Program%20Files/Template.dotm',
+    'file:///',
+    'file://localhost/C:/t.dotm',
+    'C:\\Templates\\Report.dotm',
+    'Normal.dotm',
+    '../templates/report.dotm',
+    'templates/report.dotm',
+  ];
+
+  for (const type of ['attachedTemplate', 'oleObject', 'frame', 'subDocument']) {
+    it.each(network)(`G1 refuses an external ${type} at a network target %j`, async (target) => {
+      expect(await codeOf('a.docx', MIME.docx, docxWith(type, target))).toBe('external_content');
+    });
+    it.each(local)(`G1 passes an external ${type} at a local target %j`, async (target) => {
+      expect(await codeOf('a.docx', MIME.docx, docxWith(type, target))).toBe('ok');
+    });
+  }
+
+  it.each([
+    ['image', '\\\\server\\share\\logo.png'],
+    ['image', '//server/share/logo.png'],
+    ['image', 'file://server/share/logo.png'],
+    ['image', 'file:////server/share/logo.png'],
+    ['audio', '\\\\server\\share\\a.wav'],
+    ['video', 'file://fileserver/v.mp4'],
+    ['externalLinkPath', '\\\\server\\share\\book.xlsx'],
+  ])('G2 refuses an external %s loaded from a share %j', async (type, target) => {
+    const result = await inspectUpload({
+      filename: 'a.docx',
+      mimeType: MIME.docx,
+      bytes: docxWith(type, target),
+    });
+    expect(result).toEqual({
+      ok: false,
+      code: 'external_content',
+      message: "This file loads content from the internet and can't be shared.",
+    });
+  });
+
+  it.each([
+    ['image', 'http://cdn.example.test/logo.png'],
+    ['image', 'https://cdn.example.test/logo.png'],
+    ['image', 'file:///C:/pictures/logo.png'],
+    ['image', 'logo.png'],
+    ['hyperlink', '\\\\server\\share\\doc.docx'],
+    ['hyperlink', 'file://server/share/doc.docx'],
+    ['hyperlink', 'https://srtd.io'],
+  ])('G2 passes an external %s at %j', async (type, target) => {
+    expect(await codeOf('a.docx', MIME.docx, docxWith(type, target))).toBe('ok');
+  });
+
+  it('G2 still refuses a protocol handler even in a hyperlink', async () => {
+    expect(await codeOf('a.docx', MIME.docx, docxWith('hyperlink', 'ms-msdt:/id x'))).toBe(
+      'external_content',
+    );
+  });
+
+  it('G1 leaves internal (non-External) relationships alone', async () => {
+    expect(
+      await codeOf(
+        'a.docx',
+        MIME.docx,
+        docxWith('attachedTemplate', 'http://evil.test/t.dotm', false),
+      ),
+    ).toBe('ok');
+  });
+});

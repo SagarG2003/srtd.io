@@ -16,8 +16,9 @@
 //      carry macros (vbaProject.bin or a macroEnabled content type), encrypted
 //      entries, OLE objects, any embedded archive other than a docx, xlsx or
 //      pptx (checked by the same rules one level deep only), or relationships
-//      that load a template, OLE object, frame or sub-document from outside
-//      the file or name an ms-*/msdt protocol handler.
+//      that load a template, OLE object, frame or sub-document from the
+//      network, load anything but a hyperlink from a network share, or name
+//      an ms-*/msdt protocol handler.
 
 import { BLOCKED_MIME_TYPES, EXTENSIONS_BY_MIME, normalizeMime } from './mime';
 import { isOle2Signature, isZipSignature } from './magic-bytes';
@@ -1529,10 +1530,47 @@ const REMOTE_LOADING_TYPES: ReadonlySet<string> = new Set([
 /** A Windows protocol handler such as ms-msdt: (Follina) or msdt:. */
 const PROTOCOL_HANDLER = /(^|[^a-z0-9+.-])(ms-[a-z0-9+.-]*|msdt|search-ms):/i;
 
+/** Decode %xx escapes without throwing on malformed ones. */
+function percentDecode(text: string): string {
+  return text.replace(/%([0-9a-f]{2})/gi, (_whole, hex: string) =>
+    String.fromCharCode(parseInt(hex, 16)),
+  );
+}
+
 /**
- * .rels rules: an external relationship of a remote-loading type, or any Target
- * naming an ms-* / msdt protocol handler, is refused. Ordinary external
- * hyperlinks (and every internal relationship) pass.
+ * Where a relationship target points:
+ * - 'share': a Windows share or remote file host (\\server\share, //server,
+ *   \\?\UNC\..., file://host/... with a host other than localhost, file:////...);
+ * - 'web': any other URI scheme (http, https, ftp, smb, ...);
+ * - 'local': a local or relative path (file:///C:/..., C:\..., Normal.dotm).
+ * Backslashes read as slashes and %xx escapes are decoded first.
+ */
+function targetLocation(rawTarget: string): 'share' | 'web' | 'local' {
+  const target = percentDecode(rawTarget.trim()).replace(/\\/g, '/');
+  if (target.startsWith('//')) return 'share';
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(target)?.[1]?.toLowerCase();
+  // No scheme, or a single letter (a drive such as C:), is a local path.
+  if (scheme === undefined || scheme.length === 1) return 'local';
+  if (scheme !== 'file') return 'web';
+  const rest = target.slice('file:'.length);
+  if (!rest.startsWith('//')) return 'local';
+  const authority = rest.slice(2);
+  if (authority.startsWith('/')) {
+    // file:/// is a local path; a fourth slash starts a share path.
+    return authority.startsWith('//') ? 'share' : 'local';
+  }
+  const host = authority.split('/')[0]?.toLowerCase() ?? '';
+  return host === '' || host === 'localhost' ? 'local' : 'share';
+}
+
+/**
+ * .rels rules:
+ * - any Target naming an ms-* / msdt / search-ms protocol handler is refused;
+ * - an external template, OLE object, frame or sub-document is refused when its
+ *   target is on the network (web or share); local paths pass;
+ * - any other external relationship except a hyperlink (an image, audio,
+ *   video...) is refused when it points at a share, which Office fetches on
+ *   open; web images and every hyperlink pass.
  */
 function checkRelationships(raw: string): FileSafetyResult {
   const tags = xmlStartTags(raw);
@@ -1540,11 +1578,21 @@ function checkRelationships(raw: string): FileSafetyResult {
   for (const tag of tags) {
     if (tag.name !== 'relationship') continue;
     const target = tag.attrs.get('target') ?? '';
-    if (PROTOCOL_HANDLER.test(target.trim())) return refuse('external_content');
+    if (
+      PROTOCOL_HANDLER.test(target.trim()) ||
+      PROTOCOL_HANDLER.test(percentDecode(target.trim()))
+    ) {
+      return refuse('external_content');
+    }
     const mode = (tag.attrs.get('targetmode') ?? '').trim().toLowerCase();
     if (mode !== 'external') continue;
-    const type = (tag.attrs.get('type') ?? '').trim().toLowerCase();
-    if (REMOTE_LOADING_TYPES.has(type.split('/').pop() ?? '')) return refuse('external_content');
+    const kind = (tag.attrs.get('type') ?? '').trim().toLowerCase().split('/').pop() ?? '';
+    const location = targetLocation(target);
+    if (REMOTE_LOADING_TYPES.has(kind)) {
+      if (location !== 'local') return refuse('external_content');
+    } else if (kind !== 'hyperlink' && location === 'share') {
+      return refuse('external_content');
+    }
   }
   return OK;
 }
