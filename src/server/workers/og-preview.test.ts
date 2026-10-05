@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { SupabaseClient } from '@supabase/supabase-js';
+import type { Database } from '@srtdio/schemas';
+
 import worker, {
+  createOgPreviewStore,
   isCrawler,
   renderBriefLinkCard,
   renderPostCard,
@@ -128,9 +132,8 @@ describe('worker.fetch passthrough', () => {
   });
 });
 
-describe('worker.fetch diagnostic error surface', () => {
-  // A human /posts/* request routes to passthrough, whose fetch we make throw the
-  // given value (any shape, not just an Error).
+describe('worker.fetch error surface', () => {
+  // A human /posts/* request routes to passthrough, whose fetch we make throw.
   function throwingFetch(thrown: unknown): void {
     vi.stubGlobal(
       'fetch',
@@ -138,57 +141,7 @@ describe('worker.fetch diagnostic error surface', () => {
     );
   }
 
-  it('fully serializes a thrown plain object (not "[object Object]") when x-og-debug: 1', async () => {
-    throwingFetch({ message: 'boom', code: 'X' });
-    const req = new Request('https://srtd.io/posts/abc', {
-      headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120.0', 'x-og-debug': '1' },
-    });
-    const res = await worker.fetch(req, env);
-    expect(res.status).toBe(500);
-    expect(res.headers.get('content-type')).toBe('text/plain; charset=utf-8');
-    const body = await res.text();
-    expect(body.length).toBeGreaterThan(0);
-    expect(body).not.toContain('[object Object]');
-    expect(body).toContain('boom');
-    expect(body).toContain('X');
-  });
-
-  it('reports env sanity (host, key len and prefix) without printing secret values', async () => {
-    throwingFetch({ message: 'boom', code: 'X' });
-    const req = new Request('https://srtd.io/posts/abc', {
-      headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120.0', 'x-og-debug': '1' },
-    });
-    const res = await worker.fetch(req, env);
-    const body = await res.text();
-    expect(body).toContain('SUPABASE_URL host=test.supabase.co');
-    expect(body).toContain(`SUPABASE_SECRET_KEY len=${env.SUPABASE_SECRET_KEY.length}`);
-    expect(body).not.toContain(env.SUPABASE_SECRET_KEY);
-  });
-
-  it('serializes a thrown Error including its name, message and a code property', async () => {
-    const err = Object.assign(new Error('db exploded'), { code: '42P01' });
-    throwingFetch(err);
-    const req = new Request('https://srtd.io/posts/abc', {
-      headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120.0', 'x-og-debug': '1' },
-    });
-    const res = await worker.fetch(req, env);
-    expect(res.status).toBe(500);
-    const body = await res.text();
-    expect(body).toContain('Error: db exploded');
-    expect(body).toContain('42P01');
-  });
-
-  it('caps the debug body at 2000 chars', async () => {
-    throwingFetch(new Error('x'.repeat(5000)));
-    const req = new Request('https://srtd.io/posts/abc', {
-      headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120.0', 'x-og-debug': '1' },
-    });
-    const res = await worker.fetch(req, env);
-    const body = await res.text();
-    expect(body.length).toBeLessThanOrEqual(2000);
-  });
-
-  it('returns an empty 500 when route throws without the x-og-debug header', async () => {
+  it('returns an empty 500 when route throws', async () => {
     throwingFetch(new Error('boom from passthrough'));
     const req = new Request('https://srtd.io/posts/abc', {
       headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120.0' },
@@ -196,8 +149,20 @@ describe('worker.fetch diagnostic error surface', () => {
     const res = await worker.fetch(req, env);
     expect(res.status).toBe(500);
     expect(res.headers.get('content-type')).not.toBe('text/plain; charset=utf-8');
+    expect(await res.text()).toBe('');
+  });
+
+  it('ignores x-og-debug: still an empty 500 with no env or key details', async () => {
+    throwingFetch({ message: 'boom', code: 'X' });
+    const req = new Request('https://srtd.io/posts/abc', {
+      headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120.0', 'x-og-debug': '1' },
+    });
+    const res = await worker.fetch(req, env);
+    expect(res.status).toBe(500);
     const body = await res.text();
     expect(body).toBe('');
+    expect(body).not.toContain('SUPABASE_SECRET_KEY');
+    expect(body).not.toContain(env.SUPABASE_SECRET_KEY.slice(0, 6));
   });
 });
 
@@ -540,3 +505,109 @@ describe('deleted post refuses on both endpoints', () => {
 function okImageUnused(): Promise<Response> {
   return Promise.resolve(new Response(null, { status: 200 }));
 }
+
+/** One recorded query: the table, the select string, and every filter call. */
+interface RecordedQuery {
+  table: string;
+  select: string;
+  filters: Array<[method: string, column: string, value: unknown]>;
+}
+
+/**
+ * A fake supabase-js client: records each from(...) chain and resolves
+ * maybeSingle() with the row the test supplies for that table.
+ */
+function recordingClient(rows: Record<string, unknown>): {
+  client: SupabaseClient<Database>;
+  queries: RecordedQuery[];
+} {
+  const queries: RecordedQuery[] = [];
+  const from = (table: string): unknown => {
+    const q: RecordedQuery = { table, select: '', filters: [] };
+    queries.push(q);
+    const builder = {
+      select(columns: string) {
+        q.select = columns;
+        return builder;
+      },
+      eq(column: string, value: unknown) {
+        q.filters.push(['eq', column, value]);
+        return builder;
+      },
+      is(column: string, value: unknown) {
+        q.filters.push(['is', column, value]);
+        return builder;
+      },
+      order() {
+        return builder;
+      },
+      limit() {
+        return builder;
+      },
+      maybeSingle() {
+        return Promise.resolve({ data: rows[table] ?? null, error: null });
+      },
+    };
+    return builder;
+  };
+  return { client: { from } as unknown as SupabaseClient<Database>, queries };
+}
+
+const LIBRARY_ONLY: Array<[string, string, unknown]> = [
+  ['eq', 'asset_versions.assets.origin', 'library'],
+  ['is', 'asset_versions.assets.deleted_at', null],
+];
+
+describe('createOgPreviewStore: chat files stay in chat', () => {
+  it('findFirstPostImage embeds the version asset and filters to live library assets', async () => {
+    const { client, queries } = recordingClient({
+      asset_attachments: {
+        asset_version_id: VERSION_ID,
+        asset_versions: { width: 10, height: 20 },
+      },
+    });
+    const image = await createOgPreviewStore(client).findFirstPostImage(POST_ID);
+    expect(image).toEqual({ assetVersionId: VERSION_ID, width: 10, height: 20 });
+    const q = queries.find((x) => x.table === 'asset_attachments');
+    expect(q?.select).toContain('assets!asset_versions_asset_id_fkey!inner(origin, deleted_at)');
+    expect(q?.filters).toEqual(expect.arrayContaining(LIBRARY_ONLY));
+  });
+
+  it('findFirstPostImage returns null when no live library image matches (no-image card)', async () => {
+    const { client } = recordingClient({});
+    const store = createOgPreviewStore(client);
+    expect(await store.findFirstPostImage(POST_ID)).toBeNull();
+  });
+
+  it('findBoundImage embeds the version asset and filters to live library assets', async () => {
+    const { client, queries } = recordingClient({
+      posts: { id: POST_ID },
+      asset_attachments: {
+        asset_versions: { r2_key: R2_KEY, workspaces: { asset_bucket: BUCKET } },
+      },
+    });
+    const locator = await createOgPreviewStore(client).findBoundImage({
+      postId: POST_ID,
+      assetVersionId: VERSION_ID,
+    });
+    expect(locator).toEqual({ bucket: BUCKET, r2Key: R2_KEY });
+    const q = queries.find((x) => x.table === 'asset_attachments');
+    expect(q?.select).toContain('assets!asset_versions_asset_id_fkey!inner(origin, deleted_at)');
+    expect(q?.filters).toEqual(expect.arrayContaining(LIBRARY_ONLY));
+  });
+
+  it('a chat-origin or deleted version (no filtered match) is a cacheable 404 with nothing signed', async () => {
+    const { client } = recordingClient({ posts: { id: POST_ID } });
+    const signer = new RecordingSigner();
+    const fetchImage = vi.fn(() => Promise.resolve(new Response('bytes')));
+    const res = await serveOgImage(POST_ID, VERSION_ID, {
+      store: createOgPreviewStore(client),
+      signer,
+      fetchImage,
+    });
+    expect(res.status).toBe(404);
+    expect(res.headers.get('cache-control')).toBe('public, max-age=60');
+    expect(signer.calls).toHaveLength(0);
+    expect(fetchImage).not.toHaveBeenCalled();
+  });
+});
