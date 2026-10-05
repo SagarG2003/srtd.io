@@ -315,14 +315,6 @@ export function TranscribeGlyph(props: { size?: number }): ReactElement {
 }
 
 /**
- * The main view in display order: Reply, Forward, Copy or Transcribe, Star (or
- * Unstar), "Save to notes",
- * "Mark as" (or the static "Marked as <type>"), "Remind me", Edit, Delete (or the locked
- * line), then Select
- * under a divider. Rows that do not apply are not rendered. Pure (no hooks) so
- * the row set is unit-tested without a DOM.
- */
-/**
  * A row's tap, inside its click: the action runs before the menu closes, so
  * Reply focuses the composer within the user's own tap (decision 128) and the
  * menu's focus return finds focus already taken. Mark opens its submenu; Back
@@ -345,6 +337,14 @@ export function runMenuItem(
   menu.close();
 }
 
+/**
+ * The main view in display order: Reply, Forward, Copy or Transcribe, Star (or
+ * Unstar), "Save to notes",
+ * "Mark as" (or the static "Marked as <type>"), "Remind me", Edit, Delete (or the locked
+ * line), then Select
+ * under a divider. Rows that do not apply are not rendered. Pure (no hooks) so
+ * the row set is unit-tested without a DOM.
+ */
 export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
   const items: MessageMenuItem[] = [
     { kind: 'action', key: 'reply', label: 'Reply', icon: <IconReply />, run: props.onReply },

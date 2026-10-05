@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { installHarnessNetwork } from '../fixtures/harness-routes';
-import { PEER_NAME } from '../fixtures/chat-data';
+import { MAYA_NAME, PEER_NAME } from '../fixtures/chat-data';
 
 // Decision 128: every Reply puts the cursor in the composer at once (long-press
 // menu, swipe right, laptop chevron, right-click), so typing lands there with
@@ -22,8 +22,8 @@ async function openDm(page: Page): Promise<void> {
 }
 
 /** Wait until the list stops scrolling: a scroll closes the action menu. */
-async function settle(page: Page): Promise<void> {
-  await bubble(page).scrollIntoViewIfNeeded();
+async function settle(page: Page, target: Locator = bubble(page)): Promise<void> {
+  await target.scrollIntoViewIfNeeded();
   let last = -1;
   await expect
     .poll(
@@ -189,5 +189,55 @@ test.describe('laptop', () => {
     await menuReply(page);
     await expectFocusedAtEnd(page);
     await typeLands(page, '');
+  });
+});
+
+test.describe('iPhone, cards and threads', () => {
+  async function openMaya(page: Page): Promise<void> {
+    await installHarnessNetwork(page);
+    await page.goto('/chat');
+    await page.getByText(MAYA_NAME, { exact: true }).first().click();
+    await page.locator('[data-msg-id]').first().waitFor({ state: 'visible', timeout: 8000 });
+    await page.waitForTimeout(300);
+  }
+
+  /** Hold like a finger: pointerdown, 700ms still, pointerup on the same target. */
+  async function hold(page: Page, target: Locator): Promise<void> {
+    const at = await centre(target);
+    const touch = { ...at, pointerType: 'touch', isPrimary: true, pointerId: 11 };
+    await target.dispatchEvent('pointerdown', touch);
+    await page.waitForTimeout(700);
+    await target.dispatchEvent('pointerup', touch);
+  }
+
+  test('card hold Talk about focuses the composer on release', async ({ page }, testInfo) => {
+    await openMaya(page);
+    await expect(composer(page)).not.toBeFocused();
+    const card = page.locator('[role="button"][aria-label^="Open post"]').last();
+    await settle(page, card);
+    await hold(page, card);
+    await expect(page.getByRole('menu')).toHaveCount(0);
+    await expectFocusedAtEnd(page);
+    await page.screenshot({ path: testInfo.outputPath('talk-about-hold.png') });
+  });
+
+  test('Reply inside the thread view focuses the view composer', async ({ page }, testInfo) => {
+    await openMaya(page);
+    await page.locator('[data-thread-open="replies"]', { hasText: '4 replies' }).click();
+    const view = page.locator('[data-thread-view]');
+    await expect(view).toHaveCSS('opacity', '1');
+    const input = view.getByPlaceholder('Reply in thread');
+    await input.evaluate((el) => (el as HTMLTextAreaElement).blur());
+    const member = view.locator('li[data-msg-id] [data-bubble]').last();
+    await settle(page, member);
+    await hold(page, member);
+    await menuReply(page);
+    const focused = await view
+      .locator('form textarea')
+      .evaluate((el) => document.activeElement === el);
+    expect(focused, 'thread view composer is document.activeElement').toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('reply-thread-view.png') });
+    await page.keyboard.type('hi');
+    await expect(view.locator('form textarea')).toHaveValue('hi');
   });
 });
