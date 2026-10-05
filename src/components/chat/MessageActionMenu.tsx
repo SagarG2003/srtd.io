@@ -8,22 +8,23 @@ import type {
 import { createPortal } from 'react-dom';
 import {
   IconAlarmClock,
-  IconCheck,
+  IconBookmark,
   IconChevronLeft,
   IconChevronRight,
   IconCopy,
   IconEdit,
   IconForward,
-  IconPin,
+  IconNotePage,
   IconPlus,
   IconReply,
+  IconSelectText,
   IconStar,
+  IconStarFilled,
   IconTrash,
   IconX,
 } from '@/components/ui/icons';
 import { Button } from '@/components/ui/Button';
 import { IconButton } from '@/components/ui/IconButton';
-import { POPOVER_PANEL } from '@/components/ui/popover-classes';
 import { MARK_TONE } from '@/components/chat/MarkBits';
 import { useChatLayout, type ChatLayout } from '@/components/chat/chat-type';
 import { useBellOptional } from '@/components/chat/BellContext';
@@ -181,9 +182,12 @@ interface MessageActionMenuProps {
   onSaveToNotes?: () => void;
   /** The menu is in Personal notes: Delete carries no "30 min" hint. */
   notes?: boolean;
-  /** Offers "Select" (multi-select forward and delete). */
-  canSelect?: boolean;
-  onSelect?: () => void;
+  /**
+   * Offers "Select": select part of this message's body text in place (a
+   * recorded, live message with a typed body, never a voice note alone).
+   */
+  canSelectText?: boolean;
+  onSelectText?: () => void;
   /**
    * Offers "Remind me" (a recorded message). When absent, the menu offers it
    * itself for the held bubble's message inside a BellProvider.
@@ -217,8 +221,7 @@ export type MessageMenuItem =
       /** A time after the label, in mono ("Reminder · 9:00 AM"). */
       mono?: string;
     }
-  | { kind: 'note'; key: string; label: string; icon: ReactNode }
-  | { kind: 'divider'; key: string };
+  | { kind: 'note'; key: string; label: string; icon: ReactNode };
 
 type MenuItemProps = Pick<
   MessageActionMenuProps,
@@ -243,8 +246,8 @@ type MenuItemProps = Pick<
   | 'canSaveToNotes'
   | 'onSaveToNotes'
   | 'notes'
-  | 'canSelect'
-  | 'onSelect'
+  | 'canSelectText'
+  | 'onSelectText'
   | 'canRemind'
   | 'onRemind'
   | 'reminderAt'
@@ -273,26 +276,6 @@ export function BanGlyph(props: { size?: number }): ReactElement {
 
 /** The menu row that copies a message into Personal notes. */
 export const SAVE_TO_NOTES_LABEL = 'Save to notes';
-
-/** The Save to notes glyph: a bookmark, drawn like the icon set (stroke 1.7). */
-export function SaveToNotesGlyph(props: { size?: number }): ReactElement {
-  const size = props.size ?? 18;
-  return (
-    <svg
-      aria-hidden="true"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.7}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M6 3h12v18l-6-4-6 4z" />
-    </svg>
-  );
-}
 
 /** The Transcribe row's glyph: three text lines, drawn like the icon set (stroke 1.7). */
 export function TranscribeGlyph(props: { size?: number }): ReactElement {
@@ -337,24 +320,36 @@ export function runMenuItem(
   menu.close();
 }
 
+/** The menu's glyph size (the row icons, 22px at stroke 1.7). */
+export const MENU_ICON_SIZE = 22;
+
+/** The row that selects part of one message's text in place. */
+export const SELECT_TEXT_LABEL = 'Select';
+
 /**
- * The main view in display order: Reply, Forward, Copy or Transcribe, Star (or
- * Unstar), "Save to notes",
- * "Mark as" (or the static "Marked as <type>"), "Remind me", Edit, Delete (or the locked
- * line), then Select
- * under a divider. Rows that do not apply are not rendered. Pure (no hooks) so
- * the row set is unit-tested without a DOM.
+ * The main view in display order: Reply, Forward, Copy, Transcribe, Select,
+ * Star (or Unstar), "Save to notes", "Remind me" (or "Reminder · <time>"),
+ * "Mark as" (or the static "Marked as <type>"), Edit, Delete (or the locked
+ * line). No dividers. Rows that do not apply are not rendered. Pure (no hooks)
+ * so the row set is unit-tested without a DOM.
  */
 export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
+  const size = MENU_ICON_SIZE;
   const items: MessageMenuItem[] = [
-    { kind: 'action', key: 'reply', label: 'Reply', icon: <IconReply />, run: props.onReply },
+    {
+      kind: 'action',
+      key: 'reply',
+      label: 'Reply',
+      icon: <IconReply size={size} />,
+      run: props.onReply,
+    },
   ];
   if (props.canForward === true) {
     items.push({
       kind: 'action',
       key: 'forward',
       label: 'Forward',
-      icon: <IconForward />,
+      icon: <IconForward size={size} />,
       run: () => props.onForward?.(),
     });
   }
@@ -363,7 +358,7 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
       kind: 'action',
       key: 'copy',
       label: 'Copy',
-      icon: <IconCopy />,
+      icon: <IconCopy size={size} />,
       run: props.onCopy,
     });
   }
@@ -372,16 +367,26 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
       kind: 'action',
       key: 'transcribe',
       label: 'Transcribe',
-      icon: <TranscribeGlyph />,
+      icon: <TranscribeGlyph size={size} />,
       run: () => props.onTranscribe?.(),
     });
   }
+  if (props.canSelectText === true) {
+    items.push({
+      kind: 'action',
+      key: 'select-text',
+      label: SELECT_TEXT_LABEL,
+      icon: <IconSelectText size={size} />,
+      run: () => props.onSelectText?.(),
+    });
+  }
   if (props.canStar === true) {
+    const starred = props.starred === true;
     items.push({
       kind: 'action',
       key: 'star',
-      label: props.starred === true ? UNSTAR_LABEL : STAR_LABEL,
-      icon: <IconStar />,
+      label: starred ? UNSTAR_LABEL : STAR_LABEL,
+      icon: starred ? <IconStarFilled size={size} /> : <IconStar size={size} />,
       run: () => props.onStar?.(),
     });
   }
@@ -390,25 +395,8 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
       kind: 'action',
       key: 'save-notes',
       label: SAVE_TO_NOTES_LABEL,
-      icon: <SaveToNotesGlyph />,
+      icon: <IconNotePage size={size} />,
       run: () => props.onSaveToNotes?.(),
-    });
-  }
-  if (props.markedAs != null) {
-    items.push({
-      kind: 'note',
-      key: 'marked',
-      label: `Marked as ${TYPE_LABEL[props.markedAs]}`,
-      icon: <IconPin />,
-    });
-  } else if ((props.markOptions ?? []).length > 0) {
-    items.push({
-      kind: 'action',
-      key: 'mark',
-      label: 'Mark as',
-      icon: <IconPin />,
-      run: () => {},
-      submenu: true,
     });
   }
   if (props.canRemind === true) {
@@ -417,22 +405,44 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
       kind: 'action',
       key: 'remind',
       label: at !== null && !Number.isNaN(at.getTime()) ? REMINDER_SET_LABEL : 'Remind me',
-      icon: <IconAlarmClock />,
+      icon: <IconAlarmClock size={size} />,
       run: () => props.onRemind?.(),
       ...(at !== null && !Number.isNaN(at.getTime())
         ? { mono: reminderMenuTime(at, new Date()) }
         : {}),
     });
   }
+  if (props.markedAs != null) {
+    items.push({
+      kind: 'note',
+      key: 'marked',
+      label: `Marked as ${TYPE_LABEL[props.markedAs]}`,
+      icon: <IconBookmark size={size} />,
+    });
+  } else if ((props.markOptions ?? []).length > 0) {
+    items.push({
+      kind: 'action',
+      key: 'mark',
+      label: 'Mark as',
+      icon: <IconBookmark size={size} />,
+      run: () => {},
+      submenu: true,
+    });
+  }
   if (props.lockedByMark === true) {
-    items.push({ kind: 'note', key: 'locked', label: MARKED_LOCKED_LABEL, icon: <BanGlyph /> });
+    items.push({
+      kind: 'note',
+      key: 'locked',
+      label: MARKED_LOCKED_LABEL,
+      icon: <BanGlyph size={size} />,
+    });
   } else {
     if (props.canEdit === true) {
       items.push({
         kind: 'action',
         key: 'edit',
         label: 'Edit',
-        icon: <IconEdit />,
+        icon: <IconEdit size={size} />,
         hint: '15 min',
         run: () => props.onEdit?.(),
       });
@@ -442,22 +452,12 @@ export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
         kind: 'action',
         key: 'delete',
         label: 'Delete',
-        icon: <IconTrash />,
+        icon: <IconTrash size={size} />,
         ...(props.notes === true ? {} : { hint: '30 min' }),
         danger: true,
         run: () => props.onDelete?.(),
       });
     }
-  }
-  if (props.canSelect === true) {
-    items.push({ kind: 'divider', key: 'select-divider' });
-    items.push({
-      kind: 'action',
-      key: 'select',
-      label: 'Select',
-      icon: <IconCheck />,
-      run: () => props.onSelect?.(),
-    });
   }
   return items;
 }
@@ -472,7 +472,7 @@ export function markSubmenuItems(
       kind: 'action',
       key: 'back',
       label: 'Back',
-      icon: <IconChevronLeft />,
+      icon: <IconChevronLeft size={MENU_ICON_SIZE} />,
       run: onBack,
       submenu: true,
     },
@@ -518,24 +518,24 @@ export function focusFirstMenuItem(root: MenuRoot | null): boolean {
   return true;
 }
 
-/** One row of the menu box: 50px, 17px text, the icon (or dot) left, a muted hint or chevron right. */
-function MenuRow(props: {
+/** A row's box: full-bleed, at least 44px, 16px side padding, 14px to the label. */
+export const MENU_ROW = 'flex min-h-[44px] w-full items-center gap-[14px] px-4';
+
+/** One row of the menu box: 16px text, the 22px icon (or dot) left in the row's ink, a muted hint or chevron right. */
+export function MenuRow(props: {
   item: MessageMenuItem;
   onRun: (item: MessageMenuItem) => void;
 }): ReactElement {
   const item = props.item;
-  if (item.kind === 'divider') {
-    return <div role="separator" className="mx-1 my-1 border-t border-border" />;
-  }
   if (item.kind === 'note') {
     return (
       <div
         role="menuitem"
         aria-disabled="true"
         data-menu-note={item.key}
-        className="flex min-h-[50px] items-center gap-3 px-3 text-[15px] text-fg-3"
+        className={cn(MENU_ROW, 'text-[15px] text-fg-3')}
       >
-        <span className="flex w-5 shrink-0 justify-center">{item.icon}</span>
+        <span className="flex w-[22px] shrink-0 justify-center">{item.icon}</span>
         <span className="min-w-0">{item.label}</span>
       </div>
     );
@@ -556,17 +556,13 @@ function MenuRow(props: {
       data-menu-item={item.key}
       onClick={() => props.onRun(item)}
       className={cn(
-        'flex min-h-[50px] w-full items-center gap-3 rounded-lg px-3 text-left text-[17px] transition-colors',
+        MENU_ROW,
+        'text-left text-[16px] transition-colors',
         'hover:bg-panel-2 focus:outline-none focus-visible:bg-panel-2',
         item.danger === true ? 'text-bad' : 'text-fg',
       )}
     >
-      <span
-        className={cn(
-          'flex w-5 shrink-0 items-center justify-center',
-          item.danger === true ? 'text-bad' : 'text-fg-2',
-        )}
-      >
+      <span data-menu-icon="" className="flex w-[22px] shrink-0 items-center justify-center">
         {icon}
       </span>
       <span className="min-w-0 flex-1 truncate">
@@ -595,6 +591,71 @@ interface Coords {
 }
 
 /**
+ * The menu panel's width. Six 44x44 reaction cells (the touch-target floor)
+ * plus the row's 10px sides need 284px, so the panel is that wide, never less.
+ */
+export const MENU_WIDTH_PX = 284;
+
+/** What computeMenuPlacement decides; see there. */
+export interface MenuPlacement {
+  /** How far the held bubble's copy moves on Y (0 or negative: up only). */
+  bubbleShiftY: number;
+  /** The menu's top edge (viewport px): always below the held copy. */
+  menuTop: number;
+  /** The held copy's visible height when it is too tall to fit above the menu. */
+  clipBubbleHeight: number | undefined;
+}
+
+/**
+ * WhatsApp-style placement: the menu always opens below the held bubble,
+ * `gap` under it. When there is no room below, the bubble's copy moves up by
+ * the shortfall (never so far that its top passes safeTop + margin). A copy
+ * still too tall is clipped to the room left (its top stays visible) and the
+ * menu sits right under the clipped copy. Never above the bubble. Pure.
+ */
+export function computeMenuPlacement(input: {
+  bubbleRect: { top: number; bottom: number };
+  menuHeight: number;
+  /** The visible viewport's height (visualViewport when present: the keyboard is out). */
+  viewportHeight: number;
+  safeTop: number;
+  safeBottom: number;
+  gap: number;
+  margin: number;
+}): MenuPlacement {
+  const { bubbleRect, menuHeight, gap, margin } = input;
+  const bubbleHeight = Math.max(0, bubbleRect.bottom - bubbleRect.top);
+  const floor = input.viewportHeight - input.safeBottom - margin;
+  const ceiling = input.safeTop + margin;
+  const shortfall = bubbleRect.bottom + gap + menuHeight - floor;
+  if (shortfall <= 0) {
+    return { bubbleShiftY: 0, menuTop: bubbleRect.bottom + gap, clipBubbleHeight: undefined };
+  }
+  // Up by the shortfall, but the copy's top never above the ceiling (and never down).
+  const bubbleShiftY = Math.min(0, Math.max(-shortfall, ceiling - bubbleRect.top));
+  const top = bubbleRect.top + bubbleShiftY;
+  const room = Math.max(0, floor - menuHeight - gap - top);
+  if (bubbleHeight <= room) {
+    return { bubbleShiftY, menuTop: top + bubbleHeight + gap, clipBubbleHeight: undefined };
+  }
+  return { bubbleShiftY, menuTop: top + room + gap, clipBubbleHeight: room };
+}
+
+/** The visible viewport's bottom in layout px: visualViewport (the iOS keyboard) when present. */
+export function visibleViewportHeight(win: {
+  innerHeight: number;
+  visualViewport?: { height: number; offsetTop: number } | null;
+}): number {
+  const vv = win.visualViewport;
+  return vv != null ? vv.offsetTop + vv.height : win.innerHeight;
+}
+
+/** The held copy's transform: translateY only, never X, scale or rotate. */
+export function heldTransform(shiftY: number): string {
+  return `translateY(${shiftY}px)`;
+}
+
+/**
  * The reactions row: the five quick reactions, then a "+" that opens the full
  * picker. Six 44x44 controls. Hook-free so the tests call it directly.
  */
@@ -611,9 +672,10 @@ export function ReactionsRow(props: {
   return (
     <div
       data-menu-reactions=""
+      // 8px 10px around six 44x44 cells; one hairline under it (the menu's only divider).
       className={cn(
-        'flex items-center justify-between',
-        !reactionsOnly && 'mb-1 border-b border-border pb-1',
+        'flex items-center justify-between px-[10px] py-2',
+        !reactionsOnly && 'border-b border-border',
       )}
     >
       {QUICK_REACTIONS.map((emoji) => (
@@ -1024,10 +1086,11 @@ export function EmojiPickerShell(props: {
  * it in its own colours. It focuses the first row on open and hands focus back
  * on close. Renders into document.body via a portal (mirrors Sheet.tsx) so it
  * escapes the scrolling thread. Position is computed from the anchor rect in a
- * two-pass layout effect: measured while hidden, then placed above (or below
- * when there is no room) and aligned to the bubble's side. Closes on backdrop
+ * two-pass layout effect: measured while hidden, then always placed below the
+ * bubble (computeMenuPlacement; the held copy moves up, translateY only, when
+ * there is no room) and aligned to the bubble's side. Closes on backdrop
  * click, Escape, scroll, or resize (scroll and resize never while the emoji
- * picker is open). Motion is opacity + scale only. All colours
+ * picker is open). The menu's motion is opacity + scale only. All colours
  * are design tokens, so light and dark stay at parity.
  */
 /** The reminder row's label when one is pending; the time follows in mono. */
@@ -1070,11 +1133,42 @@ export function remindProps(
   };
 }
 
+/**
+ * The menu panel (its own look; the shared popover panel stays as it is):
+ * 18px radius, a 1px border-border hairline, no inner padding (rows are
+ * full-bleed), clipped to the radius.
+ */
+export const MENU_PANEL =
+  'overflow-hidden rounded-[18px] border border-border bg-panel shadow-2xl transition-[opacity,transform] duration-fast motion-reduce:transition-none';
+
+/** The held copy's return on close, ms (the --dur-fast token). */
+export const HELD_RETURN_MS = 120;
+
+const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
+
+/** Whether the viewer asked for reduced motion (read once per open). */
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia?.(REDUCED_MOTION).matches === true;
+}
+
+/** A probe's padding in px (the safe-area insets, which JS cannot read directly). */
+function px(value: string): number {
+  const n = Number.parseFloat(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** The menu's placement and the held copy's shift, decided in the measuring pass. */
+interface Placed extends Coords {
+  shift: number;
+  clip: number | undefined;
+}
+
 export function MessageActionMenu(props: MessageActionMenuProps): ReactElement | null {
   const { open, onClose, anchor, mine, currentReaction, onReact, held } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const heldRef = useRef<HTMLDivElement>(null);
-  const [coords, setCoords] = useState<Coords | null>(null);
+  const safeRef = useRef<HTMLDivElement>(null);
+  const [coords, setCoords] = useState<Placed | null>(null);
   const [heldRect, setHeldRect] = useState<DOMRect | null>(null);
   const [shown, setShown] = useState(false);
   const [view, setView] = useState<'main' | 'mark'>('main');
@@ -1084,6 +1178,21 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
   const moreRef = useRef<HTMLButtonElement>(null);
   const layout = useChatLayout();
   const bell = useBellOptional();
+  // The held copy glides back on close (translateY only) when it had moved;
+  // Select, scroll, resize and reduced motion close at once.
+  const [instantClose, setInstantClose] = useState(false);
+  const [returning, setReturning] = useState(false);
+  const [reduced, setReduced] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setReturning(false);
+      setInstantClose(false);
+    } else if (coords !== null && coords.shift !== 0 && !instantClose && !reduced) {
+      setReturning(true);
+    }
+  }
 
   // The picker's chunk starts loading as the menu opens, so "+" opens it ready.
   useEffect(() => {
@@ -1099,28 +1208,41 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     setPicking(false);
   }, [open]);
 
+  // Measured while hidden, then placed below the held bubble (never above).
   useLayoutEffect(() => {
     if (!open || anchor === null) {
-      setCoords(null);
+      if (!returning) setCoords(null);
       return;
     }
     const el = containerRef.current;
     if (el === null) return;
-    const rect = el.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
-    let top = anchor.top - height - 8;
-    if (top < 8) {
-      top = Math.min(anchor.bottom + 8, window.innerHeight - height - 8);
-    }
-    const rawLeft = mine ? anchor.right - width : anchor.left;
-    const left = Math.max(8, Math.min(rawLeft, window.innerWidth - width - 8));
-    setCoords({ top, left });
-  }, [open, anchor, mine, view]);
+    setReduced(prefersReducedMotion());
+    // Layout size, not the rect: the entrance scale (0.96) would shrink it.
+    const rect = { width: el.offsetWidth, height: el.offsetHeight };
+    const safe = safeRef.current !== null ? getComputedStyle(safeRef.current) : null;
+    const placement = computeMenuPlacement({
+      bubbleRect: anchor,
+      menuHeight: rect.height,
+      viewportHeight: visibleViewportHeight(window),
+      safeTop: px(safe?.paddingTop ?? ''),
+      safeBottom: px(safe?.paddingBottom ?? ''),
+      gap: 8,
+      margin: 8,
+    });
+    const rawLeft = mine ? anchor.right - rect.width : anchor.left;
+    const left = Math.max(8, Math.min(rawLeft, window.innerWidth - rect.width - 8));
+    setCoords({
+      top: placement.menuTop,
+      left,
+      shift: placement.bubbleShiftY,
+      clip: placement.clipBubbleHeight,
+    });
+  }, [open, anchor, mine, view, returning]);
 
   // The held bubble: a static copy (no handlers, not focusable) at its rect.
   useLayoutEffect(() => {
     const slot = heldRef.current;
+    if (!open && returning) return;
     if (!open || held == null || !held.isConnected) {
       setHeldRect(null);
       slot?.replaceChildren();
@@ -1133,7 +1255,17 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     copy.style.transform = '';
     copy.style.transition = '';
     slot.replaceChildren(copy);
-  }, [open, held]);
+  }, [open, held, returning]);
+
+  // The return glide ends: drop the copy.
+  useEffect(() => {
+    if (!returning) return;
+    const id = window.setTimeout(() => {
+      setReturning(false);
+      setCoords(null);
+    }, HELD_RETURN_MS);
+    return () => window.clearTimeout(id);
+  }, [returning]);
 
   // Entrance motion: flip to the shown state after the menu mounts so the
   // opacity + scale transition runs (no translate, no rotate).
@@ -1175,14 +1307,18 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     }
     // While the picker is open the menu ignores scroll and resize (the
     // keyboard opening, iOS scrolling its input into view); otherwise a scroll
-    // outside the picker or any resize closes it.
+    // outside the picker or any resize closes it, at once (no glide back).
     function onScroll(event: Event): void {
       if (menuClosesOnViewport('scroll', { picking: pickingRef.current, target: event.target })) {
+        setInstantClose(true);
         onClose();
       }
     }
     function onResize(): void {
-      if (menuClosesOnViewport('resize', { picking: pickingRef.current, target: null })) onClose();
+      if (menuClosesOnViewport('resize', { picking: pickingRef.current, target: null })) {
+        setInstantClose(true);
+        onClose();
+      }
     }
     document.addEventListener('keydown', onKeyDown);
     window.addEventListener('scroll', onScroll, true);
@@ -1194,81 +1330,118 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     };
   }, [open, onClose]);
 
-  if (!open || anchor === null) return null;
+  const active = open && anchor !== null;
+  if (!active && !returning) return null;
 
   const reactionsOnly = props.reactionsOnly === true;
-  const items = reactionsOnly
+  const items = !active
     ? []
-    : view === 'mark'
-      ? markSubmenuItems(props, () => setView('main'))
-      : messageMenuItems({ ...props, ...remindProps(props, bell, held) });
-  const run = (item: MessageMenuItem): void =>
+    : reactionsOnly
+      ? []
+      : view === 'mark'
+        ? markSubmenuItems(props, () => setView('main'))
+        : messageMenuItems({ ...props, ...remindProps(props, bell, held) });
+  const run = (item: MessageMenuItem): void => {
+    // Select hands the bubble to the native selection: no glide back.
+    if (item.key === 'select-text') setInstantClose(true);
     runMenuItem(item, { openMark: () => setView('mark'), close: onClose });
+  };
+  // The copy's Y: the shift once shown (at once under reduced motion), home on the way out.
+  const shift = coords?.shift ?? 0;
+  const heldY = returning ? 0 : shown || reduced ? shift : 0;
+  const clip = coords?.clip;
 
   return createPortal(
     <>
       <div
         data-menu-backdrop=""
         className={cn(
-          'fixed inset-0 z-40 bg-black/55 transition-opacity duration-fast',
-          shown ? 'opacity-100' : 'opacity-0',
+          'fixed inset-0 z-40 bg-black/55 transition-opacity duration-fast motion-reduce:transition-none',
+          shown && !returning ? 'opacity-100' : 'opacity-0',
+          returning && 'pointer-events-none',
         )}
         onClick={onClose}
+      />
+      <div
+        ref={safeRef}
+        aria-hidden="true"
+        data-menu-safe=""
+        className="pointer-events-none invisible fixed left-0 top-0 h-0 w-0 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]"
       />
       <div
         ref={heldRef}
         aria-hidden="true"
         data-menu-held=""
-        className="pointer-events-none fixed z-40 flex"
+        data-shift={shift}
+        className={cn(
+          'pointer-events-none fixed z-40 flex transition-transform duration-fast motion-reduce:transition-none',
+          returning ? 'ease-exit' : 'ease-enter',
+          clip !== undefined && 'overflow-hidden',
+        )}
         style={
           heldRect !== null
-            ? { top: heldRect.top, left: heldRect.left, width: heldRect.width }
+            ? {
+                top: heldRect.top,
+                left: heldRect.left,
+                width: heldRect.width,
+                transform: heldTransform(heldY),
+                ...(clip !== undefined ? { height: clip } : {}),
+              }
             : { visibility: 'hidden' }
         }
       />
-      <div
-        ref={containerRef}
-        role="menu"
-        aria-label="Message actions"
-        data-menu-items=""
-        className={cn(
-          'fixed z-50 w-[288px] max-w-[calc(100vw-16px)]',
-          POPOVER_PANEL,
-          mine ? 'origin-bottom-right' : 'origin-bottom-left',
-          shown ? 'scale-100 opacity-100 ease-enter' : 'scale-[0.96] opacity-0 ease-exit',
-        )}
-        style={{
-          top: coords?.top ?? 0,
-          left: coords?.left ?? 0,
-          visibility: coords === null ? 'hidden' : 'visible',
-        }}
-      >
-        {props.canReact !== false && view === 'main' ? (
-          <ReactionsRow
-            currentReaction={currentReaction}
-            reactionsOnly={reactionsOnly}
-            onReact={(emoji) => {
-              onReact(emoji);
-              onClose();
-            }}
-            onMore={() => setPicking(true)}
-            moreRef={moreRef}
-          />
-        ) : null}
-        {items.map((item) => (
-          <MenuRow key={item.key} item={item} onRun={run} />
-        ))}
-      </div>
-      <EmojiPickerShell
-        open={picking}
-        onClose={() => setPicking(false)}
-        layout={layout}
-        returnFocus={moreRef}
-        anchor={containerRef.current?.getBoundingClientRect() ?? anchor}
-        onPick={(emoji) =>
-          pickReaction(emoji, { onReact, closePicker: () => setPicking(false), closeMenu: onClose })
-        }
-      />
+      {active ? (
+        <div
+          ref={containerRef}
+          role="menu"
+          aria-label="Message actions"
+          data-menu-items=""
+          className={cn(
+            'fixed z-50 max-w-[calc(100vw-16px)]',
+            MENU_PANEL,
+            mine ? 'origin-top-right' : 'origin-top-left',
+            shown ? 'scale-100 opacity-100 ease-enter' : 'scale-[0.96] opacity-0 ease-exit',
+          )}
+          style={{
+            width: MENU_WIDTH_PX,
+            top: coords?.top ?? 0,
+            left: coords?.left ?? 0,
+            visibility: coords === null ? 'hidden' : 'visible',
+          }}
+        >
+          {props.canReact !== false && view === 'main' ? (
+            <ReactionsRow
+              currentReaction={currentReaction}
+              reactionsOnly={reactionsOnly}
+              onReact={(emoji) => {
+                onReact(emoji);
+                onClose();
+              }}
+              onMore={() => setPicking(true)}
+              moreRef={moreRef}
+            />
+          ) : null}
+          {items.map((item) => (
+            <MenuRow key={item.key} item={item} onRun={run} />
+          ))}
+        </div>
+      ) : null}
+      {active ? (
+        <EmojiPickerShell
+          open={picking}
+          onClose={() => setPicking(false)}
+          layout={layout}
+          returnFocus={moreRef}
+          anchor={containerRef.current?.getBoundingClientRect() ?? anchor}
+          onPick={(emoji) =>
+            pickReaction(emoji, {
+              onReact,
+              closePicker: () => setPicking(false),
+              closeMenu: onClose,
+            })
+          }
+        />
+      ) : null}
     </>,
     document.body,
   );

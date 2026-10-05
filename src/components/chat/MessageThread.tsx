@@ -14,6 +14,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
+import { flushSync } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { isNearBottom } from '@/lib/chat/scroll';
 import {
@@ -567,6 +568,75 @@ export function isVoiceOnly(
     message.sharedPostIds.length === 0 &&
     message.sharedBriefIds.length === 0
   );
+}
+
+/**
+ * Whether the menu offers "Select" (select part of the body text in place): a
+ * recorded, live message with a typed body (plain, reply, forwarded, or a
+ * caption on media or cards), never a voice note alone. Pure.
+ */
+export function canSelectMessageText(
+  message: Pick<
+    ThreadMessage,
+    'state' | 'deleted' | 'body' | 'attachments' | 'sharedPostIds' | 'sharedBriefIds'
+  >,
+): boolean {
+  return (
+    message.state === 'sent' &&
+    message.deleted !== true &&
+    message.body.trim() !== '' &&
+    !isVoiceOnly(message)
+  );
+}
+
+/**
+ * The body element of the one bubble whose text is being selected: only it
+ * takes selection and the native callout. Every other bubble, the row and the
+ * list stay NO_TOUCH_SELECT (a select-text child inside select-none, as the
+ * voice transcript does).
+ */
+export const SELECTING_TEXT_BODY = 'select-text [-webkit-touch-callout:default]';
+
+/** Back leaves text selection first (its own history step). */
+export const SELECT_TEXT_HISTORY_KEY = 'chatSelectText';
+
+/**
+ * Select a bubble's whole body text (the displayed text: mentions read
+ * "@Name"; the invisible meta spacer is left out). Runs inside the user's tap
+ * so iOS shows the handles. Returns whether a range was set.
+ */
+export function selectBodyText(body: Element): boolean {
+  const doc = body.ownerDocument;
+  const selection = doc.getSelection();
+  if (selection === null) return false;
+  const range = doc.createRange();
+  range.selectNodeContents(body);
+  const spacer = body.querySelector(':scope > [data-meta-spacer]');
+  if (spacer !== null) range.setEndBefore(spacer);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
+}
+
+/**
+ * Drop the document selection when it sits in the selecting body (or the body
+ * is gone): a caret in the composer is never touched.
+ */
+export function clearBodySelection(body: Element | null): void {
+  const selection = body?.ownerDocument.getSelection() ?? document.getSelection();
+  if (selection === null || selection.rangeCount === 0) return;
+  const at = selection.anchorNode;
+  if (body === null || at === null || !at.isConnected || body.contains(at)) {
+    selection.removeAllRanges();
+  }
+}
+
+/** Whether an element has scrolled fully out of the list's visible box. */
+export function outOfView(
+  el: Pick<DOMRect, 'top' | 'bottom'>,
+  list: Pick<DOMRect, 'top' | 'bottom'>,
+): boolean {
+  return el.bottom <= list.top || el.top >= list.bottom;
 }
 
 /** The message carries at least one image: its bubble renders the album layout. */
@@ -1735,6 +1805,11 @@ export function MessageBubble(props: {
   onChangePriority?: () => void;
   /** Present while selection mode is on. */
   selection?: RowSelection;
+  /**
+   * The menu's Select is active on this bubble: its body alone takes text
+   * selection and the native callout; no hold, menu, swipe or key-open.
+   */
+  selectingText?: boolean;
   /** Tap on an album tile: open the thread's image viewer at that index. */
   onOpenImage?: (index: number) => void;
   /** The KEY chip and the cards' talk-about / thread hooks. */
@@ -1798,10 +1873,13 @@ export function MessageBubble(props: {
   const distinctEmojis = message.reactions.map((r) => r.emoji).join('');
   const meta = props.meta ?? bubbleMeta(message, timeZone, { showTicks });
   const placement = metaPlacement(message);
-  const onMore = selection === undefined ? press?.onMore : undefined;
-  const onReact = selection === undefined && message.state === 'sent' ? press?.onReact : undefined;
+  // Selecting this bubble's text: the native selection owns its gestures.
+  const textSelect = selection === undefined && props.selectingText === true;
+  const pressOn = selection === undefined && !textSelect;
+  const onMore = pressOn ? press?.onMore : undefined;
+  const onReact = pressOn && message.state === 'sent' ? press?.onReact : undefined;
   // Only a recorded message takes a reply: sending and failed bubbles never swipe.
-  const swipe = selection === undefined && message.state === 'sent' ? props.swipe : undefined;
+  const swipe = pressOn && message.state === 'sent' ? props.swipe : undefined;
   const chip = props.postRefs?.chip;
   const cardRefs = cardRefsFor(message.id, selection, props.postRefs);
   // An own send still uploading can be cancelled with the ring's X; once
@@ -1887,11 +1965,16 @@ export function MessageBubble(props: {
   const quotedMine =
     reply !== null && reply.authorUserId !== null && reply.authorUserId === props.viewerUserId;
   const body = (
-    <p className={bodyText(layout)}>
+    <p
+      data-msg-body=""
+      data-selecting-text={textSelect ? '' : undefined}
+      className={cn(bodyText(layout), textSelect && SELECTING_TEXT_BODY)}
+    >
       {renderBodyWithMentions(message.body, mine, {
         nameOf: profileNameOf(profiles, props.workspaceId ?? null),
         viewerUserId: props.viewerUserId ?? null,
-        mentions: selection === undefined ? props.mentions : undefined,
+        // Inert while selecting: a mention is plain "@Name" text in the selection.
+        mentions: pressOn ? props.mentions : undefined,
         mentionedMe: mentionsMe(message, props.viewerUserId ?? null, isGroup),
         highlight: props.searchWords ?? [],
       })}
@@ -1916,7 +1999,8 @@ export function MessageBubble(props: {
       // gesture (createSelectionGesture, attached to this row): a tap anywhere
       // (bubble, blank space, the circle) toggles, and nothing inside opens
       // (links, media, cards, voice, chips); a long-press toggles too.
-      {...(selection !== undefined ? {} : { onContextMenu: rowContextMenu })}
+      // Selecting text: the browser's own menu and callout (laptop right-click).
+      {...(!pressOn ? {} : { onContextMenu: rowContextMenu })}
     >
       {checked ? (
         <span aria-hidden="true" data-selected-tint="" className={SELECTED_ROW_TINT} />
@@ -1947,10 +2031,10 @@ export function MessageBubble(props: {
             role="group"
             tabIndex={0}
             aria-label={`${mine ? 'Your message' : `Message from ${name}`}, ${bubbleTimeLabel(message, timeZone)}`}
-            {...(selection === undefined ? press?.handlers : {})}
-            onContextMenu={selection === undefined ? press?.onContextMenu : undefined}
+            {...(pressOn ? press?.handlers : {})}
+            onContextMenu={pressOn ? press?.onContextMenu : undefined}
             onKeyDown={(e: KeyboardEvent<HTMLDivElement>) => {
-              if (selection !== undefined || press === undefined || !keyOpensMenu(e)) return;
+              if (!pressOn || press === undefined || !keyOpensMenu(e)) return;
               e.preventDefault();
               press.onKeyOpen();
             }}
@@ -2163,6 +2247,10 @@ export function MessageBubble(props: {
         >
           <SmileyGlyph />
         </button>
+      ) : textSelect && press?.onReact !== undefined && message.state === 'sent' ? (
+        // The smiley's room stays while selecting text, so the row never
+        // changes size (a pinned list would re-pin and scroll it away).
+        <span aria-hidden="true" data-react-slot="" className="h-11 w-11 shrink-0" />
       ) : null}
       {failed && mine && message.filesMissing === true ? (
         <IconButton
@@ -2365,6 +2453,8 @@ function MessageRow(props: {
   quoted?: ThreadMessage | undefined;
   /** A reaction badge tap opens who reacted; absent opens the menu (as before). */
   onOpenReactions?: (message: ThreadMessage) => void;
+  /** The menu's Select is active on this row's body (no hold, menu or swipe). */
+  selectingText?: boolean;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const iconRef = useRef<HTMLSpanElement>(null);
@@ -2409,7 +2499,9 @@ function MessageRow(props: {
         }
       },
       enabled: () =>
-        latest.current.selection === undefined && latest.current.message.state === 'sent',
+        latest.current.selection === undefined &&
+        latest.current.selectingText !== true &&
+        latest.current.message.state === 'sent',
       reducedMotion: () => latest.current.reducedMotion,
     });
   }
@@ -2435,7 +2527,7 @@ function MessageRow(props: {
     return gesture.attach(row);
   }, [selecting, gesture, tombstone]);
   function open(anchor: DOMRect | null, reactionsOnly = false): void {
-    if (latest.current.selection !== undefined) return;
+    if (latest.current.selection !== undefined || latest.current.selectingText === true) return;
     // The menu's backdrop takes the trailing pointerup, so no click to swallow.
     clearClickSuppression();
     const current = latest.current;
@@ -2522,6 +2614,7 @@ function MessageRow(props: {
         ? { onChangePriority: () => onChangePriority(props.message.id) }
         : {})}
       {...(props.selection !== undefined ? { selection: props.selection } : {})}
+      selectingText={props.selectingText === true}
       onOpenImage={(index) => props.onOpenImage(props.message, index)}
       postRefs={props.postRefs}
       threadMember={props.threadMember}
@@ -2822,8 +2915,6 @@ function ThreadBody(
     selection?: { selected: ReadonlySet<string>; onToggle: (id: string) => void };
     /** Menu "Mark as ..." picked; absent hides mark actions. */
     onMark?: (message: ThreadMessage, type: MarkType) => void;
-    /** Menu "Select" picked: selection mode with the message ticked; absent hides it. */
-    onStartSelect?: (message: ThreadMessage) => void;
     /**
      * Menu "Forward" picked: selection mode with the message ticked (true), or
      * the picker for just this message (false); absent hides it.
@@ -2892,6 +2983,8 @@ function ThreadBody(
   } | null>(null);
   // The open menu's voice-note state: its Transcribe row follows this device's store.
   const menuVoice = useVoiceRecord(menu?.message.id);
+  // The menu's Select: the one message whose body text is selectable in place.
+  const [selectingTextId, setSelectingTextId] = useState<string | null>(null);
   // The thread's one image viewer: which message's album, at which image.
   const [viewer, setViewer] = useState<{ messageId: string; index: number } | null>(null);
   // A message deleted (live, or by us) while its menu is open closes the menu.
@@ -2920,6 +3013,74 @@ function ThreadBody(
   // The open menu's star reads the one star store.
   const menuStarred = useIsStarred(menu?.message.id ?? '');
   const listRef = useRef<HTMLUListElement>(null);
+  /** The selecting bubble's body element, read from the list. */
+  const selectingBody = useCallback((id: string): Element | null => {
+    return (
+      listRef.current?.querySelector(`[data-msg-id="${CSS.escape(id)}"] [data-msg-body]`) ?? null
+    );
+  }, []);
+  /**
+   * Select, inside the menu row's tap: the body turns selectable now (flushSync)
+   * and its whole text is selected in the same gesture; the user then drags
+   * the native handles.
+   */
+  const startTextSelect = (id: string): void => {
+    flushSync(() => setSelectingTextId(id));
+    const body = selectingBody(id);
+    if (body !== null) selectBodyText(body);
+  };
+  const exitTextSelect = useCallback((): void => setSelectingTextId(null), []);
+  // Back leaves text selection first, staying in the chat.
+  useHistoryStep(selectingTextId !== null, SELECT_TEXT_HISTORY_KEY, exitTextSelect);
+  // Text selection ends on a tap outside the body, Escape, or a scroll that
+  // takes the bubble out of view; leaving drops the selection. Every listener
+  // goes with one abort.
+  useEffect(() => {
+    if (selectingTextId === null) return;
+    const id = selectingTextId;
+    const list = listRef.current;
+    const started = selectingBody(id);
+    const controller = new AbortController();
+    const { signal } = controller;
+    document.addEventListener(
+      'pointerdown',
+      (event) => {
+        const body = selectingBody(id);
+        if (body !== null && event.target instanceof Node && body.contains(event.target)) return;
+        exitTextSelect();
+      },
+      { capture: true, signal },
+    );
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.key === 'Escape') exitTextSelect();
+      },
+      { signal },
+    );
+    list?.addEventListener(
+      'scroll',
+      () => {
+        const body = selectingBody(id);
+        if (body === null || outOfView(body.getBoundingClientRect(), list.getBoundingClientRect()))
+          exitTextSelect();
+      },
+      { passive: true, signal },
+    );
+    return () => {
+      controller.abort();
+      clearBodySelection(selectingBody(id) ?? started);
+    };
+  }, [selectingTextId, selectingBody, exitTextSelect]);
+  // Multi-select, or the message going away (deleted, another thread), ends it.
+  const selectingMulti = props.selection !== undefined;
+  useEffect(() => {
+    if (selectingTextId === null) return;
+    const current = props.messages.find((m) => m.id === selectingTextId);
+    if (selectingMulti || current === undefined || !canSelectMessageText(current)) {
+      setSelectingTextId(null);
+    }
+  }, [selectingMulti, selectingTextId, props.messages]);
   // Stick-to-bottom: the intent to stay on the latest message (true on open,
   // after an own send; only the reader's gestures let go of it), and who moved
   // the list last. The thread remounts per channel, so each chat opens pinned.
@@ -3463,6 +3624,8 @@ function ThreadBody(
                     meta={row.meta}
                     onOpen={(m, rect, held, reactionsOnly) => {
                       if (m.deleted === true) return;
+                      // Another menu opening ends text selection.
+                      setSelectingTextId(null);
                       setMenu({
                         message: m,
                         rect,
@@ -3508,6 +3671,7 @@ function ThreadBody(
                     {...(props.onOpenReactions !== undefined && props.selection === undefined
                       ? { onOpenReactions: props.onOpenReactions }
                       : {})}
+                    selectingText={selectingTextId === row.message.id}
                   />
                   {replies !== null && !viewRoot ? (
                     <RepliesButtonRow
@@ -3622,11 +3786,11 @@ function ThreadBody(
           // The picker opened without selection: nothing to restore.
           if (props.onForwardMessage?.(menu.message) !== true) selectionScroll.cancelEntry();
         }}
-        canSelect={props.onStartSelect !== undefined}
-        onSelect={() => {
-          if (!menu) return;
-          anchorSelection(menu.message);
-          props.onStartSelect?.(menu.message);
+        canSelectText={
+          menu !== null && props.selection === undefined && canSelectMessageText(menu.message)
+        }
+        onSelectText={() => {
+          if (menu) startTextSelect(menu.message.id);
         }}
         onReact={(emoji) => {
           if (menu && menu.message.state === 'sent')
@@ -4229,7 +4393,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     else exitSelection();
   };
   /**
-   * Menu Select, Forward or Delete: selection mode opens with that message
+   * Menu Forward or Delete: selection mode opens with that message
    * ticked (when it can be).
    */
   const enterSelection = (message: ThreadMessage): void => {
@@ -4951,9 +5115,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           onChangePriority: (messageId: string) => setPriorityFor({ messageId, mode: 'change' }),
         }
       : {}),
-    ...(onDeleteMessages !== undefined && !selecting
-      ? { onStartSelect: enterSelection, onDeleteMessage: enterSelection }
-      : {}),
+    ...(onDeleteMessages !== undefined && !selecting ? { onDeleteMessage: enterSelection } : {}),
     ...(onEditMessage !== undefined && !selecting ? { onEditMessage: startEdit } : {}),
     ...(canForwardHere && !selecting
       ? {
