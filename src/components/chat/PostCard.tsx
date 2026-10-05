@@ -55,6 +55,7 @@ import {
   POST_CARD_TITLE_TYPE,
   sized,
   useChatLayout,
+  type ChatLayout,
 } from '@/components/chat/chat-type';
 import { formatEntityRef } from '@/lib/entityRef';
 import { env } from '@/lib/env';
@@ -562,8 +563,12 @@ export const CARD_HOLD = { thresholdMs: 450, moveTolerancePx: 10 } as const;
 
 /** A card hold's Talk about, remembered until the finger lifts. */
 export interface TalkAboutHold {
-  /** The hold fired (on its timer, outside any user event). */
-  held: () => void;
+  /**
+   * The hold fired (on its timer). With focusNow (a fine pointer) the composer
+   * takes focus right here and the release does nothing more; without it
+   * (touch) the focus waits for the release.
+   */
+  held: (focusNow?: (() => void) | undefined) => void;
   /** The press ended: focus once, inside this pointerup, when the hold fired. */
   release: (focus: (() => void) | undefined) => void;
   /** A new press or a cancelled one: forget the hold. */
@@ -571,14 +576,29 @@ export interface TalkAboutHold {
 }
 
 /**
+ * Whether a card hold focuses the composer when it fires: a laptop layout or a
+ * mouse press (desktop browsers take focus from a timer, so a mouse that drifts
+ * off the card before release still lands the cursor). Touch waits for the
+ * release, where iOS opens the keyboard. Pure.
+ */
+export function holdFocusesOnFire(input: { layout: ChatLayout; pointerType: string }): boolean {
+  return input.layout === 'laptop' || input.pointerType === 'mouse';
+}
+
+/**
  * Decision 128 for a card hold: the hold fires on a timer, where iOS WebKit
- * opens no keyboard, so the composer takes focus on the release that ends it.
- * Pure.
+ * opens no keyboard, so on touch the composer takes focus on the release that
+ * ends it. A fine pointer focuses as the hold fires. Pure.
  */
 export function createTalkAboutHold(): TalkAboutHold {
   let fired = false;
   return {
-    held: () => {
+    held: (focusNow) => {
+      if (focusNow !== undefined) {
+        fired = false;
+        focusNow();
+        return;
+      }
       fired = true;
     },
     release: (focus) => {
@@ -679,9 +699,12 @@ export function PostCardItem(
   const talkRef = useRef<TalkAboutHold | null>(null);
   talkRef.current ??= createTalkAboutHold();
   const talk = talkRef.current;
+  // The press's pointer type: a mouse hold focuses as it fires.
+  const pressPointer = useRef('');
   const hold = useLongPress(() => {
-    talk.held();
     onTalkAbout?.();
+    const now = holdFocusesOnFire({ layout, pointerType: pressPointer.current });
+    talk.held(now ? props.onTalkAboutFocus : undefined);
   }, CARD_HOLD);
   // A touch hold also fires contextmenu (Android): the hold is the card's, so
   // the bubble's action menu stays shut. A mouse right-click still reaches it.
@@ -708,6 +731,7 @@ export function PostCardItem(
               ...hold.handlers,
               onPointerDown: (e: PointerEvent<HTMLDivElement>) => {
                 touchPress.current = e.pointerType !== 'mouse';
+                pressPointer.current = e.pointerType;
                 talk.reset();
                 hold.handlers.onPointerDown(e);
               },

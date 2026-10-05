@@ -160,6 +160,31 @@ test.describe('iPhone', () => {
   });
 });
 
+async function openMaya(page: Page): Promise<void> {
+  await installHarnessNetwork(page);
+  await page.goto('/chat');
+  await page.getByText(MAYA_NAME, { exact: true }).first().click();
+  await page.locator('[data-msg-id]').first().waitFor({ state: 'visible', timeout: 8000 });
+  await page.waitForTimeout(300);
+}
+
+/** A real mouse click whose pointer drifts dx px (3 to 6) between down and up. */
+async function driftClick(page: Page, target: Locator, dx: number): Promise<void> {
+  const { clientX, clientY } = await centre(target);
+  await page.mouse.move(clientX, clientY);
+  await page.mouse.down();
+  await page.mouse.move(clientX + dx, clientY + 1, { steps: 3 });
+  await page.mouse.up();
+}
+
+/** Pick Reply in the open menu with a drifting mouse. */
+async function driftMenuReply(page: Page, dx: number): Promise<void> {
+  const menu = page.getByRole('menu', { name: 'Message actions' });
+  await expect(menu).toBeVisible();
+  await driftClick(page, menu.locator('[data-menu-item="reply"]'), dx);
+  await expect(menu).toHaveCount(0);
+}
+
 test.describe('laptop', () => {
   test.use({
     viewport: { width: 1280, height: 800 },
@@ -191,17 +216,53 @@ test.describe('laptop', () => {
     await expectFocusedAtEnd(page);
     await typeLands(page, '');
   });
+
+  test('hover chevron Reply with a drifting mouse focuses the composer', async ({ page }) => {
+    await openDm(page);
+    await leaveDraft(page, 'draft ');
+    await settle(page);
+    await bubble(page).hover();
+    await driftClick(page, bubble(page).locator('[data-more]'), 3);
+    await driftMenuReply(page, 5);
+    await expectFocusedAtEnd(page);
+    await typeLands(page, 'draft ');
+  });
+
+  test('right-click Reply with a drifting mouse focuses the composer', async ({ page }) => {
+    await openDm(page);
+    await leaveDraft(page, '');
+    await settle(page);
+    await bubble(page).click({ button: 'right' });
+    await driftMenuReply(page, 6);
+    await expectFocusedAtEnd(page);
+    await typeLands(page, '');
+  });
+
+  test('card hold with the mouse moved off the card still focuses the composer', async ({
+    page,
+  }, testInfo) => {
+    await openMaya(page);
+    await leaveDraft(page, 'about ');
+    const card = page.locator('[role="button"][aria-label^="Open post"]').last();
+    await settle(page, card);
+    const { clientX, clientY } = await centre(card);
+    await page.mouse.move(clientX, clientY);
+    await page.mouse.down();
+    await page.mouse.move(clientX + 4, clientY + 2, { steps: 2 });
+    await page.waitForTimeout(700);
+    const box = await card.boundingBox();
+    if (box === null) throw new Error('no box');
+    await page.mouse.move(box.x + box.width + 40, box.y - 40, { steps: 4 });
+    await page.mouse.up();
+    await expect(page.getByRole('menu')).toHaveCount(0);
+    await expect(page.locator('[role="dialog"]')).toHaveCount(0);
+    await expectFocusedAtEnd(page);
+    await expect(composer(page)).toHaveValue('about ');
+    await page.screenshot({ path: testInfo.outputPath('talk-about-mouse-hold.png') });
+  });
 });
 
 test.describe('iPhone, cards and threads', () => {
-  async function openMaya(page: Page): Promise<void> {
-    await installHarnessNetwork(page);
-    await page.goto('/chat');
-    await page.getByText(MAYA_NAME, { exact: true }).first().click();
-    await page.locator('[data-msg-id]').first().waitFor({ state: 'visible', timeout: 8000 });
-    await page.waitForTimeout(300);
-  }
-
   /** Hold like a finger: pointerdown, 700ms still, pointerup on the same target. */
   async function hold(page: Page, target: Locator): Promise<void> {
     const at = await centre(target);

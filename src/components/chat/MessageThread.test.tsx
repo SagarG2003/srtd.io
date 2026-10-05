@@ -106,7 +106,11 @@ import {
 } from '@/components/chat/MessageActionMenu';
 import { focusComposerInput } from '@/components/chat/Composer';
 import { createSwipeReplyController } from '@/lib/chat/swipe-reply';
-import { createTalkAboutHold, talkAboutThenFocus } from '@/components/chat/PostCard';
+import {
+  createTalkAboutHold,
+  holdFocusesOnFire,
+  talkAboutThenFocus,
+} from '@/components/chat/PostCard';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import {
   BUBBLE_BODY_TYPE,
@@ -3852,6 +3856,39 @@ describe('decision 128: every Reply focuses the composer inside the user event',
     // A plain tap (no hold) never focuses; a cancelled hold forgets itself.
     talk.release(focus);
     talk.held();
+    talk.reset();
+    talk.release(focus);
+    expect(input.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it('F1 laptop or mouse card hold: focus as the hold fires; release, leave, cancel add nothing', () => {
+    expect(holdFocusesOnFire({ layout: 'laptop', pointerType: 'mouse' })).toBe(true);
+    expect(holdFocusesOnFire({ layout: 'laptop', pointerType: 'touch' })).toBe(true);
+    expect(holdFocusesOnFire({ layout: 'touch', pointerType: 'mouse' })).toBe(true);
+    expect(holdFocusesOnFire({ layout: 'touch', pointerType: 'touch' })).toBe(false);
+    expect(holdFocusesOnFire({ layout: 'touch', pointerType: 'pen' })).toBe(false);
+    const { input, log } = fakeInput('kept draft');
+    const focus = (): void => focusComposerInput(input);
+    const talk = createTalkAboutHold();
+    synchronously(() => talk.held(focus));
+    expect(log).toEqual(['focus:noscroll', 'caret:10-10']);
+    expect(input.value).toBe('kept draft');
+    // The mouse drifted off the card: leave resets, release and cancel add nothing.
+    talk.reset();
+    talk.release(focus);
+    talk.release(focus);
+    expect(input.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it('F2 touch card hold: no focus at the hold, once on pointerup; none after a cancel', () => {
+    const { input } = fakeInput('');
+    const focus = (): void => focusComposerInput(input);
+    const talk = createTalkAboutHold();
+    talk.held(undefined);
+    expect(input.focus).not.toHaveBeenCalled();
+    talk.release(focus);
+    expect(input.focus).toHaveBeenCalledTimes(1);
+    talk.held(undefined);
     talk.reset();
     talk.release(focus);
     expect(input.focus).toHaveBeenCalledTimes(1);
