@@ -249,6 +249,15 @@ RLS (20260930160000_assets_origin_chat_private.sql):
 
 Chat-origin assets and their versions are therefore invisible to authenticated reads; chat file reads go through the service role and chat_attachment_readable (section 7).
 
+Chat files stay in chat (20261005040000_chat_files_stay_in_chat.sql):
+
+- gallery_set: raises 'attachment not available' for a version (in the post's workspace) whose asset is origin 'chat' or soft-deleted, unless that version is already live-attached to the same post, so an unchanged gallery still saves.
+- brief_create: raises 'attachment not available' for an attachment version whose asset is origin 'chat' or soft-deleted.
+- comment_create: raises 'attachment not available' for an attachment version whose asset is origin 'chat' or soft-deleted.
+- comment_batch_create: raises 'attachment not available' for an attachment version whose asset is origin 'chat' or soft-deleted.
+- asset_delete: raises 'chat files are deleted with their message' for an origin 'chat' asset.
+- asset_delete_many: raises 'chat files are deleted with their message' when the set holds a live origin 'chat' asset. Not reachable today: the proc's earlier max(workspace_id) over uuid has no Postgres 17 aggregate, so every call raises 'function max(uuid) does not exist' first (pre-existing).
+
 ### asset_attachments
 
 NO ACTION on delete: live attachments block asset hard-delete.
@@ -342,7 +351,7 @@ RLS: chat_messages_select_channel_member (SELECT to authenticated) USING chat_ch
 
 chat_message_send(p_id uuid, p_channel_id text, p_trace_id uuid, p_body text default null, p_mentions jsonb default null, p_attachment_asset_ids uuid[] default null, p_shared_post_ids uuid[] default null, p_reply_to_message_id text default null, p_attachment_meta jsonb default null, p_shared_brief_ids uuid[] default null, p_forwarded_from_message_id text default null) RETURNS chat_messages, SECURITY DEFINER (search_path='', EXECUTE to authenticated only): the only write path, 11 args. Requires auth.uid(), p_id and p_trace_id; raises 'message has no body, attachments, shared posts or shared briefs' when the trimmed body is empty and all three arrays are empty, 'body exceeds 5000 characters' past the cap, and 'not a member of this chat' unless chat_channel_member. p_reply_to_message_id must be a message in the same channel ('reply target not in this chat'); p_forwarded_from_message_id must be a non-deleted message in the same workspace in a channel the sender is a member of ('forward source not accessible'). p_mentions is resolved to channel members by chat_mentions_resolve, and each mentioned user gets an urgent 'mention' inbox_entries row. p_attachment_asset_ids, p_attachment_meta, p_shared_post_ids and p_shared_brief_ids are stored as given (no existence or workspace check). Takes pg_advisory_xact_lock(hashtext(p_id)) and, when a row with that id already exists, returns it unchanged (idempotent retry); otherwise inserts with sender_user_id = auth.uid(), created_at = now(), agora_event_id null, and returns the new row.
 
-chat_attachment_readable(p_asset_version_id uuid, p_user_id uuid) RETURNS boolean, SQL STABLE SECURITY DEFINER (search_path=''; EXECUTE revoked from PUBLIC, anon, authenticated; granted to service_role only): true when the version's asset has uploaded_by = p_user_id, or a chat_messages row has attachment_asset_ids @> array[p_asset_version_id], deleted_at null, chat_channel_member(channel_id, p_user_id), and created_at > coalesce(chat_cleared_at(channel_id, p_user_id), '-infinity'). Recorded in 20260930160000_assets_origin_chat_private.sql.
+chat_attachment_readable(p_asset_version_id uuid, p_user_id uuid) RETURNS boolean, SQL STABLE SECURITY DEFINER (search_path=''; EXECUTE revoked from PUBLIC, anon, authenticated; granted to service_role only): true when the version has asset_versions.uploaded_by = p_user_id (20261005040000_chat_files_stay_in_chat.sql; was assets.uploaded_by), or a chat_messages row has attachment_asset_ids @> array[p_asset_version_id], deleted_at null, chat_channel_member(channel_id, p_user_id), and created_at > coalesce(chat_cleared_at(channel_id, p_user_id), '-infinity'). Recorded in 20260930160000_assets_origin_chat_private.sql.
 
 Trigger: chat_messages_thread_root (BEFORE INSERT OR UPDATE OF reply_to_message_id on chat_messages, FOR EACH ROW, chat_messages_set_thread_root(), plpgsql, search_path=''): reply_to_message_id null sets thread_root_message_id null; otherwise thread_root_message_id = coalesce(parent.thread_root_message_id, parent.id) where the parent is the reply target in the same channel_id. A reply to a reply (or to a deleted tombstone) inherits the top-level root. chat_message_send has no thread root parameter. Existing replies were backfilled. Recorded in 20261003120000_chat_thread_root.sql.
 
