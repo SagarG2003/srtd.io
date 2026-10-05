@@ -60,6 +60,7 @@ import {
   SELECTION_HISTORY_KEY,
   type SelectionHistoryWindow,
   cardRefsFor,
+  replyWithFocus,
   forwardEntersSelection,
   selectionOnEntry,
   SELECTION_ROW_OFFSET,
@@ -97,7 +98,15 @@ import { MarkStrip } from '@/components/chat/MarksSheet';
 import type { ChatMark } from '@/lib/chat/marks';
 import { SelectCheckbox } from '@/components/chat/MarkBits';
 import { roleLabel } from '@/components/pages/settings/members-data';
-import { focusFirstMenuItem, menuClosesOnKey } from '@/components/chat/MessageActionMenu';
+import {
+  focusFirstMenuItem,
+  menuClosesOnKey,
+  messageMenuItems,
+  runMenuItem,
+} from '@/components/chat/MessageActionMenu';
+import { focusComposerInput } from '@/components/chat/Composer';
+import { createSwipeReplyController } from '@/lib/chat/swipe-reply';
+import { createTalkAboutHold, talkAboutThenFocus } from '@/components/chat/PostCard';
 import { ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import {
   BUBBLE_BODY_TYPE,
@@ -3740,5 +3749,136 @@ describe('the X on an own uploading bubble', () => {
       onCancelUpload: vi.fn(),
     });
     expect(cancelOf(root)).toBeUndefined();
+  });
+});
+
+describe('decision 128: every Reply focuses the composer inside the user event', () => {
+  /** A composer input fake: logs focus and caret calls in order. */
+  function fakeInput(value: string) {
+    const log: string[] = [];
+    const input = {
+      value,
+      focus: vi.fn((options?: FocusOptions) => {
+        log.push(`focus:${options?.preventScroll === true ? 'noscroll' : 'scroll'}`);
+      }),
+      setSelectionRange: vi.fn((start: number, end: number) => {
+        log.push(`caret:${start}-${end}`);
+      }),
+    };
+    return { input, log };
+  }
+  const msg = makeMessage({ id: 'm-reply', body: 'quote me' });
+
+  /** Run fn with every deferral (timers, frames, microtasks) frozen: only sync calls count. */
+  function synchronously(fn: () => void): void {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'requestAnimationFrame', 'queueMicrotask'] });
+    try {
+      fn();
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it('replyWithFocus focuses (no scroll, caret at the draft end) before the reply is set', () => {
+    const { input, log } = fakeInput('half a draft');
+    const reply = replyWithFocus(
+      () => input,
+      (m: ThreadMessage) => log.push(`reply:${m.id}`),
+    );
+    synchronously(() => reply(msg));
+    expect(log).toEqual(['focus:noscroll', 'caret:12-12', 'reply:m-reply']);
+    expect(input.value).toBe('half a draft');
+  });
+
+  it('long-press / chevron / right-click menu Reply: focus runs in the row tap, before the menu closes', () => {
+    const { input, log } = fakeInput('');
+    const onReply = replyWithFocus(
+      () => input,
+      (m: ThreadMessage) => log.push(`reply:${m.id}`),
+    );
+    const items = messageMenuItems({
+      canCopy: true,
+      onReply: () => onReply(msg),
+      onCopy: () => {},
+    });
+    const item = items.find((i) => i.key === 'reply');
+    expect(item).toBeDefined();
+    if (item === undefined) return;
+    synchronously(() =>
+      runMenuItem(item, { openMark: () => log.push('mark'), close: () => log.push('close') }),
+    );
+    expect(log).toEqual(['focus:noscroll', 'caret:0-0', 'reply:m-reply', 'close']);
+  });
+
+  it('swipe right: focus runs inside the pointerup that releases the swipe', () => {
+    const { input, log } = fakeInput('keep');
+    const onReply = replyWithFocus(
+      () => input,
+      (m: ThreadMessage) => log.push(`reply:${m.id}`),
+    );
+    const swipe = createSwipeReplyController({
+      onReply: () => onReply(msg),
+      onFrame: () => {},
+      vibrate: () => {},
+      raf: () => 0,
+      cancelRaf: () => {},
+      now: () => 0,
+    });
+    const at = (x: number, t: number) => ({
+      clientX: 100 + x,
+      clientY: 200,
+      pointerType: 'touch',
+      pointerId: 1,
+      timeStamp: t,
+    });
+    swipe.handlers.onPointerDown(at(0, 0));
+    swipe.handlers.onPointerMove(at(40, 50));
+    swipe.handlers.onPointerMove(at(90, 100));
+    expect(input.focus).not.toHaveBeenCalled();
+    synchronously(() => swipe.handlers.onPointerUp({ timeStamp: 110 }));
+    expect(log).toEqual(['focus:noscroll', 'caret:4-4', 'reply:m-reply']);
+  });
+
+  it('card hold Talk about: focus waits for the release (never the hold timer), once', () => {
+    const { input, log } = fakeInput('');
+    const focus = (): void => focusComposerInput(input);
+    const talk = createTalkAboutHold();
+    talk.held();
+    expect(input.focus).not.toHaveBeenCalled();
+    synchronously(() => talk.release(focus));
+    expect(log).toEqual(['focus:noscroll', 'caret:0-0']);
+    talk.release(focus);
+    expect(input.focus).toHaveBeenCalledTimes(1);
+    // A plain tap (no hold) never focuses; a cancelled hold forgets itself.
+    talk.release(focus);
+    talk.held();
+    talk.reset();
+    talk.release(focus);
+    expect(input.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it('sheet Talk about: the post comes in, then focus, both inside the tap', () => {
+    const { input, log } = fakeInput('');
+    const tap = talkAboutThenFocus(
+      () => log.push('about'),
+      () => focusComposerInput(input),
+    );
+    synchronously(tap);
+    expect(log).toEqual(['about', 'focus:noscroll', 'caret:0-0']);
+  });
+
+  it('a card in selection mode gets no Talk about focus', () => {
+    const refs = { onTalkAbout: () => {}, onTalkAboutFocus: () => {} };
+    expect(
+      cardRefsFor('m1', { role: 'selectable', checked: false, onToggle: () => {} }, refs)
+        .onTalkAboutFocus,
+    ).toBeUndefined();
+    expect(cardRefsFor('m1', undefined, refs).onTalkAboutFocus).toBe(refs.onTalkAboutFocus);
+  });
+
+  it('no composer mounted: Reply still sets the reply and never throws', () => {
+    const set = vi.fn();
+    replyWithFocus(() => null, set)(msg);
+    expect(set).toHaveBeenCalledWith(msg);
   });
 });

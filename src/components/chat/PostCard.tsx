@@ -380,6 +380,11 @@ export const PRESIGN_ENABLED =
 export interface CardRefActions {
   /** Hold on a card, or the sheet's "Talk about": bring the post into the conversation. */
   onTalkAbout?: ((postId: string) => void) | undefined;
+  /**
+   * Called inside the user event that ends a Talk about (the hold's release,
+   * the sheet's tap): focus the composer there, where iOS opens the keyboard.
+   */
+  onTalkAboutFocus?: (() => void) | undefined;
   /** Tap on a card's KEY: open the card message's thread. */
   onOpenThread?: (() => void) | undefined;
 }
@@ -388,12 +393,14 @@ export function SharedPostCards({
   postIds,
   messageId,
   onTalkAbout,
+  onTalkAboutFocus,
   onOpenThread,
 }: {
   postIds: string[];
   /** The card message's id, handed to onTalkAbout. */
   messageId?: string;
   onTalkAbout?: ((postId: string, messageId: string) => void) | undefined;
+  onTalkAboutFocus?: (() => void) | undefined;
   onOpenThread?: (() => void) | undefined;
 }): ReactElement | null {
   const { workspaceId, workspaceKey, workspaces } = useWorkspace();
@@ -425,6 +432,7 @@ export function SharedPostCards({
           ? (postId) => onTalkAbout(postId, messageId)
           : undefined
       }
+      onTalkAboutFocus={onTalkAboutFocus}
       onOpenThread={onOpenThread}
     />
   );
@@ -468,7 +476,15 @@ export function SharedPostCardList(
   } & CardContext &
     CardRefActions,
 ): ReactElement {
-  const { views, onTalkAbout, onOpenThread, failed = [], onRetry, ...context } = props;
+  const {
+    views,
+    onTalkAbout,
+    onTalkAboutFocus,
+    onOpenThread,
+    failed = [],
+    onRetry,
+    ...context
+  } = props;
   const failedIds = new Set(failed);
   return (
     <div className="mt-1.5 flex flex-col items-start gap-1.5">
@@ -483,6 +499,7 @@ export function SharedPostCardList(
             view={view}
             {...context}
             {...(onTalkAbout !== undefined ? { onTalkAbout: () => onTalkAbout(view.postId) } : {})}
+            {...(onTalkAboutFocus !== undefined ? { onTalkAboutFocus } : {})}
             {...(onOpenThread !== undefined ? { onOpenThread } : {})}
           />
         ),
@@ -543,6 +560,49 @@ export function cardTapHandlers(
 /** A card's hold: 450 ms still within 10 px, the bubble's long-press defaults. */
 export const CARD_HOLD = { thresholdMs: 450, moveTolerancePx: 10 } as const;
 
+/** A card hold's Talk about, remembered until the finger lifts. */
+export interface TalkAboutHold {
+  /** The hold fired (on its timer, outside any user event). */
+  held: () => void;
+  /** The press ended: focus once, inside this pointerup, when the hold fired. */
+  release: (focus: (() => void) | undefined) => void;
+  /** A new press or a cancelled one: forget the hold. */
+  reset: () => void;
+}
+
+/**
+ * Decision 128 for a card hold: the hold fires on a timer, where iOS WebKit
+ * opens no keyboard, so the composer takes focus on the release that ends it.
+ * Pure.
+ */
+export function createTalkAboutHold(): TalkAboutHold {
+  let fired = false;
+  return {
+    held: () => {
+      fired = true;
+    },
+    release: (focus) => {
+      if (!fired) return;
+      fired = false;
+      focus?.();
+    },
+    reset: () => {
+      fired = false;
+    },
+  };
+}
+
+/** The sheet's "Talk about" tap: the post comes in, then the composer takes focus, before the sheet closes. Pure. */
+export function talkAboutThenFocus(
+  talkAbout: () => void,
+  focus: (() => void) | undefined,
+): () => void {
+  return () => {
+    talkAbout();
+    focus?.();
+  };
+}
+
 /**
  * A tap on a card's KEY. The KEY sits inside the card, so a hold that starts on
  * it is the card's hold: the release click reads (and so clears) the card's
@@ -597,6 +657,7 @@ function CardRef(props: {
 export function PostCardItem(
   props: { view: Extract<SharedPostView, { kind: 'post' }> } & CardContext & {
       onTalkAbout?: () => void;
+      onTalkAboutFocus?: () => void;
       onOpenThread?: () => void;
     },
 ): ReactElement {
@@ -615,7 +676,13 @@ export function PostCardItem(
   const [sheetMounted, setSheetMounted] = useState(false);
   const layout = useChatLayout();
   const onTalkAbout = props.onTalkAbout;
-  const hold = useLongPress(() => onTalkAbout?.(), CARD_HOLD);
+  const talkRef = useRef<TalkAboutHold | null>(null);
+  talkRef.current ??= createTalkAboutHold();
+  const talk = talkRef.current;
+  const hold = useLongPress(() => {
+    talk.held();
+    onTalkAbout?.();
+  }, CARD_HOLD);
   // A touch hold also fires contextmenu (Android): the hold is the card's, so
   // the bubble's action menu stays shut. A mouse right-click still reaches it.
   const touchPress = useRef(false);
@@ -641,7 +708,18 @@ export function PostCardItem(
               ...hold.handlers,
               onPointerDown: (e: PointerEvent<HTMLDivElement>) => {
                 touchPress.current = e.pointerType !== 'mouse';
+                talk.reset();
                 hold.handlers.onPointerDown(e);
+              },
+              // The hold fired on a timer, where iOS opens no keyboard: the
+              // composer takes focus here, inside the release.
+              onPointerUp: () => {
+                hold.handlers.onPointerUp();
+                talk.release(props.onTalkAboutFocus);
+              },
+              onPointerCancel: () => {
+                hold.handlers.onPointerCancel();
+                talk.reset();
               },
               onContextMenu: (e: MouseEvent<HTMLDivElement>) => {
                 if (!touchPress.current) return;
@@ -716,7 +794,9 @@ export function PostCardItem(
             cache={sharedCardPresignCache()}
             deps={cardPresignDeps}
             presignEnabled={PRESIGN_ENABLED}
-            {...(onTalkAbout !== undefined ? { onTalkAbout } : {})}
+            {...(onTalkAbout !== undefined
+              ? { onTalkAbout: talkAboutThenFocus(onTalkAbout, props.onTalkAboutFocus) }
+              : {})}
           />
         </SheetBoundary>
       ) : null}

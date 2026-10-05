@@ -322,6 +322,29 @@ export function TranscribeGlyph(props: { size?: number }): ReactElement {
  * under a divider. Rows that do not apply are not rendered. Pure (no hooks) so
  * the row set is unit-tested without a DOM.
  */
+/**
+ * A row's tap, inside its click: the action runs before the menu closes, so
+ * Reply focuses the composer within the user's own tap (decision 128) and the
+ * menu's focus return finds focus already taken. Mark opens its submenu; Back
+ * returns from it; neither closes. Pure.
+ */
+export function runMenuItem(
+  item: MessageMenuItem,
+  menu: { openMark: () => void; close: () => void },
+): void {
+  if (item.kind !== 'action') return;
+  if (item.key === 'mark') {
+    menu.openMark();
+    return;
+  }
+  if (item.key === 'back') {
+    item.run();
+    return;
+  }
+  item.run();
+  menu.close();
+}
+
 export function messageMenuItems(props: MenuItemProps): MessageMenuItem[] {
   const items: MessageMenuItem[] = [
     { kind: 'action', key: 'reply', label: 'Reply', icon: <IconReply />, run: props.onReply },
@@ -1179,19 +1202,8 @@ export function MessageActionMenu(props: MessageActionMenuProps): ReactElement |
     : view === 'mark'
       ? markSubmenuItems(props, () => setView('main'))
       : messageMenuItems({ ...props, ...remindProps(props, bell, held) });
-  const run = (item: MessageMenuItem): void => {
-    if (item.kind !== 'action') return;
-    if (item.key === 'mark') {
-      setView('mark');
-      return;
-    }
-    if (item.key === 'back') {
-      item.run();
-      return;
-    }
-    item.run();
-    onClose();
-  };
+  const run = (item: MessageMenuItem): void =>
+    runMenuItem(item, { openMark: () => setView('mark'), close: onClose });
 
   return createPortal(
     <>
