@@ -750,6 +750,12 @@ export function PostCardItem(
               },
               // Released off the card: that press never focuses later.
               onPointerLeave: () => talk.reset(),
+              // A mouse press on the card is the hold's alone: no native press
+              // handling (WebKit's moves the caret the hold just put in the
+              // composer on release). Touch presses are left as they were.
+              onMouseDown: (e: MouseEvent<HTMLDivElement>) => {
+                if (e.button === 0 && pressPointer.current === 'mouse') e.preventDefault();
+              },
               onContextMenu: (e: MouseEvent<HTMLDivElement>) => {
                 if (!touchPress.current) return;
                 e.preventDefault();
