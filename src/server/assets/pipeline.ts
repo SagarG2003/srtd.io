@@ -1,8 +1,10 @@
 // The asset upload pipeline.
 //
 // Order (see PR description):
-//   receive -> MIME allowlist -> size cap -> EXIF strip (images) ->
-//   SVG sanitize (svg) -> virus scan -> sha256 -> R2 upload ->
+//   receive -> blocked type (svg, legacy Office) -> MIME allowlist -> size cap ->
+//   magic bytes -> file-safety rules (filename, OLE2, encrypted PDF, Office
+//   package inspection; @srtdio/storage file-safety.ts) -> EXIF strip (images) ->
+//   virus scan -> sha256 -> R2 upload ->
 //   insert asset (new) or asset_version (existing) -> bump current_version_id ->
 //   return summary.
 //
@@ -17,14 +19,14 @@
 
 import { v7 as uuidv7 } from 'uuid';
 import { stripJpegMetadata } from './exif';
-import { sanitizeSvgBytes } from './svg';
 import type { VirusScanner } from './virus-scan';
 import {
   buildR2Key,
   computeSha256,
+  inspectUpload,
   isAllowedMime,
+  isBlockedMime,
   isJpegMime,
-  isSvgMime,
   normalizeMime,
   readImageDimensions,
   verifyMagicBytes,
@@ -53,7 +55,8 @@ export interface PipelineDeps {
 /**
  * Map a normalized, already-allowlisted MIME type to its stored-file kind.
  * Allowlist (mime.ts): image/* -> 'image', video/* -> 'video',
- * audio/* -> 'audio', application/pdf -> 'pdf'. Anything else is impossible past the allowlist and
+ * audio/* -> 'audio', application/pdf -> 'pdf', docx/xlsx/pptx -> 'document',
+ * 'spreadsheet', 'presentation'. Anything else is impossible past the allowlist and
  * is a programming error, so it throws rather than guessing a kind.
  */
 function fileKindForMime(mimeType: string): FileVersionKind {
@@ -69,22 +72,13 @@ function fileKindForMime(mimeType: string): FileVersionKind {
   if (mimeType === 'application/pdf') {
     return 'pdf';
   }
-  if (
-    mimeType === 'application/msword' ||
-    mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-  ) {
+  if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
     return 'document';
   }
-  if (
-    mimeType === 'application/vnd.ms-excel' ||
-    mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-  ) {
+  if (mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
     return 'spreadsheet';
   }
-  if (
-    mimeType === 'application/vnd.ms-powerpoint' ||
-    mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-  ) {
+  if (mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') {
     return 'presentation';
   }
   throw new Error(`no file kind mapping for allowed mime type ${mimeType}`);
@@ -92,9 +86,6 @@ function fileKindForMime(mimeType: string): FileVersionKind {
 
 /** Apply the format-specific sanitization step to the raw bytes. */
 function sanitizeBytes(contentType: string, bytes: Uint8Array): Uint8Array {
-  if (isSvgMime(contentType)) {
-    return sanitizeSvgBytes(bytes);
-  }
   if (isJpegMime(contentType)) {
     return stripJpegMetadata(bytes);
   }
@@ -123,7 +114,10 @@ export async function runUploadPipeline(
   const { storage, repository, scanner } = deps;
   const mimeType = normalizeMime(input.contentType);
 
-  // 1. MIME allowlist.
+  // 1. MIME allowlist. SVG and legacy OLE Office get the "not allowed" refusal.
+  if (isBlockedMime(input.contentType)) {
+    return err({ code: 'blocked_type', message: "This file type isn't allowed" });
+  }
   if (!isAllowedMime(input.contentType)) {
     return err({ code: 'unsupported_mime', message: `MIME type not allowed: ${mimeType}` });
   }
@@ -139,7 +133,21 @@ export async function runUploadPipeline(
     });
   }
 
-  // 2b. Magic-byte check (after the allowlist, before sanitize): the declared
+  // 2b. File-safety rules on the raw bytes and the client filename: disguised
+  // or executable names, OLE2, encrypted files, and Office package inspection
+  // (macros, embedded content, archive caps). Refusals are permanent 4xx. Runs
+  // before the signature check so a password-protected Office file (OLE2 bytes
+  // under a docx/xlsx/pptx MIME) gets the password copy, not a mismatch.
+  const safety = await inspectUpload({
+    filename: input.filename,
+    mimeType,
+    bytes: input.bytes,
+  });
+  if (!safety.ok) {
+    return err({ code: safety.code, message: safety.message });
+  }
+
+  // 2c. Magic-byte check (after the allowlist, before sanitize): the declared
   // MIME type must match the file's actual leading bytes, so a renamed
   // executable cannot ride in under an allowed type.
   if (!verifyMagicBytes(input.bytes, mimeType)) {
@@ -159,7 +167,7 @@ export async function runUploadPipeline(
     existingAssetId = asset.id;
   }
 
-  // 3-4. Sanitize: EXIF strip for JPEG, script/handler strip for SVG.
+  // 3-4. Sanitize: EXIF strip for JPEG.
   const sanitized = sanitizeBytes(input.contentType, input.bytes);
 
   // 5. Virus scan on the bytes that will actually be stored.

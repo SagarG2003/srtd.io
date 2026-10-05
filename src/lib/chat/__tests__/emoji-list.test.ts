@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  clearEmojiRecents,
   EMOJI_LIST,
   EMOJI_RECENTS_KEY,
   EMOJI_RECENTS_MAX,
@@ -74,5 +75,30 @@ describe('T7 emoji recents', () => {
       caret: 7,
     });
     expect(insertAtCaret('abc', { start: 1, end: 2 }, 'X')).toEqual({ value: 'aXc', caret: 2 });
+  });
+});
+
+describe('clearEmojiRecents', () => {
+  it('removes the recents key; a throwing storage never throws', () => {
+    const data = new Map<string, string>([[EMOJI_RECENTS_KEY, '["😀"]']]);
+    const storage: RecentsStorage = {
+      getItem: (k) => data.get(k) ?? null,
+      setItem: (k, v) => void data.set(k, v),
+      removeItem: (k) => void data.delete(k),
+    };
+    clearEmojiRecents(storage);
+    expect(data.has(EMOJI_RECENTS_KEY)).toBe(false);
+    expect(readRecents(storage)).toEqual([]);
+    const throwing: RecentsStorage = {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error('blocked');
+      },
+      removeItem: () => {
+        throw new Error('blocked');
+      },
+    };
+    expect(() => clearEmojiRecents(throwing)).not.toThrow();
+    expect(() => clearEmojiRecents(null)).not.toThrow();
   });
 });

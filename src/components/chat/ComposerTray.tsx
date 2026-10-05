@@ -32,20 +32,28 @@ export interface TrayTile {
   Icon: TileIcon;
 }
 
-/** The tiles: the same four on touch and laptop, Schedule last. Pure. */
-export function trayTiles(layout: ChatLayout): TrayTile[] {
+/**
+ * The tiles: the same four on touch and laptop, Schedule last. A chat that
+ * cannot schedule (Personal notes) leaves Schedule out. Pure.
+ */
+export function trayTiles(layout: ChatLayout, opts: { schedule?: boolean } = {}): TrayTile[] {
   void layout;
-  return [
+  const tiles: TrayTile[] = [
     { id: 'photos', label: 'Photos', Icon: IconImage },
     { id: 'file', label: 'File', Icon: IconFile },
     { id: 'post', label: 'Post', Icon: IconPipeline },
-    { id: 'schedule', label: 'Schedule', Icon: IconCalendarClock },
   ];
+  if (opts.schedule !== false) {
+    tiles.push({ id: 'schedule', label: 'Schedule', Icon: IconCalendarClock });
+  }
+  return tiles;
 }
 
 export function ComposerTray(props: {
   layout: ChatLayout;
   onPick: (id: TrayTile['id']) => void;
+  /** False: the chat cannot schedule, so no Schedule tile. Absent is true. */
+  schedule?: boolean;
 }): ReactElement {
   const [open, setOpen] = useState(false);
   // Kept mounted through the exit; `shown` drives the transition.
@@ -85,7 +93,7 @@ export function ComposerTray(props: {
     };
   }, [open]);
 
-  const tiles = trayTiles(props.layout);
+  const tiles = trayTiles(props.layout, { schedule: props.schedule !== false });
   return (
     <div ref={rootRef} className={cn('shrink-0', NO_TOUCH_SELECT)} onContextMenu={preventDefault}>
       <button

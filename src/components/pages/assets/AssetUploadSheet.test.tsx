@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildUploadPlan,
   computeDisplayNames,
+  seedName,
   uploadMode,
   uploadNameError,
 } from '@/components/pages/assets/AssetUploadSheet';
@@ -89,5 +90,52 @@ describe('buildUploadPlan', () => {
     // The part is always sent under the original filename, never a typed name.
     expect(plan.map((item) => item.file.name)).toEqual(['IMG_0001.png', 'IMG_0002.png']);
     expect(plan.map((item) => item.displayName)).toEqual(['Trip 1', 'Trip 2']);
+  });
+});
+
+describe('from a post page: the name box starts as the post title', () => {
+  const TITLE = 'Ethyl Acetate - The Ferrari Story';
+
+  it('prefills the post title instead of the file name', () => {
+    expect(seedName('', TITLE, 'IMG_0042.png')).toBe(TITLE);
+  });
+
+  it('keeps a name the user already typed', () => {
+    expect(seedName('Hero shot', TITLE, 'IMG_0042.png')).toBe('Hero shot');
+  });
+
+  it('falls back to the file name with no default (Assets page) or a blank title', () => {
+    expect(seedName('', null, 'IMG_0042.png')).toBe('IMG_0042');
+    expect(seedName('', '   ', 'IMG_0042.png')).toBe('IMG_0042');
+  });
+
+  it('names a single file after the post title', () => {
+    const base = seedName('', TITLE, 'a.png');
+    expect(
+      computeDisplayNames({ inFolder: false, folderName: null, base, siblingLabels: [], count: 1 }),
+    ).toEqual([TITLE]);
+  });
+
+  it('numbers a bulk upload from the existing max for that base', () => {
+    const base = seedName('', TITLE, 'a.png');
+    const names = computeDisplayNames({
+      inFolder: false,
+      folderName: null,
+      base,
+      siblingLabels: [`${TITLE} 1`, `${TITLE} 4`, 'Other 9', `${TITLE} (comment)`],
+      count: 3,
+    });
+    expect(names).toEqual([`${TITLE} 5`, `${TITLE} 6`, `${TITLE} 7`]);
+  });
+
+  it('leaves folder uploads auto-named after the folder', () => {
+    const names = computeDisplayNames({
+      inFolder: true,
+      folderName: 'Trip',
+      base: seedName('', TITLE, 'a.png'),
+      siblingLabels: ['Trip 2'],
+      count: 2,
+    });
+    expect(names).toEqual(['Trip 3', 'Trip 4']);
   });
 });

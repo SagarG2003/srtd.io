@@ -19,6 +19,8 @@ const state = vi.hoisted(() => ({
   members: new Set<string>(),
   capturedInput: null as Record<string, unknown> | null,
   repo: null as unknown as InMemoryAssetRepository,
+  /** When set, POST runs the real pipeline over in-memory storage and this repo. */
+  realPipeline: false,
 }));
 
 // Substitute the service-role membership store with an in-memory set; keep the
@@ -46,8 +48,19 @@ vi.mock('@/server/assets', async (importOriginal) => {
   return {
     ...actual,
     createSupabaseAssetRepository: () => state.repo,
-    runUploadPipeline: (_deps: unknown, input: Record<string, unknown>) => {
+    runUploadPipeline: async (_deps: unknown, input: Record<string, unknown>) => {
       state.capturedInput = input;
+      if (state.realPipeline) {
+        const { InMemoryStorageClient } = await import('@srtdio/storage');
+        return actual.runUploadPipeline(
+          {
+            storage: new InMemoryStorageClient(),
+            repository: state.repo,
+            scanner: new actual.NoOpScanner(),
+          },
+          input as unknown as UploadInput,
+        );
+      }
       return Promise.resolve({
         ok: true,
         value: {
@@ -68,7 +81,20 @@ vi.mock('@/server/assets', async (importOriginal) => {
 });
 
 import worker, { serializeError, type AssetUploadEnv } from './asset-upload';
-import { InMemoryAssetRepository } from '@/server/assets';
+import { InMemoryAssetRepository, type UploadInput } from '@/server/assets';
+import {
+  MIME,
+  buildZip,
+  encryptedPdf,
+  jpeg,
+  mp4,
+  office,
+  ole2,
+  pdf,
+  png,
+  relationships,
+  svg,
+} from '../../../packages/storage/src/__fixtures__/files';
 
 const USER = '33333333-3333-7333-8333-333333333333';
 const OTHER_USER = '44444444-4444-7444-8444-444444444444';
@@ -101,6 +127,7 @@ beforeEach(() => {
   state.members.clear();
   state.capturedInput = null;
   state.repo = new InMemoryAssetRepository();
+  state.realPipeline = false;
 });
 
 async function mintToken(sub: string, expSecondsFromNow = 3600): Promise<string> {
@@ -961,4 +988,151 @@ describe('serializeError', () => {
     expect(out).toContain('TypeError');
     expect(out).toContain('boom');
   });
+});
+
+describe('asset-upload file-safety refusals (real pipeline)', () => {
+  function fileRequest(
+    token: string,
+    name: string,
+    type: string,
+    bytes: Uint8Array,
+    origin: 'library' | 'chat',
+  ): Request {
+    const form = new FormData();
+    form.set('file', new File([new Uint8Array(bytes)], name, { type }));
+    form.set('workspace_id', WORKSPACE);
+    form.set('origin', origin);
+    return new Request('https://worker.test/', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+  }
+
+  const docxWithVba = () => office('docx', { extra: [{ name: 'word/vbaProject.bin', data: 'x' }] });
+  const docxWithOle = () =>
+    office('docx', { extra: [{ name: 'word/embeddings/oleObject1.bin', data: 'x' }] });
+  const zipEncrypted = () =>
+    office('docx', { extra: [{ name: 'word/x.xml', data: 'x', encrypted: true }] });
+
+  const refusals: ReadonlyArray<[string, string, string, () => Uint8Array, number, string]> = [
+    [
+      'zip renamed .docx',
+      'a.docx',
+      MIME.docx,
+      () => buildZip([{ name: 'a', data: 'a' }]),
+      415,
+      'mime_mismatch',
+    ],
+    [
+      'docm renamed .docx',
+      'a.docx',
+      MIME.docx,
+      () => office('docx', { macroContentType: true }),
+      415,
+      'blocked_type',
+    ],
+    ['docx with vbaProject.bin', 'a.docx', MIME.docx, docxWithVba, 415, 'blocked_type'],
+    ['docx with oleObject1.bin', 'a.docx', MIME.docx, docxWithOle, 422, 'embedded_content'],
+    ['legacy .doc', 'a.doc', 'application/msword', () => ole2(), 415, 'blocked_type'],
+    ['svg', 'a.svg', 'image/svg+xml', () => svg(), 415, 'blocked_type'],
+    ['invoice.pdf.exe', 'invoice.pdf.exe', MIME.pdf, () => pdf(), 415, 'blocked_type'],
+    ['extension/MIME mismatch', 'a.png', MIME.pdf, () => pdf(), 415, 'mime_mismatch'],
+    ['signature mismatch', 'a.pdf', MIME.pdf, () => png(), 415, 'mime_mismatch'],
+    [
+      'ratio bomb',
+      'a.xlsx',
+      MIME.xlsx,
+      () => office('xlsx', { mainBody: new Uint8Array(20 * 1024 * 1024) }),
+      422,
+      'archive_limits',
+    ],
+    ['encrypted pdf', 'a.pdf', MIME.pdf, () => pdf({ encrypted: true }), 422, 'encrypted_file'],
+    [
+      'password-protected docx (OLE2 bytes)',
+      'a.docx',
+      MIME.docx,
+      () => ole2({ encryptedPackage: true }),
+      422,
+      'encrypted_file',
+    ],
+    [
+      'remote attachedTemplate docx',
+      'a.docx',
+      MIME.docx,
+      () =>
+        office('docx', {
+          extra: [
+            {
+              name: 'word/_rels/settings.xml.rels',
+              data: relationships([
+                { type: 'attachedTemplate', target: 'http://example.test/t.dotm', external: true },
+              ]),
+            },
+          ],
+        }),
+      422,
+      'external_content',
+    ],
+    [
+      'pdf needing a password to open (AES-256)',
+      'a.pdf',
+      MIME.pdf,
+      () => encryptedPdf({ revision: 6, userPassword: 'secret' }),
+      422,
+      'encrypted_file',
+    ],
+    ['encrypted zip entry', 'a.docx', MIME.docx, zipEncrypted, 422, 'encrypted_file'],
+  ];
+
+  for (const origin of ['library', 'chat'] as const) {
+    for (const [label, name, type, bytes, status, code] of refusals) {
+      it(`${origin}: refuses ${label} with a permanent ${status}`, async () => {
+        state.realPipeline = true;
+        const token = await mintToken(USER);
+        state.members.add(`${USER}:${WORKSPACE}`);
+        const res = await worker.fetch(fileRequest(token, name, type, bytes(), origin), env);
+        expect(res.status).toBe(status);
+        const body = (await res.json()) as { error: { code: string; message: string } };
+        expect(body.error.code).toBe(code);
+        expect(body.error.message).not.toMatch(/connect|network|offline/i);
+        expect(state.repo.versions).toHaveLength(0);
+      });
+    }
+  }
+
+  const allowed: ReadonlyArray<[string, string, () => Uint8Array]> = [
+    ['a.docx', MIME.docx, () => office('docx')],
+    ['a.xlsx', MIME.xlsx, () => office('xlsx')],
+    ['a.pptx', MIME.pptx, () => office('pptx')],
+    ['a.pdf', MIME.pdf, () => pdf()],
+    ['a.mp4', MIME.mp4, () => mp4()],
+    ['a.png', MIME.png, () => png()],
+    ['locked-no-print.pdf', MIME.pdf, () => encryptedPdf({ revision: 4, userPassword: '' })],
+    ['a.jpg', MIME.jpeg, () => jpeg()],
+    ['a.gif', 'image/gif', () => Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])],
+    [
+      'a.webp',
+      'image/webp',
+      () => Uint8Array.from([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]),
+    ],
+    [
+      'a.mov',
+      'video/quicktime',
+      () => Uint8Array.from([0, 0, 0, 0x14, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74]),
+    ],
+    ['voice-note.webm', 'audio/webm', () => Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3, 0x01])],
+    ['voice-note.m4a', 'audio/mp4', () => mp4()],
+    ['voice-note.mp3', 'audio/mpeg', () => Uint8Array.from([0x49, 0x44, 0x33, 0x03, 0x00])],
+  ];
+  for (const [name, type, bytes] of allowed) {
+    it(`still stores an allowed ${name}`, async () => {
+      state.realPipeline = true;
+      const token = await mintToken(USER);
+      state.members.add(`${USER}:${WORKSPACE}`);
+      const res = await worker.fetch(fileRequest(token, name, type, bytes(), 'library'), env);
+      expect(res.status).toBe(201);
+      expect(state.repo.versions).toHaveLength(1);
+    });
+  }
 });

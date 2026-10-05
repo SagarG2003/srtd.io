@@ -14,6 +14,7 @@ import {
   WORKSPACE_ID,
   type ChatWorld,
 } from './chat-data';
+import { notesChannelRow } from './notes-data';
 
 const SUPABASE_HOST = 'harness.supabase.test';
 const CHAT_TOKEN_HOST = 'chat-token.harness.test';
@@ -185,9 +186,20 @@ const RPC: Record<string, RpcHandler> = {
     return null;
   },
   session_register: () => null,
+  // Personal notes: the deterministic channel, created once (idempotent).
+  notes_channel_ensure: (args, tables) => {
+    const channels = (tables.chat_channels ??= []);
+    const id = `notes__${String(args.p_workspace_id)}__${ME}`;
+    if (!channels.some((c) => c.channel_id === id))
+      channels.push({ ...notesChannelRow(), channel_id: id });
+    return id;
+  },
   // Message search: each word a prefix match, newest first, keyset paging,
   // deleted rows left out, the limit clamped 1..50, a query outside 2..100 empty.
   chat_message_search: (args, tables) => {
+    // A filter chip (p_kind): the newest matches of that kind, the query
+    // (when 2+ characters) narrowing them, like the 8-arg proc.
+    if (typeof args.p_kind === 'string') return kindSearch(args, tables);
     const query = String(args.p_query ?? '').trim();
     if (query.length < 2 || query.length > 100) return [];
     const words = query.toLowerCase().match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
@@ -264,6 +276,10 @@ const RPC: Record<string, RpcHandler> = {
       deleted_at: null,
       thread_root_message_id: threadRootOf(rows, replyTo),
     };
+    if (typeof args.p_forwarded_from_message_id === 'string') {
+      row.forwarded_from_message_id = args.p_forwarded_from_message_id;
+    }
+    if (Array.isArray(args.p_shared_brief_ids)) row.shared_brief_ids = args.p_shared_brief_ids;
     rows.push(row);
     return row;
   },
@@ -333,6 +349,52 @@ const RPC: Record<string, RpcHandler> = {
         );
   },
 };
+
+/** chat_message_search with p_kind: photo / voice / file by attachment mime, link by body. */
+function kindSearch(args: Record<string, unknown>, tables: Tables): Row[] {
+  const kind = String(args.p_kind);
+  const query = String(args.p_query ?? '').trim();
+  if (query.length === 1 || query.length > 100) return [];
+  const words = query.toLowerCase().match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
+  const limit = Math.min(50, Math.max(1, Number(args.p_limit ?? 30)));
+  const beforeAt = typeof args.p_before_created_at === 'string' ? args.p_before_created_at : null;
+  const beforeId = typeof args.p_before_id === 'string' ? args.p_before_id : null;
+  const mimes = (m: Row): string[] =>
+    isObject(m.attachment_meta)
+      ? Object.values(m.attachment_meta).map((v) => (isObject(v) ? String(v.mime ?? '') : ''))
+      : [];
+  const ofKind = (m: Row): boolean => {
+    if (kind === 'link') return /https?:\/\//i.test(String(m.body ?? ''));
+    const list = mimes(m);
+    if (kind === 'photo') return list.some((t) => t.startsWith('image/'));
+    if (kind === 'voice') return list.some((t) => t.startsWith('audio/'));
+    if (kind === 'file')
+      return list.some((t) => !t.startsWith('image/') && !t.startsWith('audio/'));
+    return false;
+  };
+  return (tables.chat_messages ?? [])
+    .filter((m) => m.deleted_at === null && ofKind(m))
+    .filter((m) => args.p_channel_id == null || m.channel_id === args.p_channel_id)
+    .filter((m) => {
+      if (words.length === 0) return true;
+      const tokens =
+        String(m.body ?? '')
+          .toLowerCase()
+          .match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
+      return words.every((w) => tokens.some((t) => t.startsWith(w)));
+    })
+    .sort(
+      (a, b) =>
+        String(b.created_at).localeCompare(String(a.created_at)) ||
+        String(b.id).localeCompare(String(a.id)),
+    )
+    .filter((m) => {
+      if (beforeAt === null || beforeId === null) return true;
+      const at = String(m.created_at);
+      return at < beforeAt || (at === beforeAt && String(m.id) < beforeId);
+    })
+    .slice(0, limit);
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

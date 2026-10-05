@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgoraChat } from 'agora-chat';
 import {
+  sendSignal,
   sendTyping,
   subscribeTyping,
   TYPING_ACTION,
+  TYPING_MAX_AGE_MS,
   TYPING_EVENT_HANDLER_ID,
   typingChannelId,
   typingForChannel,
@@ -13,6 +15,7 @@ import {
 import {
   addTypingId,
   removeTypingId,
+  trackChannelTyping,
   typingIdsFor,
   type TypingState,
 } from '@/lib/chat/use-chat-typing';
@@ -37,7 +40,7 @@ function cmd(over: Partial<AgoraChat.CmdMsgBody> & { ext?: unknown }): AgoraChat
     to: toAgoraUsername(ME),
     from: toAgoraUsername(PEER),
     action: TYPING_ACTION,
-    time: 1,
+    time: Date.now(),
     ...over,
   } as AgoraChat.CmdMsgBody;
 }
@@ -68,6 +71,7 @@ describe('outbound typing', () => {
       to: 'agora-group-1',
       action: 'typing',
       ext: { channelId: 'chan-1' },
+      deliverOnlineOnly: true,
     });
   });
 });
@@ -92,6 +96,7 @@ describe('inbound typing', () => {
       channelId: 'open',
       currentUserId: ME,
       onTypingFrom,
+      onMessageFrom: vi.fn(),
     });
     handlers[TYPING_EVENT_HANDLER_ID]?.onCmdMessage?.(cmd({ ext: { channelId: 'other' } }));
     expect(onTypingFrom).not.toHaveBeenCalled();
@@ -128,5 +133,123 @@ describe('switching chats', () => {
       visibleTypingIds({ ids, isGroup: true, peerUserId: null, memberIds: new Set([OTHER]) }),
     ).toEqual([OTHER]);
     expect(visibleTypingIds({ ids, isGroup: true, peerUserId: null, memberIds: null })).toEqual([]);
+  });
+});
+
+function text(over: Partial<AgoraChat.TextMsgBody> & { ext?: unknown }): AgoraChat.TextMsgBody {
+  return {
+    id: 't1',
+    type: 'txt',
+    chatType: 'singleChat',
+    to: toAgoraUsername(ME),
+    from: toAgoraUsername(PEER),
+    msg: 'hi',
+    time: Date.now(),
+    ext: { sorted_message_id: 'm1', sorted_channel_id: 'open' },
+    ...over,
+  } as AgoraChat.TextMsgBody;
+}
+
+function subscribe() {
+  const { conn, handlers } = connection();
+  const onTypingFrom = vi.fn();
+  const onMessageFrom = vi.fn();
+  const teardown = subscribeTyping({
+    connection: conn,
+    target: DM,
+    channelId: 'open',
+    currentUserId: ME,
+    onTypingFrom,
+    onMessageFrom,
+  });
+  const handler = handlers[TYPING_EVENT_HANDLER_ID];
+  return { conn, handler, onTypingFrom, onMessageFrom, teardown };
+}
+
+describe('online-only delivery', () => {
+  it('sendTyping asks for online-only delivery; sendSignal leaves the SDK default', async () => {
+    const { conn } = connection();
+    const createCmd = vi.fn().mockReturnValue({});
+    await sendTyping({ connection: conn, target: DM, createCmd, channelId: 'open' });
+    expect(createCmd.mock.calls[0]?.[0]).toMatchObject({ deliverOnlineOnly: true });
+    createCmd.mockClear();
+    await sendSignal({ connection: conn, target: DM, createCmd, ext: { kind: 'read' } });
+    expect(createCmd.mock.calls[0]?.[0]).not.toHaveProperty('deliverOnlineOnly');
+  });
+});
+
+describe('stale typing cmds', () => {
+  it('drops a cmd older than TYPING_MAX_AGE_MS; fresh and future-dated are accepted', () => {
+    const { handler, onTypingFrom } = subscribe();
+    const now = Date.now();
+    handler?.onCmdMessage?.(cmd({ time: now - TYPING_MAX_AGE_MS - 1000 }));
+    expect(onTypingFrom).not.toHaveBeenCalled();
+    handler?.onCmdMessage?.(cmd({ time: now }));
+    expect(onTypingFrom).toHaveBeenCalledTimes(1);
+    handler?.onCmdMessage?.(cmd({ time: now + 60000 }));
+    expect(onTypingFrom).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts a cmd with a missing or non-number time', () => {
+    const { handler, onTypingFrom } = subscribe();
+    handler?.onCmdMessage?.(cmd({ time: undefined as unknown as number }));
+    handler?.onCmdMessage?.(cmd({ time: 'x' as unknown as number }));
+    expect(onTypingFrom).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('message clears typing', () => {
+  it('fires onMessageFrom for the peer text message in the open channel', () => {
+    const { handler, onMessageFrom } = subscribe();
+    handler?.onTextMessage?.(text({}));
+    expect(onMessageFrom).toHaveBeenCalledTimes(1);
+    expect(onMessageFrom).toHaveBeenCalledWith(PEER);
+  });
+
+  it('ignores another channel, self, and unmappable messages', () => {
+    const { handler, onMessageFrom } = subscribe();
+    handler?.onTextMessage?.(text({ ext: { sorted_message_id: 'm1', sorted_channel_id: 'x' } }));
+    handler?.onTextMessage?.(text({ from: toAgoraUsername(ME), to: toAgoraUsername(PEER) }));
+    handler?.onTextMessage?.(text({ from: 'not-a-sorted-user' }));
+    handler?.onTextMessage?.(text({ ext: {} }));
+    expect(onMessageFrom).not.toHaveBeenCalled();
+  });
+
+  it('teardown removes exactly the chat-typing handler', () => {
+    const { conn, teardown } = subscribe();
+    teardown();
+    expect(conn.removeEventHandler).toHaveBeenCalledTimes(1);
+    expect(conn.removeEventHandler).toHaveBeenCalledWith(TYPING_EVENT_HANDLER_ID);
+  });
+});
+
+describe('hook inbound tracking', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a peer message clears their typing at once; the old timer is inert', () => {
+    vi.useFakeTimers();
+    const { conn, handlers } = connection();
+    let state: TypingState = { channelId: null, ids: [] };
+    const teardown = trackChannelTyping({
+      connection: conn,
+      target: DM,
+      channelId: 'open',
+      currentUserId: ME,
+      setState: (update) => {
+        state = update(state);
+      },
+    });
+    const handler = handlers[TYPING_EVENT_HANDLER_ID];
+    handler?.onCmdMessage?.(cmd({ ext: { channelId: 'open' } }));
+    expect(typingIdsFor(state, 'open')).toEqual([PEER]);
+    handler?.onTextMessage?.(text({}));
+    expect(typingIdsFor(state, 'open')).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(() => vi.advanceTimersByTime(10000)).not.toThrow();
+    expect(typingIdsFor(state, 'open')).toEqual([]);
+    teardown();
+    expect(conn.removeEventHandler).toHaveBeenCalledWith(TYPING_EVENT_HANDLER_ID);
   });
 });

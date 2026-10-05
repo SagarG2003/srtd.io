@@ -914,8 +914,14 @@ export function stripDeletedQuotes(outbox: Outbox, deletedIds: ReadonlySet<strin
   return changed ? next : outbox;
 }
 
-/** The one localStorage key the pending outbox lives under. */
-export const OUTBOX_STORAGE_KEY = 'sorted:chat:outbox:v1';
+/**
+ * The one localStorage key the pending outbox lives under: one user, one slot
+ * per workspace ({ userId, byWorkspace: { [workspaceId]: outbox } }).
+ */
+export const OUTBOX_STORAGE_KEY = 'sorted:chat:outbox:v2';
+
+/** The single-workspace blob before v2; folded into v2 on first read. */
+const LEGACY_OUTBOX_STORAGE_KEY = 'sorted:chat:outbox:v1';
 
 /** The slice of Web Storage the outbox persistence uses. */
 export interface OutboxStorage {
@@ -975,8 +981,10 @@ function parseReply(value: unknown): ReplyQuote | null | undefined {
 function parseEntry(value: unknown): OutboxEntry | null {
   if (!isRecord(value) || !isRecord(value.local)) return null;
   const { id, text, createdMs } = value;
-  const { attachments, sharedPostIds, sharedBriefIds, reply } = value.local;
+  const { attachments, sharedPostIds, sharedBriefIds, reply, forwardedFromMessageId } = value.local;
   if (typeof id !== 'string' || typeof text !== 'string') return null;
+  if (forwardedFromMessageId !== undefined && typeof forwardedFromMessageId !== 'string')
+    return null;
   if (!Array.isArray(attachments) || !isStringArray(sharedPostIds)) return null;
   if (sharedBriefIds !== undefined && !isStringArray(sharedBriefIds)) return null;
   const parsedAttachments = attachments.map(parseAttachment);
@@ -993,6 +1001,7 @@ function parseEntry(value: unknown): OutboxEntry | null {
       sharedPostIds,
       ...(sharedBriefIds !== undefined ? { sharedBriefIds } : {}),
       reply: parsedReply,
+      ...(forwardedFromMessageId !== undefined ? { forwardedFromMessageId } : {}),
     },
     state: filesMissing ? 'failed' : 'sending',
     ...(typeof createdMs === 'number' && Number.isFinite(createdMs) && createdMs > 0
@@ -1041,31 +1050,90 @@ export function awaitRestoredFiles(outbox: Outbox): Outbox {
   return changed ? next : outbox;
 }
 
-function readRaw(storage: OutboxStorage): Record<string, unknown> | null {
-  const raw = storage.getItem(OUTBOX_STORAGE_KEY);
+/** The stored v2 blob; slots are raw (unparsed) outboxes. */
+interface StoredOutboxes {
+  userId: string;
+  byWorkspace: Record<string, Record<string, unknown>>;
+}
+
+function parseJsonRecord(raw: string | null): Record<string, unknown> | null {
   if (raw === null) return null;
-  const parsed: unknown = JSON.parse(raw);
-  return isRecord(parsed) ? parsed : null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Save the blob; no slots left removes the key. May throw (storage). */
+function saveStored(storage: OutboxStorage, stored: StoredOutboxes): void {
+  if (Object.keys(stored.byWorkspace).length === 0) storage.removeItem(OUTBOX_STORAGE_KEY);
+  else storage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(stored));
+}
+
+/**
+ * The stored v2 blob, after folding any v1 blob into it (v1 is always removed;
+ * its entries survive only when no other user's v2 blob is present). A
+ * malformed v2 blob is removed. Null when nothing is stored. May throw only
+ * when storage itself does.
+ */
+function loadStored(storage: OutboxStorage): StoredOutboxes | null {
+  const rawV2 = storage.getItem(OUTBOX_STORAGE_KEY);
+  const v2 = parseJsonRecord(rawV2);
+  let stored: StoredOutboxes | null = null;
+  if (v2 !== null && typeof v2.userId === 'string' && isRecord(v2.byWorkspace)) {
+    const byWorkspace: Record<string, Record<string, unknown>> = {};
+    for (const [workspaceId, slot] of Object.entries(v2.byWorkspace)) {
+      if (isRecord(slot)) byWorkspace[workspaceId] = slot;
+    }
+    stored = { userId: v2.userId, byWorkspace };
+  } else if (rawV2 !== null) {
+    storage.removeItem(OUTBOX_STORAGE_KEY);
+  }
+
+  const rawV1 = storage.getItem(LEGACY_OUTBOX_STORAGE_KEY);
+  if (rawV1 === null) return stored;
+  const v1 = parseJsonRecord(rawV1);
+  storage.removeItem(LEGACY_OUTBOX_STORAGE_KEY);
+  if (
+    v1 === null ||
+    typeof v1.userId !== 'string' ||
+    typeof v1.workspaceId !== 'string' ||
+    !isRecord(v1.outbox)
+  ) {
+    return stored;
+  }
+  if (stored !== null && stored.userId !== v1.userId) return stored;
+  const next: StoredOutboxes = stored ?? { userId: v1.userId, byWorkspace: {} };
+  // A v2 slot is newer than the v1 blob and wins.
+  if (next.byWorkspace[v1.workspaceId] === undefined) {
+    next.byWorkspace[v1.workspaceId] = v1.outbox;
+    saveStored(storage, next);
+  }
+  return next;
 }
 
 /**
  * The persisted outbox for exactly this workspace and user, every entry back
- * to 'sending' (or 'failed' with filesMissing when its upload never finished). Another workspace's entries are left in place (they resume
- * when the user returns to it); another user's are deleted. Never throws:
+ * to 'sending' (or 'failed' with filesMissing when its upload never
+ * finished). Other workspaces' slots are left in place (they resume when the
+ * user returns to them); another user's blob is deleted. Never throws:
  * unreadable storage or a malformed blob is an empty outbox.
  */
 export function readPersistedOutbox(storage: OutboxStorage | null, scope: OutboxScope): Outbox {
   if (storage === null) return {};
   try {
-    const stored = readRaw(storage);
+    const stored = loadStored(storage);
     if (stored === null) return {};
     if (stored.userId !== scope.userId) {
       storage.removeItem(OUTBOX_STORAGE_KEY);
       return {};
     }
-    if (stored.workspaceId !== scope.workspaceId || !isRecord(stored.outbox)) return {};
+    const slot = stored.byWorkspace[scope.workspaceId];
+    if (slot === undefined) return {};
     const outbox: Record<string, OutboxEntry[]> = {};
-    for (const [channelId, list] of Object.entries(stored.outbox)) {
+    for (const [channelId, list] of Object.entries(slot)) {
       if (!Array.isArray(list)) continue;
       const entries = list.map(parseEntry).filter((e): e is OutboxEntry => e !== null);
       if (entries.length > 0) outbox[channelId] = entries;
@@ -1077,20 +1145,23 @@ export function readPersistedOutbox(storage: OutboxStorage | null, scope: Outbox
 }
 
 /**
- * Every entry id the persisted outbox holds, whatever its workspace and user
- * (the file store keeps blobs for exactly these). Empty when nothing is
- * stored; null when storage is missing or unreadable (keep every blob).
+ * Every entry id the persisted outbox holds, across every workspace slot of
+ * the stored user (the file store keeps blobs for exactly these). Empty when
+ * nothing is stored; null when storage is missing or unreadable (keep every
+ * blob).
  */
 export function persistedOutboxIds(storage: OutboxStorage | null): Set<string> | null {
   if (storage === null) return null;
   try {
     const ids = new Set<string>();
-    const stored = readRaw(storage);
-    if (stored === null || !isRecord(stored.outbox)) return ids;
-    for (const list of Object.values(stored.outbox)) {
-      if (!Array.isArray(list)) continue;
-      for (const entry of list) {
-        if (isRecord(entry) && typeof entry.id === 'string') ids.add(entry.id);
+    const stored = loadStored(storage);
+    if (stored === null) return ids;
+    for (const slot of Object.values(stored.byWorkspace)) {
+      for (const list of Object.values(slot)) {
+        if (!Array.isArray(list)) continue;
+        for (const entry of list) {
+          if (isRecord(entry) && typeof entry.id === 'string') ids.add(entry.id);
+        }
       }
     }
     return ids;
@@ -1100,9 +1171,10 @@ export function persistedOutboxIds(storage: OutboxStorage | null): Set<string> |
 }
 
 /**
- * Persist this scope's pending sends (bodies included) under the one key, so
- * the blob only ever holds a single workspace and user. An empty outbox
- * removes the key when it is this scope's. Never throws.
+ * Persist this scope's pending sends (bodies included) into its workspace
+ * slot; other workspaces' slots stay. An empty outbox drops the slot, and the
+ * key goes with the last slot. Another user's blob is replaced, never merged.
+ * Never throws.
  */
 export function writePersistedOutbox(
   storage: OutboxStorage | null,
@@ -1111,15 +1183,16 @@ export function writePersistedOutbox(
 ): void {
   if (storage === null) return;
   try {
+    const loaded = loadStored(storage);
+    const stored: StoredOutboxes =
+      loaded !== null && loaded.userId === scope.userId
+        ? loaded
+        : { userId: scope.userId, byWorkspace: {} };
     const pending = Object.entries(outbox).filter(([, list]) => list.length > 0);
     if (pending.length === 0) {
-      const stored = readRaw(storage);
-      if (
-        stored === null ||
-        (stored.userId === scope.userId && stored.workspaceId === scope.workspaceId)
-      ) {
-        storage.removeItem(OUTBOX_STORAGE_KEY);
-      }
+      delete stored.byWorkspace[scope.workspaceId];
+      if (loaded === null) return;
+      saveStored(storage, stored);
       return;
     }
     const persisted: Record<
@@ -1137,10 +1210,8 @@ export function writePersistedOutbox(
         ...(e.createdMs !== undefined ? { createdMs: e.createdMs } : {}),
       }));
     }
-    storage.setItem(
-      OUTBOX_STORAGE_KEY,
-      JSON.stringify({ workspaceId: scope.workspaceId, userId: scope.userId, outbox: persisted }),
-    );
+    stored.byWorkspace[scope.workspaceId] = persisted;
+    saveStored(storage, stored);
   } catch {
     // Storage full or blocked: the send carries on from memory.
   }
@@ -1148,7 +1219,7 @@ export function writePersistedOutbox(
 
 /**
  * Clear the quote text of persisted sends that quote a deleted message, in
- * place (whatever workspace and user the blob holds); reply ids stay. Never
+ * place (every workspace slot of the stored user); reply ids stay. Never
  * throws.
  */
 export function stripPersistedQuotes(
@@ -1157,21 +1228,23 @@ export function stripPersistedQuotes(
 ): void {
   if (storage === null || deletedIds.length === 0) return;
   try {
-    const stored = readRaw(storage);
-    if (stored === null || !isRecord(stored.outbox)) return;
+    const stored = loadStored(storage);
+    if (stored === null) return;
     const hit = new Set(deletedIds);
     let changed = false;
-    for (const list of Object.values(stored.outbox)) {
-      if (!Array.isArray(list)) continue;
-      for (const entry of list) {
-        if (!isRecord(entry) || !isRecord(entry.local) || !isRecord(entry.local.reply)) continue;
-        const reply = entry.local.reply;
-        if (typeof reply.id !== 'string' || !hit.has(reply.id) || reply.preview === '') continue;
-        reply.preview = '';
-        changed = true;
+    for (const slot of Object.values(stored.byWorkspace)) {
+      for (const list of Object.values(slot)) {
+        if (!Array.isArray(list)) continue;
+        for (const entry of list) {
+          if (!isRecord(entry) || !isRecord(entry.local) || !isRecord(entry.local.reply)) continue;
+          const reply = entry.local.reply;
+          if (typeof reply.id !== 'string' || !hit.has(reply.id) || reply.preview === '') continue;
+          reply.preview = '';
+          changed = true;
+        }
       }
     }
-    if (changed) storage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify(stored));
+    if (changed) saveStored(storage, stored);
   } catch {
     // Unreadable or blocked storage: nothing to strip.
   }
@@ -1182,6 +1255,7 @@ export function clearPersistedOutbox(storage: OutboxStorage | null): void {
   if (storage === null) return;
   try {
     storage.removeItem(OUTBOX_STORAGE_KEY);
+    storage.removeItem(LEGACY_OUTBOX_STORAGE_KEY);
   } catch {
     // Blocked storage has nothing to clear.
   }

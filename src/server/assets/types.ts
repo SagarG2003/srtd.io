@@ -22,6 +22,11 @@ export type AssetOrigin = 'library' | 'chat';
 /** Every expected, caller-handled failure in the pipeline. */
 export type UploadErrorCode =
   | 'unsupported_mime'
+  | 'blocked_type'
+  | 'encrypted_file'
+  | 'embedded_content'
+  | 'archive_limits'
+  | 'external_content'
   | 'mime_mismatch'
   | 'file_too_large'
   | 'virus_detected'

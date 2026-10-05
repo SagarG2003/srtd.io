@@ -24,6 +24,7 @@ import {
   clearPendingOpen,
   clearPersistedOutbox,
   OUTBOX_STORAGE_KEY,
+  persistedOutboxIds,
   readPersistedOutbox,
   writePersistedOutbox,
   type OutboxStorage,
@@ -249,22 +250,91 @@ describe('outbox persistence (reload)', () => {
     expect(storage.data.has(OUTBOX_STORAGE_KEY)).toBe(false);
   });
 
-  it('holds a single scope: writing another workspace replaces the blob', () => {
+  it('keeps one slot per workspace: writing B never drops A', () => {
     const storage = memoryStorage();
+    const B = { workspaceId: 'wb', userId: 'u1' };
     writePersistedOutbox(storage, A, { c1: [entry('m1')] });
-    writePersistedOutbox(storage, { workspaceId: 'wb', userId: 'u1' }, { c9: [entry('m9')] });
-    expect(readPersistedOutbox(storage, A)).toEqual({});
-    expect(storage.data.get(OUTBOX_STORAGE_KEY)).not.toContain('m1');
+    writePersistedOutbox(storage, B, { c9: [entry('m9')] });
+    expect(readPersistedOutbox(storage, A)).toEqual({ c1: [entry('m1')] });
+    expect(readPersistedOutbox(storage, B)).toEqual({ c9: [entry('m9')] });
+    expect(persistedOutboxIds(storage)).toEqual(new Set(['m1', 'm9']));
   });
 
-  it('an emptied outbox removes the key; sign-out clears it', () => {
+  it('emptying one workspace keeps the others; the last slot removes the key', () => {
+    const storage = memoryStorage();
+    const B = { workspaceId: 'wb', userId: 'u1' };
+    writePersistedOutbox(storage, A, { c1: [entry('m1')] });
+    writePersistedOutbox(storage, B, { c9: [entry('m9')] });
+    writePersistedOutbox(storage, B, {});
+    expect(readPersistedOutbox(storage, A)).toEqual({ c1: [entry('m1')] });
+    expect(readPersistedOutbox(storage, B)).toEqual({});
+    writePersistedOutbox(storage, A, {});
+    expect(storage.data.has(OUTBOX_STORAGE_KEY)).toBe(false);
+  });
+
+  it("replaces another user's blob on write, never merging it", () => {
+    const storage = memoryStorage();
+    writePersistedOutbox(storage, { workspaceId: 'wb', userId: 'u2' }, { c9: [entry('m9')] });
+    writePersistedOutbox(storage, A, { c1: [entry('m1')] });
+    expect(storage.data.get(OUTBOX_STORAGE_KEY)).not.toContain('m9');
+    expect(persistedOutboxIds(storage)).toEqual(new Set(['m1']));
+    expect(readPersistedOutbox(storage, A)).toEqual({ c1: [entry('m1')] });
+  });
+
+  it('folds a v1 blob into v2 under its workspace and removes v1', () => {
+    const storage = memoryStorage();
+    storage.setItem(
+      'sorted:chat:outbox:v1',
+      JSON.stringify({ workspaceId: 'wa', userId: 'u1', outbox: { c1: [entry('m1')] } }),
+    );
+    writePersistedOutbox(storage, { workspaceId: 'wb', userId: 'u1' }, { c9: [entry('m9')] });
+    expect(storage.data.has('sorted:chat:outbox:v1')).toBe(false);
+    expect(readPersistedOutbox(storage, A)).toEqual({ c1: [entry('m1')] });
+    expect(persistedOutboxIds(storage)).toEqual(new Set(['m1', 'm9']));
+  });
+
+  it("migrates on read and drops another user's v1 blob", () => {
+    const storage = memoryStorage();
+    storage.setItem(
+      'sorted:chat:outbox:v1',
+      JSON.stringify({ workspaceId: 'wa', userId: 'u1', outbox: { c1: [entry('m1')] } }),
+    );
+    expect(readPersistedOutbox(storage, A)).toEqual({ c1: [entry('m1')] });
+    expect(storage.data.has('sorted:chat:outbox:v1')).toBe(false);
+    expect(storage.data.has(OUTBOX_STORAGE_KEY)).toBe(true);
+
+    const other = memoryStorage();
+    other.setItem(
+      'sorted:chat:outbox:v1',
+      JSON.stringify({ workspaceId: 'wa', userId: 'u2', outbox: { c1: [entry('m1')] } }),
+    );
+    expect(readPersistedOutbox(other, A)).toEqual({});
+    expect([...other.data.keys()]).toEqual([]);
+  });
+
+  it('an emptied outbox removes the key; sign-out clears v1 and v2', () => {
     const storage = memoryStorage();
     writePersistedOutbox(storage, A, { c1: [entry('m1')] });
     writePersistedOutbox(storage, A, {});
     expect(storage.data.has(OUTBOX_STORAGE_KEY)).toBe(false);
     writePersistedOutbox(storage, A, { c1: [entry('m1')] });
+    storage.setItem('sorted:chat:outbox:v1', '{}');
     clearPersistedOutbox(storage);
-    expect(storage.data.has(OUTBOX_STORAGE_KEY)).toBe(false);
+    expect([...storage.data.keys()]).toEqual([]);
+  });
+
+  it('a malformed v1 or v2 blob is an empty outbox and is removed', () => {
+    for (const key of [OUTBOX_STORAGE_KEY, 'sorted:chat:outbox:v1']) {
+      const storage = memoryStorage();
+      storage.setItem(key, '{not json');
+      expect(readPersistedOutbox(storage, A)).toEqual({});
+      expect(storage.data.has(key)).toBe(false);
+      storage.setItem(key, '{not json');
+      expect(persistedOutboxIds(storage)).toEqual(new Set());
+      storage.setItem(key, '{not json');
+      expect(() => writePersistedOutbox(storage, A, { c1: [entry('m1')] })).not.toThrow();
+      expect(readPersistedOutbox(storage, A)).toEqual({ c1: [entry('m1')] });
+    }
   });
 
   it('drops malformed entries and survives a corrupt blob', () => {
@@ -272,13 +342,14 @@ describe('outbox persistence (reload)', () => {
     storage.setItem(
       OUTBOX_STORAGE_KEY,
       JSON.stringify({
-        workspaceId: 'wa',
         userId: 'u1',
-        outbox: {
-          c1: [
-            { id: 5 },
-            { id: 'm2', text: 'ok', local: { attachments: [], sharedPostIds: [], reply: null } },
-          ],
+        byWorkspace: {
+          wa: {
+            c1: [
+              { id: 5 },
+              { id: 'm2', text: 'ok', local: { attachments: [], sharedPostIds: [], reply: null } },
+            ],
+          },
         },
       }),
     );

@@ -144,11 +144,16 @@ export interface OgPreviewStore {
    * missing/deleted brief.
    */
   findBriefByRef(ref: EntityRef): Promise<{ briefId: string; title: string } | null>;
-  /** First image attachment of a live post, ordered position, attached_at, id. */
+  /**
+   * First image attachment of a live post, ordered position, attached_at, id.
+   * Only a version whose asset is a live library asset (origin 'library',
+   * deleted_at null) qualifies: chat files never surface here.
+   */
   findFirstPostImage(postId: string): Promise<PostImage | null>;
   /**
    * Locate the bytes for the (post, version) pair iff a live attachment binds
-   * them, the post is live, and the version is an image. Null on any miss.
+   * them, the post is live, the version is an image, and its asset is a live
+   * library asset (origin 'library', deleted_at null). Null on any miss.
    */
   findBoundImage(input: { postId: string; assetVersionId: string }): Promise<ImageLocator | null>;
 }
@@ -391,6 +396,13 @@ function passthrough(request: Request, env: OgPreviewEnv): Promise<Response> {
 }
 
 /**
+ * The embed that reaches a version's own asset (asset_versions.asset_id). The
+ * constraint-name hint is required: assets.current_version_id also links the two
+ * tables, so a bare `assets` embed is ambiguous.
+ */
+const VERSION_ASSET_EMBED = 'assets!asset_versions_asset_id_fkey!inner(origin, deleted_at)';
+
+/**
  * Service-role-backed store. The service role bypasses RLS; the Worker is the
  * only caller and never exposes this key. supabase-js is a stateless HTTP client
  * (no pooled connection to close); it is built per request and discarded when
@@ -400,12 +412,15 @@ function createSupabaseOgPreviewStore(env: {
   SUPABASE_URL: string;
   SUPABASE_SECRET_KEY: string;
 }): OgPreviewStore {
-  const client: SupabaseClient<Database> = createClient<Database>(
-    env.SUPABASE_URL,
-    env.SUPABASE_SECRET_KEY,
-    { auth: { persistSession: false, autoRefreshToken: false } },
+  return createOgPreviewStore(
+    createClient<Database>(env.SUPABASE_URL, env.SUPABASE_SECRET_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    }),
   );
+}
 
+/** The store over a given (service-role) client; exported so tests can inject one. */
+export function createOgPreviewStore(client: SupabaseClient<Database>): OgPreviewStore {
   return {
     async findPostTitle(postId) {
       const { data, error } = await client
@@ -483,15 +498,18 @@ function createSupabaseOgPreviewStore(env: {
     },
 
     async findFirstPostImage(postId) {
-      // asset_versions carries no soft-delete column, so nothing to filter there;
-      // width/height are the only real dimensions, emitted only when non-null.
+      // asset_versions carries no soft-delete column; the parent asset does, and
+      // it must also be a library asset (chat files stay in chat). width/height
+      // are the only real dimensions, emitted only when non-null.
       const { data, error } = await client
         .from('asset_attachments')
-        .select('asset_version_id, asset_versions!inner(width, height)')
+        .select(`asset_version_id, asset_versions!inner(width, height, ${VERSION_ASSET_EMBED})`)
         .eq('entity_type', 'post')
         .eq('entity_id', postId)
         .is('deleted_at', null)
         .eq('asset_versions.kind', 'image')
+        .eq('asset_versions.assets.origin', 'library')
+        .is('asset_versions.assets.deleted_at', null)
         .order('position', { ascending: true })
         .order('attached_at', { ascending: true })
         .order('id', { ascending: true })
@@ -527,12 +545,16 @@ function createSupabaseOgPreviewStore(env: {
       }
       const { data, error } = await client
         .from('asset_attachments')
-        .select('asset_versions!inner(r2_key, workspaces!inner(asset_bucket))')
+        .select(
+          `asset_versions!inner(r2_key, workspaces!inner(asset_bucket), ${VERSION_ASSET_EMBED})`,
+        )
         .eq('entity_type', 'post')
         .eq('entity_id', postId)
         .eq('asset_version_id', assetVersionId)
         .is('deleted_at', null)
         .eq('asset_versions.kind', 'image')
+        .eq('asset_versions.assets.origin', 'library')
+        .is('asset_versions.assets.deleted_at', null)
         .maybeSingle();
       if (error) {
         throw error;
@@ -613,69 +635,6 @@ async function route(request: Request, env: OgPreviewEnv): Promise<Response> {
   return passthrough(request, env);
 }
 
-/**
- * Temporary diagnostic: one line of env sanity that never prints a secret value.
- * SUPABASE_URL is reduced to its hostname (or MISSING/INVALID), the secret key to
- * its length and a 6-char prefix only.
- */
-function envSanityLine(env: OgPreviewEnv): string {
-  const rawUrl: string | undefined = env.SUPABASE_URL;
-  let host: string;
-  if (rawUrl === undefined || rawUrl === '') {
-    host = 'MISSING';
-  } else {
-    try {
-      host = new URL(rawUrl).hostname;
-    } catch (err: unknown) {
-      host = `INVALID:${String(err)}`;
-    }
-  }
-  const key: string | undefined = env.SUPABASE_SECRET_KEY;
-  const len = typeof key === 'string' ? key.length : 0;
-  const prefix = typeof key === 'string' && key.length > 0 ? key.slice(0, 6) : 'MISSING';
-  return `env SUPABASE_URL host=${host} SUPABASE_SECRET_KEY len=${len} prefix=${prefix}`;
-}
-
-/**
- * Temporary diagnostic: fully serialize a thrown value by shape so a non-Error
- * throw (a plain object, a supabase-js error) is legible instead of collapsing to
- * "[object Object]". Never throws itself.
- */
-function serializeThrown(error: unknown): string {
-  if (error instanceof Error) {
-    const stackLines = (error.stack ?? '').split('\n').slice(0, 4).join('\n');
-    let out = `${error.name}: ${error.message}`;
-    if (stackLines !== '') {
-      out += `\n${stackLines}`;
-    }
-    const extra: Record<string, unknown> = {};
-    for (const prop of Object.keys(error)) {
-      if (prop === 'message' || prop === 'stack') {
-        continue;
-      }
-      extra[prop] = (error as unknown as Record<string, unknown>)[prop];
-    }
-    if (Object.keys(extra).length > 0) {
-      try {
-        out += `\n${JSON.stringify(extra)}`;
-      } catch {
-        // Non-serializable extras are dropped; the message and stack still stand.
-      }
-    }
-    return out;
-  }
-  if (typeof error === 'object' && error !== null) {
-    const ctor = (error as { constructor?: { name?: string } }).constructor?.name;
-    const label = ctor !== undefined && ctor !== '' ? `${ctor} ` : '';
-    try {
-      return `${label}${JSON.stringify(error, Object.getOwnPropertyNames(error))}`;
-    } catch {
-      return `${label}${String(error)}`;
-    }
-  }
-  return String(error);
-}
-
 export default {
   async fetch(request: Request, env: OgPreviewEnv): Promise<Response> {
     const traceId = extractTraceId(request);
@@ -688,16 +647,6 @@ export default {
       const errStack =
         error instanceof Error && error.stack ? (error.stack.split('\n')[1]?.trim() ?? '') : '';
       logger.error(`og preview failed: ${errName}: ${errMsg} ${errStack}`.trim());
-      // Temporary diagnostic: opt-in per request via x-og-debug: 1 to read the
-      // runtime crash plus env sanity. Normal requests still get an opaque empty
-      // 500. Capped at 2000 chars; never prints a secret value.
-      if (request.headers.get('x-og-debug') === '1') {
-        const body = `${envSanityLine(env)}\n${serializeThrown(error)}`.slice(0, 2000);
-        return new Response(body, {
-          status: 500,
-          headers: { 'content-type': 'text/plain; charset=utf-8' },
-        });
-      }
       return new Response(null, { status: 500 });
     } finally {
       logger.clearTraceId();

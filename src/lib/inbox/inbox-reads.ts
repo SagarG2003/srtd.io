@@ -7,7 +7,8 @@
 
 import type { Client, Result } from '@srtdio/rpc';
 import { MENTION_EVENT_TYPE, mapEntry } from '@/components/pages/activity/data';
-import { readProfiles } from '@/lib/chat-reads';
+import { READ_TIMEOUT_MS, readProfiles, withReadTimeout } from '@/lib/chat-reads';
+import { mentionIds } from '@/lib/chat/mentions';
 import { pickNewest, type EnrichedNew, type InboxRow } from '@/lib/inbox/inbox-live';
 import { withoutBellEntries } from '@/lib/inbox/bell-types';
 
@@ -96,12 +97,15 @@ export async function fetchInboxSince(
 /**
  * Reduce a batch of new rows to a count plus its enriched lead (the newest row).
  * Batched only: one comments read, one posts read, one briefs read and one
- * batched profile read regardless of row count. Each sub-query is best-effort, so
- * a failure leaves its field null rather than failing the batch. Never throws.
+ * batched profile read (comment authors plus the ids the lead's body mentions)
+ * regardless of row count. The profile read is capped at `nameTimeoutMs`. Each
+ * sub-query is best-effort, so a failure leaves its field null rather than
+ * failing the batch. Never throws.
  */
 export async function enrichNewRows(
   client: Client,
   newRows: readonly InboxRow[],
+  nameTimeoutMs: number = READ_TIMEOUT_MS,
 ): Promise<EnrichedNew> {
   const count = newRows.length;
   const newest = pickNewest(newRows);
@@ -145,28 +149,43 @@ export async function enrichNewRows(
     for (const r of briefsRes.data ?? []) briefTitles.set(r.id, r.title);
   }
 
-  const authorIds = unique([...commentAuthors.values()]);
-  const names = new Map<string, string>();
-  const avatars = new Map<string, string>();
-  if (authorIds.length > 0) {
-    const profiles = await readProfiles(client, authorIds);
-    if (profiles.ok) {
-      for (const p of profiles.data) {
-        names.set(p.userId, p.displayName);
-        if (p.avatarUrl !== null) avatars.set(p.userId, p.avatarUrl);
-      }
-    }
-  }
-
   const leadItem = mapEntry(newest);
-  const authorId =
-    leadItem.commentId !== null ? (commentAuthors.get(leadItem.commentId) ?? null) : null;
-  const actorName = authorId !== null ? (names.get(authorId) ?? null) : null;
-  const actorAvatarUrl = authorId !== null ? (avatars.get(authorId) ?? null) : null;
   const body =
     leadItem.eventType === 'comment' && leadItem.commentId !== null
       ? (commentBodies.get(leadItem.commentId) ?? null)
       : null;
+  const mentioned = body !== null ? mentionIds(body) : [];
+
+  const profileIds = unique([...commentAuthors.values(), ...mentioned]);
+  const names = new Map<string, string>();
+  const avatars = new Map<string, string>();
+  let namesRead = profileIds.length === 0;
+  if (profileIds.length > 0) {
+    const profiles = await withReadTimeout(
+      (signal) => readProfiles(client, profileIds, signal),
+      nameTimeoutMs,
+    );
+    if (profiles.ok) {
+      namesRead = true;
+      for (const p of profiles.data) {
+        names.set(p.userId.toLowerCase(), p.displayName);
+        if (p.avatarUrl !== null) avatars.set(p.userId.toLowerCase(), p.avatarUrl);
+      }
+    }
+  }
+
+  const authorId =
+    leadItem.commentId !== null ? (commentAuthors.get(leadItem.commentId) ?? null) : null;
+  const actorName = authorId !== null ? (names.get(authorId.toLowerCase()) ?? null) : null;
+  const actorAvatarUrl = authorId !== null ? (avatars.get(authorId.toLowerCase()) ?? null) : null;
+  let mentionNames: Map<string, string> | null = null;
+  if (namesRead) {
+    mentionNames = new Map<string, string>();
+    for (const id of mentioned) {
+      const name = names.get(id);
+      if (name !== undefined) mentionNames.set(id, name);
+    }
+  }
   const title =
     leadItem.entityType === 'post' && leadItem.entityId !== null
       ? (postTitles.get(leadItem.entityId) ?? null)
@@ -174,5 +193,8 @@ export async function enrichNewRows(
         ? (briefTitles.get(leadItem.entityId) ?? null)
         : null;
 
-  return { count, lead: { eventType: leadItem.eventType, actorName, actorAvatarUrl, body, title } };
+  return {
+    count,
+    lead: { eventType: leadItem.eventType, actorName, actorAvatarUrl, body, title, mentionNames },
+  };
 }

@@ -97,10 +97,32 @@ describe('uploadErrorMessage maps worker codes to plain English', () => {
     expect(uploadErrorMessage('unsupported_mime')).toBe("This file type isn't supported");
     expect(uploadErrorMessage('mime_mismatch')).toBe("File contents don't match the file type");
     expect(uploadErrorMessage('virus_detected')).toBe('This file was blocked for safety');
-    expect(uploadErrorMessage('network')).toBe('Upload failed. Check your connection and retry');
-    expect(uploadErrorMessage('internal_error')).toBe(
-      'Upload failed. Check your connection and retry',
+    expect(uploadErrorMessage('blocked_type')).toBe("This file type isn't allowed");
+    expect(uploadErrorMessage('encrypted_file')).toBe("Password-protected files can't be shared");
+    expect(uploadErrorMessage('embedded_content')).toBe(
+      "This file contains embedded content that can't be checked.",
     );
+    expect(uploadErrorMessage('archive_limits')).toBe('This file is too complex to check');
+    expect(uploadErrorMessage('network')).toBe("Couldn't upload. Try again.");
+    expect(uploadErrorMessage('internal_error')).toBe("Couldn't upload. Try again.");
+  });
+
+  it('never mentions the connection, network or offline in any upload copy', () => {
+    const codes = [
+      'file_too_large',
+      'unsupported_mime',
+      'mime_mismatch',
+      'virus_detected',
+      'blocked_type',
+      'encrypted_file',
+      'embedded_content',
+      'archive_limits',
+      'network',
+      'internal_error',
+    ];
+    for (const code of codes) {
+      expect(uploadErrorMessage(code)).not.toMatch(/connect|network|offline/i);
+    }
   });
 });
 
@@ -210,7 +232,7 @@ describe('uploadAssetFile', () => {
   it('maps a transport failure to the retry message', async () => {
     const fetcher = vi.fn().mockRejectedValue(new Error('offline'));
     const out = await uploadAssetFile(fakeFile('a.png', 'image/png', 1), baseConfig(fetcher));
-    expect(out).toEqual({ ok: false, message: 'Upload failed. Check your connection and retry' });
+    expect(out).toEqual({ ok: false, message: "Couldn't upload. Try again." });
   });
 });
 
@@ -314,12 +336,8 @@ describe('linkErrorMessage maps worker codes to plain English', () => {
   it('maps known codes and falls back for the rest', () => {
     expect(linkErrorMessage('invalid_url')).toBe('Enter a full link starting with https://');
     expect(linkErrorMessage('name_required')).toBe('The link needs a name');
-    expect(linkErrorMessage('network')).toBe(
-      "Couldn't add the link. Check your connection and retry",
-    );
-    expect(linkErrorMessage('whatever')).toBe(
-      "Couldn't add the link. Check your connection and retry",
-    );
+    expect(linkErrorMessage('network')).toBe("Couldn't add the link. Try again.");
+    expect(linkErrorMessage('whatever')).toBe("Couldn't add the link. Try again.");
   });
 });
 
@@ -355,7 +373,7 @@ describe('addAssetLink', () => {
     const out = await addAssetLink(linkConfig(fetcher));
     expect(out).toEqual({
       ok: false,
-      message: "Couldn't add the link. Check your connection and retry",
+      message: "Couldn't add the link. Try again.",
     });
   });
 });
@@ -417,7 +435,7 @@ describe('createFolderRequest', () => {
     const out = await createFolderRequest(folderConfig(fetcher));
     expect(out).toEqual({
       ok: false,
-      message: "Couldn't create the folder. Check your connection and retry",
+      message: "Couldn't create the folder. Try again.",
     });
   });
 
@@ -426,7 +444,7 @@ describe('createFolderRequest', () => {
     const out = await createFolderRequest(folderConfig(fetcher));
     expect(out).toEqual({
       ok: false,
-      message: "Couldn't create the folder. Check your connection and retry",
+      message: "Couldn't create the folder. Try again.",
     });
   });
 });
@@ -477,7 +495,7 @@ describe('moveAssetsRequest', () => {
     const out = await moveAssetsRequest(moveConfig(fetcher));
     expect(out).toEqual({
       ok: false,
-      message: "Couldn't move the files. Check your connection and retry",
+      message: "Couldn't move the files. Try again.",
     });
   });
 
@@ -486,7 +504,7 @@ describe('moveAssetsRequest', () => {
     const out = await moveAssetsRequest(moveConfig(fetcher));
     expect(out).toEqual({
       ok: false,
-      message: "Couldn't move the files. Check your connection and retry",
+      message: "Couldn't move the files. Try again.",
     });
   });
 });
@@ -513,12 +531,8 @@ describe('canRenameAssets gates the edit affordance by role', () => {
 describe('renameErrorMessage', () => {
   it('maps a 403 to the agency-only line and everything else to retry', () => {
     expect(renameErrorMessage(403)).toBe('Only the agency team can rename assets');
-    expect(renameErrorMessage(0)).toBe(
-      "Couldn't rename this asset. Check your connection and retry",
-    );
-    expect(renameErrorMessage(500)).toBe(
-      "Couldn't rename this asset. Check your connection and retry",
-    );
+    expect(renameErrorMessage(0)).toBe("Couldn't rename this asset. Try again.");
+    expect(renameErrorMessage(500)).toBe("Couldn't rename this asset. Try again.");
   });
 });
 
@@ -551,7 +565,7 @@ describe('renameAsset', () => {
     const out = await renameAsset(renameConfig(fetcher));
     expect(out).toEqual({
       ok: false,
-      message: "Couldn't rename this asset. Check your connection and retry",
+      message: "Couldn't rename this asset. Try again.",
     });
   });
 });
@@ -615,7 +629,7 @@ describe('renameFolderRequest', () => {
     expect(out).toEqual({
       ok: false,
       nameTaken: false,
-      message: "Couldn't rename the folder. Check your connection and retry",
+      message: "Couldn't rename the folder. Try again.",
     });
   });
 });
@@ -653,7 +667,7 @@ describe('deleteFolderRequest', () => {
     const out = await deleteFolderRequest(deleteFolderConfig(fetcher));
     expect(out).toEqual({
       ok: false,
-      message: "Couldn't delete the folder. Check your connection and retry",
+      message: "Couldn't delete the folder. Try again.",
     });
   });
 });

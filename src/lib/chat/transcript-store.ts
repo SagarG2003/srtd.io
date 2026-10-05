@@ -45,6 +45,7 @@ export type TranscriptView =
 export interface VoiceStorage {
   getItem: (key: string) => string | null;
   setItem: (key: string, value: string) => void;
+  removeItem?: (key: string) => void;
 }
 
 function isRecord(value: unknown): value is VoiceRecord {
@@ -102,6 +103,8 @@ export interface VoiceStore {
   update: (id: string, patch: VoicePatch) => void;
   setPending: (id: string, pending: boolean) => void;
   subscribe: (listener: () => void) => () => void;
+  /** Forget every record (memory and storage) and pending flag. */
+  clear: () => void;
 }
 
 /** Build a store over `storage` (null: memory only). Never throws. */
@@ -173,6 +176,20 @@ export function createVoiceStore(
         listeners.delete(listener);
       };
     },
+    clear() {
+      records = new Map();
+      pending.clear();
+      // The original storage, even when a failed write fell back to memory.
+      if (storage !== null) {
+        try {
+          if (storage.removeItem !== undefined) storage.removeItem(VOICE_STORE_KEY);
+          else storage.setItem(VOICE_STORE_KEY, '[]');
+        } catch {
+          // Blocked storage has nothing to clear.
+        }
+      }
+      emit();
+    },
   };
 }
 
@@ -186,6 +203,11 @@ function browserStorage(): VoiceStorage | null {
 
 /** The app-wide store. */
 export const voiceStore = createVoiceStore(browserStorage());
+
+/** Sign-out: every voice-note record goes, from memory and storage. Never throws. */
+export function clearVoiceTranscripts(store: VoiceStore = voiceStore): void {
+  store.clear();
+}
 
 /**
  * One message's record and pending flag. A write replaces only that message's

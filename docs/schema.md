@@ -15,7 +15,7 @@ All tables are in schema `public`, all have RLS enabled. `id` uses `uuidv7()` un
 4. Briefs: briefs
 5. Assets: assets, asset_versions, asset_attachments, folders
 6. People grouping: groups, group_members
-7. Chat (Postgres record): chat_channels, chat_messages, chat_message_marks, chat_reactions, chat_read_cursors, chat_sync_events
+7. Chat (Postgres record): chat_channels, chat_messages, chat_message_marks, chat_message_stars, chat_reactions, chat_read_cursors, chat_sync_events
 8. Inbox and delivery: inbox_entries, email_threads, delivery_attempts, webhook_events, webhook_processing_attempts
 9. Platform ops (Cockpit): audit_log, feature_flags, cockpit_access_log, cockpit_procedure_allowlist, intent_ledger, pending_flows
 10. Enumerations reference
@@ -249,6 +249,15 @@ RLS (20260930160000_assets_origin_chat_private.sql):
 
 Chat-origin assets and their versions are therefore invisible to authenticated reads; chat file reads go through the service role and chat_attachment_readable (section 7).
 
+Chat files stay in chat (20261005040000_chat_files_stay_in_chat.sql):
+
+- gallery_set: raises 'attachment not available' for a version (in the post's workspace) whose asset is origin 'chat' or soft-deleted, unless that version is already live-attached to the same post, so an unchanged gallery still saves.
+- brief_create: raises 'attachment not available' for an attachment version whose asset is origin 'chat' or soft-deleted.
+- comment_create: raises 'attachment not available' for an attachment version whose asset is origin 'chat' or soft-deleted.
+- comment_batch_create: raises 'attachment not available' for an attachment version whose asset is origin 'chat' or soft-deleted.
+- asset_delete: raises 'chat files are deleted with their message' for an origin 'chat' asset.
+- asset_delete_many: raises 'chat files are deleted with their message' when the set holds a live origin 'chat' asset.
+
 ### asset_attachments
 
 NO ACTION on delete: live attachments block asset hard-delete.
@@ -311,7 +320,7 @@ chat_messages carries shared_post_ids, reply_to_message_id and attachment_meta (
 Marks: chat_message_marks, one per message, types commitment/decision (commitment/decision/pending are all resolvable by any member (Delivered / Closed / Completed) via chat_mark_resolve; chat_mark_reopen (any member) returns a resolved mark to open; resolved rows stay as history; marks hidden by the caller's clear, same as messages.) and pending (resolvable by any member, optional priority 1 or 2). Delete: chat_message_delete soft-deletes the caller's own messages only, never marked ones. shared_brief_ids alongside shared_post_ids.
 
 chat_message_edit(p_message_id text, p_channel_id text, p_body text, p_trace_id uuid, p_mentions jsonb default null): own message only, body and mentions only, 15 min window from created_at, blocked when marked or deleted; sets edited_at.
-chat_message_delete: own messages only, 30 min window from created_at, blocked when marked.
+chat_message_delete: own messages only, 30 min window from created_at (none in a notes channel), blocked when marked.
 Notes channels (20261003170000_notes_channel_and_search_kind.sql): chat_message_delete has no time window for messages in a notes channel; DM and group messages keep the 30 minute window. Own-only and the marked block still apply.
 chat_message_search(p_workspace_id uuid, p_query text, p_trace_id uuid, p_channel_id text default null, p_before_created_at timestamptz default null, p_before_id text default null, p_limit integer default 30, p_kind text default null) RETURNS SETOF chat_messages, SQL STABLE SECURITY INVOKER (search_path public, pg_temp; EXECUTE to authenticated only), 8 args (the old 7-arg version is dropped). New p_kind filter: photo = an attachment_meta entry with mime image/*, voice = audio/*, file = any other attachment, link = body matches http(s)://. An empty query is allowed only together with p_kind; no query and no kind returns no rows. An unknown p_kind returns no rows. Rows stay limited by chat_messages RLS, so notes rows reach only their owner.
 Tombstone: delete sets deleted_at, wipes every content column (body, mentions, attachment_asset_ids, attachment_meta, shared_post_ids, shared_brief_ids set to null) and keeps the row, so members still read it and render "Message deleted". Existing deleted rows were wiped the same way. Recorded in 20260929120000_chat_delete_tombstone.sql.
@@ -324,9 +333,11 @@ Applied to live 2026-09-22 and recorded in 20260922200000_chat_postgres_record.s
 
 ### chat_channels
 
-PK channel_id (text, ^(dm|group)__[a-f0-9-]{36}__.+$). Fields: workspace_id FK, channel_type (dm / group), entity_id uuid nullable (the group id for group channels), dm_user_a / dm_user_b nullable FK auth.users.id (dm_user_a < dm_user_b), agora_group_id nullable (unique where not null), last_synced_at nullable, created_at. Channel ids: dm__W__min(A,B)__max(A,B); group__W__G.
+PK channel_id (text, ^(dm|group|notes)__[a-f0-9-]{36}__.+$). Fields: workspace_id FK, channel_type (dm / group / notes), entity_id uuid nullable (the group id for group channels), dm_user_a / dm_user_b nullable FK auth.users.id (dm_user_a < dm_user_b), owner_user_id nullable FK auth.users.id (notes only), agora_group_id nullable (unique where not null), last_synced_at nullable, created_at. Channel ids: dm__W__min(A,B)__max(A,B); group__W__G; notes__W__U.
 
 Notes (20261003170000_notes_channel_and_search_kind.sql): channel_type adds 'notes' (channel_id regex now ^(dm|group|notes)__...). New column owner_user_id uuid nullable FK auth.users.id, set only for notes rows (chat_channels_shape requires it null for dm / group / plan_period and non-null for notes). Notes channel_id = notes__<workspace_id>__<owner_user_id>, enforced by chat_channels_shape: one personal notes channel per person per workspace. Notes channels have no Agora group (no agora_group_id, no chat_sync_events).
+
+Notes channel: client calls notes_channel_ensure on Chat home load; no Agora; sync by catch-up on open/focus.
 
 notes_channel_ensure(p_workspace_id uuid, p_trace_id uuid) RETURNS text (the channel_id), SECURITY DEFINER (search_path='', EXECUTE to authenticated only; revoked from PUBLIC and anon): requires auth.uid(), p_trace_id and an active workspace member ('workspace_member_only'). Idempotent (ON CONFLICT DO NOTHING); writes one audit_log row (action notes_channel_ensure, entity chat_channel) only when the row is created.
 
@@ -340,7 +351,7 @@ RLS: chat_messages_select_channel_member (SELECT to authenticated) USING chat_ch
 
 chat_message_send(p_id uuid, p_channel_id text, p_trace_id uuid, p_body text default null, p_mentions jsonb default null, p_attachment_asset_ids uuid[] default null, p_shared_post_ids uuid[] default null, p_reply_to_message_id text default null, p_attachment_meta jsonb default null, p_shared_brief_ids uuid[] default null, p_forwarded_from_message_id text default null) RETURNS chat_messages, SECURITY DEFINER (search_path='', EXECUTE to authenticated only): the only write path, 11 args. Requires auth.uid(), p_id and p_trace_id; raises 'message has no body, attachments, shared posts or shared briefs' when the trimmed body is empty and all three arrays are empty, 'body exceeds 5000 characters' past the cap, and 'not a member of this chat' unless chat_channel_member. p_reply_to_message_id must be a message in the same channel ('reply target not in this chat'); p_forwarded_from_message_id must be a non-deleted message in the same workspace in a channel the sender is a member of ('forward source not accessible'). p_mentions is resolved to channel members by chat_mentions_resolve, and each mentioned user gets an urgent 'mention' inbox_entries row. p_attachment_asset_ids, p_attachment_meta, p_shared_post_ids and p_shared_brief_ids are stored as given (no existence or workspace check). Takes pg_advisory_xact_lock(hashtext(p_id)) and, when a row with that id already exists, returns it unchanged (idempotent retry); otherwise inserts with sender_user_id = auth.uid(), created_at = now(), agora_event_id null, and returns the new row.
 
-chat_attachment_readable(p_asset_version_id uuid, p_user_id uuid) RETURNS boolean, SQL STABLE SECURITY DEFINER (search_path=''; EXECUTE revoked from PUBLIC, anon, authenticated; granted to service_role only): true when the version's asset has uploaded_by = p_user_id, or a chat_messages row has attachment_asset_ids @> array[p_asset_version_id], deleted_at null, chat_channel_member(channel_id, p_user_id), and created_at > coalesce(chat_cleared_at(channel_id, p_user_id), '-infinity'). Recorded in 20260930160000_assets_origin_chat_private.sql.
+chat_attachment_readable(p_asset_version_id uuid, p_user_id uuid) RETURNS boolean, SQL STABLE SECURITY DEFINER (search_path=''; EXECUTE revoked from PUBLIC, anon, authenticated; granted to service_role only): true when the version has asset_versions.uploaded_by = p_user_id (20261005040000_chat_files_stay_in_chat.sql; was assets.uploaded_by), or a chat_messages row has attachment_asset_ids @> array[p_asset_version_id], deleted_at null, chat_channel_member(channel_id, p_user_id), and created_at > coalesce(chat_cleared_at(channel_id, p_user_id), '-infinity'). Recorded in 20260930160000_assets_origin_chat_private.sql.
 
 Trigger: chat_messages_thread_root (BEFORE INSERT OR UPDATE OF reply_to_message_id on chat_messages, FOR EACH ROW, chat_messages_set_thread_root(), plpgsql, search_path=''): reply_to_message_id null sets thread_root_message_id null; otherwise thread_root_message_id = coalesce(parent.thread_root_message_id, parent.id) where the parent is the reply target in the same channel_id. A reply to a reply (or to a deleted tombstone) inherits the top-level root. chat_message_send has no thread root parameter. Existing replies were backfilled. Recorded in 20261003120000_chat_thread_root.sql.
 
@@ -399,6 +410,19 @@ RLS: chat_reminders_select_own (SELECT to authenticated) USING user_id = auth.ui
 - Trigger chat_messages_reminders_on_delete (AFTER UPDATE OF deleted_at ON chat_messages, when deleted_at goes from null to not null) runs chat_messages_reminders_on_delete() (no grants): cancels every pending reminder on that message.
 
 Recorded in 20261003140000_chat_message_reminders.sql.
+
+### chat_message_stars
+
+PK (user_id, message_id). Fields: user_id FK auth.users.id ON DELETE CASCADE (the person who starred), message_id text (no FK; chat_messages is partitioned with PK (id, created_at), same as chat_message_marks), message_created_at timestamptz (the starred message's created_at, used to join back to chat_messages and to order), channel_id text FK chat_channels ON DELETE CASCADE, workspace_id FK workspaces ON DELETE CASCADE, starred_at timestamptz default now(). Stars are private: each person sees only their own. Indexes: chat_message_stars_user_ws_idx (user_id, workspace_id, message_created_at DESC), chat_message_stars_user_channel_idx (user_id, channel_id, message_created_at DESC), chat_message_stars_message_idx (message_id), chat_message_stars_channel_idx (channel_id), chat_message_stars_workspace_idx (workspace_id).
+
+RLS: chat_message_stars_select_own (SELECT to authenticated) USING user_id = auth.uid() AND chat_channel_member(channel_id, auth.uid()): own rows in chats the caller is still in. No write policies. Table grants: authenticated SELECT only (INSERT, UPDATE, DELETE revoked); anon none. All writes go through chat_message_star_set.
+
+- chat_message_star_set(p_message_ids text[], p_channel_id text, p_starred boolean, p_trace_id uuid) RETURNS void, SECURITY DEFINER (search_path=''; EXECUTE to authenticated only). Requires auth.uid(), p_trace_id ('trace id required') and p_starred ('starred flag required'); 1 to 100 ids ('select between 1 and 100 messages'); member only ('not a member of this chat'). p_starred true: every id must be a live message in p_channel_id after the caller's clear, else 'message not found' (deleted and cleared-away messages are refused); already-starred ids are a no-op. p_starred false: removes the caller's stars on those ids in that channel; unknown ids are a no-op. Idempotent. Writes one audit_log row per call that changed rows: chat_message_star or chat_message_unstar, entity chat_channel / p_channel_id, payload {count}. A call that changes nothing writes no audit row.
+- chat_message_starred_list(p_workspace_id uuid, p_trace_id uuid, p_channel_id text default null, p_query text default null, p_before_created_at timestamptz default null, p_before_id text default null, p_limit integer default 30) RETURNS SETOF chat_messages, SQL STABLE SECURITY INVOKER (search_path public, pg_temp; EXECUTE to authenticated only). The caller's own stars in the workspace only, joined to chat_messages (RLS on both tables applies), skipping deleted messages; newest message first (created_at desc, id desc); keyset paging via p_before_created_at + p_before_id; optional p_channel_id filter; optional p_query prefix text search with the same rules as chat_message_search (simple tsvector over body, each term a prefix, query trimmed length 2 to 100, else no rows); p_limit clamped 1 to 50. Writes nothing (allowlisted in tests/rls/trace-id-usage.test.ts).
+- Trigger chat_messages_stars_on_delete (AFTER UPDATE OF deleted_at ON chat_messages, when deleted_at goes from null to not null) runs chat_messages_stars_on_delete() (no grants): deletes every star on that message (mirrors chat_messages_reminders_on_delete).
+- Clear for me: a cleared chat hides its stars. chat_message_starred_list returns nothing at or before the caller's cleared_at (chat_messages RLS), and starring a pre-clear message raises 'message not found'.
+
+Recorded in 20261004050000_chat_message_stars.sql.
 
 ## 8. Inbox and delivery
 
@@ -509,7 +533,7 @@ Each carries (id, created_at) composite PK. New monthly partitions must be creat
 These are dead references from the pre-MVP schema. Harmless (they only widen a CHECK or name a now-missing concept), but listed so they can be cleaned in a later migration if desired:
 
 - comments.entity_type and inbox_entries.entity_type still allow plan_cell / plan_period. Plan is removed, so these values will never be written.
-- chat_channels.channel_type and channel_id regex still allow plan / plan_period channels. No plan periods exist to create them.
+- chat_channels_shape and chat_channel_member still carry a plan_period branch. channel_type (dm, group, notes) and the channel_id regex (^(dm|group|notes)__) no longer allow plan or plan_period, so the branch can never match.
 - intent_ledger.target_type still lists share_token. share_tokens table is dropped.
 - webhook_events.source lists stripe / resend / linkedin but not agora. To store the Agora chat webhook entry you wanted, this enum likely needs an agora value added.
 

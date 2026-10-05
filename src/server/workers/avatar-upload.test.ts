@@ -22,6 +22,7 @@ import worker, {
 } from './avatar-upload';
 import { getSupabaseJwks, verifyCaller } from './asset-read';
 import { computeSha256, type PutObjectInput } from '@srtdio/storage';
+import { ole2, svg } from '../../../packages/storage/src/__fixtures__/files';
 
 const USER = '33333333-3333-7333-8333-333333333333';
 const OTHER_USER = '44444444-4444-7444-8444-444444444444';
@@ -373,4 +374,34 @@ describe('avatar-upload group target', () => {
       ).toBe(false);
     });
   });
+});
+
+describe('avatar-upload refuses SVG and OLE2 on every target', () => {
+  const GROUP = '55555555-5555-7555-8555-555555555555';
+  const refused: ReadonlyArray<[string, Uint8Array<ArrayBuffer>]> = [
+    ['an SVG', new Uint8Array(svg())],
+    ['a legacy OLE2 Office file', new Uint8Array(ole2())],
+  ];
+
+  for (const [label, bytes] of refused) {
+    for (const extra of [{}, { target_kind: 'group', target_id: GROUP }]) {
+      const target = 'target_kind' in extra ? 'group photo' : 'avatar';
+      it(`returns 415 for ${label} as a ${target} and stores nothing`, async () => {
+        const token = await mintToken(USER);
+        const storage = new FakeStorage();
+        const res = await handleAvatarUpload(
+          uploadRequest(token, bytes, extra),
+          env,
+          { ...deps(storage), canManageGroup: () => Promise.resolve(true) },
+          'trace-svg',
+          null,
+        );
+        expect(res.status).toBe(415);
+        const body = (await res.json()) as { error: { code: string; message: string } };
+        expect(body.error.code).toBe('unsupported_format');
+        expect(body.error.message).not.toMatch(/connect|network|offline/i);
+        expect(storage.calls).toHaveLength(0);
+      });
+    }
+  }
 });

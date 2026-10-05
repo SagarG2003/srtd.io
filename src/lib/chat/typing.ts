@@ -14,7 +14,12 @@
 
 import type { AgoraChat } from 'agora-chat';
 import type { ChatConnection } from '@/lib/chat/types';
-import { sendRouted, type ChannelTarget, type ThreadChatType } from '@/lib/chat/thread';
+import {
+  mapLiveTextMessage,
+  sendRouted,
+  type ChannelTarget,
+  type ThreadChatType,
+} from '@/lib/chat/thread';
 import { userIdFromAgoraUsername } from '@/lib/chat/agora-identity';
 
 /** Our own SDK event-handler id, distinct from the thread/Foundation handlers. */
@@ -43,6 +48,11 @@ export type CreateCmdMessage = (options: {
   action: string;
   /** Custom extension; the thread's live signals ride here. */
   ext?: Record<string, unknown>;
+  /**
+   * Agora's online-only delivery flag. The SDK default (false) queues the cmd
+   * for an offline recipient and replays it on reconnect; omitted keeps it.
+   */
+  deliverOnlineOnly?: boolean;
 }) => AgoraChat.MessageBody;
 
 /** Whether a live command message belongs to the open channel. */
@@ -53,6 +63,22 @@ export function cmdBelongsToTarget(msg: AgoraChat.CmdMsgBody, target: ChannelTar
   return (
     msg.chatType === 'singleChat' && (msg.from === target.targetId || msg.to === target.targetId)
   );
+}
+
+/**
+ * Drop an inbound typing cmd older than this (by its `time` against the local
+ * clock). Generous rather than INBOUND_CLEAR_MS-tight so device clock skew never
+ * hides a live signal; it exists to drop cmds queued offline and replayed.
+ */
+export const TYPING_MAX_AGE_MS = 30000;
+
+/**
+ * Whether a typing cmd is too old to show. A future-dated time (skew) is fresh;
+ * a missing or non-number time is accepted, since typing is a live hint only.
+ */
+export function typingCmdIsStale(time: unknown, now: number): boolean {
+  if (typeof time !== 'number' || !Number.isFinite(time)) return false;
+  return now - time > TYPING_MAX_AGE_MS;
 }
 
 /** The `ext` key a typing command carries the Sorted channel id under. */
@@ -94,7 +120,15 @@ export function sendTyping(params: {
   const ext =
     params.channelId !== undefined ? { ext: { [TYPING_CHANNEL_KEY]: params.channelId } } : {};
   return sendRouted(params.connection, params.target, (to, chatType) =>
-    params.createCmd({ chatType, type: 'cmd', to, action: TYPING_ACTION, ...ext }),
+    params.createCmd({
+      chatType,
+      type: 'cmd',
+      to,
+      action: TYPING_ACTION,
+      ...ext,
+      // Typing is live only: never queue it for an offline peer to replay later.
+      deliverOnlineOnly: true,
+    }),
   );
 }
 
@@ -131,7 +165,9 @@ export function sendSignal(params: {
  * Subscribe to live typing commands for one channel and return the teardown.
  * Registers the 'chat-typing' handler (distinct from the thread handler) and
  * removes exactly it on teardown, so leaving a channel or unmounting leaves
- * nothing dangling. Own echoes and unmappable senders are ignored.
+ * nothing dangling. Own echoes, unmappable senders and stale (replayed) cmds
+ * are ignored. A peer's text message landing in the open channel fires
+ * onMessageFrom so their typing row clears with the message, not a timer later.
  */
 export function subscribeTyping(params: {
   connection: TypingConnection;
@@ -141,15 +177,25 @@ export function subscribeTyping(params: {
   channelId?: string;
   currentUserId: string;
   onTypingFrom: (userId: string) => void;
+  /** A peer's text message arrived in the open channel; their typing is over. */
+  onMessageFrom: (userId: string) => void;
 }): () => void {
-  const { connection, target, channelId, currentUserId, onTypingFrom } = params;
+  const { connection, target, channelId, currentUserId, onTypingFrom, onMessageFrom } = params;
   connection.addEventHandler(TYPING_EVENT_HANDLER_ID, {
     onCmdMessage: (msg) => {
       if (msg.action !== TYPING_ACTION) return;
+      if (typingCmdIsStale((msg as { time?: unknown }).time, Date.now())) return;
       if (!typingForChannel(msg, target, channelId)) return;
       if (msg.from === undefined) return;
       const mapped = userIdFromAgoraUsername(msg.from);
       if (mapped.ok && mapped.userId !== currentUserId) onTypingFrom(mapped.userId);
+    },
+    onTextMessage: (msg) => {
+      if (channelId === undefined) return;
+      const mapped = mapLiveTextMessage(msg, currentUserId);
+      if (!mapped.ok || mapped.channelId !== channelId) return;
+      const sender = mapped.message.senderUserId;
+      if (sender !== null && sender !== currentUserId) onMessageFrom(sender);
     },
   });
   return () => connection.removeEventHandler(TYPING_EVENT_HANDLER_ID);

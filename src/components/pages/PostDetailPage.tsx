@@ -65,11 +65,12 @@ import { AssetUploadSheet } from '@/components/pages/assets/AssetUploadSheet';
 import { Toasts } from '@/components/pages/assets/Toasts';
 import { useToasts } from '@/components/pages/assets/useToasts';
 import { supabase } from '@/lib/supabase';
+import { logger } from '@/lib/logger';
 import { listBuckets, type BucketOption } from '@/lib/buckets';
 import { fetchWithTrace } from '@/lib/fetch';
 import { env } from '@/lib/env';
 import { PresignCache, type PresignDeps } from '@/lib/asset-presign';
-import { fetchMemberRole } from '@/lib/assets';
+import { displayLabel, fetchMemberRole, listAssets } from '@/lib/assets';
 import { uploadAssetFile, type UploadOutcome } from '@/lib/asset-upload';
 import { useNewTrace } from '@/lib/trace-context';
 import { useSession } from '@/lib/session-context';
@@ -355,6 +356,31 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
     { mode: 'append' } | { mode: 'insertAfter'; index: number } | null
   >(null);
   const uploadedVersionIds = useRef<string[]>([]);
+  // Root library labels, read when the upload sheet opens, so a bulk upload named
+  // after the post continues numbering past "<title> N" already in the library.
+  // Cleared on close so a reopen never numbers from a stale list. A failed read
+  // leaves the list empty (numbering starts at 1).
+  const [rootLabels, setRootLabels] = useState<string[]>([]);
+  const uploadOpen = addTarget !== null;
+  useEffect(() => {
+    if (!uploadOpen || workspaceId === null) {
+      setRootLabels([]);
+      return;
+    }
+    let active = true;
+    void listAssets(supabase, workspaceId).then((result) => {
+      if (!active) return;
+      if (!result.ok) {
+        logger.warn('post page: root asset labels read failed', { error: result.error.message });
+      }
+      setRootLabels(
+        result.ok ? result.data.filter((item) => item.folderId === null).map(displayLabel) : [],
+      );
+    });
+    return () => {
+      active = false;
+    };
+  }, [uploadOpen, workspaceId]);
 
   // F7.5 version-history viewer. historyOpen drives the sheet; viewingVersionId,
   // when set to a non-current version, puts the whole PCS into read-only mode.
@@ -951,7 +977,7 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
   const handleUploadFile = useCallback(
     async (file: File, displayName: string, folderId: string | null): Promise<UploadOutcome> => {
       if (uploadEndpoint === undefined || uploadEndpoint === '') {
-        return { ok: false, message: 'Upload failed. Check your connection and retry' };
+        return { ok: false, message: "Couldn't upload. Try again." };
       }
       if (workspaceId === null) {
         return { ok: false, message: 'No workspace selected.' };
@@ -1554,6 +1580,8 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
         }
         onToast={push}
         onUploaded={() => void handleUploaded()}
+        siblingLabels={rootLabels}
+        defaultBaseName={post.title}
       />
 
       <VersionHistorySheet

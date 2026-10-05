@@ -18,10 +18,10 @@ import { Chip } from '@/components/ui/Chip';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Sheet } from '@/components/ui/Sheet';
 import {
+  IconBookmark,
   IconCheck,
   IconChevronRight,
   IconPipeline,
-  IconPin,
   IconRotateCcw,
 } from '@/components/ui/icons';
 import { Tag } from '@/components/ui/Tag';
@@ -547,7 +547,7 @@ export function MarksList(props: MarksListProps): ReactElement {
         </p>
       ) : body === 'empty' ? (
         <EmptyState
-          icon={<IconPin size={22} />}
+          icon={<IconBookmark size={22} />}
           title="Nothing here"
           description={
             tab === 'open' ? 'No open marks in this chat.' : 'Nothing has been stamped yet.'

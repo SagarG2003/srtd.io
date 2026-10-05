@@ -14,16 +14,19 @@ import {
   searchDateLabel,
   searchMessages,
   searchQueryReady,
+  searchReady,
   searchSenderPrefix,
   snippetText,
   SEARCH_EMPTY_COPY,
   SEARCH_FAILED_COPY,
   type SearchHit,
+  type SearchKind,
   type SearchPageFetch,
   type SearchRunner,
   type SearchState,
 } from '@/lib/chat/search';
 import { NO_TOUCH_SELECT } from '@/components/chat/chat-type';
+import { NotesAvatar } from '@/components/chat/NotesBits';
 
 /**
  * The search runner for one surface (chat home, or one chat's bar): created per
@@ -43,8 +46,16 @@ export function useMessageSearch(params: {
     if (workspaceId === null) return;
     const fetch: SearchPageFetch =
       fetchPage ??
-      (({ query, before, signal }) =>
-        searchMessages({ client: supabase, workspaceId, query, before, signal, channelId }));
+      (({ query, before, signal, kind }) =>
+        searchMessages({
+          client: supabase,
+          workspaceId,
+          query,
+          before,
+          signal,
+          channelId,
+          kind: kind ?? null,
+        }));
     const next = createSearchRunner({ fetch, onChange: setState });
     setRunner(next);
     setState(IDLE_SEARCH);
@@ -83,12 +94,15 @@ const RESULT_LABEL = 'px-1 pt-1 text-xs font-semibold uppercase tracking-[0.06em
 
 /** A result row: one 64px tap target, no text selection and no iOS callout on hold. */
 const RESULT_ROW = cn(
-  'flex min-h-[64px] w-full min-w-0 items-center gap-3 rounded-[14px] px-2 py-2 text-left hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+  'group/notes-row flex min-h-[64px] w-full min-w-0 items-center gap-3 rounded-[14px] px-2 py-2 text-left hover:bg-panel-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
   NO_TOUCH_SELECT,
 );
 
-/** The 48px result avatar: a group's rounded square, a person's circle. */
+/** The 48px result avatar: a group's rounded square, a person's circle, the notes notebook. */
 function resultAvatar(channel: ChannelSummary): ReactElement {
+  if (channel.channelType === 'notes') {
+    return <NotesAvatar size="small" src={channel.avatarUrl} surface="bg" hoverSurface="panel-2" />;
+  }
   return (
     <span
       className={cn('flex shrink-0', channel.channelType === 'group' && '[&>*]:!rounded-[12px]')}
@@ -138,8 +152,10 @@ function noCallout(event: { preventDefault: () => void }): void {
 }
 
 export interface SearchResultsProps {
-  /** The text in the search box (2+ trimmed chars while this shows). */
+  /** The text in the search box (2+ trimmed chars, or any with a chip, while this shows). */
   query: string;
+  /** The active filter chip; absent or null without one. */
+  kind?: SearchKind | null;
   /** The name search's matches (hidden chats included). */
   chats: readonly ChannelSummary[];
   state: SearchState;
@@ -166,10 +182,12 @@ const LOADING_ROWS = 3;
  */
 export function searchResultsView(props: SearchResultsProps): ReactElement {
   const query = normalizeQuery(props.query);
-  const words = queryWords(query);
+  const kind = props.kind ?? null;
+  // A chip with too short a query lists by the chip alone: nothing to bold.
+  const words = searchQueryReady(query) ? queryWords(query) : [];
   // Past the server's 100 characters there is nothing to wait for: no messages.
-  const sendable = searchQueryReady(query);
-  const current = props.state.query === query;
+  const sendable = searchReady(query, kind);
+  const current = props.state.query === query && props.state.kind === kind;
   const loading =
     sendable && (!current || props.state.status === 'loading' || props.state.status === 'idle');
   const failed = current && props.state.status === 'error';
@@ -192,7 +210,7 @@ export function searchResultsView(props: SearchResultsProps): ReactElement {
   );
   return (
     <div data-search-results="" className="flex flex-col gap-2 px-[14px] pb-4">
-      {props.chats.length > 0 ? (
+      {props.chats.length > 0 && kind === null ? (
         <>
           <h3 data-section-label="chats" className={RESULT_LABEL}>
             Chats
@@ -239,12 +257,16 @@ export function searchResultsView(props: SearchResultsProps): ReactElement {
           </li>
         ) : (
           rows.map(({ hit, channel }) => {
-            const prefix = searchSenderPrefix({
-              senderUserId: hit.senderUserId,
-              currentUserId: props.currentUserId,
-              isGroup: channel.channelType === 'group',
-              nameOf: props.nameOf,
-            });
+            // Notes are all mine: no "You:" before the line.
+            const prefix =
+              channel.channelType === 'notes'
+                ? ''
+                : searchSenderPrefix({
+                    senderUserId: hit.senderUserId,
+                    currentUserId: props.currentUserId,
+                    isGroup: channel.channelType === 'group',
+                    nameOf: props.nameOf,
+                  });
             return (
               <li key={hit.id} className="min-w-0">
                 <button
@@ -273,7 +295,9 @@ export function searchResultsView(props: SearchResultsProps): ReactElement {
                       className="line-clamp-2 break-words text-[14px] leading-[19px] text-fg-2"
                     >
                       {prefix !== '' ? <span>{prefix}</span> : null}
-                      {boldMatches(snippetText(hit.body, words, props.nameOf), words)}
+                      {hit.body.trim() === '' && hit.mediaLine !== undefined && hit.mediaLine !== ''
+                        ? hit.mediaLine
+                        : boldMatches(snippetText(hit.body, words, props.nameOf), words)}
                     </span>
                   </span>
                 </button>
@@ -323,7 +347,12 @@ export function SearchResults(
   // No runner (no workspace): nothing can be searched, so no skeleton forever.
   const state: SearchState =
     runner === null
-      ? { ...IDLE_SEARCH, query: normalizeQuery(props.query), status: 'ready' }
+      ? {
+          ...IDLE_SEARCH,
+          query: normalizeQuery(props.query),
+          kind: props.kind ?? null,
+          status: 'ready',
+        }
       : props.state;
   return <div ref={rootRef}>{searchResultsView({ ...props, state, onRetry, sentinelRef })}</div>;
 }

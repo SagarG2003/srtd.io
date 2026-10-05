@@ -14,6 +14,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
+import { flushSync } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { isNearBottom } from '@/lib/chat/scroll';
 import {
@@ -64,6 +65,8 @@ import {
   IconForward,
   IconSearch,
   IconSettings,
+  IconStar,
+  IconStarFilled,
   IconTrash,
 } from '@/components/ui/icons';
 import { useLongPress } from '@/components/ui';
@@ -122,6 +125,8 @@ import type { PresignCache } from '@/lib/asset-presign';
 import { roleLabel } from '@/components/pages/settings/members-data';
 import {
   Composer,
+  focusComposerInput,
+  type ComposerInput,
   type ComposerProps,
   type ComposerSend,
   type EditingDraft,
@@ -168,9 +173,35 @@ import { useViewerSide, type ViewerSide } from '@/lib/chat/viewer-role';
 import { ContactSheet } from '@/components/chat/ContactSheet';
 import type { GroupInfoTabsWiring } from '@/components/chat/GroupInfoSheet';
 import { SelectionBar, SelectionHeader } from '@/components/chat/SelectionBar';
+import { StarredSheet, useStarToggle } from '@/components/chat/StarredList';
+import {
+  canStar,
+  isStarredIn,
+  selectionStarAction,
+  STARRED_HEADER_LABEL,
+  useIsStarred,
+  useStarSnapshot,
+  useStarStore,
+} from '@/lib/chat/stars';
 import { quoteMedia, ReplyQuoteBox } from '@/components/chat/ReplyQuote';
 import { withDaySeparators } from '@/components/chat/day-separators';
 import { ForwardPicker, type ForwardSendResult } from '@/components/chat/ForwardPicker';
+import {
+  NotesAvatar,
+  SavedFromLabel,
+  useSavedFrom,
+  type SavedFromWiring,
+} from '@/components/chat/NotesBits';
+import { canSaveToNotes, NOTES_PLACEHOLDER, NOTES_TILE_LINE } from '@/lib/chat/notes';
+import {
+  BURIED_STEPS_LIMIT,
+  buriedStepCount,
+  enterHistoryStep,
+  HISTORY_STEP_KEYS,
+  resetHistorySteps,
+  useHistoryStep,
+  type HistoryStepWindow,
+} from '@/lib/chat/use-history-step';
 import {
   FORWARDED_LABEL,
   canForward,
@@ -179,7 +210,6 @@ import {
   pruneThreadSelection,
   scheduleSelectionBoundary,
   selectedForForward,
-  setSelectionLeave,
   threadSelectable,
   threadSelectionRole,
 } from '@/lib/chat/forward';
@@ -380,7 +410,13 @@ interface MessageThreadProps {
    * A message search hit: jump to the message and open the in-chat bar on the
    * query. seq makes a repeat in the same chat run again.
    */
-  searchRequest?: { messageId: string; query: string; seq: number } | null;
+  searchRequest?: {
+    messageId: string;
+    query: string;
+    seq: number;
+    /** A starred row: the jump and its highlight only, no in-chat bar. */
+    jumpOnly?: boolean;
+  } | null;
   /** The thread took searchRequest: the caller drops it. */
   onSearchRequestTaken?: () => void;
   /** The channel's read cursors (Seen, Read by, the unread divider); absent: none of them. */
@@ -391,6 +427,13 @@ interface MessageThreadProps {
   unreadAtOpen?: number;
   /** Who-reacted reader; defaults to Supabase. */
   loadReactors?: WhoReactedLoad;
+  /**
+   * Personal notes: the notes header (not tappable, no second line), Delete
+   * with no window, the "Note" placeholder, and no "Save to notes".
+   */
+  notes?: boolean;
+  /** Menu "Save to notes" in any other chat; absent hides it. */
+  onSaveToNotes?: (message: ThreadMessage) => void;
 }
 
 /** Users who asked for less motion: the swipe resets without a spring. */
@@ -527,6 +570,108 @@ export function isVoiceOnly(
   );
 }
 
+/**
+ * Whether the menu offers "Select" (select part of the body text in place): a
+ * recorded, live message with a typed body (plain, reply, forwarded, or a
+ * caption on media or cards), never a voice note alone. Pure.
+ */
+export function canSelectMessageText(
+  message: Pick<
+    ThreadMessage,
+    'state' | 'deleted' | 'body' | 'attachments' | 'sharedPostIds' | 'sharedBriefIds'
+  >,
+): boolean {
+  return (
+    message.state === 'sent' &&
+    message.deleted !== true &&
+    message.body.trim() !== '' &&
+    !isVoiceOnly(message)
+  );
+}
+
+/**
+ * The body element of the one bubble whose text is being selected: only it
+ * takes selection and the native callout. Every other bubble, the row and the
+ * list stay NO_TOUCH_SELECT (a select-text child inside select-none, as the
+ * voice transcript does).
+ */
+export const SELECTING_TEXT_BODY = 'select-text [-webkit-touch-callout:default]';
+
+/** Back leaves text selection first (its own history step). */
+export const SELECT_TEXT_HISTORY_KEY = 'chatSelectText';
+
+/**
+ * Select a bubble's whole body text (the displayed text: mentions read
+ * "@Name"; the invisible meta spacer is left out). Runs inside the user's tap
+ * so iOS shows the handles. Returns whether a range was set.
+ */
+export function selectBodyText(body: Element): boolean {
+  const doc = body.ownerDocument;
+  const selection = doc.getSelection();
+  if (selection === null) return false;
+  const range = doc.createRange();
+  range.selectNodeContents(body);
+  const spacer = body.querySelector(':scope > [data-meta-spacer]');
+  if (spacer !== null) range.setEndBefore(spacer);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
+}
+
+/**
+ * Drop the document selection when it sits in the selecting body (or the body
+ * is gone): a caret in the composer is never touched.
+ */
+export function clearBodySelection(body: Element | null): void {
+  const selection = body?.ownerDocument.getSelection() ?? document.getSelection();
+  if (selection === null || selection.rangeCount === 0) return;
+  const at = selection.anchorNode;
+  if (body === null || at === null || !at.isConnected || body.contains(at)) {
+    selection.removeAllRanges();
+  }
+}
+
+/**
+ * How far around the selecting body a touch still counts as on it: the iOS
+ * drag handles (and their knobs) reach past the text into the bubble's
+ * padding and below the last line.
+ */
+export const SELECT_TEXT_HANDLE_SLOP_PX = 24;
+
+/** A press that moves further than this is a drag (a handle, a scroll), never a tap. */
+export const SELECT_TEXT_TAP_MOVE_PX = 10;
+
+/**
+ * Whether a finished press ends text selection: only a tap (released within
+ * SELECT_TEXT_TAP_MOVE_PX of where it went down) that went down clearly
+ * outside the body (beyond SELECT_TEXT_HANDLE_SLOP_PX). Dragging a handle,
+ * scrolling, or a press the browser cancelled (a native handle drag) never
+ * ends it. Pure.
+ */
+export function tapEndsTextSelect(input: {
+  down: { x: number; y: number };
+  up: { x: number; y: number };
+  body: Pick<DOMRect, 'top' | 'bottom' | 'left' | 'right'>;
+}): boolean {
+  const { down, up, body } = input;
+  if (Math.hypot(up.x - down.x, up.y - down.y) > SELECT_TEXT_TAP_MOVE_PX) return false;
+  const slop = SELECT_TEXT_HANDLE_SLOP_PX;
+  const near =
+    down.x >= body.left - slop &&
+    down.x <= body.right + slop &&
+    down.y >= body.top - slop &&
+    down.y <= body.bottom + slop;
+  return !near;
+}
+
+/** Whether an element has scrolled fully out of the list's visible box. */
+export function outOfView(
+  el: Pick<DOMRect, 'top' | 'bottom'>,
+  list: Pick<DOMRect, 'top' | 'bottom'>,
+): boolean {
+  return el.bottom <= list.top || el.top >= list.bottom;
+}
+
 /** The message carries at least one image: its bubble renders the album layout. */
 export function hasAlbum(message: Pick<ThreadMessage, 'attachments'>): boolean {
   return message.attachments.some((a) => classifyAttachment(a.mime) === 'image');
@@ -574,8 +719,25 @@ export interface BubblePostRefs {
   chip?: BubbleChip | undefined;
   /** Hold on a card or the sheet's "Talk about". */
   onTalkAbout?: ((postId: string, messageId: string) => void) | undefined;
+  /** Inside the gesture that ends a Talk about: focus the composer (decision 128). */
+  onTalkAboutFocus?: (() => void) | undefined;
   /** Tap on a root card's KEY: open that card's thread. */
   onOpenThread?: ((messageId: string) => void) | undefined;
+}
+
+/**
+ * Decision 128: a Reply (menu, swipe, laptop chevron, right-click) focuses the
+ * composer first, synchronously inside the same user event (iOS WebKit opens
+ * the keyboard only then), and only then sets the reply. Pure.
+ */
+export function replyWithFocus<T>(
+  input: () => ComposerInput | null,
+  setReply: (target: T) => void,
+): (target: T) => void {
+  return (target) => {
+    focusComposerInput(input());
+    setReply(target);
+  };
 }
 
 /** The chip for a message, from its target and the batch lookup; undefined keeps the quote. */
@@ -670,12 +832,14 @@ export function cardRefsFor(
 ): {
   messageId: string;
   onTalkAbout: BubblePostRefs['onTalkAbout'];
+  onTalkAboutFocus: BubblePostRefs['onTalkAboutFocus'];
   onOpenThread: (() => void) | undefined;
 } {
   const open = postRefs?.onOpenThread;
   return {
     messageId,
     onTalkAbout: selection === undefined ? postRefs?.onTalkAbout : undefined,
+    onTalkAboutFocus: selection === undefined ? postRefs?.onTalkAboutFocus : undefined,
     onOpenThread: open !== undefined ? () => open(messageId) : undefined,
   };
 }
@@ -710,6 +874,17 @@ export function dmHeaderLine(input: {
     return role !== null ? `${role} · ${input.workspaceName}` : input.workspaceName;
   }
   return role;
+}
+
+/**
+ * The thread header's second line: in notes the static "Only you can see
+ * this" (never role, typing or online), else the DM line (groups: none). Pure.
+ */
+export function threadHeaderLine(
+  input: Parameters<typeof dmHeaderLine>[0] & { notes: boolean },
+): string | null {
+  if (input.notes) return NOTES_TILE_LINE;
+  return dmHeaderLine(input);
 }
 
 /**
@@ -782,21 +957,26 @@ export function ThreadHeaderIdentity(props: {
   headerLine: string | null;
   layout: ChatLayout;
   onOpenContact?: () => void;
+  /** Personal notes: the notes avatar (own photo + badge, or the notebook) in place of a photo. */
+  notes?: boolean;
 }): ReactElement {
-  const photo = props.isGroup ? (
-    <Avatar
-      name={props.title}
-      size="header"
-      {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
-    />
-  ) : (
-    <Avatar
-      name={props.title}
-      size="row"
-      {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
-      presence={props.presence}
-    />
-  );
+  const photo =
+    props.notes === true ? (
+      <NotesAvatar size="header" src={props.avatarUrl} surface="panel" />
+    ) : props.isGroup ? (
+      <Avatar
+        name={props.title}
+        size="header"
+        {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
+      />
+    ) : (
+      <Avatar
+        name={props.title}
+        size="row"
+        {...(props.avatarUrl !== null ? { src: props.avatarUrl } : {})}
+        presence={props.presence}
+      />
+    );
   const text = (
     <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
       <span className={cn('block truncate text-fg', sized(HEADER_NAME_TYPE, props.layout))}>
@@ -903,11 +1083,30 @@ export function bubbleStatus(
   return message.status === 'read' ? 'read' : 'delivered';
 }
 
-/** What every bubble shows at its bottom-right: "edited", the time, the tick. */
+/** What every bubble shows at its bottom-right: the star, "edited", the time, the tick. */
 export interface BubbleMeta {
   time: string;
   edited: boolean;
   status: BubbleStatus | null;
+  /** The viewer starred it: a small filled star before "edited" and the time. */
+  starred?: boolean;
+}
+
+/**
+ * The meta's 12px filled star. Own bubbles: the meta ink (white, as the
+ * time); peer bubbles: fg-3. No motion.
+ */
+export function MetaStar({ mine }: { mine: boolean }): ReactElement {
+  return (
+    <span
+      role="img"
+      aria-label="Starred"
+      data-meta-star=""
+      className={cn('inline-flex', !mine && 'text-fg-3')}
+    >
+      <IconStarFilled size={12} />
+    </span>
+  );
 }
 
 /** A message's in-bubble meta, on the workspace clock in the device hour cycle. Pure. */
@@ -998,11 +1197,20 @@ export function FailedGlyph(): ReactElement {
   );
 }
 
-/** The meta's inner run: "edited", time, glyph. Shared by the meta and its spacer. */
-function metaParts(meta: BubbleMeta): ReactElement {
+/** The meta's inner run: star, "edited", time, glyph. Shared by the meta and its spacer. */
+function metaParts(meta: BubbleMeta, mine = true, spacer = false): ReactElement {
   const tick = metaTick(meta.status);
   return (
     <>
+      {meta.starred === true ? (
+        spacer ? (
+          <span className="inline-flex">
+            <IconStarFilled size={12} />
+          </span>
+        ) : (
+          <MetaStar mine={mine} />
+        )
+      ) : null}
       {meta.edited ? <span data-edited="">{EDITED_LABEL}</span> : null}
       {meta.time !== '' ? <span aria-hidden="true">{meta.time}</span> : null}
       {tick !== null ? <MetaGlyph status={tick} /> : null}
@@ -1054,7 +1262,7 @@ export function BubbleMetaView(props: {
         props.className,
       )}
     >
-      {metaParts(props.meta)}
+      {metaParts(props.meta, props.mine || props.placement === 'pill')}
     </span>
   );
 }
@@ -1074,7 +1282,7 @@ export function MetaSpacer({ meta }: { meta: BubbleMeta }): ReactElement {
         BUBBLE_META_TYPE,
       )}
     >
-      {metaParts(meta)}
+      {metaParts(meta, true, true)}
     </span>
   );
 }
@@ -1594,6 +1802,8 @@ function withRailPhoto(
  */
 export function MessageBubble(props: {
   message: ThreadMessage;
+  /** Notes only: a saved copy's "Saved from" line replaces "Forwarded". */
+  savedFrom?: SavedFromWiring | null;
   /** The open in-chat search's words; absent or [] draws no marks. */
   searchWords?: readonly string[];
   profiles: Map<string, ChatProfile>;
@@ -1628,6 +1838,11 @@ export function MessageBubble(props: {
   onChangePriority?: () => void;
   /** Present while selection mode is on. */
   selection?: RowSelection;
+  /**
+   * The menu's Select is active on this bubble: its body alone takes text
+   * selection and the native callout; no hold, menu, swipe or key-open.
+   */
+  selectingText?: boolean;
   /** Tap on an album tile: open the thread's image viewer at that index. */
   onOpenImage?: (index: number) => void;
   /** The KEY chip and the cards' talk-about / thread hooks. */
@@ -1663,6 +1878,10 @@ export function MessageBubble(props: {
 }): ReactElement {
   const { message, profiles, cache, presignEnabled, showTicks, isGroup, head, tail } = props;
   const { onBadgeClick } = props;
+  // Notes: a saved copy names its source instead of "Forwarded".
+  const savedFrom = props.savedFrom ?? null;
+  const savedLine =
+    savedFrom !== null && message.forwarded === true ? savedFrom.lineFor(message) : null;
   const { bubbleRef, press, timeZone, layout } = props;
   const mine = message.mine;
   const reply = message.reply;
@@ -1687,10 +1906,13 @@ export function MessageBubble(props: {
   const distinctEmojis = message.reactions.map((r) => r.emoji).join('');
   const meta = props.meta ?? bubbleMeta(message, timeZone, { showTicks });
   const placement = metaPlacement(message);
-  const onMore = selection === undefined ? press?.onMore : undefined;
-  const onReact = selection === undefined && message.state === 'sent' ? press?.onReact : undefined;
+  // Selecting this bubble's text: the native selection owns its gestures.
+  const textSelect = selection === undefined && props.selectingText === true;
+  const pressOn = selection === undefined && !textSelect;
+  const onMore = pressOn ? press?.onMore : undefined;
+  const onReact = pressOn && message.state === 'sent' ? press?.onReact : undefined;
   // Only a recorded message takes a reply: sending and failed bubbles never swipe.
-  const swipe = selection === undefined && message.state === 'sent' ? props.swipe : undefined;
+  const swipe = pressOn && message.state === 'sent' ? props.swipe : undefined;
   const chip = props.postRefs?.chip;
   const cardRefs = cardRefsFor(message.id, selection, props.postRefs);
   // An own send still uploading can be cancelled with the ring's X; once
@@ -1776,11 +1998,16 @@ export function MessageBubble(props: {
   const quotedMine =
     reply !== null && reply.authorUserId !== null && reply.authorUserId === props.viewerUserId;
   const body = (
-    <p className={bodyText(layout)}>
+    <p
+      data-msg-body=""
+      data-selecting-text={textSelect ? '' : undefined}
+      className={cn(bodyText(layout), textSelect && SELECTING_TEXT_BODY)}
+    >
       {renderBodyWithMentions(message.body, mine, {
         nameOf: profileNameOf(profiles, props.workspaceId ?? null),
         viewerUserId: props.viewerUserId ?? null,
-        mentions: selection === undefined ? props.mentions : undefined,
+        // Inert while selecting: a mention is plain "@Name" text in the selection.
+        mentions: pressOn ? props.mentions : undefined,
         mentionedMe: mentionsMe(message, props.viewerUserId ?? null, isGroup),
         highlight: props.searchWords ?? [],
       })}
@@ -1805,7 +2032,8 @@ export function MessageBubble(props: {
       // gesture (createSelectionGesture, attached to this row): a tap anywhere
       // (bubble, blank space, the circle) toggles, and nothing inside opens
       // (links, media, cards, voice, chips); a long-press toggles too.
-      {...(selection !== undefined ? {} : { onContextMenu: rowContextMenu })}
+      // Selecting text: the browser's own menu and callout (laptop right-click).
+      {...(!pressOn ? {} : { onContextMenu: rowContextMenu })}
     >
       {checked ? (
         <span aria-hidden="true" data-selected-tint="" className={SELECTED_ROW_TINT} />
@@ -1836,10 +2064,10 @@ export function MessageBubble(props: {
             role="group"
             tabIndex={0}
             aria-label={`${mine ? 'Your message' : `Message from ${name}`}, ${bubbleTimeLabel(message, timeZone)}`}
-            {...(selection === undefined ? press?.handlers : {})}
-            onContextMenu={selection === undefined ? press?.onContextMenu : undefined}
+            {...(pressOn ? press?.handlers : {})}
+            onContextMenu={pressOn ? press?.onContextMenu : undefined}
             onKeyDown={(e: KeyboardEvent<HTMLDivElement>) => {
-              if (selection !== undefined || press === undefined || !keyOpensMenu(e)) return;
+              if (!pressOn || press === undefined || !keyOpensMenu(e)) return;
               e.preventDefault();
               press.onKeyOpen();
             }}
@@ -1864,7 +2092,15 @@ export function MessageBubble(props: {
                   ? { onChangePriority: props.onChangePriority }
                   : {})}
               />
-              {message.forwarded === true ? <ForwardedLabel mine={mine} /> : null}
+              {message.forwarded === true ? (
+                savedFrom !== null ? (
+                  savedLine !== null ? (
+                    <SavedFromLabel line={savedLine} mine={mine} onOpen={savedFrom.onOpen} />
+                  ) : null
+                ) : (
+                  <ForwardedLabel mine={mine} />
+                )
+              ) : null}
             </div>
             <div data-bubble-content="" className={cn('contents', mine && OWN_BUBBLE_CONTENT)}>
               {threadMember ? null : chip?.kind === 'chip' && !parentDeleted ? (
@@ -2044,6 +2280,10 @@ export function MessageBubble(props: {
         >
           <SmileyGlyph />
         </button>
+      ) : textSelect && press?.onReact !== undefined && message.state === 'sent' ? (
+        // The smiley's room stays while selecting text, so the row never
+        // changes size (a pinned list would re-pin and scroll it away).
+        <span aria-hidden="true" data-react-slot="" className="h-11 w-11 shrink-0" />
       ) : null}
       {failed && mine && message.filesMissing === true ? (
         <IconButton
@@ -2246,6 +2486,8 @@ function MessageRow(props: {
   quoted?: ThreadMessage | undefined;
   /** A reaction badge tap opens who reacted; absent opens the menu (as before). */
   onOpenReactions?: (message: ThreadMessage) => void;
+  /** The menu's Select is active on this row's body (no hold, menu or swipe). */
+  selectingText?: boolean;
 }): ReactElement {
   const bubbleRef = useRef<HTMLDivElement>(null);
   const iconRef = useRef<HTMLSpanElement>(null);
@@ -2290,7 +2532,9 @@ function MessageRow(props: {
         }
       },
       enabled: () =>
-        latest.current.selection === undefined && latest.current.message.state === 'sent',
+        latest.current.selection === undefined &&
+        latest.current.selectingText !== true &&
+        latest.current.message.state === 'sent',
       reducedMotion: () => latest.current.reducedMotion,
     });
   }
@@ -2316,7 +2560,7 @@ function MessageRow(props: {
     return gesture.attach(row);
   }, [selecting, gesture, tombstone]);
   function open(anchor: DOMRect | null, reactionsOnly = false): void {
-    if (latest.current.selection !== undefined) return;
+    if (latest.current.selection !== undefined || latest.current.selectingText === true) return;
     // The menu's backdrop takes the trailing pointerup, so no click to swallow.
     clearClickSuppression();
     const current = latest.current;
@@ -2348,9 +2592,14 @@ function MessageRow(props: {
   const onChangePriority = props.onChangePriority;
   // The in-chat search's words: matched words in this bubble draw as <mark>.
   const searchWords = useContext(SearchHighlightContext);
+  const savedFrom = useSavedFrom();
+  // The viewer's star: read from the one star store, painted with the row.
+  const starred = useIsStarred(props.message.id) && canStar(props.message);
+  const meta = starred ? { ...props.meta, starred: true } : props.meta;
   return (
     <MessageBubble
       searchWords={searchWords}
+      savedFrom={savedFrom}
       message={props.message}
       profiles={props.profiles}
       cache={props.cache}
@@ -2365,7 +2614,7 @@ function MessageRow(props: {
       viewerUserId={props.viewerUserId}
       mentions={props.mentions}
       workspaceId={props.workspaceId}
-      meta={props.meta}
+      meta={meta}
       nextVoiceId={props.nextVoiceId}
       {...(props.onTranscribe !== undefined
         ? { onTranscribe: () => props.onTranscribe?.(props.message) }
@@ -2398,6 +2647,7 @@ function MessageRow(props: {
         ? { onChangePriority: () => onChangePriority(props.message.id) }
         : {})}
       {...(props.selection !== undefined ? { selection: props.selection } : {})}
+      selectingText={props.selectingText === true}
       onOpenImage={(index) => props.onOpenImage(props.message, index)}
       postRefs={props.postRefs}
       threadMember={props.threadMember}
@@ -2698,8 +2948,6 @@ function ThreadBody(
     selection?: { selected: ReadonlySet<string>; onToggle: (id: string) => void };
     /** Menu "Mark as ..." picked; absent hides mark actions. */
     onMark?: (message: ThreadMessage, type: MarkType) => void;
-    /** Menu "Select" picked: selection mode with the message ticked; absent hides it. */
-    onStartSelect?: (message: ThreadMessage) => void;
     /**
      * Menu "Forward" picked: selection mode with the message ticked (true), or
      * the picker for just this message (false); absent hides it.
@@ -2716,6 +2964,8 @@ function ThreadBody(
     /** A message's KEY chip (undefined keeps its quote). */
     chipFor?: (message: ThreadMessage) => BubbleChip | undefined;
     onTalkAbout?: (postId: string, messageId: string) => void;
+    /** Inside the gesture that ends a Talk about: focus the composer. */
+    onTalkAboutFocus?: () => void;
     /** Tap on a root card's KEY: open its thread. */
     onOpenThread?: (messageId: string) => void;
     /** The thread view: a "Load older" row at the top instead of scroll-to-top paging. */
@@ -2737,6 +2987,12 @@ function ThreadBody(
     onOpenReadInfo?: () => void;
     /** A reaction badge tapped: the who-reacted sheet; absent keeps the menu. */
     onOpenReactions?: (message: ThreadMessage) => void;
+    /** Personal notes: Delete has no window and carries no hint. */
+    notes?: boolean;
+    /** Menu "Save to notes" picked; absent hides it. */
+    onSaveToNotes?: (message: ThreadMessage) => void;
+    /** Menu "Star" / "Unstar" picked (the new value); absent hides the row. */
+    onStar?: (message: ThreadMessage, starred: boolean) => void;
   },
 ): ReactElement {
   const { onNewestVisible, jumpRequest } = props;
@@ -2760,6 +3016,8 @@ function ThreadBody(
   } | null>(null);
   // The open menu's voice-note state: its Transcribe row follows this device's store.
   const menuVoice = useVoiceRecord(menu?.message.id);
+  // The menu's Select: the one message whose body text is selectable in place.
+  const [selectingTextId, setSelectingTextId] = useState<string | null>(null);
   // The thread's one image viewer: which message's album, at which image.
   const [viewer, setViewer] = useState<{ messageId: string; index: number } | null>(null);
   // A message deleted (live, or by us) while its menu is open closes the menu.
@@ -2785,7 +3043,93 @@ function ThreadBody(
   const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
   const reducedMotion = useMediaQuery(REDUCED_MOTION_QUERY);
   const toast = useToast();
+  // The open menu's star reads the one star store.
+  const menuStarred = useIsStarred(menu?.message.id ?? '');
   const listRef = useRef<HTMLUListElement>(null);
+  /** The selecting bubble's body element, read from the list. */
+  const selectingBody = useCallback((id: string): Element | null => {
+    return (
+      listRef.current?.querySelector(`[data-msg-id="${CSS.escape(id)}"] [data-msg-body]`) ?? null
+    );
+  }, []);
+  /**
+   * Select, inside the menu row's tap: the body turns selectable now (flushSync)
+   * and its whole text is selected in the same gesture; the user then drags
+   * the native handles.
+   */
+  const startTextSelect = (id: string): void => {
+    flushSync(() => setSelectingTextId(id));
+    const body = selectingBody(id);
+    if (body !== null) selectBodyText(body);
+  };
+  const exitTextSelect = useCallback((): void => setSelectingTextId(null), []);
+  // Back leaves text selection first, staying in the chat.
+  useHistoryStep(selectingTextId !== null, SELECT_TEXT_HISTORY_KEY, exitTextSelect);
+  // Text selection ends on a tap outside the body (tapEndsTextSelect: never a
+  // handle drag, a scroll or a cancelled press), Escape, or a scroll that
+  // takes the bubble out of view; leaving drops the selection. Every listener
+  // goes with one abort.
+  useEffect(() => {
+    if (selectingTextId === null) return;
+    const id = selectingTextId;
+    const list = listRef.current;
+    const started = selectingBody(id);
+    const controller = new AbortController();
+    const { signal } = controller;
+    // The press in progress (by pointer id): where it went down.
+    const presses = new Map<number, { x: number; y: number }>();
+    document.addEventListener(
+      'pointerdown',
+      (event) => presses.set(event.pointerId, { x: event.clientX, y: event.clientY }),
+      { capture: true, signal },
+    );
+    document.addEventListener(
+      'pointerup',
+      (event) => {
+        const down = presses.get(event.pointerId);
+        presses.delete(event.pointerId);
+        if (down === undefined) return;
+        const body = selectingBody(id);
+        if (body === null) return;
+        const up = { x: event.clientX, y: event.clientY };
+        if (tapEndsTextSelect({ down, up, body: body.getBoundingClientRect() })) exitTextSelect();
+      },
+      { capture: true, signal },
+    );
+    document.addEventListener('pointercancel', (event) => presses.delete(event.pointerId), {
+      capture: true,
+      signal,
+    });
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.key === 'Escape') exitTextSelect();
+      },
+      { signal },
+    );
+    list?.addEventListener(
+      'scroll',
+      () => {
+        const body = selectingBody(id);
+        if (body === null || outOfView(body.getBoundingClientRect(), list.getBoundingClientRect()))
+          exitTextSelect();
+      },
+      { passive: true, signal },
+    );
+    return () => {
+      controller.abort();
+      clearBodySelection(selectingBody(id) ?? started);
+    };
+  }, [selectingTextId, selectingBody, exitTextSelect]);
+  // Multi-select, or the message going away (deleted, another thread), ends it.
+  const selectingMulti = props.selection !== undefined;
+  useEffect(() => {
+    if (selectingTextId === null) return;
+    const current = props.messages.find((m) => m.id === selectingTextId);
+    if (selectingMulti || current === undefined || !canSelectMessageText(current)) {
+      setSelectingTextId(null);
+    }
+  }, [selectingMulti, selectingTextId, props.messages]);
   // Stick-to-bottom: the intent to stay on the latest message (true on open,
   // after an own send; only the reader's gestures let go of it), and who moved
   // the list last. The thread remounts per channel, so each chat opens pinned.
@@ -3191,7 +3535,12 @@ function ThreadBody(
   const nowMs = Date.now();
   const menuOwn =
     menu !== null
-      ? ownMessageActions(menu.message, props.marks.get(menu.message.id), menu.openedAt)
+      ? ownMessageActions(
+          menu.message,
+          props.marks.get(menu.message.id),
+          menu.openedAt,
+          props.notes === true,
+        )
       : { canEdit: false, canDelete: false, lockedByMark: false };
   const viewerMessage =
     viewer !== null ? props.messages.find((m) => m.id === viewer.messageId) : undefined;
@@ -3324,6 +3673,8 @@ function ThreadBody(
                     meta={row.meta}
                     onOpen={(m, rect, held, reactionsOnly) => {
                       if (m.deleted === true) return;
+                      // Another menu opening ends text selection.
+                      setSelectingTextId(null);
                       setMenu({
                         message: m,
                         rect,
@@ -3348,6 +3699,7 @@ function ThreadBody(
                     postRefs={{
                       chip: props.chipFor?.(row.message),
                       onTalkAbout: props.onTalkAbout,
+                      onTalkAboutFocus: props.onTalkAboutFocus,
                       onOpenThread: rootCard ? props.onOpenThread : undefined,
                     }}
                     threadMember={memberOf?.(row.message) != null}
@@ -3368,6 +3720,7 @@ function ThreadBody(
                     {...(props.onOpenReactions !== undefined && props.selection === undefined
                       ? { onOpenReactions: props.onOpenReactions }
                       : {})}
+                    selectingText={selectingTextId === row.message.id}
                   />
                   {replies !== null && !viewRoot ? (
                     <RepliesButtonRow
@@ -3442,6 +3795,13 @@ function ThreadBody(
           props.onDeleteMessage?.(menu.message);
         }}
         lockedByMark={menuOwn.lockedByMark}
+        notes={props.notes === true}
+        canSaveToNotes={
+          menu !== null && props.onSaveToNotes !== undefined && canSaveToNotes(menu.message)
+        }
+        onSaveToNotes={() => {
+          if (menu) props.onSaveToNotes?.(menu.message);
+        }}
         currentReaction={menu ? (menu.message.reactions.find((r) => r.mine)?.emoji ?? null) : null}
         canCopy={menu ? menu.message.body.trim() !== '' : false}
         canTranscribe={
@@ -3452,6 +3812,11 @@ function ThreadBody(
         }
         onTranscribe={() => {
           if (menu) props.onTranscribe?.(menu.message);
+        }}
+        canStar={menu !== null && props.onStar !== undefined && canStar(menu.message)}
+        starred={menuStarred}
+        onStar={() => {
+          if (menu) props.onStar?.(menu.message, !menuStarred);
         }}
         markOptions={
           menu && props.onMark !== undefined
@@ -3470,11 +3835,11 @@ function ThreadBody(
           // The picker opened without selection: nothing to restore.
           if (props.onForwardMessage?.(menu.message) !== true) selectionScroll.cancelEntry();
         }}
-        canSelect={props.onStartSelect !== undefined}
-        onSelect={() => {
-          if (!menu) return;
-          anchorSelection(menu.message);
-          props.onStartSelect?.(menu.message);
+        canSelectText={
+          menu !== null && props.selection === undefined && canSelectMessageText(menu.message)
+        }
+        onSelectText={() => {
+          if (menu) startTextSelect(menu.message.id);
         }}
         onReact={(emoji) => {
           if (menu && menu.message.state === 'sent')
@@ -3827,16 +4192,7 @@ export function markOutcomeCopy(result: WriteResult): string | null {
 export const SELECTION_HISTORY_KEY = 'chatSelection';
 
 /** The slice of window selection history needs (the real window, or a test fake). */
-export interface SelectionHistoryWindow {
-  history: {
-    readonly state: unknown;
-    pushState: (data: unknown, unused: string, url?: string | null) => void;
-    back: () => void;
-  };
-  location: { href: string };
-  addEventListener: (type: 'popstate', listener: () => void) => void;
-  removeEventListener: (type: 'popstate', listener: () => void) => void;
-}
+export type SelectionHistoryWindow = HistoryStepWindow;
 
 /** One selection mode's history entry; see enterSelectionHistory. */
 export interface SelectionHistory {
@@ -3850,141 +4206,35 @@ export interface SelectionHistory {
 }
 
 /** How many buried markers the guard remembers (the most recent ones). */
-export const BURIED_MARKERS_LIMIT = 20;
-
-let selectionMarkerSeq = 0;
-// Markers buried under a later navigation (the chat was left while selecting):
-// landing on one skips it, so no stale entry ever shows the chat twice. One
-// module-level listener; bounded to the most recent BURIED_MARKERS_LIMIT.
-const buriedMarkers = new Set<number>();
-let buriedGuard: (() => void) | null = null;
-
-function selectionMarkerOf(state: unknown): number | null {
-  if (typeof state !== 'object' || state === null) return null;
-  const marker = (state as Record<string, unknown>)[SELECTION_HISTORY_KEY];
-  return typeof marker === 'number' ? marker : null;
-}
-
-function buryMarker(win: SelectionHistoryWindow, marker: number): void {
-  buriedMarkers.add(marker);
-  if (buriedMarkers.size > BURIED_MARKERS_LIMIT) {
-    const oldest = buriedMarkers.values().next().value;
-    if (oldest !== undefined) buriedMarkers.delete(oldest);
-  }
-  if (buriedGuard !== null) return;
-  const guard = (): void => {
-    const landed = selectionMarkerOf(win.history.state);
-    if (landed === null || !buriedMarkers.has(landed)) return;
-    buriedMarkers.delete(landed);
-    win.history.back();
-  };
-  win.addEventListener('popstate', guard);
-  buriedGuard = () => win.removeEventListener('popstate', guard);
-}
+export const BURIED_MARKERS_LIMIT = BURIED_STEPS_LIMIT;
 
 /** How many markers are buried (tests). */
 export function buriedMarkerCount(): number {
-  return buriedMarkers.size;
+  return buriedStepCount();
 }
 
 /**
  * Selection mode's history entry (WhatsApp: system back and the iOS swipe-back
- * leave selection first). Entering pushes one entry at the same URL (the
- * ?channel= included) whose state carries a marker; a popstate off it exits
- * selection and stays in the chat. cancel() leaves through history.back(), so
- * the marker never lingers, and only once however often it is pressed;
- * dispose() pops it too when selection ended some other way, and a marker
- * buried under a navigation is skipped if ever landed on. While open, a
- * channel switch (leaveSelectionThen) goes through cancel() first; a dispose()
- * while that back() is pending still runs the switch once the pop lands.
+ * leave selection first): one step of the shared mechanism
+ * (lib/chat/use-history-step), under its own key. Entering pushes one entry
+ * at the same URL (the ?channel= included); a popstate off it exits selection
+ * and stays in the chat. cancel() leaves through history.back(), so the marker
+ * never lingers, and only once however often it is pressed; dispose() pops it
+ * too when selection ended some other way, and a marker buried under a
+ * navigation is skipped if ever landed on. While open, a channel switch
+ * (leaveSelectionThen) goes through cancel() first; a dispose() while that
+ * back() is pending still runs the switch once the pop lands.
  */
 export function enterSelectionHistory(
   win: SelectionHistoryWindow,
   onExit: () => void,
 ): SelectionHistory {
-  selectionMarkerSeq += 1;
-  const marker = selectionMarkerSeq;
-  const base = win.history.state;
-  win.history.pushState(
-    { ...(typeof base === 'object' && base !== null ? base : {}), [SELECTION_HISTORY_KEY]: marker },
-    '',
-    win.location.href,
-  );
-  let active = true;
-  let leaving = false;
-  let afterExit: (() => void) | null = null;
-  const leave = (then: () => void): void => handle.cancel(then);
-  const onTop = (): boolean => selectionMarkerOf(win.history.state) === marker;
-  const finish = (): void => {
-    active = false;
-    win.removeEventListener('popstate', onPop);
-    clearSelectionLeave(leave);
-    onExit();
-    const then = afterExit;
-    afterExit = null;
-    then?.();
-  };
-  function onPop(): void {
-    if (!active || onTop()) return;
-    finish();
-  }
-  win.addEventListener('popstate', onPop);
-  const handle: SelectionHistory = {
-    cancel: (then) => {
-      if (!active) {
-        then?.();
-        return;
-      }
-      if (then !== undefined) {
-        const prior = afterExit;
-        afterExit =
-          prior === null
-            ? then
-            : () => {
-                prior();
-                then();
-              };
-      }
-      if (leaving) return;
-      if (onTop()) {
-        leaving = true;
-        win.history.back();
-        return;
-      }
-      buryMarker(win, marker);
-      finish();
-    },
-    dispose: () => {
-      win.removeEventListener('popstate', onPop);
-      if (!active) return;
-      active = false;
-      const pending = afterExit;
-      afterExit = null;
-      clearSelectionLeave(leave);
-      if (leaving) {
-        // A switch waiting on history.back() still runs once that pop lands.
-        if (pending !== null) {
-          const onLanded = (): void => {
-            win.removeEventListener('popstate', onLanded);
-            pending();
-          };
-          win.addEventListener('popstate', onLanded);
-        }
-        return;
-      }
-      if (onTop()) win.history.back();
-      else buryMarker(win, marker);
-    },
-  };
-  setSelectionLeave(leave);
-  return handle;
+  return enterHistoryStep(win, SELECTION_HISTORY_KEY, onExit);
 }
 
-/** Test seam: forget buried markers and the guard. */
+/** Test seam: forget buried markers, open steps and the guard. */
 export function resetSelectionHistory(): void {
-  buriedMarkers.clear();
-  buriedGuard?.();
-  buriedGuard = null;
+  resetHistorySteps();
   clearSelectionLeave(null);
 }
 
@@ -4104,11 +4354,18 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     query: string;
     anchor: string | null;
     key: number;
+    /** Opened from the header (a history step), not by a search hit's open. */
+    manual: boolean;
   } | null>(null);
   const [searchWords, setSearchWords] = useState<readonly string[]>([]);
   const [forwardFor, setForwardFor] = useState<ThreadMessage[] | null>(null);
   // The own message being edited in the composer.
   const [editing, setEditing] = useState<EditingDraft | null>(null);
+  // Stars: the one store (absent outside the chat page: no star UI at all).
+  const starStore = useStarStore();
+  const starSnapshot = useStarSnapshot(starStore);
+  const toggleStar = useStarToggle();
+  const [starredOpen, setStarredOpen] = useState(false);
   // Server time for the delete window (device clock plus the store's offset).
   const serverNow = useServerNow();
 
@@ -4154,6 +4411,11 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   };
   const onForward = props.onForward;
   const forwardChannels = props.forwardChannels;
+  // Chat names for the Starred sheet's rows (already loaded, never read).
+  const starChannels = useMemo(
+    () => new Map((forwardChannels ?? []).map((c) => [c.channelId, c] as const)),
+    [forwardChannels],
+  );
   const canForwardHere = onForward !== undefined && forwardChannels !== undefined;
   const exitSelection = (): void => {
     setSelecting(false);
@@ -4180,7 +4442,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     else exitSelection();
   };
   /**
-   * Menu Select, Forward or Delete: selection mode opens with that message
+   * Menu Forward or Delete: selection mode opens with that message
    * ticked (when it can be).
    */
   const enterSelection = (message: ThreadMessage): void => {
@@ -4199,13 +4461,19 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [selecting]);
-  const handleReply = (message: ThreadMessage): void => {
-    const preview = replyPreview(message);
-    setReplyDraft({
-      authorName: senderName(message, props.profiles),
-      quote: { id: message.id, authorUserId: message.senderUserId, preview },
-    });
-  };
+  // The composers' inputs: a Reply focuses them inside the user's own event.
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const viewComposerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const handleReply = replyWithFocus(
+    () => composerInputRef.current,
+    (message: ThreadMessage) => {
+      const preview = replyPreview(message);
+      setReplyDraft({
+        authorName: senderName(message, props.profiles),
+        quote: { id: message.id, authorUserId: message.senderUserId, preview },
+      });
+    },
+  );
   // The quoted message became a tombstone: the reply chip loses its text and
   // reads the deleted label (the draft map is stripped by the store too).
   const replyQuoteId =
@@ -4221,13 +4489,15 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
       if (current !== null) setDraft(channelId, { reply: strippedReply(current) });
     }
   }, [replyQuoteDeleted, channelId]);
-  const headerLine = dmHeaderLine({
+  const notes = props.notes === true;
+  const headerLine = threadHeaderLine({
+    notes,
     isGroup: props.isGroup === true,
     peerTyping: props.typingUserIds.length > 0,
     role: props.role ?? null,
     workspaceName: props.subtitle,
   });
-  const canOpenContact = props.isGroup !== true && props.channelId !== undefined;
+  const canOpenContact = !notes && props.isGroup !== true && props.channelId !== undefined;
   // The Contact sheet's role line is the header's resting line: never typing,
   // so it reads "role · workspace" from the same source.
   const contactRoleLine = dmHeaderLine({
@@ -4386,7 +4656,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     if (searchSeqRef.current === searchRequest.seq) return;
     searchSeqRef.current = searchRequest.seq;
     const { messageId, query, seq } = searchRequest;
-    setChatSearch({ query, anchor: messageId, key: seq });
+    if (searchRequest.jumpOnly !== true)
+      setChatSearch({ query, anchor: messageId, key: seq, manual: false });
     setJumpRequest((prev) => ({ id: messageId, seq: (prev?.seq ?? 0) + 1 }));
     onSearchRequestTaken?.();
   }, [searchRequest, bodyLoading, onSearchRequestTaken]);
@@ -4634,6 +4905,22 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     setViewReply(null);
     threadView.close();
   };
+  // Each layer is one history step (lib/chat/use-history-step): back closes
+  // only that layer through its own close (the thread view through its Close,
+  // so the fade runs) and stays in the chat; its own close pops the step.
+  const rootRef = useRef<HTMLDivElement>(null);
+  useHistoryStep(view !== null, HISTORY_STEP_KEYS.threadView, () => {
+    const close = rootRef.current?.querySelector<HTMLButtonElement>('[data-thread-view-close]');
+    if (close !== null && close !== undefined) close.click();
+    else closeThread();
+  });
+  useHistoryStep(contactOpen, HISTORY_STEP_KEYS.contact, () => setContactOpen(false));
+  useHistoryStep(starredOpen, HISTORY_STEP_KEYS.starred, () => setStarredOpen(false));
+  useHistoryStep(marksOpen, HISTORY_STEP_KEYS.marks, () => setMarksOpen(false));
+  useHistoryStep(readInfoOpen && readBy !== null, HISTORY_STEP_KEYS.readInfo, () =>
+    setReadInfoOpen(false),
+  );
+  useHistoryStep(chatSearch?.manual === true, HISTORY_STEP_KEYS.search, closeChatSearch);
   const threadPostOf = (rootId: string): PostRefPost | null => {
     const root = known.get(rootId);
     const postId =
@@ -4686,12 +4973,19 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         }
       : undefined;
   /** Swipe or menu Reply inside the view: the reply bar names that member. */
-  const viewHandleReply = (message: ThreadMessage): void => {
-    setViewReply({
-      authorName: senderName(message, props.profiles),
-      quote: { id: message.id, authorUserId: message.senderUserId, preview: replyPreview(message) },
-    });
-  };
+  const viewHandleReply = replyWithFocus(
+    () => viewComposerInputRef.current,
+    (message: ThreadMessage) => {
+      setViewReply({
+        authorName: senderName(message, props.profiles),
+        quote: {
+          id: message.id,
+          authorUserId: message.senderUserId,
+          preview: replyPreview(message),
+        },
+      });
+    },
+  );
   /** A send from the view replies to the root (or the member its reply bar names). */
   const viewSend: ComposerSend = (text, attachments, sharedPostIds, reply, sharedBriefIds) => {
     if (viewRoot === undefined) return;
@@ -4747,18 +5041,44 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
   // Delete follows the 30 minute window on server time; the bar says why not.
   // One timeout re-computes it when the earliest selected own message ages out.
   useEffect(() => {
-    if (!selecting) return;
+    // Notes delete at any age: no window boundary to wait for.
+    if (!selecting || notes) return;
     return scheduleSelectionBoundary({
       selected,
       messages: selectable,
       now: serverNow,
       onBoundary: () => setSelectionTick((t) => t + 1),
     });
-  }, [selecting, selected, selectable, serverNow, selectionTick]);
+  }, [selecting, selected, selectable, serverNow, selectionTick, notes]);
   const deleteBlock = selecting
-    ? deleteSelectionBlock(selected, selectable, marks, serverNow())
+    ? deleteSelectionBlock(selected, selectable, marks, serverNow(), notes)
     : null;
   const stripSlot = threadStripSlot({ hasMarks: props.marks !== undefined, selecting });
+  // Star or Unstar the selection: Unstar only when every one is starred. One
+  // write for the batch; selection ends once it is accepted, as Forward does.
+  const starTargets =
+    selecting && starStore !== null && channelId !== undefined
+      ? selectable.filter((m) => selected.has(m.id) && canStar(m))
+      : [];
+  const starAction = selectionStarAction(
+    starTargets.map((m) => m.id),
+    (id) => isStarredIn(starSnapshot, id),
+  );
+  const selectionStar =
+    selecting && starStore !== null && channelId !== undefined
+      ? {
+          action: starAction ?? 'star',
+          onRun: () => {
+            if (starAction === null) return;
+            void toggleStar(
+              starTargets.map((m) => ({ id: m.id, channelId })),
+              starAction === 'star',
+            ).then((result) => {
+              if (result.ok) exitSelection();
+            });
+          },
+        }
+      : null;
   // Selection mode's bar: in place of the composer, in the chat or the open thread.
   const selectionBar =
     selecting && onDeleteMessages !== undefined ? (
@@ -4769,6 +5089,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         {...(canForwardHere
           ? { onForward: () => setForwardFor(selectedForForward(selected, selectable)) }
           : {})}
+        {...(selectionStar !== null ? { star: selectionStar } : {})}
         onDelete={async () => {
           // Committed chunks become tombstones (and leave the selection);
           // a failed chunk's ids stay selected for another try.
@@ -4843,9 +5164,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           onChangePriority: (messageId: string) => setPriorityFor({ messageId, mode: 'change' }),
         }
       : {}),
-    ...(onDeleteMessages !== undefined && !selecting
-      ? { onStartSelect: enterSelection, onDeleteMessage: enterSelection }
-      : {}),
+    ...(onDeleteMessages !== undefined && !selecting ? { onDeleteMessage: enterSelection } : {}),
     ...(onEditMessage !== undefined && !selecting ? { onEditMessage: startEdit } : {}),
     ...(canForwardHere && !selecting
       ? {
@@ -4880,9 +5199,19 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
     ...(props.onToggleReaction !== undefined && !selecting
       ? { onOpenReactions: (message: ThreadMessage) => setReactionsFor(message.id) }
       : {}),
+    notes,
+    ...(props.onSaveToNotes !== undefined && !notes && !selecting
+      ? { onSaveToNotes: props.onSaveToNotes }
+      : {}),
+    ...(starStore !== null && channelId !== undefined && !selecting
+      ? {
+          onStar: (message: ThreadMessage, starred: boolean) =>
+            void toggleStar([{ id: message.id, channelId }], starred),
+        }
+      : {}),
   };
   return (
-    <div className="relative flex h-full flex-col bg-bg">
+    <div ref={rootRef} className="relative flex h-full flex-col bg-bg">
       <div
         className={cn(
           'flex h-14 shrink-0 items-center gap-2.5 border-b border-border bg-panel',
@@ -4923,16 +5252,22 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
               presence={headerAvatarPresence(props.presence)}
               headerLine={headerLine}
               layout={layout}
+              notes={notes}
               {...(canOpenContact
                 ? { onOpenContact: () => setContactOpen(true) }
                 : props.isGroup === true && props.onOpenInfo !== undefined
                   ? { onOpenContact: props.onOpenInfo }
                   : {})}
             />
+            {channelId !== undefined && starStore !== null ? (
+              <IconButton label={STARRED_HEADER_LABEL} onClick={() => setStarredOpen(true)}>
+                <IconStar size={20} />
+              </IconButton>
+            ) : null}
             {channelId !== undefined ? (
               <IconButton
                 label="Search this chat"
-                onClick={() => setChatSearch({ query: '', anchor: null, key: 0 })}
+                onClick={() => setChatSearch({ query: '', anchor: null, key: 0, manual: true })}
               >
                 <IconSearch size={20} />
               </IconButton>
@@ -4973,6 +5308,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           messages={shownMessages}
           chipFor={chipFor}
           onTalkAbout={talkAbout}
+          onTalkAboutFocus={() => focusComposerInput(composerInputRef.current)}
           onOpenThread={openThread}
           threads={mainThreads}
           loading={bodyLoading}
@@ -5023,6 +5359,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         <Composer
           key={channelKey}
           channelId={channelId}
+          inputRef={composerInputRef}
           focusOnMount={finePointer && view === null}
           onSend={composerSend}
           onTyping={props.onTyping}
@@ -5035,6 +5372,8 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
               }
             : {})}
           {...(aboutDraft !== null && !aboutGone ? { about: aboutPost ?? null } : {})}
+          {...(notes && replyDraft === null ? { placeholder: NOTES_PLACEHOLDER } : {})}
+          {...(notes ? { noSchedule: true } : {})}
           onCancelAbout={() => setAboutDraft(null)}
           sharedPostIds={sharedInChat}
           onBringPost={bringPost}
@@ -5093,6 +5432,20 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           cache={presignCache}
           presignEnabled={presignEnabled}
           marks={infoMarks}
+          onJump={jumpTo}
+        />
+      ) : null}
+      {starStore !== null && props.channelId !== undefined ? (
+        <StarredSheet
+          key={`starred:${props.channelId}`}
+          open={starredOpen}
+          onClose={() => setStarredOpen(false)}
+          channelId={props.channelId}
+          chatName={props.title}
+          channelsById={starChannels}
+          profiles={props.profiles}
+          currentUserId={props.currentUserId ?? ''}
+          timeZone={props.timeZone}
           onJump={jumpTo}
         />
       ) : null}
@@ -5168,6 +5521,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
           {selectionBar ?? (
             <Composer
               key={`thread:${view.rootId}`}
+              inputRef={viewComposerInputRef}
               focusOnMount={finePointer}
               onSend={viewSend}
               placeholder={THREAD_REPLY_PLACEHOLDER}
