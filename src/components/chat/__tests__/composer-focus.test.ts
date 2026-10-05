@@ -78,7 +78,7 @@ describe('composer textarea: no iOS AutoFill bar', () => {
     expect(tag).not.toMatch(/spellCheck|autoCorrect|autoCapitalize/);
   });
 
-  it('the rendered textarea carries autocomplete="off" (main and thread view)', () => {
+  it('the shared Textarea forwards autoComplete="off" to the DOM textarea', () => {
     for (const placeholder of ['Message', 'Reply in thread']) {
       const html = renderToStaticMarkup(
         createElement(Textarea, { autoComplete: 'off', rows: 1, compact: true, placeholder }),
