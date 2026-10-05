@@ -55,17 +55,17 @@ export async function uploadAvatarFile(
       body: form,
     });
   } catch {
-    return fail('Upload failed. Check your connection and retry');
+    return fail("Couldn't upload. Try again.");
   }
 
   if (!response.ok) {
-    return fail('Upload failed. Check your connection and retry');
+    return fail("Couldn't upload. Try again.");
   }
 
   const body = await readJson(response);
   const avatarUrl = avatarUrlOf(body);
   if (avatarUrl === null) {
-    return fail('Upload failed. Check your connection and retry');
+    return fail("Couldn't upload. Try again.");
   }
   return { ok: true, data: { avatarUrl } };
 }

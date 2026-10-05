@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { verifyMagicBytes } from './magic-bytes';
+import { isOle2Signature, isZipSignature, verifyMagicBytes } from './magic-bytes';
 
 function bytes(...values: number[]): Uint8Array {
   return Uint8Array.from(values);
@@ -49,5 +49,14 @@ describe('verifyMagicBytes existing types are unaffected', () => {
 
   it('still verifies video/mp4 via ftyp', () => {
     expect(verifyMagicBytes(FTYP_HEADER, 'video/mp4')).toBe(true);
+  });
+});
+
+describe('container signature helpers', () => {
+  it('detects an OLE2 compound file and a ZIP header', () => {
+    const ole = bytes(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1);
+    expect(isOle2Signature(ole)).toBe(true);
+    expect(isZipSignature(ole)).toBe(false);
+    expect(isZipSignature(bytes(0x50, 0x4b, 0x03, 0x04))).toBe(true);
   });
 });

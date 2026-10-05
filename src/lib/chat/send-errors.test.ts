@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { uploadErrorMessage } from '@/lib/asset-upload';
-import { uploadFailureCode, uploadRefusalContext } from '@/lib/chat/send-errors';
+import {
+  classifyUploadFailure,
+  uploadFailureCode,
+  uploadRefusalContext,
+} from '@/lib/chat/send-errors';
 import { rememberRecorderMime } from '@/lib/chat/audio-sniff';
 import { logUploadRefusal } from '@/lib/chat/send-flow';
 import { logger } from '@/lib/logger';
@@ -20,6 +24,25 @@ describe('T4: upload refusal log', () => {
     expect(uploadFailureCode(uploadErrorMessage('unsupported_mime'))).toBe('unsupported_mime');
     expect(uploadFailureCode(uploadErrorMessage('mime_mismatch'))).toBe('mime_mismatch');
     expect(uploadFailureCode('something else')).toBe('unknown');
+  });
+
+  it('names every file-safety refusal code instead of logging unknown', () => {
+    for (const code of [
+      'blocked_type',
+      'encrypted_file',
+      'embedded_content',
+      'archive_limits',
+      'external_content',
+    ]) {
+      expect(uploadFailureCode(uploadErrorMessage(code))).toBe(code);
+    }
+  });
+
+  it('leaves the send classification unchanged for the new codes', () => {
+    // Still permanent through the HTTP status, as before; nothing else moved.
+    expect(classifyUploadFailure(uploadErrorMessage('blocked_type'), 415)).toBe('permanent');
+    expect(classifyUploadFailure(uploadErrorMessage('external_content'), 422)).toBe('permanent');
+    expect(classifyUploadFailure(uploadErrorMessage('encrypted_file'), null)).toBe('transient');
   });
 
   it('the context carries exactly the allowed keys', () => {

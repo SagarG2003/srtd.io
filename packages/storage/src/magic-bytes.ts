@@ -1,8 +1,8 @@
 // Magic-byte verification: confirm a file's leading bytes match the MIME type
 // the client claims, so a renamed executable cannot ride in under an allowed
 // type. This checks file signatures only; it never parses container internals.
-// In particular, a ZIP local-file-header is accepted for every Office Open XML
-// type (docx/xlsx/pptx) without reading the archive entries.
+// The ZIP signature is the first gate for Office Open XML (docx/xlsx/pptx); the
+// archive itself is opened and checked in file-safety.ts.
 
 import { normalizeMime } from './mime';
 
@@ -32,13 +32,11 @@ const WEBP = [0x57, 0x45, 0x42, 0x50]; // "WEBP" at offset 8
 const PDF = [0x25, 0x50, 0x44, 0x46]; // "%PDF"
 const FTYP = [0x66, 0x74, 0x79, 0x70]; // "ftyp" box type at offset 4 (MP4/MOV)
 const ZIP = [0x50, 0x4b, 0x03, 0x04]; // ZIP local file header (covers OOXML)
-const CFB = [0xd0, 0xcf, 0x11, 0xe0]; // legacy Office compound file (doc/xls/ppt)
+// OLE2 compound file (legacy doc/xls/ppt, and password-protected Office files).
+const CFB = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 const EBML = [0x1a, 0x45, 0xdf, 0xa3]; // Matroska/EBML header (covers webm)
 const ID3 = [0x49, 0x44, 0x33]; // "ID3" tag prefixing many MP3 files
 const MPEG_FRAME_SYNC = new Set<number>([0xfb, 0xf3, 0xf2]); // 2nd byte after 0xff
-
-const WHITESPACE = new Set<number>([0x20, 0x09, 0x0a, 0x0d]);
-const SVG_SCAN_BYTES = 512;
 
 /** RIFF....WEBP container. */
 function isWebp(bytes: Uint8Array): boolean {
@@ -59,17 +57,14 @@ function isMpegAudio(bytes: Uint8Array): boolean {
   return bytes.length >= 2 && bytes[0] === 0xff && MPEG_FRAME_SYNC.has(bytes[1] as number);
 }
 
-/** Leading whitespace, then '<', with a <svg or <?xml marker in the first 512 bytes. */
-function isSvg(bytes: Uint8Array): boolean {
-  let i = 0;
-  while (i < bytes.length && WHITESPACE.has(bytes[i] as number)) {
-    i += 1;
-  }
-  if (bytes[i] !== 0x3c) return false; // '<'
-  const head = new TextDecoder('utf-8', { fatal: false })
-    .decode(bytes.subarray(0, SVG_SCAN_BYTES))
-    .toLowerCase();
-  return head.includes('<svg') || head.includes('<?xml');
+/** True for a ZIP archive (local file header first). */
+export function isZipSignature(bytes: Uint8Array): boolean {
+  return startsWith(bytes, ZIP);
+}
+
+/** True for an OLE2 compound file, whatever type the client claimed. */
+export function isOle2Signature(bytes: Uint8Array): boolean {
+  return startsWith(bytes, CFB);
 }
 
 /**
@@ -87,8 +82,6 @@ export function verifyMagicBytes(bytes: Uint8Array, claimedMime: string): boolea
       return startsWith(bytes, GIF);
     case 'image/webp':
       return isWebp(bytes);
-    case 'image/svg+xml':
-      return isSvg(bytes);
     case 'video/mp4':
     case 'video/quicktime':
     case 'audio/mp4':
@@ -107,10 +100,6 @@ export function verifyMagicBytes(bytes: Uint8Array, claimedMime: string): boolea
     case 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
       // OOXML files are ZIP archives; the ZIP signature is sufficient.
       return startsWith(bytes, ZIP);
-    case 'application/msword':
-    case 'application/vnd.ms-powerpoint':
-    case 'application/vnd.ms-excel':
-      return startsWith(bytes, CFB);
     default:
       return true;
   }
