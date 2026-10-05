@@ -721,6 +721,8 @@ export function PostCardItem(
                 hold.handlers.onPointerCancel();
                 talk.reset();
               },
+              // Released off the card: that press never focuses later.
+              onPointerLeave: () => talk.reset(),
               onContextMenu: (e: MouseEvent<HTMLDivElement>) => {
                 if (!touchPress.current) return;
                 e.preventDefault();

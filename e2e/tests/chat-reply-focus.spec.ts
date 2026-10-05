@@ -3,8 +3,9 @@ import { installHarnessNetwork } from '../fixtures/harness-routes';
 import { MAYA_NAME, PEER_NAME } from '../fixtures/chat-data';
 
 // Decision 128: every Reply puts the cursor in the composer at once (long-press
-// menu, swipe right, laptop chevron, right-click), so typing lands there with
-// no extra tap. Decision 32 holds: opening a chat on touch focuses nothing.
+// menu, swipe right, laptop chevron, right-click, a card hold or the sheet's
+// Talk about, Reply in the thread view), so typing lands there with no extra
+// tap. Decision 32 holds: opening a chat on touch focuses nothing.
 // Linux WebKit approximates iOS WebKit (it never shows a keyboard); it is not iOS.
 
 const PEER_LINE = 'Can we tighten the hook on slide one?';
@@ -219,6 +220,19 @@ test.describe('iPhone, cards and threads', () => {
     await expect(page.getByRole('menu')).toHaveCount(0);
     await expectFocusedAtEnd(page);
     await page.screenshot({ path: testInfo.outputPath('talk-about-hold.png') });
+  });
+
+  test('sheet Talk about focuses the composer', async ({ page }, testInfo) => {
+    await openMaya(page);
+    const card = page.locator('[role="button"][aria-label^="Open post"]').last();
+    await settle(page, card);
+    await card.click();
+    const talk = page.getByRole('button', { name: /^Talk about/ });
+    await expect(talk).toBeVisible();
+    await talk.click();
+    await expect(talk).toHaveCount(0);
+    await expectFocusedAtEnd(page);
+    await page.screenshot({ path: testInfo.outputPath('talk-about-sheet.png') });
   });
 
   test('Reply inside the thread view focuses the view composer', async ({ page }, testInfo) => {
