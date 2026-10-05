@@ -1138,3 +1138,49 @@ describe('H1-H3 share targets hidden by path tricks', () => {
     expect(await codeOf('a.docx', MIME.docx, docxWith('hyperlink', target))).toBe('ok');
   });
 });
+
+describe('H4-H5 NT object paths and control characters', () => {
+  const T = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const docxWith = (type: string, target: string) =>
+    office('docx', {
+      extra: [
+        {
+          name: 'word/_rels/document.xml.rels',
+          data: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="${T}/${type}" Target="${target.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" TargetMode="External"/></Relationships>`,
+        },
+      ],
+    });
+
+  const ntShares = [
+    '\\??\\GLOBALROOT\\Device\\Mup\\server\\share\\t.dotm',
+    '\\??\\Global\\UNC\\server\\share\\t.dotm',
+    '\\??\\globalroot\\??\\UNC\\server\\share',
+    'file:///??/GLOBALROOT/Device/Mup/x',
+    'file:///\\??\\GLOBALROOT\\Device\\Mup\\x',
+    'file://localhost/??/Global/UNC/server/x',
+  ];
+  const controls = [
+    '%00\\\\server\\share\\t.dotm',
+    '%01\\\\server\\share\\t.dotm',
+    '\\%09\\server\\share\\t.dotm',
+    'file:///%09/server/share/t.dotm',
+    'file:///C:/Templates/t%1F.dotm',
+    'Normal%0D.dotm',
+  ];
+
+  for (const type of ['attachedTemplate', 'image']) {
+    it.each([...ntShares, ...controls])(`refuses an external ${type} at %j`, async (target) => {
+      expect(await codeOf('a.docx', MIME.docx, docxWith(type, target))).toBe('external_content');
+    });
+    it.each(['\\??\\C:\\x.dotm', '\\??\\c:\\Templates\\Normal.dotm', 'file:///??/D:/x.dotm'])(
+      `passes an external ${type} at the local NT drive path %j`,
+      async (target) => {
+        expect(await codeOf('a.docx', MIME.docx, docxWith(type, target))).toBe('ok');
+      },
+    );
+  }
+
+  it.each([...ntShares, ...controls])('leaves a hyperlink to %j alone', async (target) => {
+    expect(await codeOf('a.docx', MIME.docx, docxWith('hyperlink', target))).toBe('ok');
+  });
+});

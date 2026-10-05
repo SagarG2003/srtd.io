@@ -1530,8 +1530,22 @@ const REMOTE_LOADING_TYPES: ReadonlySet<string> = new Set([
 /** A Windows protocol handler such as ms-msdt: (Follina) or msdt:. */
 const PROTOCOL_HANDLER = /(^|[^a-z0-9+.-])(ms-[a-z0-9+.-]*|msdt|search-ms):/i;
 
-/** \\??\\UNC\\ (after backslashes read as slashes), optionally after a leading slash. */
-const NT_UNC_PREFIX = /^\/?\/\?\?\/unc\//i;
+/**
+ * An NT object-manager path (\??\..., read with slashes) counts as a share:
+ * \??\UNC\, \??\Global\UNC\ and \??\GLOBALROOT\Device\Mup\ all reach the
+ * network redirector. Only a drive (\??\C:\) is local.
+ */
+function isNtShare(path: string): boolean {
+  return /^\/+\?\?(\/|$)/.test(path) && !/^\/+\?\?\/[a-z]:(\/|$)/i.test(path);
+}
+
+/** True when any C0 control character (%00-%1F once decoded) is present. */
+function hasControlCharacter(text: string): boolean {
+  for (let i = 0; i < text.length; i += 1) {
+    if (text.charCodeAt(i) < 0x20) return true;
+  }
+  return false;
+}
 
 /** Decode %xx escapes without throwing on malformed ones. */
 function percentDecode(text: string): string {
@@ -1549,11 +1563,14 @@ function percentDecode(text: string): string {
  * Backslashes read as slashes and %xx escapes are decoded first.
  */
 function targetLocation(rawTarget: string): 'share' | 'web' | 'local' {
-  // Trim again after decoding: %20 or %09 before \\server must not hide it.
-  const target = percentDecode(rawTarget.trim()).trim().replace(/\\/g, '/');
+  // A control character anywhere (%00-%1F, or a raw tab or newline) is
+  // treated as a share: readers may strip it and reveal one.
+  const decoded = percentDecode(rawTarget);
+  if (hasControlCharacter(decoded)) return 'share';
+  // Trim again after decoding: %20 before \\server must not hide it.
+  const target = decoded.trim().replace(/\\/g, '/');
   if (target.startsWith('//')) return 'share';
-  // The NT object-manager prefix \??\UNC\server\share is a share too.
-  if (NT_UNC_PREFIX.test(target)) return 'share';
+  if (isNtShare(target)) return 'share';
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(target)?.[1]?.toLowerCase();
   // No scheme, or a single letter (a drive such as C:), is a local path.
   if (scheme === undefined || scheme.length === 1) return 'local';
@@ -1570,7 +1587,7 @@ function targetLocation(rawTarget: string): 'share' | 'web' | 'local' {
   // file: URL into a path, which can leave a share (\\server\share). So any
   // "//" in the path, any "." or ".." segment, or an NT UNC prefix counts as
   // a share.
-  if (path.includes('//') || NT_UNC_PREFIX.test(path)) return 'share';
+  if (path.includes('//') || isNtShare(path)) return 'share';
   if (path.split('/').some((segment) => segment === '.' || segment === '..')) return 'share';
   return 'local';
 }
