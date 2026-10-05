@@ -129,12 +129,12 @@ async function expectMenuStyle(page: Page): Promise<void> {
     expect(icon.icon).toBe(icon.row);
     expect(icon.row).toBe(style.fg);
     expect(icon.width).toBe('22');
-    expect(icon.height).toBeGreaterThanOrEqual(43.5);
+    expect(icon.height).toBeGreaterThanOrEqual(44);
   }
   expect(style.cells).toHaveLength(6);
   for (const [w, h] of style.cells) {
-    expect(w).toBeGreaterThanOrEqual(43.5);
-    expect(h).toBeGreaterThanOrEqual(43.5);
+    expect(w).toBeGreaterThanOrEqual(44);
+    expect(h).toBeGreaterThanOrEqual(44);
   }
 }
 

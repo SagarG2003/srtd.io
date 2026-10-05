@@ -258,8 +258,8 @@ describe('menu style', () => {
     expect(cls.some((c) => /^p-/.test(c))).toBe(false);
     expect(MENU_PANEL).not.toContain(DARK);
     expect(MENU_PANEL).not.toContain(HASH);
-    // Six 44px reaction cells plus the row's 10px sides.
-    expect(MENU_WIDTH_PX).toBeGreaterThanOrEqual(6 * 44 + 20);
+    // Six 44px reaction cells, the row's 10px sides and the 1px border each side.
+    expect(MENU_WIDTH_PX).toBeGreaterThanOrEqual(6 * 44 + 20 + 2);
   });
 
   it('rows: full-bleed, >= 44px, 16px sides, 14px gap, 16px fg text', () => {
@@ -320,7 +320,7 @@ describe('menu style', () => {
         onMore={() => {}}
       />,
     );
-    expect(html.match(/h-11 w-11/g)?.length).toBe(6);
+    expect(html.match(/h-11 w-11 shrink-0/g)?.length).toBe(6);
     expect(html).toContain('px-[10px] py-2');
     expect(html).toContain('border-b border-border');
   });

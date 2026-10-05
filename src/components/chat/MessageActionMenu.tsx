@@ -591,10 +591,11 @@ interface Coords {
 }
 
 /**
- * The menu panel's width. Six 44x44 reaction cells (the touch-target floor)
- * plus the row's 10px sides need 284px, so the panel is that wide, never less.
+ * The menu panel's width. Six 44x44 reaction cells (the touch-target floor),
+ * the row's 10px sides and the 1px border each side need 286px, so the panel
+ * is that wide, never less.
  */
-export const MENU_WIDTH_PX = 284;
+export const MENU_WIDTH_PX = 286;
 
 /** What computeMenuPlacement decides; see there. */
 export interface MenuPlacement {
@@ -687,7 +688,7 @@ export function ReactionsRow(props: {
           {...(reactionsOnly ? { 'data-menu-item': `react-${emoji}` } : {})}
           onClick={() => props.onReact(emoji)}
           className={cn(
-            'flex h-11 w-11 items-center justify-center rounded-full text-xl hover:bg-panel-2',
+            'flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-xl hover:bg-panel-2',
             emoji === currentReaction && 'bg-panel-3',
           )}
         >
@@ -702,7 +703,7 @@ export function ReactionsRow(props: {
         aria-haspopup="dialog"
         {...(reactionsOnly ? { 'data-menu-item': 'react-more' } : {})}
         onClick={props.onMore}
-        className="flex h-11 w-11 items-center justify-center rounded-full bg-panel-2 text-fg-2 hover:bg-panel-3 hover:text-fg"
+        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-panel-2 text-fg-2 hover:bg-panel-3 hover:text-fg"
       >
         <IconPlus size={20} />
       </button>
