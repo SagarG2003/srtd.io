@@ -256,7 +256,7 @@ Chat files stay in chat (20261005040000_chat_files_stay_in_chat.sql):
 - comment_create: raises 'attachment not available' for an attachment version whose asset is origin 'chat' or soft-deleted.
 - comment_batch_create: raises 'attachment not available' for an attachment version whose asset is origin 'chat' or soft-deleted.
 - asset_delete: raises 'chat files are deleted with their message' for an origin 'chat' asset.
-- asset_delete_many: raises 'chat files are deleted with their message' when the set holds a live origin 'chat' asset. Not reachable today: the proc's earlier max(workspace_id) over uuid has no Postgres 17 aggregate, so every call raises 'function max(uuid) does not exist' first (pre-existing).
+- asset_delete_many: raises 'chat files are deleted with their message' when the set holds a live origin 'chat' asset.
 
 ### asset_attachments
 

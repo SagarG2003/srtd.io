@@ -339,24 +339,51 @@ describe.runIf(RLS_SUITE)('chat files stay in chat', () => {
       expect(await isDeleted(target.assetId)).toBe(false);
     });
 
-    // asset_delete_many reads max(workspace_id) over uuid before any of its
-    // checks; Postgres 17 has no max(uuid), so today every call raises and the
-    // proc cannot delete anything (live and local alike). That predates this
-    // migration and is out of its scope, so this spec asserts only what holds
-    // either way: a set holding a chat-origin asset is refused and nothing in it
-    // is deleted.
-    it('asset_delete_many refuses a set containing a chat-origin asset and deletes nothing', async () => {
-      const target = await seedAsset(g, ws.id, owner.id, 'library');
-      const res = await clientFor(owner.id).rpc(
+    async function deleteMany(assetIds: string[], traceId: string): Promise<RpcResult> {
+      return await clientFor(owner.id).rpc(
         'asset_delete_many',
         rpcArgs({
-          p_asset_ids: [target.assetId, chat.assetId],
-          p_trace_id: uuidv7(),
+          p_asset_ids: assetIds,
+          p_trace_id: traceId,
         }),
       );
-      expect(res.error).not.toBeNull();
+    }
+
+    it('asset_delete_many deletes two library assets in one workspace and writes two audit rows', async () => {
+      const a = await seedAsset(g, ws.id, owner.id, 'library');
+      const b = await seedAsset(g, ws.id, owner.id, 'library');
+      const traceId = uuidv7();
+      expectOk(await deleteMany([a.assetId, b.assetId], traceId));
+      expect(await isDeleted(a.assetId)).toBe(true);
+      expect(await isDeleted(b.assetId)).toBe(true);
+      expect(
+        await countWhere(g, 'audit_log', [
+          ['trace_id', traceId],
+          ['action', 'asset_delete'],
+        ]),
+      ).toBe(2);
+    });
+
+    it('asset_delete_many refuses a set containing a chat-origin asset and deletes nothing', async () => {
+      const target = await seedAsset(g, ws.id, owner.id, 'library');
+      const traceId = uuidv7();
+      expectRefused(await deleteMany([target.assetId, chat.assetId], traceId), CHAT_DELETE);
       expect(await isDeleted(target.assetId)).toBe(false);
       expect(await isDeleted(chat.assetId)).toBe(false);
+      expect(await countWhere(g, 'audit_log', [['trace_id', traceId]])).toBe(0);
+    });
+
+    it('asset_delete_many refuses a set spanning two workspaces with invalid_payload', async () => {
+      const target = await seedAsset(g, ws.id, owner.id, 'library');
+      const elsewhere = await seedAsset(g, other.id, outsider.id, 'library');
+      const traceId = uuidv7();
+      expectRefused(
+        await deleteMany([target.assetId, elsewhere.assetId], traceId),
+        'invalid_payload',
+      );
+      expect(await isDeleted(target.assetId)).toBe(false);
+      expect(await isDeleted(elsewhere.assetId)).toBe(false);
+      expect(await countWhere(g, 'audit_log', [['trace_id', traceId]])).toBe(0);
     });
   });
 
