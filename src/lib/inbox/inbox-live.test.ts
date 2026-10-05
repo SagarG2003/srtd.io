@@ -6,6 +6,7 @@ import {
   type EnrichedNew,
   type InboxRow,
 } from '@/lib/inbox/inbox-live';
+import { UNKNOWN_MEMBER } from '@/lib/chat/mentions';
 
 function row(over: Partial<InboxRow>): InboxRow {
   return {
@@ -37,6 +38,7 @@ const enriched = (over: Partial<EnrichedNew>): EnrichedNew => ({
     actorAvatarUrl: null,
     body: null,
     title: null,
+    mentionNames: new Map(),
   },
   ...over,
 });
@@ -97,11 +99,12 @@ describe('toastFromEnriched', () => {
           actorAvatarUrl: 'https://cdn/a.png',
           body: 'Looks great, ship it!',
           title: 'Q3 Launch',
+          mentionNames: new Map(),
         },
       }),
     );
     expect(spec).toEqual({
-      title: 'Alice commented',
+      title: 'Alice commented on Q3 Launch',
       description: 'Looks great, ship it!',
       actorName: 'Alice',
       actorAvatarUrl: 'https://cdn/a.png',
@@ -117,6 +120,7 @@ describe('toastFromEnriched', () => {
           actorAvatarUrl: null,
           body: null,
           title: 'Q3 Launch',
+          mentionNames: new Map(),
         },
       }),
     );
@@ -137,6 +141,7 @@ describe('toastFromEnriched', () => {
           actorAvatarUrl: null,
           body: null,
           title: null,
+          mentionNames: new Map(),
         },
       }),
     );
@@ -151,6 +156,112 @@ describe('toastFromEnriched', () => {
       actorAvatarUrl: null,
     });
     expect(toastFromEnriched(enriched({ count: 12, lead: null }))?.title).toBe('12 new updates');
+  });
+});
+
+describe('comment toast names and title', () => {
+  const MANISHA = '0b9d7c1e-1f2a-4c3b-9d8e-7f6a5b4c3d2e';
+  const RAHUL = '1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+  const GONE = '9f8e7d6c-5b4a-4321-8fed-cba987654321';
+  const TITLE = 'Ethyl Acetate - The Ferrari Story';
+  const comment = (over: Partial<NonNullable<EnrichedNew['lead']>>): EnrichedNew =>
+    enriched({
+      lead: {
+        eventType: 'comment',
+        actorName: 'Chitra',
+        actorAvatarUrl: null,
+        body: null,
+        title: TITLE,
+        mentionNames: new Map(),
+        ...over,
+      },
+    });
+
+  it('names the post on line 1 and resolves a mention on line 2', () => {
+    const spec = toastFromEnriched(
+      comment({
+        body: `@[${MANISHA}] can we post this today`,
+        mentionNames: new Map([[MANISHA, 'Manisha']]),
+      }),
+    );
+    expect(spec?.title).toBe('Chitra commented on Ethyl Acetate - The Ferrari Story');
+    expect(spec?.description).toBe('@Manisha can we post this today');
+  });
+
+  it('names a brief on line 1 the same way', () => {
+    expect(toastFromEnriched(comment({ title: 'Diwali brief' }))?.title).toBe(
+      'Chitra commented on Diwali brief',
+    );
+  });
+
+  it('resolves two mentions', () => {
+    const spec = toastFromEnriched(
+      comment({
+        body: `@[${MANISHA}] and @[${RAHUL}] please check`,
+        mentionNames: new Map([
+          [MANISHA, 'Manisha'],
+          [RAHUL, 'Rahul'],
+        ]),
+      }),
+    );
+    expect(spec?.description).toBe('@Manisha and @Rahul please check');
+  });
+
+  it('renders an unknown id as the resolver does', () => {
+    const spec = toastFromEnriched(comment({ body: `@[${GONE}] ping` }));
+    expect(spec?.description).toBe(`@${UNKNOWN_MEMBER} ping`);
+  });
+
+  it('drops line 2 when the name read failed, never showing a raw token', () => {
+    const spec = toastFromEnriched(
+      comment({ body: `@[${MANISHA}] can we post this today`, mentionNames: null }),
+    );
+    expect(spec?.title).toBe('Chitra commented on Ethyl Acetate - The Ferrari Story');
+    expect(spec && 'description' in spec).toBe(false);
+    expect(JSON.stringify(spec)).not.toContain('@[');
+  });
+
+  it('reads "New comment on <title>" with no line 2 when the name read failed', () => {
+    const spec = toastFromEnriched(
+      comment({
+        actorName: null,
+        body: `@[${MANISHA}] can we post this today`,
+        mentionNames: null,
+      }),
+    );
+    expect(spec?.title).toBe('New comment on Ethyl Acetate - The Ferrari Story');
+    expect(spec && 'description' in spec).toBe(false);
+    expect(JSON.stringify(spec)).not.toContain('@[');
+    expect(JSON.stringify(spec)).not.toContain('can we post');
+  });
+
+  it('keeps the generic label when the name read failed and the title is missing', () => {
+    const spec = toastFromEnriched(
+      comment({ actorName: null, title: null, body: 'Ship it', mentionNames: null }),
+    );
+    expect(spec?.title).toBe('New comment');
+    expect(spec && 'description' in spec).toBe(false);
+  });
+
+  it('drops line 2 for a token-free body too when the name read failed', () => {
+    const spec = toastFromEnriched(comment({ body: 'Ship it', mentionNames: null }));
+    expect(spec && 'description' in spec).toBe(false);
+  });
+
+  it('reads "<actor> commented" when the title is missing', () => {
+    const spec = toastFromEnriched(comment({ title: null, body: 'Ship it' }));
+    expect(spec?.title).toBe('Chitra commented');
+    expect(spec?.description).toBe('Ship it');
+  });
+
+  it('truncates after resolving names', () => {
+    const tail = 'x'.repeat(200);
+    const spec = toastFromEnriched(
+      comment({ body: `@[${MANISHA}] ${tail}`, mentionNames: new Map([[MANISHA, 'Manisha']]) }),
+    );
+    const expected = `@Manisha ${tail}`.slice(0, 100);
+    expect(spec?.description).toBe(`${expected}\u2026`);
+    expect(spec?.description).not.toContain('@[');
   });
 });
 

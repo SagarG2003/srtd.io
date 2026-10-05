@@ -10,6 +10,7 @@ import {
   chatMessageHref,
   isBellRow,
 } from '@/lib/inbox/bell-types';
+import { resolveMentionText } from '@/lib/chat/mentions';
 
 /** The raw inbox_entries row, reused from the generated schema (never redefined). */
 export type InboxRow = Database['public']['Tables']['inbox_entries']['Row'];
@@ -27,8 +28,15 @@ interface EnrichedLead {
   eventType: string;
   actorName: string | null;
   actorAvatarUrl: string | null;
+  /** The raw comment body: mention tokens are still `@[uuid]` here. */
   body: string | null;
   title: string | null;
+  /**
+   * Display names for the ids mentioned in `body`, from the same batched read as
+   * the actor. Null when that read failed or timed out: the toast then shows no
+   * line 2 at all, never a raw token.
+   */
+  mentionNames: ReadonlyMap<string, string> | null;
 }
 
 /** A batch of new rows reduced to a count plus its enriched lead. */
@@ -129,11 +137,29 @@ function trimSnippet(text: string): string {
 }
 
 /**
+ * The toast's line 2 for a comment body: every mention token becomes "@Name"
+ * (an unknown id reads as resolveMentionText's "@Unknown member"), then the text
+ * is trimmed, so the cut never lands inside a token. Null for an empty body, or
+ * whenever the name read failed or timed out (no raw token is ever shown).
+ */
+function commentSnippet(
+  body: string | null,
+  names: ReadonlyMap<string, string> | null,
+): string | null {
+  if (body === null || body.trim().length === 0) return null;
+  // The name read failed or timed out: no body line at all (never a raw token).
+  if (names === null) return null;
+  return trimSnippet(resolveMentionText(body, (id) => names.get(id)));
+}
+
+/**
  * Build the toast content for an enriched batch, or null when there is nothing to
- * show. A single comment with a known actor reads "{name} commented"; any other
- * single event takes its neutral label. The description is the trimmed body, then
- * the resolved title, then nothing. Many new rows coalesce to "N new updates" with
- * no actor. Pure; produces no JSX.
+ * show. A single comment with a known actor reads "{name} commented on {title}"
+ * (the post's or brief's title), or "{name} commented" when the title is missing;
+ * its description is the body with mentions resolved, else nothing. Any other
+ * single event takes its neutral label, with the body, then the title, as its
+ * description. Many new rows coalesce to "N new updates" with no actor. Pure;
+ * produces no JSX.
  */
 export function toastFromEnriched(enriched: EnrichedNew): ToastSpec | null {
   if (enriched.count === 0) return null;
@@ -148,18 +174,28 @@ export function toastFromEnriched(enriched: EnrichedNew): ToastSpec | null {
   if (lead === null) {
     return { title: 'New activity', actorName: null, actorAvatarUrl: null };
   }
-  const title =
-    lead.eventType === 'comment' && lead.actorName !== null
-      ? `${lead.actorName} commented`
+  const snippet = commentSnippet(lead.body, lead.mentionNames);
+  const isComment = lead.eventType === 'comment';
+  const named = isComment && lead.actorName !== null;
+  // The name read failed or timed out: the actor is unknown and no body shows.
+  const namesFailed = isComment && lead.mentionNames === null;
+  const leadTitle = lead.title !== null && lead.title.trim().length > 0 ? lead.title.trim() : null;
+  const title = named
+    ? leadTitle !== null
+      ? `${lead.actorName} commented on ${leadTitle}`
+      : `${lead.actorName} commented`
+    : namesFailed && leadTitle !== null
+      ? `New comment on ${leadTitle}`
       : eventLabel(lead.eventType);
-  const snippet = lead.body !== null && lead.body.trim().length > 0 ? trimSnippet(lead.body) : null;
-  const description = snippet ?? lead.title ?? undefined;
+  // A named comment, or a failed name read, already carries the title on line 1
+  // (or has no line 2 at all); do not repeat it.
+  const description = snippet ?? (named || namesFailed ? null : leadTitle);
   const base: ToastSpec = {
     title,
     actorName: lead.actorName,
     actorAvatarUrl: lead.actorAvatarUrl,
   };
-  return description !== undefined ? { ...base, description } : base;
+  return description !== null ? { ...base, description } : base;
 }
 
 /** A batch of new rows split between the two surfaces. */
