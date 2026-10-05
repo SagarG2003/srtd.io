@@ -1560,7 +1560,9 @@ function targetLocation(rawTarget: string): 'share' | 'web' | 'local' {
     return authority.startsWith('//') ? 'share' : 'local';
   }
   const host = authority.split('/')[0]?.toLowerCase() ?? '';
-  return host === '' || host === 'localhost' ? 'local' : 'share';
+  if (host !== '' && host !== 'localhost') return 'share';
+  // file://localhost//server/share converts to \\server\share: still a share.
+  return authority.slice(host.length).startsWith('//') ? 'share' : 'local';
 }
 
 /**

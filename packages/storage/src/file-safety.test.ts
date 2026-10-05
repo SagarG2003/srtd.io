@@ -1005,6 +1005,9 @@ describe('G1/G2 external relationships by target location', () => {
     'file://%5C%5Cserver/t.dotm',
     '%5C%5Cserver%5Cshare%5Ct.dotm',
     'smb://server/share/t.dotm',
+    'file://localhost//server/share/t.dotm',
+    'file://localhost/\\\\server\\share\\t.dotm',
+    'file://LOCALHOST////server/share/t.dotm',
     'ms-msdt:/id PCWDiagnostic',
     'search-ms:query=x',
   ];
@@ -1035,6 +1038,7 @@ describe('G1/G2 external relationships by target location', () => {
     ['image', 'file:////server/share/logo.png'],
     ['audio', '\\\\server\\share\\a.wav'],
     ['video', 'file://fileserver/v.mp4'],
+    ['image', 'file://localhost//server/share/logo.png'],
     ['externalLinkPath', '\\\\server\\share\\book.xlsx'],
   ])('G2 refuses an external %s loaded from a share %j', async (type, target) => {
     const result = await inspectUpload({
