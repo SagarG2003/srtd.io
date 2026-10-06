@@ -174,7 +174,8 @@ export function BoardApproveConfirm(props: {
 }
 
 /**
- * Desktop kanban: one fixed-width column per stage in the locked STAGE order,
+ * Desktop kanban: one fixed-width column per stage (a single-stage view renders
+ * the full-width {@link SingleStageGrid} instead) in the locked STAGE order,
  * horizontally scrolled. Cards are native-draggable items and columns are drop
  * targets; a drop onto a legal target (canTransition) calls up to the page's move
  * handler, an illegal drop bounces. No DnD library, native events only, and no
@@ -193,6 +194,17 @@ export function PipelineBoardView({
   onViewAll,
   onMovePost,
 }: PipelineBoardProps): ReactElement {
+  const only = stages.length === 1 ? stages[0] : undefined;
+  if (only !== undefined) {
+    // Called, not mounted, so the tree stays walkable in unit tests (hookless).
+    return SingleStageGrid({
+      stage: only,
+      posts: grouped[only],
+      cache,
+      presignEnabled,
+      workspaceKey,
+    });
+  }
   return (
     // Lock scrolling to the horizontal axis only: with bare overflow-x-auto the
     // y-axis resolves to auto, so a both-axis scroll fights the app-shell main.
@@ -262,6 +274,65 @@ export function PipelineBoardView({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * Single-stage view: the one stage's cards as a full-width auto-fill grid, no
+ * column chrome (the active chip already names the stage and count). Flows top
+ * to bottom with the page owning vertical scroll; no inner scroll box. Cards
+ * stay draggable items with the same payload; there is no drop target here
+ * since the only column on screen is the cards' own stage.
+ */
+function SingleStageGrid({
+  stage,
+  posts,
+  cache,
+  presignEnabled,
+  workspaceKey,
+}: {
+  stage: Stage;
+  posts: PipelinePost[];
+  cache: PresignCache;
+  presignEnabled: boolean;
+  workspaceKey: string | null;
+}): ReactElement {
+  if (posts.length === 0) {
+    return (
+      <div
+        data-board-grid
+        data-stage={stage}
+        className="flex min-h-[160px] items-center justify-center px-4 py-6 text-sm text-fg-3 md:px-6"
+      >
+        Empty
+      </div>
+    );
+  }
+  return (
+    <div
+      data-board-grid
+      data-stage={stage}
+      className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4 px-4 py-4 md:px-6"
+    >
+      {posts.map((post) => (
+        <div
+          key={post.id}
+          data-drag-item
+          data-post-id={post.id}
+          draggable
+          onDragStart={(event) => onCardDragStart(event, post)}
+          onDragEnd={onCardDragEnd}
+          className="min-w-0 rounded-lg"
+        >
+          <PostCard
+            post={post}
+            cache={cache}
+            presignEnabled={presignEnabled}
+            workspaceKey={workspaceKey}
+          />
+        </div>
+      ))}
     </div>
   );
 }
