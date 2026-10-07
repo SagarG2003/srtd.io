@@ -304,30 +304,38 @@ function stagePhrase(toStage: string | null, ref: string): string {
   }
 }
 
+/** The client's own decisions: only these carry "on behalf of client" (decision 136). */
+const ON_BEHALF_STAGES: ReadonlySet<string> = new Set(['approved', 'rejected', 'parked']);
+
 /**
  * The who-did-what line for an actor row (stage_change, post_deleted,
- * assets_deleted): "<Name> approved KEY-12", "<Name> deleted KEY-12 Title",
- * "<Name> deleted brief.pdf" / "<Name> deleted 3 assets", plus "on behalf of
- * client" when the actor was agency-side (old rows with no actor_role: name
- * only). A missing name reads "Someone". Null for any other event type.
+ * assets_deleted): "<Name> approved KEY-12", "<Name> sent KEY-12 for review",
+ * "<Name> deleted KEY-12 Title", "<Name> deleted brief.pdf" / "<Name> deleted 3
+ * assets". Only approve, reject and park by an agency-side actor add "on behalf
+ * of client" (old rows with no actor_role: name only); send for review and the
+ * deletes are always plain. A missing name reads "Someone". Null for any other
+ * event type.
  */
 export function actorRowLine(item: ActivityItem, workspaceKey: string | null): string | null {
   if (!ACTOR_ROW_EVENTS.has(item.eventType)) return null;
   const who = item.actorName ?? UNKNOWN_ACTOR;
-  const suffix = onBehalfSuffix(item.actorRole);
   if (item.eventType === 'stage_change') {
+    const suffix =
+      item.toStage !== null && ON_BEHALF_STAGES.has(item.toStage)
+        ? onBehalfSuffix(item.actorRole)
+        : '';
     return `${who} ${stagePhrase(item.toStage, postRef(item, workspaceKey))}${suffix}`;
   }
   if (item.eventType === 'post_deleted') {
     const title = item.title !== null && item.title !== '' ? ` ${item.title}` : '';
-    return `${who} deleted ${postRef(item, workspaceKey)}${title}${suffix}`;
+    return `${who} deleted ${postRef(item, workspaceKey)}${title}`;
   }
   const filenames = item.filenames ?? [];
   const count = item.assetCount ?? filenames.length;
   const first = filenames[0];
   const what =
     count === 1 && first !== undefined ? first : count === 1 ? 'an asset' : `${count} assets`;
-  return `${who} deleted ${what}${suffix}`;
+  return `${who} deleted ${what}`;
 }
 
 /**

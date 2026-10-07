@@ -195,6 +195,14 @@ export async function enrichNewRows(
 
   return {
     count,
-    lead: { eventType: leadItem.eventType, actorName, actorAvatarUrl, body, title, mentionNames },
+    lead: {
+      eventType: leadItem.eventType,
+      actorName,
+      actorAvatarUrl,
+      body,
+      title,
+      mentionNames,
+      toStage: leadItem.toStage,
+    },
   };
 }

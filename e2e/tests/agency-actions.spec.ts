@@ -95,7 +95,7 @@ test('Activity: "<Name> approved KEY-N on behalf of client"', async ({ page }) =
   await expect(page.getByText('Leo Martins approved HS-101 on behalf of client')).toBeVisible({
     timeout: 15_000,
   });
-  await expect(page.getByText('Leo Martins deleted 3 assets on behalf of client')).toBeVisible();
+  await expect(page.getByText('Leo Martins deleted 3 assets', { exact: true })).toBeVisible();
   await expect(page.getByText('Moved to', { exact: false })).toHaveCount(0);
   await shot(page, 'activity-on-behalf');
   expectNoBlocked(network);

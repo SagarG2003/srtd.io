@@ -285,3 +285,94 @@ describe.runIf(RLS_SUITE)('agency actions on behalf of client', () => {
     });
   });
 });
+
+// post_soft_delete draft recipients (20261007120000_post_soft_delete_draft_recipients.sql):
+// a deleted DRAFT notifies only roles with pipeline.view_all_stages (owner, admin,
+// agency); a client gets nothing. A deleted REVIEW post still reaches the client.
+describe.runIf(RLS_SUITE)('post_deleted recipients for a draft', () => {
+  let admin: SupabaseClient<Database>;
+  let g: GenericClient;
+  let owner: SeededUser;
+  let adminUser: SeededUser;
+  let agency: SeededUser;
+  let agency2: SeededUser;
+  let client: SeededUser;
+  let ws: SeededWorkspace;
+  let bucketId: string;
+
+  async function seedPost(stage: string): Promise<string> {
+    const post = await insertRow(g, 'posts', {
+      workspace_id: ws.id,
+      number: await nextEntityNumber(g, ws.id),
+      title: `Post ${randomSuffix()}`,
+      bucket_id: bucketId,
+      owner_user_id: owner.id,
+      platform: 'linkedin',
+      format: 'text',
+      stage,
+      created_by: owner.id,
+    });
+    return String(post.id);
+  }
+
+  async function recipients(postId: string): Promise<string[]> {
+    const res = await g
+      .from('inbox_entries')
+      .select('user_id, entity_id')
+      .eq('workspace_id', ws.id)
+      .eq('event_type', 'post_deleted');
+    if (res.error) throw new Error(`inbox read failed: ${res.error.message}`);
+    return (res.data as { user_id: string; entity_id: string }[])
+      .filter((row) => row.entity_id === postId)
+      .map((row) => row.user_id)
+      .sort();
+  }
+
+  beforeAll(async () => {
+    const env = loadRlsEnv();
+    admin = createAdminClient(env);
+    g = asGeneric(admin);
+    owner = await seedUser(env, admin);
+    adminUser = await seedUser(env, admin);
+    agency = await seedUser(env, admin);
+    agency2 = await seedUser(env, admin);
+    client = await seedUser(env, admin);
+    ws = await seedWorkspace(admin, owner, `Draft recipients ${owner.email}`);
+    await seedMember(g, ws, adminUser, 'admin');
+    await seedMember(g, ws, agency, 'agency');
+    await seedMember(g, ws, agency2, 'agency');
+    await seedMember(g, ws, client, 'client');
+    const bucket = await insertRow(g, 'workspace_buckets', {
+      workspace_id: ws.id,
+      name: `Bucket ${randomSuffix()}`,
+      color_hex: '#112233',
+    });
+    bucketId = String(bucket.id);
+  });
+
+  afterAll(async () => {
+    await cleanupWorkspaces(admin, [ws], [owner, adminUser, agency, agency2, client]);
+  });
+
+  it('agency deletes a DRAFT: owner, admin and the other agency get post_deleted, the client none', async () => {
+    const postId = await seedPost('draft');
+    const res = await clientFor(agency.id).rpc(
+      'post_soft_delete',
+      rpcArgs({ p_post_id: postId, p_trace_id: uuidv7() }),
+    );
+    expect(res.error).toBeNull();
+    expect(await recipients(postId)).toEqual([owner.id, adminUser.id, agency2.id].sort());
+  });
+
+  it('agency deletes a REVIEW post: the client gets one too', async () => {
+    const postId = await seedPost('review');
+    const res = await clientFor(agency.id).rpc(
+      'post_soft_delete',
+      rpcArgs({ p_post_id: postId, p_trace_id: uuidv7() }),
+    );
+    expect(res.error).toBeNull();
+    const got = await recipients(postId);
+    expect(got).toEqual([owner.id, adminUser.id, agency2.id, client.id].sort());
+    expect(got.filter((id) => id === client.id)).toHaveLength(1);
+  });
+});

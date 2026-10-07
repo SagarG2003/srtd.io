@@ -835,7 +835,7 @@ describe('fetchActivityEntries enrichment', () => {
       const row = res.data[0]!;
       expect(row.number).toBe(9);
       expect(row.title).toBe('Old teaser');
-      expect(activityLine(row, 'key')).toBe('Chitra deleted KEY-9 Old teaser on behalf of client');
+      expect(activityLine(row, 'key')).toBe('Chitra deleted KEY-9 Old teaser');
       expect(entityHref(row, 'key')).toBeNull();
     }
   });
@@ -1223,7 +1223,16 @@ describe('actor rows: who did what (approve, reject, park, review, deletes)', ()
     );
   });
 
-  it('an agency-side actor adds "on behalf of client"; never a workspace name', () => {
+  it('send for review is plain even for an agency-side actor', () => {
+    expect(activityLine(stage('review', { actorRole: 'agency' }), 'gbl')).toBe(
+      'Chitra sent GBL-12 for review',
+    );
+  });
+
+  it('an agency-side approve, reject or park adds "on behalf of client"; never a workspace name', () => {
+    expect(activityLine(stage('parked', { actorRole: 'agency' }), 'gbl')).toBe(
+      'Chitra parked GBL-12 on behalf of client',
+    );
     for (const role of ['agency', 'admin', 'owner']) {
       const line = activityLine(stage('approved', { actorRole: role }), 'gbl');
       expect(line).toBe('Chitra approved GBL-12 on behalf of client');
@@ -1246,7 +1255,7 @@ describe('actor rows: who did what (approve, reject, park, review, deletes)', ()
     );
   });
 
-  it('post_deleted: "<Name> deleted KEY-N <title>" with the suffix; not tappable', () => {
+  it('post_deleted: "<Name> deleted KEY-N <title>", plain even for agency; not tappable', () => {
     const del = item({
       eventType: 'post_deleted',
       number: 7,
@@ -1254,8 +1263,8 @@ describe('actor rows: who did what (approve, reject, park, review, deletes)', ()
       actorName: 'Chitra',
       actorRole: 'agency',
     });
-    expect(activityLine(del, 'gbl')).toBe('Chitra deleted GBL-7 Diwali teaser on behalf of client');
-    expect(cardBodyLine(del, 'gbl')).toBe('Chitra deleted GBL-7 Diwali teaser on behalf of client');
+    expect(activityLine(del, 'gbl')).toBe('Chitra deleted GBL-7 Diwali teaser');
+    expect(cardBodyLine(del, 'gbl')).toBe('Chitra deleted GBL-7 Diwali teaser');
     expect(entityHref(del, 'gbl')).toBeNull();
   });
 
@@ -1273,7 +1282,7 @@ describe('actor rows: who did what (approve, reject, park, review, deletes)', ()
     const many = { ...one, assetCount: 4, filenames: ['a', 'b', 'c'] };
     expect(activityLine(many)).toBe('Asha deleted 4 assets');
     const agency = { ...many, actorName: 'Chitra', actorRole: 'agency' };
-    expect(activityLine(agency)).toBe('Chitra deleted 4 assets on behalf of client');
+    expect(activityLine(agency)).toBe('Chitra deleted 4 assets');
     expect(activityLine({ ...one, actorName: null })).toBe('Someone deleted brief.pdf');
     expect(entityHref(one)).toBe('/assets');
   });

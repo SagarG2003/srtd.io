@@ -419,7 +419,8 @@ describe('ActivityCard actor rows', () => {
         actorRole: 'agency',
       }),
     ]);
-    expect(html).toContain('Chitra deleted GBL-9 Old teaser on behalf of client');
+    expect(html).toContain('Chitra deleted GBL-9 Old teaser');
+    expect(html).not.toContain('on behalf of client');
     expect(html).not.toContain('role="button"');
     expect(html).not.toContain('cursor-pointer');
   });
@@ -451,6 +452,7 @@ describe('ActivityCard actor rows', () => {
         filenames: ['a', 'b', 'c'],
       }),
     ]);
-    expect(many).toContain('Someone deleted 3 assets on behalf of client');
+    expect(many).toContain('Someone deleted 3 assets');
+    expect(many).not.toContain('on behalf of client');
   });
 });
