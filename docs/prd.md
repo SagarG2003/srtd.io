@@ -240,10 +240,10 @@ Chat messages do NOT land in Activity. Chat notification is Agora native push on
 | Stage | Definition |
 | --- | --- |
 | Draft | Agency private. Client cannot see. |
-| Review | Client review required. Client approves, rejects, or comments. |
-| Approved | Client approved. |
+| Review | Client approves or rejects; agency may act on behalf of client. |
+| Approved | Approved by client or agency on behalf of client. |
 | Parked | Held by agency. |
-| Rejected | Client rejected. |
+| Rejected | Rejected by client or agency on behalf of client. |
 
 ### Stage transition map
 

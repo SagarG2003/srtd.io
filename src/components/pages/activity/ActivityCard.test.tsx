@@ -28,6 +28,11 @@ vi.mock('react', async (importOriginal) => {
   };
 });
 
+// The card reads the workspace key (for KEY-N) from the workspace context.
+vi.mock('@/lib/workspace-context', () => ({
+  useWorkspace: () => ({ workspaceKey: 'gbl' }),
+}));
+
 /** Recursively collect every element of a given host type from a tree. */
 function collectByType(node: ReactNode, type: string, acc: ReactElement[]): void {
   if (Array.isArray(node)) {
@@ -112,8 +117,8 @@ describe('ActivityCard', () => {
     expect(html).toContain('w-[3px] shrink-0 bg-border-strong');
     // Title appears exactly once (the header row), never repeated per event line.
     expect(count(html, 'Q3 Launch')).toBe(1);
-    // Lead actor line carries the event without the title.
-    expect(html).toContain('Moved to review');
+    // The lead names who did what without repeating the title.
+    expect(html).toContain('Someone sent a post for review');
   });
 
   it('threads a group of >1 behind a "+N more" toggle, collapsed by default', () => {
@@ -367,5 +372,85 @@ describe('A3 @all in the Activity preview', () => {
     ]);
     expect(html).toMatch(/<span data-mention-all="" class="font-bold text-accent">@all<\/span>/);
     expect(html).not.toContain('@[');
+  });
+});
+
+describe('ActivityCard actor rows', () => {
+  it('stage_change: "<Name> approved KEY-N on behalf of client" with the avatar', () => {
+    const html = renderCard([
+      item({
+        id: 'a',
+        title: 'Diwali teaser',
+        eventType: 'stage_change',
+        toStage: 'approved',
+        number: 12,
+        actorName: 'Chitra',
+        actorRole: 'agency',
+      }),
+    ]);
+    expect(html).toContain('Chitra approved GBL-12 on behalf of client');
+    expect(html).not.toContain('Moved to');
+    expect(html).toContain('role="button"');
+  });
+
+  it('a client approver has no suffix; an old row without actor_role has none either', () => {
+    for (const actorRole of ['client', null]) {
+      const html = renderCard([
+        item({
+          eventType: 'stage_change',
+          toStage: 'rejected',
+          number: 3,
+          actorName: 'Asha',
+          actorRole,
+        }),
+      ]);
+      expect(html).toContain('Asha rejected GBL-3');
+      expect(html).not.toContain('on behalf of client');
+    }
+  });
+
+  it('post_deleted is shown with the actor and is not tappable', () => {
+    const html = renderCard([
+      item({
+        eventType: 'post_deleted',
+        title: 'Old teaser',
+        number: 9,
+        actorName: 'Chitra',
+        actorRole: 'agency',
+      }),
+    ]);
+    expect(html).toContain('Chitra deleted GBL-9 Old teaser on behalf of client');
+    expect(html).not.toContain('role="button"');
+    expect(html).not.toContain('cursor-pointer');
+  });
+
+  it('assets_deleted: count 1 names the file; N counts; missing actor is Someone', () => {
+    const one = renderCard([
+      item({
+        eventType: 'assets_deleted',
+        entityType: 'workspace',
+        entityId: 'w1',
+        scope: 'everything',
+        actorName: 'Asha',
+        actorRole: 'client',
+        assetCount: 1,
+        filenames: ['brief.pdf'],
+      }),
+    ]);
+    expect(one).toContain('Asha deleted brief.pdf');
+    expect(one).toContain('role="button"');
+    const many = renderCard([
+      item({
+        eventType: 'assets_deleted',
+        entityType: 'workspace',
+        entityId: 'w1',
+        scope: 'everything',
+        actorName: null,
+        actorRole: 'agency',
+        assetCount: 3,
+        filenames: ['a', 'b', 'c'],
+      }),
+    ]);
+    expect(many).toContain('Someone deleted 3 assets on behalf of client');
   });
 });

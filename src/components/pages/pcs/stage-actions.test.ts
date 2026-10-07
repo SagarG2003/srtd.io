@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { visibleStageActions } from '@/components/pages/pcs/stage-actions';
+import {
+  canRoleMove,
+  roleMayTarget,
+  visibleStageActions,
+} from '@/components/pages/pcs/stage-actions';
+import { STAGE_TRANSITIONS, canTransition } from '@srtdio/posts';
 import type { Stage } from '@srtdio/posts';
 
 // The visibility matrix matches the server (stage_transition) exactly: the
-// client only sees approve / reject, the agency side only sees
-// park / move-to-review, and an unknown role sees nothing.
+// client only sees approve / reject, the agency side sees approve / reject (on
+// the client's behalf) plus park / move-to-review, and an unknown role sees
+// nothing.
 
 function labels(stage: Stage, role: string | null): string[] {
   return visibleStageActions(stage, role).map((a) => a.label);
@@ -39,9 +45,11 @@ describe('visibleStageActions', () => {
     expect(labels('draft', 'agency')).toEqual(['Send for review', 'Park']);
   });
 
-  it('shows the agency side only park at review and at approved', () => {
-    expect(labels('review', 'admin')).toEqual(['Park']);
-    expect(labels('approved', 'owner')).toEqual(['Park']);
+  it('shows the agency side approve, reject and park at review; park and reject at approved', () => {
+    for (const role of ['owner', 'admin', 'agency']) {
+      expect(labels('review', role)).toEqual(['Approve', 'Reject', 'Park']);
+      expect(labels('approved', role)).toEqual(['Park', 'Reject']);
+    }
   });
 
   it('shows the agency side move-to-review from parked and rejected', () => {
@@ -59,5 +67,44 @@ describe('visibleStageActions', () => {
     expect(labels('review', null)).toEqual([]);
     expect(labels('draft', null)).toEqual([]);
     expect(labels('approved', null)).toEqual([]);
+  });
+});
+
+const STAGES = Object.keys(STAGE_TRANSITIONS) as Stage[];
+
+describe('canRoleMove (pipeline targets per role)', () => {
+  function targets(role: string | null, from: Stage): Stage[] {
+    return STAGES.filter((to) => canRoleMove(role, from, to));
+  }
+
+  it('client: only approved and rejected, where the map allows', () => {
+    expect(targets('client', 'review')).toEqual(['approved', 'rejected']);
+    expect(targets('client', 'approved')).toEqual(['rejected']);
+    expect(targets('client', 'draft')).toEqual([]);
+    expect(targets('client', 'parked')).toEqual([]);
+    expect(targets('client', 'rejected')).toEqual([]);
+  });
+
+  it('client never gets Park or Back to review', () => {
+    for (const from of STAGES) {
+      expect(canRoleMove('client', from, 'parked')).toBe(false);
+      expect(canRoleMove('client', from, 'review')).toBe(false);
+    }
+  });
+
+  it('agency, admin, owner: every legal target', () => {
+    for (const role of ['agency', 'admin', 'owner']) {
+      for (const from of STAGES) {
+        expect(targets(role, from)).toEqual(STAGES.filter((to) => canTransition(from, to)));
+      }
+    }
+  });
+
+  it('unknown role: nothing', () => {
+    for (const from of STAGES) expect(targets(null, from)).toEqual([]);
+  });
+
+  it('roleMayTarget never allows draft', () => {
+    expect(roleMayTarget('owner', 'draft')).toBe(false);
   });
 });

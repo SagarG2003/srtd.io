@@ -12,6 +12,7 @@ import type { ViewerSide } from '@/lib/chat/viewer-role';
 import { formatLabel } from '@/lib/post-detail-presentation';
 import { friendlyTransitionError } from '@/lib/post-transition-errors';
 import { POST_CHANGED_EVENT } from '@/components/chat/post-card';
+import { onBehalfSuffix } from '@/components/pages/pcs/roles';
 
 /** Every action the sheet can offer. */
 export type SheetAction = 'approve' | 'comment' | 'open_post' | 'send_review' | 'open_pipeline';
@@ -34,8 +35,9 @@ export const CLIENT_REVIEW_HINT = 'One post at a time. Comments keep it in revie
 /**
  * The action set by side and stage. Client in review: approve, comment, open.
  * Client elsewhere: open only (plus the approved pill). Agency in draft: send for
- * review, open in pipeline. Agency elsewhere: open in pipeline, with a waiting
- * hint in review. An unresolved side gets the neutral open action only, so a
+ * review, open in pipeline. Agency in review: approve on the client's behalf and
+ * open in pipeline, with a waiting hint. Agency elsewhere: open in pipeline. No
+ * Reject or Park in chat for anyone. An unresolved side gets the neutral open action only, so a
  * write is never offered before the role is known.
  */
 export function sheetActions(
@@ -64,6 +66,9 @@ export function sheetActions(
           ? 'Waiting on the client'
           : `Waiting on the client since ${since}`
         : null;
+    if (post.stage === 'review') {
+      return { actions: ['approve', 'open_pipeline'], hint, approvedPill: false };
+    }
     return { actions: ['open_pipeline'], hint, approvedPill: false };
   }
   return { actions: ['open_post'], hint: null, approvedPill: false };
@@ -85,9 +90,17 @@ export function actionLabel(action: SheetAction, ref: string): string {
   }
 }
 
-/** The disabled pill a client sees on an approved post. */
-export function approvedPillLabel(approverName: string | null): string {
-  return approverName !== null ? `Approved by ${approverName}` : 'Approved';
+/**
+ * The disabled pill a client sees on an approved post: "Approved by Chitra", plus
+ * "on behalf of client" when the approver is agency-side (no role: name only).
+ */
+export function approvedPillLabel(
+  approverName: string | null,
+  approverRole: string | null = null,
+): string {
+  return approverName !== null
+    ? `Approved by ${approverName}${onBehalfSuffix(approverRole)}`
+    : 'Approved';
 }
 
 /** "1 slide" / "N slides"; empty for no media. */
@@ -126,7 +139,8 @@ export function confirmCopy(
   }
   return {
     question: `Send ${args.ref} to the client for review?`,
-    detail: 'It leaves draft, and the client can approve it or comment.',
+    detail:
+      'It leaves draft, and the client can approve it or comment, or you can approve on their behalf.',
     confirmLabel: 'Send for review',
   };
 }
@@ -217,8 +231,9 @@ function dateTime(iso: string, timeZone: string): string {
 
 /**
  * The rows after Stage: target date, format (with "· N slides" past one item),
- * and the approval. With an approver on record the value is "Name · Oct 2 2:05 pm";
- * an approved post with no approver reads the date it entered approved.
+ * and the approval. With an approver on record the value is "Name · Oct 2 2:05 pm"
+ * ("Name on behalf of client · ..." for an agency-side approver); an approved
+ * post with no approver reads the date it entered approved.
  */
 export function detailRows(
   post: Pick<
@@ -233,6 +248,7 @@ export function detailRows(
   >,
   approverName: string | null,
   timeZone: string,
+  approverRole: string | null = null,
 ): DetailRow[] {
   const rows: DetailRow[] = [];
   const target = post.target_date !== null ? formatShortDate(post.target_date, timeZone) : '';
@@ -245,7 +261,8 @@ export function detailRows(
   });
   if (post.approved_by !== null) {
     const at = post.approved_at !== null ? dateTime(post.approved_at, timeZone) : '';
-    const value = [approverName ?? '', at].filter((part) => part !== '').join(' · ');
+    const who = approverName !== null ? `${approverName}${onBehalfSuffix(approverRole)}` : '';
+    const value = [who, at].filter((part) => part !== '').join(' · ');
     if (value !== '') rows.push({ key: 'approved', label: 'Approved', value });
   } else if (post.stage === 'approved') {
     const on = formatShortDate(post.stage_entered_at, timeZone);

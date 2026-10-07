@@ -1,8 +1,9 @@
 // The post sheet a shared post card opens in chat: every slide of the post, the
 // title and its key facts, and the one action the viewer is waited on for.
 // Clients in review approve (after a confirm step) or leave checkpoint points
-// through the same SlotComposer the post page uses; agency in draft sends for
-// review (also confirmed). The post itself is never refetched: the card's PR 2
+// through the same SlotComposer the post page uses; agency in review may approve
+// on the client's behalf (same confirm, plus one on-behalf line); agency in draft
+// sends for review (also confirmed). The post itself is never refetched: the card's PR 2
 // row carries every value shown. Only the gallery is read, once per open, and
 // the strip paints a same-height skeleton until it lands, so the sheet never
 // shortens after first paint. A successful stage change announces
@@ -41,6 +42,7 @@ import {
   type SheetAction,
   type SheetActionSet,
 } from '@/components/chat/post-sheet';
+import { ON_BEHALF_CONFIRM_LINE } from '@/components/pages/pcs/stage-actions';
 import type { PresignCache, PresignDeps } from '@/lib/asset-presign';
 import { formatShortDate } from '@/lib/chat/time-format';
 import type { ViewerSide } from '@/lib/chat/viewer-role';
@@ -245,8 +247,8 @@ export function PostSheetMedia(props: {
 
 /** The full title, the Stage tag, then the key/value rows. Presentational. */
 export function PostSheetDetails(props: { view: PostView; timeZone: string }): ReactElement {
-  const { post, approverName } = props.view;
-  const rows = detailRows(post, approverName, props.timeZone);
+  const { post, approverName, approverRole } = props.view;
+  const rows = detailRows(post, approverName, props.timeZone, approverRole ?? null);
   return (
     <div className="flex flex-col gap-3">
       <h3 data-sheet-title="" className="text-[17px] font-semibold leading-6 text-fg">
@@ -285,6 +287,10 @@ export interface PostSheetActionsProps {
   mode: SheetMode;
   refLabel: string;
   approverName: string | null;
+  /** The approver's role: an agency-side approver's pill adds "on behalf of client". */
+  approverRole?: string | null;
+  /** Agency side: the approve confirm adds the on-behalf-of-client line. */
+  onBehalf?: boolean;
   mediaCount: number;
   targetDate: string;
   busy: boolean;
@@ -321,6 +327,11 @@ export function PostSheetActions(props: PostSheetActionsProps): ReactElement {
       <div data-sheet-confirm={mode.confirm} className="flex flex-col gap-2">
         <p className="text-sm font-medium text-fg">{copy.question}</p>
         <p className="text-sm text-fg-2">{copy.detail}</p>
+        {mode.confirm === 'approve' && props.onBehalf === true ? (
+          <p data-sheet-on-behalf="" className="text-sm text-fg-2">
+            {ON_BEHALF_CONFIRM_LINE}
+          </p>
+        ) : null}
         {error}
         <div className="mt-1 flex gap-2">
           <button
@@ -362,7 +373,7 @@ export function PostSheetActions(props: PostSheetActionsProps): ReactElement {
               'cursor-default bg-good-soft text-good disabled:opacity-100',
             )}
           >
-            {approvedPillLabel(props.approverName)}
+            {approvedPillLabel(props.approverName, props.approverRole ?? null)}
           </button>
         ) : null}
         {set.actions.map((action, index) => (
@@ -553,6 +564,8 @@ export function PostSheet(props: PostSheetProps): ReactElement {
             mode={mode}
             refLabel={ref}
             approverName={view.approverName}
+            approverRole={view.approverRole ?? null}
+            onBehalf={side === 'agency'}
             mediaCount={post.mediaCount}
             targetDate={targetDate}
             busy={busy}

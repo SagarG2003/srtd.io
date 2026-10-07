@@ -49,7 +49,7 @@ interface PostActionSheetProps {
   postNumber: number;
   /** Push a toast onto the page's stack. */
   onToast: (message: string) => void;
-  /** Owner/admin only: gates the destructive Delete post row + confirm view. */
+  /** Owner, admin or agency (canDeletePost): gates the Delete post row + confirm view. */
   canDelete: boolean;
   /** Soft-delete the post; the page handles the proc call, toast, and navigation. */
   onDeletePost: () => Promise<void>;

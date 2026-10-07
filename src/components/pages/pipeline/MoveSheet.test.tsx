@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ReactElement, ReactNode } from 'react';
 import { MoveSheetView } from '@/components/pages/pipeline/MoveSheet';
+import { ON_BEHALF_CONFIRM_LINE } from '@/components/pages/pcs/stage-actions';
 import { ApproveConfirm } from '@/components/ui/ApproveConfirm';
 import {
   GATE_IDLE,
@@ -59,13 +60,17 @@ function harness(): {
   return { gate, move, state: () => state };
 }
 
-function view(h: ReturnType<typeof harness>): {
+function view(
+  h: ReturnType<typeof harness>,
+  role: string | null = 'agency',
+): {
   gate: ReturnType<typeof createApproveGate>;
   gateState: GateState;
   refLabel: string;
   targetDate: string;
+  role: string | null;
 } {
-  return { gate: h.gate, gateState: h.state(), refLabel: 'GBL-1', targetDate: 'Oct 2' };
+  return { gate: h.gate, gateState: h.state(), refLabel: 'GBL-1', targetDate: 'Oct 2', role };
 }
 
 function isElement(node: ReactNode): node is ReactElement {
@@ -310,5 +315,61 @@ describe('MoveSheet approve confirm', () => {
     const undated = confirmOf(render(h, makePost('review')));
     expect(undated?.targetDate).toBe('');
     expect(confirmText(undated as ConfirmProps)).toContain('Approve GBL-1?');
+  });
+});
+
+describe('MoveSheet targets per role', () => {
+  function rows(source: Stage, role: string | null): { label: string; disabled: boolean }[] {
+    const tree = MoveSheetView({
+      open: true,
+      post: makePost(source),
+      onClose: () => {},
+      ...view(harness(), role),
+    });
+    const all: ReactElement[] = [];
+    collect(tree, all);
+    return all
+      .filter((el) => el.type === 'button')
+      .map((button) => ({
+        label: labelOf(button) ?? '',
+        disabled: Boolean((button.props as { disabled?: boolean }).disabled),
+      }))
+      .filter((row) => row.label !== '');
+  }
+
+  it('client sees only Approved and Rejected rows (no Park, no Back to review)', () => {
+    const labels = rows('review', 'client').map((r) => r.label);
+    expect(labels).toEqual([stageLabel('approved'), stageLabel('rejected')]);
+    expect(rows('review', 'client').every((r) => !r.disabled)).toBe(true);
+    const fromApproved = rows('approved', 'client');
+    expect(fromApproved.map((r) => r.label)).toEqual([stageLabel('rejected')]);
+    expect(rows('parked', 'client').every((r) => r.disabled)).toBe(true);
+  });
+
+  it('agency sees every other stage with the legal ones enabled', () => {
+    const enabled = rows('review', 'agency')
+      .filter((r) => !r.disabled)
+      .map((r) => r.label);
+    expect(enabled).toEqual([stageLabel('approved'), stageLabel('parked'), stageLabel('rejected')]);
+  });
+
+  it('agency approve confirm carries the on-behalf line; client confirm does not', () => {
+    for (const [role, expected] of [
+      ['agency', true],
+      ['client', false],
+    ] as [string, boolean][]) {
+      const h = harness();
+      h.gate.request('p1', 'approved');
+      const tree = MoveSheetView({
+        open: true,
+        post: makePost('review'),
+        onClose: () => {},
+        ...view(h, role),
+      });
+      const all: ReactElement[] = [];
+      collect(tree, all);
+      const texts = all.map((el) => (el.props as { children?: unknown }).children);
+      expect(texts.includes(ON_BEHALF_CONFIRM_LINE)).toBe(expected);
+    }
   });
 });

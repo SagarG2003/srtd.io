@@ -17,7 +17,7 @@ import { CATCHUP_EVENT_TYPES } from '@/server/cron/catchup-send';
 import { logger } from '@/lib/logger';
 import { warnUnknownEventType } from '@/components/pages/activity/data';
 
-/** The 19 values that must match the DB constraint. Spelled out so an accidental
+/** The 21 values that must match the DB constraint. Spelled out so an accidental
  *  edit to the canonical list (add/remove/reorder-away a value) fails here too. */
 const EXPECTED_CANONICAL = [
   'comment',
@@ -39,11 +39,14 @@ const EXPECTED_CANONICAL = [
   'scheduled_sent',
   'scheduled_failed',
   'reminder',
+  'post_deleted',
+  'assets_deleted',
 ];
 
 describe('INBOX_EVENT_TYPES (canonical event_type list)', () => {
-  it('is exactly the expected 19 values, with no duplicates', () => {
+  it('is exactly the expected 21 values, with no duplicates', () => {
     expect([...INBOX_EVENT_TYPES]).toEqual(EXPECTED_CANONICAL);
+    expect(INBOX_EVENT_TYPES).toHaveLength(21);
     expect(new Set(INBOX_EVENT_TYPES).size).toBe(INBOX_EVENT_TYPES.length);
   });
 
@@ -92,6 +95,12 @@ describe('emitter lists are subsets of the canonical list', () => {
     for (const eventType of CATCHUP_EVENT_TYPES) {
       expect(canonical.has(eventType)).toBe(true);
     }
+  });
+
+  it('the catch-up email skips post_deleted and assets_deleted (no email)', () => {
+    const catchup = new Set<string>(CATCHUP_EVENT_TYPES);
+    expect(catchup.has('post_deleted')).toBe(false);
+    expect(catchup.has('assets_deleted')).toBe(false);
   });
 });
 

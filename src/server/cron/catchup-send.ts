@@ -39,6 +39,8 @@ interface CatchupEnv {
 // the canonical INBOX_EVENT_TYPES (@srtdio/schemas): points/ready (checkpoints_
 // added / post_ready) and the account events (invite / trial_warning /
 // billing_failure / system) intentionally do not generate a catch-up digest.
+// post_deleted and assets_deleted are deliberately left out too: they are
+// Activity-only, never emailed.
 // event-types.test.ts asserts this stays a subset so a value the DB rejects can
 // never be read here.
 export const CATCHUP_EVENT_TYPES = [

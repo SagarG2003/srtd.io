@@ -26,6 +26,7 @@ import { useSession } from '@/lib/session-context';
 import { useNewTrace } from '@/lib/trace-context';
 import { fetchMemberRole } from '@/lib/assets';
 import { isAgencySide } from '@/components/pages/pcs/roles';
+import { roleMayTarget } from '@/components/pages/pcs/stage-actions';
 import {
   DATE_WINDOW_DEFAULT,
   POST_SORT_DEFAULT,
@@ -254,6 +255,8 @@ export interface PipelineSurfaceProps {
   onViewAll: (stage: Stage) => void;
   onMovePost: (postId: string, toStage: Stage) => void;
   onLongPressPost: (post: PipelinePost) => void;
+  /** The viewer's workspace role: filters the board's drop targets. */
+  role: string | null;
 }
 
 /**
@@ -292,6 +295,7 @@ export function pipelineSurface(props: PipelineSurfaceProps): ReactElement {
         workspaceKey={props.workspaceKey}
         onViewAll={props.onViewAll}
         onMovePost={props.onMovePost}
+        role={props.role}
       />
     );
   }
@@ -440,6 +444,8 @@ export interface MovePostDeps {
   /** Close the move sheet (no-op on the desktop drag path). */
   onClose: () => void;
   toast: (message: string) => void;
+  /** The viewer's workspace role: a move this role may not make never reaches the proc. */
+  role: string | null;
 }
 
 /**
@@ -459,6 +465,11 @@ export async function runMovePost(
   }
   const target = deps.posts.find((post) => post.id === postId);
   if (target === undefined) {
+    return;
+  }
+  // A target this role may never trigger (a client parking or sending back to
+  // review) never reaches the proc; legality from the stage stays the proc's.
+  if (!roleMayTarget(deps.role, toStage)) {
     return;
   }
   deps.inFlight.add(postId);
@@ -736,6 +747,7 @@ export function PipelinePage() {
           setPosts,
           onClose: () => setMovePostTarget(null),
           toast: push,
+          role,
         },
         postId,
         toStage,
@@ -743,7 +755,7 @@ export function PipelinePage() {
         setMovingId((current) => (current === postId ? null : current));
       });
     },
-    [posts, push],
+    [posts, push, role],
   );
 
   const steps: OnboardingStep[] = [
@@ -879,6 +891,7 @@ export function PipelinePage() {
           onViewAll: setStage,
           onMovePost: movePost,
           onLongPressPost: setMovePostTarget,
+          role,
         })
       )}
 
@@ -888,6 +901,7 @@ export function PipelinePage() {
         busy={movePostTarget !== null && movingId === movePostTarget.id}
         onClose={() => setMovePostTarget(null)}
         onMove={movePost}
+        role={role}
       />
 
       <SetDateSheet

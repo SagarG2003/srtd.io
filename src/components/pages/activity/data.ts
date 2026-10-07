@@ -11,7 +11,8 @@ import type { Database, InboxEventTypeValue, Json } from '@srtdio/schemas';
 import { INBOX_EVENT_TYPES } from '@srtdio/schemas';
 import { parseMentions } from '@srtdio/comments';
 import { readActiveMemberIds, readProfiles } from '@/lib/chat-reads';
-import { entityUrlPath } from '@/lib/entityRef';
+import { entityUrlPath, formatEntityRef } from '@/lib/entityRef';
+import { onBehalfSuffix } from '@/components/pages/pcs/roles';
 import { logger } from '@/lib/logger';
 import { EX_MEMBER_LABEL } from '@/components/comments/commentProfiles';
 import { resolveMentionPreview } from '@/lib/chat/mentions';
@@ -155,6 +156,32 @@ export interface ActivityItem {
   messageId: string | null;
   /** A chat mention's chat kind, resolved by the chat_channels join; null otherwise. */
   channelType: 'group' | 'dm' | null;
+  /** The actor's workspace role at the time (payload.actor_role); null or absent on old rows. */
+  actorRole?: string | null;
+  /** assets_deleted only: how many assets went (payload.count); null otherwise. */
+  assetCount?: number | null;
+  /** assets_deleted only: up to 3 of the deleted filenames (payload.filenames). */
+  filenames?: string[];
+}
+
+/**
+ * Event types whose actor is the row's own actor_user_id (the person who
+ * approved, rejected, parked, sent for review, or deleted).
+ */
+export const ACTOR_ROW_EVENTS: ReadonlySet<string> = new Set([
+  'stage_change',
+  'post_deleted',
+  'assets_deleted',
+]);
+
+/** The name an actor-row line uses when the actor's name did not resolve. */
+export const UNKNOWN_ACTOR = 'Someone';
+
+/** Read a string array field from an `unknown` jsonb payload; non-strings are dropped. */
+export function payloadStrings(p: unknown, key: string): string[] {
+  if (typeof p !== 'object' || p === null) return [];
+  const val = (p as Record<string, unknown>)[key];
+  return Array.isArray(val) ? val.filter((v): v is string => typeof v === 'string') : [];
 }
 
 /** The entity_type of a chat mention row (entity_id is the channel id). */
@@ -194,21 +221,26 @@ export function mapEntry(row: InboxEntryRow): ActivityItem {
     toStage: payloadStr(payload, 'to_stage') ?? payloadStr(payload, 'to'),
     fromStage: payloadStr(payload, 'from_stage') ?? payloadStr(payload, 'from'),
     title: payloadStr(payload, 'title'),
-    actorId: isChatMention({ eventType: row.event_type, entityType: row.entity_type })
-      ? (row.actor_user_id ?? null)
-      : (payloadStr(payload, 'created_by') ?? payloadStr(payload, 'invited_by')),
+    actorId:
+      isChatMention({ eventType: row.event_type, entityType: row.entity_type }) ||
+      ACTOR_ROW_EVENTS.has(row.event_type)
+        ? (row.actor_user_id ?? null)
+        : (payloadStr(payload, 'created_by') ?? payloadStr(payload, 'invited_by')),
     actorName: null,
     actorAvatarUrl: null,
     body: null,
     format: null,
     caption: null,
     thumbnailAssetVersionId: null,
-    number: null,
+    number: row.event_type === 'post_deleted' ? payloadNum(payload, 'number') : null,
     pointsAdded: payloadNum(payload, 'count'),
     checkpointTotal: payloadNum(payload, 'checkpoints'),
     batchId: row.event_type === 'checkpoints_added' ? payloadStr(payload, 'batch_id') : null,
     messageId: payloadStr(payload, 'message_id'),
     channelType: null,
+    actorRole: payloadStr(payload, 'actor_role'),
+    assetCount: row.event_type === 'assets_deleted' ? payloadNum(payload, 'count') : null,
+    filenames: row.event_type === 'assets_deleted' ? payloadStrings(payload, 'filenames') : [],
   };
 }
 
@@ -248,15 +280,67 @@ function chatMentionLine(item: ActivityItem): string {
   return who !== null ? `${who} mentioned you${inGroup}` : `New mention${inGroup}`;
 }
 
+/** KEY-N for a post row, a plain "post N" before the key resolves, else "a post". */
+function postRef(item: ActivityItem, workspaceKey: string | null): string {
+  if (item.number === null) return 'a post';
+  return workspaceKey !== null && workspaceKey !== ''
+    ? formatEntityRef(workspaceKey, item.number)
+    : `post ${item.number}`;
+}
+
+/** The stage verb phrase: "approved KEY-N", "sent KEY-N for review". */
+function stagePhrase(toStage: string | null, ref: string): string {
+  switch (toStage) {
+    case 'approved':
+      return `approved ${ref}`;
+    case 'rejected':
+      return `rejected ${ref}`;
+    case 'parked':
+      return `parked ${ref}`;
+    case 'review':
+      return `sent ${ref} for review`;
+    default:
+      return toStage !== null ? `moved ${ref} to ${toStage}` : `moved ${ref}`;
+  }
+}
+
+/**
+ * The who-did-what line for an actor row (stage_change, post_deleted,
+ * assets_deleted): "<Name> approved KEY-12", "<Name> deleted KEY-12 Title",
+ * "<Name> deleted brief.pdf" / "<Name> deleted 3 assets", plus "on behalf of
+ * client" when the actor was agency-side (old rows with no actor_role: name
+ * only). A missing name reads "Someone". Null for any other event type.
+ */
+export function actorRowLine(item: ActivityItem, workspaceKey: string | null): string | null {
+  if (!ACTOR_ROW_EVENTS.has(item.eventType)) return null;
+  const who = item.actorName ?? UNKNOWN_ACTOR;
+  const suffix = onBehalfSuffix(item.actorRole);
+  if (item.eventType === 'stage_change') {
+    return `${who} ${stagePhrase(item.toStage, postRef(item, workspaceKey))}${suffix}`;
+  }
+  if (item.eventType === 'post_deleted') {
+    const title = item.title !== null && item.title !== '' ? ` ${item.title}` : '';
+    return `${who} deleted ${postRef(item, workspaceKey)}${title}${suffix}`;
+  }
+  const filenames = item.filenames ?? [];
+  const count = item.assetCount ?? filenames.length;
+  const first = filenames[0];
+  const what =
+    count === 1 && first !== undefined ? first : count === 1 ? 'an asset' : `${count} assets`;
+  return `${who} deleted ${what}${suffix}`;
+}
+
 /**
  * The human-readable line for a row. Null-safe: a missing actor name drops the
- * name entirely rather than printing a placeholder, and a missing title falls
- * back to "a post" / "a brief" by entity type.
+ * name entirely rather than printing a placeholder (actor rows read "Someone"),
+ * and a missing title falls back to "a post" / "a brief" by entity type.
  */
-export function activityLine(item: ActivityItem): string {
+export function activityLine(item: ActivityItem, workspaceKey: string | null = null): string {
   const who = item.actorName;
   const target = entityTarget(item);
   if (isChatMention(item)) return chatMentionLine(item);
+  const actorRow = actorRowLine(item, workspaceKey);
+  if (actorRow !== null) return actorRow;
   switch (item.eventType) {
     case 'comment':
       return who !== null ? `${who} commented on ${target}` : `New comment on ${target}`;
@@ -266,8 +350,6 @@ export function activityLine(item: ActivityItem): string {
       return who !== null
         ? `${who} resolved a thread on ${target}`
         : `A comment thread was resolved on ${target}`;
-    case 'stage_change':
-      return `Moved to ${item.toStage ?? 'a new stage'}`;
     case 'brief_created':
       return who !== null
         ? `${who} created ${target}`
@@ -313,9 +395,13 @@ export function cardTitle(item: ActivityItem): string {
 /**
  * The short event line for inside a card: the event WITHOUT the entity title or
  * actor (the title is the card header, the actor is the avatar). Used for the lead
- * line and every threaded event line so the title is never repeated.
+ * line and every threaded event line so the title is never repeated. Actor rows
+ * (approve, reject, park, review, deletes) are the exception: who did it IS the
+ * event, so they read the full who-did-what line.
  */
-export function shortLine(item: ActivityItem): string {
+export function shortLine(item: ActivityItem, workspaceKey: string | null = null): string {
+  const actorRow = actorRowLine(item, workspaceKey);
+  if (actorRow !== null) return actorRow;
   switch (item.eventType) {
     case 'comment':
       return 'New comment';
@@ -323,8 +409,6 @@ export function shortLine(item: ActivityItem): string {
       return 'New mention';
     case 'comment_resolved':
       return 'Thread resolved';
-    case 'stage_change':
-      return `Moved to ${item.toStage ?? 'a new stage'}`;
     case 'brief_created':
       return 'Brief created';
     case 'brief_closed':
@@ -356,12 +440,12 @@ function trimBody(text: string): string {
  * an empty/missing body) it falls back to the existing generic short line. Never
  * throws and never renders an empty string for a comment that has text.
  */
-export function cardBodyLine(item: ActivityItem): string {
+export function cardBodyLine(item: ActivityItem, workspaceKey: string | null = null): string {
   const showsBody = item.eventType === 'comment' || item.eventType === 'checkpoints_added';
   if (showsBody && item.body !== null && item.body.trim().length > 0) {
     return trimBody(item.body);
   }
-  return shortLine(item);
+  return shortLine(item, workspaceKey);
 }
 
 /**
@@ -379,6 +463,9 @@ export function entityHref(item: ActivityItem, workspaceKey: string | null = nul
   if (item.eventType === 'asset_uploaded' || item.eventType === 'asset_version_added') {
     return item.assetId !== null ? `/assets?asset=${item.assetId}` : null;
   }
+  // The assets are gone: open Assets itself. A deleted post has nowhere to go.
+  if (item.eventType === 'assets_deleted') return '/assets';
+  if (item.eventType === 'post_deleted') return null;
   if (item.entityId === null) return null;
   if (item.entityType === 'post') {
     // Prefer the pretty link (/p/KEY-N) when the number and key are known; the
@@ -835,7 +922,8 @@ export async function fetchActivityEntries(
   }
 
   // WAVE 2: resolve the display names for every actor id we now know about: the
-  // comment authors plus the payload-supplied created_by / invited_by (actorId).
+  // comment authors plus actorId (payload created_by / invited_by, or the row's
+  // actor_user_id for approve / reject / park / review / deletes), one IN read.
   const userIds = unique([
     ...items
       .flatMap((item) =>
@@ -903,6 +991,9 @@ export async function fetchActivityEntries(
     } else if (item.eventType === 'checkpoints_added') {
       // Every point in a batch shares one author; take it from the batch join.
       actorUserId = item.batchId !== null ? (batchAuthors.get(item.batchId) ?? null) : null;
+    } else if (ACTOR_ROW_EVENTS.has(item.eventType)) {
+      // Approve / reject / park / review and the deletes: the row's own actor.
+      actorUserId = item.actorId;
     }
     item.actorName = actorUserId !== null ? (userNames.get(actorUserId) ?? null) : null;
     item.actorAvatarUrl = actorUserId !== null ? (userAvatars.get(actorUserId) ?? null) : null;
@@ -924,12 +1015,19 @@ export async function fetchActivityEntries(
       rawBody !== null ? resolveBodyMentions(rawBody, (id) => userNames.get(id) ?? null) : null;
 
     if (item.entityType === 'post') {
-      item.title = item.entityId !== null ? (postTitles.get(item.entityId) ?? null) : null;
+      // A deleted post is gone from the posts read: its payload carries the
+      // number and title the writer captured.
+      const deleted = item.eventType === 'post_deleted';
+      item.title =
+        (item.entityId !== null ? (postTitles.get(item.entityId) ?? null) : null) ??
+        (deleted ? payloadStr(payload, 'title') : null);
       item.format = item.entityId !== null ? (postFormats.get(item.entityId) ?? null) : null;
       item.caption = item.entityId !== null ? (postCaptions.get(item.entityId) ?? null) : null;
       item.thumbnailAssetVersionId =
         item.entityId !== null ? (postThumbnails.get(item.entityId) ?? null) : null;
-      item.number = item.entityId !== null ? (postNumbers.get(item.entityId) ?? null) : null;
+      item.number =
+        (item.entityId !== null ? (postNumbers.get(item.entityId) ?? null) : null) ??
+        (deleted ? payloadNum(payload, 'number') : null);
     } else if (item.entityType === 'brief') {
       const fromJoin = item.entityId !== null ? briefTitles.get(item.entityId) : undefined;
       item.title = fromJoin ?? payloadStr(payload, 'title') ?? null;

@@ -3,8 +3,10 @@
 // the stage-transition proc itself; selecting a valid target calls up to the
 // page's single move handler (PipelinePage owns the proc call + toast + regroup).
 //
-// Rows mirror the client-side transition map (canTransition): targets that are
-// legal from the post's current stage are enabled, the rest are disabled with a
+// Rows mirror the client-side transition map (canTransition) and the viewer's
+// role (canRoleMove): a client only ever sees the Approved and Rejected rows;
+// the agency side sees every stage. Targets that are legal from the post's
+// current stage for this role are enabled, the rest are disabled with a
 // "Blocked" hint. The server proc remains the real guard; this is UI gating only.
 //
 // Approved asks first (decision 22): picking it swaps the rows and Cancel for
@@ -25,7 +27,13 @@ import {
   type ApproveGate,
   type GateState,
 } from '@/components/pages/pipeline/approve-gate';
-import { STAGE_TRANSITIONS, canTransition } from '@srtdio/posts';
+import { isAgencySide, isClient } from '@/components/pages/pcs/roles';
+import {
+  ON_BEHALF_CONFIRM_LINE,
+  canRoleMove,
+  roleMayTarget,
+} from '@/components/pages/pcs/stage-actions';
+import { STAGE_TRANSITIONS } from '@srtdio/posts';
 import type { PipelinePost, Stage } from '@srtdio/posts';
 
 /** All workflow stages in the locked transition-map order. */
@@ -40,6 +48,8 @@ export interface MoveSheetProps {
   onMove: (postId: string, toStage: Stage) => void;
   /** Disables targets while a move is in flight for this post. */
   busy?: boolean;
+  /** The viewer's workspace role (the page's fetchMemberRole read); null is read-only. */
+  role: string | null;
 }
 
 /**
@@ -83,8 +93,15 @@ export interface MoveSheetViewProps extends Omit<MoveSheetProps, 'onMove'> {
   targetDate: string;
 }
 
+/** The stages this role sees as rows: a client only Approved and Rejected. */
+export function moveTargets(role: string | null, currentStage: Stage): Stage[] {
+  const others = STAGES.filter((stage) => stage !== currentStage);
+  return isClient(role) ? others.filter((stage) => roleMayTarget(role, stage)) : others;
+}
+
 /**
- * Bottom sheet listing every OTHER stage as a move target. Reuses the shared
+ * Bottom sheet listing every OTHER stage (for a client, only Approved and
+ * Rejected) as a move target. Reuses the shared
  * Sheet primitive (bottom on mobile, centered on desktop), the StageDot/label
  * metadata, and the canTransition mirror. Every row is a >=44px touch target;
  * colour comes only through token-backed classes, so light/dark track index.css.
@@ -99,13 +116,14 @@ export function MoveSheetView({
   gateState,
   refLabel,
   targetDate,
+  role,
 }: MoveSheetViewProps): ReactElement | null {
   if (post === null) {
     return null;
   }
   // posts.stage is a DB text column (typed string); it is one of the Stage values.
   const currentStage = post.stage as Stage;
-  const targets = STAGES.filter((stage) => stage !== currentStage);
+  const targets = moveTargets(role, currentStage);
   const confirming = gateState.pendingId === post.id;
   return (
     <Sheet
@@ -138,10 +156,15 @@ export function MoveSheetView({
             <span>{stageLabel(currentStage)}</span>
           </div>
         </div>
+        {confirming && isAgencySide(role) ? (
+          <p data-approve-on-behalf="" className="text-sm text-fg-2">
+            {ON_BEHALF_CONFIRM_LINE}
+          </p>
+        ) : null}
         {confirming ? null : (
           <ul className="flex flex-col gap-1">
             {targets.map((target) => {
-              const allowed = canTransition(currentStage, target);
+              const allowed = canRoleMove(role, currentStage, target);
               return (
                 <li key={target}>
                   <button

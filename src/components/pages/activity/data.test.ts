@@ -159,7 +159,7 @@ describe('activityLine null-safe rendering', () => {
       'Ada resolved a thread on a post',
     );
     expect(activityLine(item({ eventType: 'stage_change', toStage: 'approved' }))).toBe(
-      'Moved to approved',
+      'Someone approved a post',
     );
   });
 
@@ -219,7 +219,7 @@ describe('shortLine', () => {
     );
     expect(shortLine(item({ eventType: 'mention', title: 'Q3' }))).toBe('New mention');
     expect(shortLine(item({ eventType: 'stage_change', toStage: 'approved' }))).toBe(
-      'Moved to approved',
+      'Someone approved a post',
     );
     expect(shortLine(item({ eventType: 'brief_closed' }))).toBe('Brief closed');
   });
@@ -312,7 +312,7 @@ describe('cardBodyLine', () => {
   it('keeps the generic label for a non-comment event even when a body is set', () => {
     expect(
       cardBodyLine(item({ eventType: 'stage_change', toStage: 'approved', body: 'ignored' })),
-    ).toBe('Moved to approved');
+    ).toBe('Someone approved a post');
     expect(cardBodyLine(item({ eventType: 'mention', body: 'still generic' }))).toBe('New mention');
   });
 
@@ -789,6 +789,81 @@ describe('fetchActivityEntries enrichment', () => {
     }
   });
 
+  it('resolves a stage_change actor from actor_user_id with its avatar and actor_role', async () => {
+    const client = fakeClient({
+      inbox_entries: ok([
+        inboxRow({
+          id: 'e-stage',
+          event_type: 'stage_change',
+          entity_type: 'post',
+          entity_id: 'p1',
+          actor_user_id: 'u-chitra',
+          payload: { from: 'review', to: 'approved', actor_role: 'agency' },
+        }),
+      ]),
+      posts: ok([{ id: 'p1', title: 'Q3 Launch', number: 12 }]),
+      users: ok([{ id: 'u-chitra', display_name: 'Chitra', avatar_url: 'https://a/c.png' }]),
+    });
+    const res = await fetchActivityEntries(client, 'w1');
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const row = res.data[0]!;
+      expect(row.actorName).toBe('Chitra');
+      expect(row.actorAvatarUrl).toBe('https://a/c.png');
+      expect(activityLine(row, 'key')).toBe('Chitra approved KEY-12 on behalf of client');
+    }
+  });
+
+  it('a post_deleted row keeps its payload number and title when the post read misses it', async () => {
+    const client = fakeClient({
+      inbox_entries: ok([
+        inboxRow({
+          id: 'e-del',
+          event_type: 'post_deleted',
+          entity_type: 'post',
+          entity_id: 'p9',
+          actor_user_id: 'u-chitra',
+          payload: { number: 9, title: 'Old teaser', actor_role: 'agency' },
+        }),
+      ]),
+      posts: ok([]),
+      users: ok([{ id: 'u-chitra', display_name: 'Chitra', avatar_url: null }]),
+    });
+    const res = await fetchActivityEntries(client, 'w1');
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const row = res.data[0]!;
+      expect(row.number).toBe(9);
+      expect(row.title).toBe('Old teaser');
+      expect(activityLine(row, 'key')).toBe('Chitra deleted KEY-9 Old teaser on behalf of client');
+      expect(entityHref(row, 'key')).toBeNull();
+    }
+  });
+
+  it('an assets_deleted row resolves its actor and opens Assets', async () => {
+    const client = fakeClient({
+      inbox_entries: ok([
+        inboxRow({
+          id: 'e-assets',
+          event_type: 'assets_deleted',
+          entity_type: 'workspace',
+          entity_id: 'w1',
+          scope: 'everything',
+          actor_user_id: 'u-asha',
+          payload: { count: 3, filenames: ['a.png', 'b.png', 'c.png'], actor_role: 'client' },
+        }),
+      ]),
+      users: ok([{ id: 'u-asha', display_name: 'Asha', avatar_url: null }]),
+    });
+    const res = await fetchActivityEntries(client, 'w1');
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const row = res.data[0]!;
+      expect(activityLine(row, 'key')).toBe('Asha deleted 3 assets');
+      expect(entityHref(row, 'key')).toBe('/assets');
+    }
+  });
+
   it('resolves a stage_change title via posts with a null actor and the payload stage', async () => {
     const client = fakeClient({
       inbox_entries: ok([
@@ -1126,5 +1201,105 @@ describe('chat mention rows', () => {
       mapEntry(row({ event_type: 'mention', entity_type: 'post', payload: { created_by: 'u1' } }))
         .actorId,
     ).toBe('u1');
+  });
+});
+
+describe('actor rows: who did what (approve, reject, park, review, deletes)', () => {
+  const stage = (to: string, over: Partial<ActivityItem> = {}): ActivityItem =>
+    item({ eventType: 'stage_change', toStage: to, number: 12, actorName: 'Chitra', ...over });
+
+  it('stage_change lines name the actor and KEY-N', () => {
+    expect(activityLine(stage('approved', { actorRole: 'client' }), 'gbl')).toBe(
+      'Chitra approved GBL-12',
+    );
+    expect(activityLine(stage('rejected', { actorRole: 'client' }), 'gbl')).toBe(
+      'Chitra rejected GBL-12',
+    );
+    expect(activityLine(stage('parked', { actorRole: 'client' }), 'gbl')).toBe(
+      'Chitra parked GBL-12',
+    );
+    expect(activityLine(stage('review', { actorRole: 'client' }), 'gbl')).toBe(
+      'Chitra sent GBL-12 for review',
+    );
+  });
+
+  it('an agency-side actor adds "on behalf of client"; never a workspace name', () => {
+    for (const role of ['agency', 'admin', 'owner']) {
+      const line = activityLine(stage('approved', { actorRole: role }), 'gbl');
+      expect(line).toBe('Chitra approved GBL-12 on behalf of client');
+    }
+    expect(activityLine(stage('rejected', { actorRole: 'agency' }), 'gbl')).toBe(
+      'Chitra rejected GBL-12 on behalf of client',
+    );
+  });
+
+  it('an old row with no actor_role: name only, no suffix', () => {
+    expect(activityLine(stage('approved', { actorRole: null }), 'gbl')).toBe(
+      'Chitra approved GBL-12',
+    );
+    expect(activityLine(stage('approved'), 'gbl')).toBe('Chitra approved GBL-12');
+  });
+
+  it('a missing actor reads "Someone"', () => {
+    expect(activityLine(stage('approved', { actorName: null }), 'gbl')).toBe(
+      'Someone approved GBL-12',
+    );
+  });
+
+  it('post_deleted: "<Name> deleted KEY-N <title>" with the suffix; not tappable', () => {
+    const del = item({
+      eventType: 'post_deleted',
+      number: 7,
+      title: 'Diwali teaser',
+      actorName: 'Chitra',
+      actorRole: 'agency',
+    });
+    expect(activityLine(del, 'gbl')).toBe('Chitra deleted GBL-7 Diwali teaser on behalf of client');
+    expect(cardBodyLine(del, 'gbl')).toBe('Chitra deleted GBL-7 Diwali teaser on behalf of client');
+    expect(entityHref(del, 'gbl')).toBeNull();
+  });
+
+  it('assets_deleted: count 1 names the file, N counts; tap opens Assets', () => {
+    const one = item({
+      eventType: 'assets_deleted',
+      entityType: 'workspace',
+      entityId: 'w1',
+      actorName: 'Asha',
+      actorRole: 'client',
+      assetCount: 1,
+      filenames: ['brief.pdf'],
+    });
+    expect(activityLine(one)).toBe('Asha deleted brief.pdf');
+    const many = { ...one, assetCount: 4, filenames: ['a', 'b', 'c'] };
+    expect(activityLine(many)).toBe('Asha deleted 4 assets');
+    const agency = { ...many, actorName: 'Chitra', actorRole: 'agency' };
+    expect(activityLine(agency)).toBe('Chitra deleted 4 assets on behalf of client');
+    expect(activityLine({ ...one, actorName: null })).toBe('Someone deleted brief.pdf');
+    expect(entityHref(one)).toBe('/assets');
+  });
+
+  it('mapEntry reads actor_user_id, actor_role, count and filenames', () => {
+    const mapped = mapEntry(
+      row({
+        event_type: 'assets_deleted',
+        entity_type: 'workspace',
+        entity_id: 'w1',
+        actor_user_id: 'u9',
+        payload: { count: 2, filenames: ['a', 'b'], actor_role: 'client' },
+      }),
+    );
+    expect(mapped.actorId).toBe('u9');
+    expect(mapped.actorRole).toBe('client');
+    expect(mapped.assetCount).toBe(2);
+    expect(mapped.filenames).toEqual(['a', 'b']);
+    const old = mapEntry(
+      row({
+        event_type: 'stage_change',
+        actor_user_id: 'u1',
+        payload: { from: 'review', to: 'approved' },
+      }),
+    );
+    expect(old.actorRole).toBeNull();
+    expect(old.actorId).toBe('u1');
   });
 });
