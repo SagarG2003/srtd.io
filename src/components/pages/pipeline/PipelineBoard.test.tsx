@@ -242,6 +242,65 @@ describe('PipelineBoard', () => {
   });
 });
 
+describe('PipelineBoard single-stage grid', () => {
+  function attr(el: ReactElement, name: string): unknown {
+    return (el.props as Record<string, unknown>)[name];
+  }
+
+  it('a single-stage view renders one full-width grid, not the column layout', () => {
+    const tree = PipelineBoardView({
+      stages: ['review'],
+      grouped: groupByStage(manyIn('review', 12), STAGES),
+      cap: null,
+      cache,
+      presignEnabled: false,
+      onViewAll: () => {},
+      onMovePost: () => {},
+    });
+    const grids = findAll(tree, (el) => Boolean(attr(el, 'data-board-grid')));
+    expect(grids).toHaveLength(1);
+    const className = (grids[0]!.props as { className: string }).className;
+    expect(className).toContain('grid-cols-[repeat(auto-fill,minmax(220px,1fr))]');
+    expect(className).toContain('gap-4');
+    expect(className).not.toContain('overflow');
+    expect(findAll(tree, (el) => Boolean(attr(el, 'data-drag-container')))).toHaveLength(0);
+    expect(findAll(tree, (el) => Boolean(attr(el, 'data-board-scroll')))).toHaveLength(0);
+    // Every post renders (no cap, no View all) as a draggable card.
+    expect(findAll(tree, (el) => Boolean(attr(el, 'data-drag-item')))).toHaveLength(12);
+  });
+
+  it('an empty single-stage view keeps the Empty state', () => {
+    const tree = PipelineBoardView({
+      stages: ['parked'],
+      grouped: groupByStage([], STAGES),
+      cap: null,
+      cache,
+      presignEnabled: false,
+      onViewAll: () => {},
+      onMovePost: () => {},
+    });
+    const markup = renderToStaticMarkup(tree);
+    expect(markup).toContain('Empty');
+    expect(markup).toContain('data-board-grid');
+  });
+
+  it('All still renders the column layout, not the grid', () => {
+    const tree = PipelineBoardView({
+      stages: STAGES,
+      grouped: groupByStage([], STAGES),
+      cap: BOARD_CAP,
+      cache,
+      presignEnabled: false,
+      onViewAll: () => {},
+      onMovePost: () => {},
+    });
+    expect(findAll(tree, (el) => Boolean(attr(el, 'data-board-grid')))).toHaveLength(0);
+    expect(findAll(tree, (el) => Boolean(attr(el, 'data-drag-container')))).toHaveLength(
+      STAGES.length,
+    );
+  });
+});
+
 function harness(): {
   gate: ReturnType<typeof createApproveGate>;
   move: ReturnType<typeof vi.fn<(postId: string, toStage: Stage) => void>>;
