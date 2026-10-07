@@ -14,7 +14,13 @@ import { useNewTrace } from '@/lib/trace-context';
 import { MembersInviteForm } from './MembersInviteForm';
 import { MembersList } from './MembersList';
 import { MemberActionSheet } from './MemberActionSheet';
-import { canManageMembers, deriveMembers, memberRemoveErrorMessage } from './members-data';
+import {
+  activeMemberRole,
+  canInviteMembers,
+  canManageMembers,
+  deriveMembers,
+  memberRemoveErrorMessage,
+} from './members-data';
 import type { MemberEntry } from './members-data';
 import { useMembersData } from './useMembersData';
 
@@ -33,6 +39,8 @@ export function MembersPanel() {
     [rows, profiles, currentUserId, selfEmail],
   );
   const canManage = useMemo(() => canManageMembers(rows, currentUserId), [rows, currentUserId]);
+  const callerRole = useMemo(() => activeMemberRole(rows, currentUserId), [rows, currentUserId]);
+  const canInvite = useMemo(() => canInviteMembers(rows, currentUserId), [rows, currentUserId]);
 
   const [actionsFor, setActionsFor] = useState<MemberEntry | null>(null);
   const [confirmFor, setConfirmFor] = useState<MemberEntry | null>(null);
@@ -77,7 +85,9 @@ export function MembersPanel() {
 
   return (
     <div className="flex flex-col gap-6">
-      <MembersInviteForm onInvited={refetch} />
+      {canInvite ? (
+        <MembersInviteForm clientOnly={callerRole === 'client'} onInvited={refetch} />
+      ) : null}
 
       {loading ? (
         <p className="text-sm text-fg-3">Loading members</p>

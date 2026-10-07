@@ -38,6 +38,7 @@ export interface SignUpInput {
   displayName: string;
   workspaceName: string;
   timezone: string;
+  policyConsent: boolean;
 }
 
 export type SignUpResult =
@@ -57,6 +58,13 @@ export async function performSignUp(
   client: SignUpAuthClient,
   input: SignUpInput,
 ): Promise<SignUpResult> {
+  if (!input.policyConsent) {
+    return {
+      status: 'error',
+      message: 'You must agree to the Privacy Policy and Terms & Conditions to create an account.',
+    };
+  }
+
   const { data, error } = await client.auth.signUp({
     email: input.email,
     password: input.password,
@@ -81,6 +89,7 @@ export function SignUpPage() {
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [workspaceName, setWorkspaceName] = useState('');
   const [timezone, setTimezone] = useState(detectTimezone);
+  const [policyConsent, setPolicyConsent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [awaitingConfirm, setAwaitingConfirm] = useState(false);
@@ -95,6 +104,7 @@ export function SignUpPage() {
       displayName: name,
       workspaceName,
       timezone,
+      policyConsent,
     });
 
     if (result.status === 'error') {
@@ -205,7 +215,8 @@ export function SignUpPage() {
             </button>
           </div>
           <p id="signup-password-hint" className="mt-1.5 text-[11px] text-fg-3">
-            Use at least {MIN_PASSWORD_LENGTH} characters with a mix of Uppercase and lowercase letters, numbers, and symbols for a strong password.
+            Use at least {MIN_PASSWORD_LENGTH} characters that contains letters, numbers and
+            symbols.
           </p>
         </Field>
 
@@ -231,6 +242,43 @@ export function SignUpPage() {
           />
         </Field>
 
+        <div className="flex items-start gap-1.5 text-sm text-fg-2">
+          <label
+            htmlFor="signup-policy-consent"
+            className="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center"
+          >
+            <input
+              id="signup-policy-consent"
+              type="checkbox"
+              required
+              checked={policyConsent}
+              onChange={(event) => setPolicyConsent(event.target.checked)}
+              aria-label="Agree to the Privacy Policy and Terms & Conditions"
+              className="h-4 w-4 accent-accent"
+            />
+          </label>
+          <span className="flex flex-wrap items-center gap-x-1 leading-6">
+            <span className="flex min-h-11 items-center">I have read and agree to the</span>
+            <Link
+              to="/legal/privacy-policy"
+              target="_blank"
+              rel="noreferrer"
+              className="flex min-h-11 items-center text-accent underline underline-offset-2"
+            >
+              Privacy Policy
+            </Link>
+            ,
+            <Link
+              to="/legal/terms-and-conditions"
+              target="_blank"
+              rel="noreferrer"
+              className="flex min-h-11 items-center text-accent underline underline-offset-2"
+            >
+              Terms &amp; Conditions
+            </Link>
+          </span>
+        </div>
+
         {error !== null ? <p className="text-sm text-bad">{error}</p> : null}
 
         <Button
@@ -238,7 +286,7 @@ export function SignUpPage() {
           size="lg"
           className="w-full"
           type="submit"
-          disabled={submitting}
+          disabled={submitting || !policyConsent}
         >
           {submitting ? 'Creating account' : 'Create account'}
         </Button>

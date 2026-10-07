@@ -47,15 +47,42 @@ describe('performSignUp', () => {
       displayName: 'Dana',
       workspaceName: 'Acme',
       timezone: 'UTC',
+      policyConsent: true,
     });
 
     expect(result).toEqual({ status: 'confirm-email' });
     expect(signUp).toHaveBeenCalledWith(
       expect.objectContaining({
-        options: { data: { display_name: 'Dana', workspace_name: 'Acme', timezone: 'UTC' } },
+        options: {
+          data: {
+            display_name: 'Dana',
+            workspace_name: 'Acme',
+            timezone: 'UTC',
+          },
+        },
       }),
     );
     expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it('does not sign up when policy consent is missing', async () => {
+    const signUp = vi.fn();
+    const client = { auth: { signUp } } as unknown as SignUpAuthClient;
+
+    const result = await performSignUp(client, {
+      email: 'dana@example.com',
+      password: 'pw',
+      displayName: 'Dana',
+      workspaceName: 'Acme',
+      timezone: 'UTC',
+      policyConsent: false,
+    });
+
+    expect(result).toEqual({
+      status: 'error',
+      message: 'You must agree to the Privacy Policy and Terms & Conditions to create an account.',
+    });
+    expect(signUp).not.toHaveBeenCalled();
   });
 
   it('reports authenticated when signUp returns a session', async () => {
@@ -68,6 +95,7 @@ describe('performSignUp', () => {
       displayName: 'Dana',
       workspaceName: 'Acme',
       timezone: 'UTC',
+      policyConsent: true,
     });
 
     expect(result).toEqual({ status: 'authenticated' });

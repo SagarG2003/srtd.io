@@ -94,17 +94,33 @@ export function deriveMembers(params: {
 }
 
 /**
- * Whether the caller may see action affordances. Owner or admin only; everyone
- * else gets a read-only list. The server remains the authoritative check; this
- * only gates the UI.
+ * Whether the caller may manage members. The server remains authoritative.
  */
 export function canManageMembers(
   rows: WorkspaceMemberRow[],
   currentUserId: string | null,
 ): boolean {
-  if (currentUserId === null) return false;
+  const role = activeMemberRole(rows, currentUserId);
+  return role === 'owner' || role === 'admin';
+}
+
+/** The caller's active workspace role, or null when they are not a member. */
+export function activeMemberRole(
+  rows: WorkspaceMemberRow[],
+  currentUserId: string | null,
+): string | null {
+  if (currentUserId === null) return null;
   const own = rows.find((r) => r.user_id === currentUserId && isActiveMember(r));
-  return own !== undefined && (own.role === 'owner' || own.role === 'admin');
+  return own?.role ?? null;
+}
+
+/** Clients can invite clients, but cannot manage or remove workspace members. */
+export function canInviteMembers(
+  rows: WorkspaceMemberRow[],
+  currentUserId: string | null,
+): boolean {
+  const role = activeMemberRole(rows, currentUserId);
+  return role === 'owner' || role === 'admin' || role === 'client';
 }
 
 // Friendly, code-free failure copy in the style of INVITE_ERROR_MESSAGE. Domain

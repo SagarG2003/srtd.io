@@ -20,12 +20,29 @@ import { z } from 'zod';
 const TRACE_ID_HEADER = 'X-Trace-Id';
 const INVITE_TEMPLATE_KEY = 'member_invite';
 
+function hasValidEmailDomain(email: string): boolean {
+  const domain = email.slice(email.lastIndexOf('@') + 1).toLowerCase();
+  const labels = domain.split('.');
+  const topLevelDomain = labels.at(-1) ?? '';
+  const isValidLabel = (label: string) =>
+    label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label);
+
+  return (
+    domain.length <= 253 &&
+    labels.length >= 2 &&
+    labels.every(isValidLabel) &&
+    (/^[a-z]{2,}$/.test(topLevelDomain) || /^xn--[a-z0-9-]{2,}$/.test(topLevelDomain))
+  );
+}
+
 const inputSchema = z.object({
   workspace_id: z.string().uuid(),
   email: z
     .string()
+    .trim()
     .email()
-    .transform((value) => value.trim().toLowerCase()),
+    .refine(hasValidEmailDomain, 'A valid email domain is required.')
+    .transform((value) => value.toLowerCase()),
   role: z.enum(['admin', 'agency', 'client']),
 });
 
@@ -235,6 +252,36 @@ Deno.serve(async (req: Request): Promise<Response> => {
         allowedOrigin,
         traceId,
       );
+    }
+
+    const inviterMembership = await callerClient
+      .from('workspace_members')
+      .select('role')
+      .eq('workspace_id', workspace_id)
+      .eq('user_id', caller.data.user.id)
+      .eq('active', true)
+      .is('removed_at', null)
+      .maybeSingle();
+    if (inviterMembership.error) {
+      const message = inviterMembership.error.message;
+      console.error(traceId, message);
+      return json(
+        { error: 'membership_lookup_failed', error_detail: message, trace_id: traceId },
+        500,
+        allowedOrigin,
+        traceId,
+      );
+    }
+    if (!inviterMembership.data) {
+      return json(
+        { error: 'workspace_member_only', trace_id: traceId },
+        403,
+        allowedOrigin,
+        traceId,
+      );
+    }
+    if (inviterMembership.data.role === 'client' && role !== 'client') {
+      return json({ error: 'forbidden_role', trace_id: traceId }, 403, allowedOrigin, traceId);
     }
 
     // Resolve the invitee; provision the auth user when absent so member_invite
