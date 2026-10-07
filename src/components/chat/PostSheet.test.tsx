@@ -93,11 +93,57 @@ describe('PostSheetActions by side and stage', () => {
     expect(html).toContain('bg-accent');
   });
 
-  it('agency in review: open in pipeline (primary) and the waiting hint', () => {
+  it('agency in review: approve (good), open in pipeline and the waiting hint', () => {
     const html = actions('agency', row({ stage: 'review' }));
-    expect(actionIds(html)).toEqual(['open_pipeline']);
+    expect(actionIds(html)).toEqual(['approve', 'open_pipeline']);
+    expect(html).toContain('Approve GBL-12');
     expect(html).toContain('Waiting on the client since Sep 20');
-    expect(html).toContain('bg-accent');
+    expect(html).toContain('bg-good');
+  });
+
+  it('agency gets no Approve outside review, and never Reject or Park', () => {
+    for (const stage of ['draft', 'approved', 'parked', 'rejected']) {
+      const html = actions('agency', row({ stage }));
+      expect(actionIds(html)).not.toContain('approve');
+    }
+    for (const side of ['agency', 'client'] as const) {
+      const html = actions(side, row({ stage: 'review' }));
+      expect(html).not.toContain('Reject');
+      expect(html).not.toContain('Park');
+    }
+  });
+
+  it('agency approve confirm names slides and date, plus the on-behalf line', () => {
+    const html = actions('agency', row({ stage: 'review', mediaCount: 5 }), {
+      mode: { kind: 'confirm', confirm: 'approve' },
+      mediaCount: 5,
+      onBehalf: true,
+    });
+    expect(html).toContain('Approve GBL-12, all 5 slides, for Oct 2?');
+    expect(html).toContain('You are approving on behalf of client.');
+  });
+
+  it('client approve confirm has no on-behalf line', () => {
+    const html = actions('client', row({ stage: 'review' }), {
+      mode: { kind: 'confirm', confirm: 'approve' },
+      onBehalf: false,
+    });
+    expect(html).not.toContain('on behalf of client');
+  });
+
+  it('approved pill suffixes an agency-side approver, not a client or unknown one', () => {
+    const agency = actions('client', row({ stage: 'approved' }), {
+      approverName: 'Chitra',
+      approverRole: 'agency',
+    });
+    expect(agency).toContain('Approved by Chitra on behalf of client');
+    const client = actions('client', row({ stage: 'approved' }), {
+      approverName: 'Asha',
+      approverRole: 'client',
+    });
+    expect(client).toContain('Approved by Asha<');
+    const old = actions('client', row({ stage: 'approved' }), { approverName: 'Asha' });
+    expect(old).not.toContain('on behalf of client');
   });
 
   it('every action button is 48px tall and the area pads for the safe area', () => {

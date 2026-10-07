@@ -4,6 +4,7 @@ import {
   peekViewerSide,
   resetViewerSideCache,
   resolveViewerSide,
+  actsOnBehalfOfClient,
   sideForRole,
 } from '@/lib/chat/viewer-role';
 
@@ -58,5 +59,13 @@ describe('resolveViewerSide', () => {
     expect(peekViewerSide('ws1', 'u1')).toBeUndefined();
     await resolveViewerSide(client, 'ws1', 'u1');
     expect(from).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('actsOnBehalfOfClient', () => {
+  it('is true for the agency side only', () => {
+    expect(actsOnBehalfOfClient('agency')).toBe(true);
+    expect(actsOnBehalfOfClient('client')).toBe(false);
+    expect(actsOnBehalfOfClient('unknown')).toBe(false);
   });
 });

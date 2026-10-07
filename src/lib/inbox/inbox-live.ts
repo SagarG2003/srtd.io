@@ -37,6 +37,8 @@ interface EnrichedLead {
    * line 2 at all, never a raw token.
    */
   mentionNames: ReadonlyMap<string, string> | null;
+  /** stage_change only: the stage the post moved to (payload.to), when the reader carries it. */
+  toStage?: string | null;
 }
 
 /** A batch of new rows reduced to a count plus its enriched lead. */
@@ -85,15 +87,37 @@ export function pickNewest(rows: readonly InboxRow[]): InboxRow | null {
   return newest;
 }
 
-/** A neutral, null-safe label for a single event, by type. */
-function eventLabel(eventType: string): string {
+/** The stage_change toast label by target stage; any other stage reads "Post moved". */
+export function stageChangeLabel(toStage: string | null | undefined): string {
+  switch (toStage) {
+    case 'approved':
+      return 'Post approved';
+    case 'rejected':
+      return 'Post rejected';
+    case 'parked':
+      return 'Post parked';
+    default:
+      return 'Post moved';
+  }
+}
+
+/**
+ * A neutral, null-safe label for a single event, by type. post_deleted and
+ * assets_deleted are Activity rows (never bell types): they toast here and
+ * count in the Activity badge.
+ */
+export function eventLabel(eventType: string, toStage: string | null = null): string {
   switch (eventType) {
     case 'comment':
       return 'New comment';
     case 'mention':
       return 'New mention';
     case 'stage_change':
-      return 'Post moved';
+      return stageChangeLabel(toStage);
+    case 'post_deleted':
+      return 'Post deleted';
+    case 'assets_deleted':
+      return 'Assets deleted';
     case 'brief_created':
       return 'New brief';
     case 'brief_closed':
@@ -186,7 +210,7 @@ export function toastFromEnriched(enriched: EnrichedNew): ToastSpec | null {
       : `${lead.actorName} commented`
     : namesFailed && leadTitle !== null
       ? `New comment on ${leadTitle}`
-      : eventLabel(lead.eventType);
+      : eventLabel(lead.eventType, lead.toStage ?? null);
   // A named comment, or a failed name read, already carries the title on line 1
   // (or has no line 2 at all); do not repeat it.
   const description = snippet ?? (named || namesFailed ? null : leadTitle);

@@ -171,6 +171,7 @@ function harness(posts: PipelinePost[]): {
       wasClosed = true;
     },
     toast: (message) => toasts.push(message),
+    role: 'agency',
   };
   return {
     deps,
@@ -393,6 +394,7 @@ describe('the Plan surface', () => {
   function surface(over: Partial<PipelineSurfaceProps> = {}): ReactElement {
     const posts = over.sorted ?? [];
     return pipelineSurface({
+      role: 'agency',
       stage: 'plan',
       isDesktop: true,
       sorted: posts,
@@ -564,6 +566,7 @@ describe('the set-date surface wiring', () => {
     const props = (canSetDate: boolean): { canSetDate: boolean } =>
       findAll(
         pipelineSurface({
+          role: 'agency',
           stage: 'plan',
           isDesktop: true,
           sorted: [],
@@ -749,6 +752,28 @@ describe('runMovePost', () => {
     expect(grouped.draft).toHaveLength(0);
     expect(h.closed()).toBe(true);
     expect(h.toasts).toEqual(['"Post p1" moved to Review']);
+  });
+
+  it('client role: a park or back-to-review never reaches the proc', async () => {
+    stMock.mockClear();
+    for (const [from, to] of [
+      ['review', 'parked'],
+      ['approved', 'parked'],
+      ['rejected', 'review'],
+    ] as [Stage, Stage][]) {
+      const h = harness([makePost('p1', from)]);
+      await runMovePost({ ...h.deps, role: 'client' }, 'p1', to);
+      expect(h.setPostsCalls()).toBe(0);
+      expect(h.toasts).toEqual([]);
+    }
+    expect(stMock).not.toHaveBeenCalled();
+  });
+
+  it('client role: approve and reject still reach the proc', async () => {
+    stMock.mockResolvedValue({ ok: true, data: 'p1' } satisfies Result<string>);
+    const h = harness([makePost('p1', 'review')]);
+    await runMovePost({ ...h.deps, role: 'client' }, 'p1', 'approved');
+    expect(h.state()[0]!.stage).toBe('approved');
   });
 
   it('failure: leaves the post in place, toasts a friendly error, no stage change', async () => {

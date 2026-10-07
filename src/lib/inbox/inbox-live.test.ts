@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  eventLabel,
+  stageChangeLabel,
   pickNewest,
+  splitNewRows,
   summarizeNew,
   toastFromEnriched,
   type EnrichedNew,
@@ -285,5 +288,63 @@ describe('chat mention rows in the live layer', () => {
     expect(
       toastFromEnriched(enriched({ lead: { ...enriched({}).lead!, eventType: 'mention' } }))?.title,
     ).toBe('New mention');
+  });
+});
+
+describe('live toast labels for approve, reject, park and deletes', () => {
+  it('stage_change names the outcome; anything else is "Post moved"', () => {
+    expect(stageChangeLabel('approved')).toBe('Post approved');
+    expect(stageChangeLabel('rejected')).toBe('Post rejected');
+    expect(stageChangeLabel('parked')).toBe('Post parked');
+    expect(stageChangeLabel('review')).toBe('Post moved');
+    expect(stageChangeLabel(null)).toBe('Post moved');
+    expect(eventLabel('stage_change', 'approved')).toBe('Post approved');
+  });
+
+  it('post_deleted and assets_deleted have their own labels', () => {
+    expect(eventLabel('post_deleted')).toBe('Post deleted');
+    expect(eventLabel('assets_deleted')).toBe('Assets deleted');
+  });
+
+  it('a single stage_change lead with its target stage toasts the outcome', () => {
+    const spec = toastFromEnriched({
+      count: 1,
+      lead: {
+        eventType: 'stage_change',
+        actorName: null,
+        actorAvatarUrl: null,
+        body: null,
+        title: 'Q3 Launch',
+        mentionNames: new Map(),
+        toStage: 'rejected',
+      },
+    });
+    expect(spec?.title).toBe('Post rejected');
+  });
+
+  it('the two delete types are Activity rows, not bell rows', () => {
+    const base = {
+      id: 'e',
+      user_id: 'u',
+      workspace_id: 'w',
+      entity_id: 'x',
+      scope: 'posts',
+      scope_key: null,
+      tier: 'active',
+      payload: {},
+      read_at: null,
+      snoozed_until: null,
+      actor_user_id: 'u2',
+      email_sent_at: null,
+      deleted_at: null,
+      created_at: '2026-10-07T00:00:00.000Z',
+    };
+    const rows = [
+      { ...base, event_type: 'post_deleted', entity_type: 'post' },
+      { ...base, event_type: 'assets_deleted', entity_type: 'workspace' },
+    ];
+    const split = splitNewRows(rows);
+    expect(split.activity).toHaveLength(2);
+    expect(split.chatMentions).toHaveLength(0);
   });
 });

@@ -13,6 +13,7 @@ import {
   type GateState,
 } from '@/components/pages/pipeline/approve-gate';
 import { ApproveConfirm } from '@/components/ui/ApproveConfirm';
+import { ON_BEHALF_CONFIRM_LINE } from '@/components/pages/pcs/stage-actions';
 import { PipelineFeed } from '@/components/pages/pipeline/PipelineFeed';
 import { BOARD_CAP, emptyStageMessage } from '@/components/pages/pipeline/stage-meta';
 import { groupByStage } from '@/lib/post-board';
@@ -172,6 +173,7 @@ describe('PipelineBoard', () => {
       presignEnabled: false,
       onViewAll: () => {},
       onMovePost: () => {},
+      role: 'agency',
     });
     const columns = findAll(tree, (el) =>
       Boolean((el.props as { 'data-drag-container'?: boolean })['data-drag-container']),
@@ -189,6 +191,7 @@ describe('PipelineBoard', () => {
       presignEnabled: false,
       onViewAll: () => {},
       onMovePost: () => {},
+      role: 'agency',
     });
     const scroll = findAll(tree, (el) =>
       Boolean((el.props as { 'data-board-scroll'?: boolean })['data-board-scroll']),
@@ -212,6 +215,7 @@ describe('PipelineBoard', () => {
       presignEnabled: false,
       onViewAll: () => {},
       onMovePost,
+      role: 'agency',
     });
     const review = findAll(tree, (el) => dataStage(el) === 'review' && 'onDrop' in el.props)[0]!;
     // draft -> review is legal per the transition map.
@@ -219,6 +223,32 @@ describe('PipelineBoard', () => {
       dropEvent('draft:p1'),
     );
     expect(onMovePost).toHaveBeenCalledWith('p1', 'review');
+  });
+
+  it('client: a drop into Parked or Review bounces; Approved and Rejected go through', () => {
+    const onMovePost = vi.fn();
+    const grouped = groupByStage([makePost('p1', 'review')], STAGES);
+    const tree = PipelineBoardView({
+      stages: STAGES,
+      grouped,
+      cap: BOARD_CAP,
+      cache,
+      presignEnabled: false,
+      onViewAll: () => {},
+      onMovePost,
+      role: 'client',
+    });
+    const dropOn = (stage: Stage, payload: string): void => {
+      const col = findAll(tree, (el) => dataStage(el) === stage && 'onDrop' in el.props)[0]!;
+      (col.props as { onDrop: (e: DragEvent<HTMLDivElement>) => void }).onDrop(dropEvent(payload));
+    };
+    dropOn('parked', 'review:p1');
+    dropOn('review', 'rejected:p1');
+    expect(onMovePost).not.toHaveBeenCalled();
+    dropOn('rejected', 'review:p1');
+    expect(onMovePost).toHaveBeenCalledWith('p1', 'rejected');
+    dropOn('approved', 'review:p1');
+    expect(onMovePost).toHaveBeenCalledWith('p1', 'approved');
   });
 
   it('a drop onto an invalid target does NOT call the move handler', () => {
@@ -232,6 +262,7 @@ describe('PipelineBoard', () => {
       presignEnabled: false,
       onViewAll: () => {},
       onMovePost,
+      role: 'agency',
     });
     const draft = findAll(tree, (el) => dataStage(el) === 'draft' && 'onDrop' in el.props)[0]!;
     // approved -> draft is NOT in the transition map; the drop must bounce.
@@ -256,6 +287,7 @@ describe('PipelineBoard single-stage grid', () => {
       presignEnabled: false,
       onViewAll: () => {},
       onMovePost: () => {},
+      role: 'agency',
     });
     const grids = findAll(tree, (el) => Boolean(attr(el, 'data-board-grid')));
     expect(grids).toHaveLength(1);
@@ -278,6 +310,7 @@ describe('PipelineBoard single-stage grid', () => {
       presignEnabled: false,
       onViewAll: () => {},
       onMovePost: () => {},
+      role: 'agency',
     });
     const markup = renderToStaticMarkup(tree);
     expect(markup).toContain('Empty');
@@ -293,6 +326,7 @@ describe('PipelineBoard single-stage grid', () => {
       presignEnabled: false,
       onViewAll: () => {},
       onMovePost: () => {},
+      role: 'agency',
     });
     expect(findAll(tree, (el) => Boolean(attr(el, 'data-board-grid')))).toHaveLength(0);
     expect(findAll(tree, (el) => Boolean(attr(el, 'data-drag-container')))).toHaveLength(
@@ -330,6 +364,7 @@ function board(h: ReturnType<typeof harness>, posts: PipelinePost[]): ReactNode 
     presignEnabled: false,
     onViewAll: () => {},
     onMovePost: h.gate.request,
+    role: 'agency',
   });
 }
 
@@ -346,6 +381,7 @@ function sheet(h: ReturnType<typeof harness>, posts: PipelinePost[]): ReactEleme
     gateState: h.state(),
     workspaceKey: 'gbl',
     timeZone: 'UTC',
+    onBehalf: false,
   });
 }
 
@@ -415,5 +451,24 @@ describe('PipelineBoard approve confirm (drop)', () => {
       targetDate: 'Oct 2',
     });
     expect(confirmOf(sheet(h, [review])).targetDate).toBe('');
+  });
+
+  it('T7: an agency approve confirm adds the on-behalf line; a client one does not', () => {
+    for (const onBehalf of [true, false]) {
+      const h = harness();
+      drop(board(h, [review]), 'approved', 'review:p1');
+      const el = BoardApproveConfirm({
+        post: pendingPost(groupByStage([review], STAGES), h.state().pendingId),
+        gate: h.gate,
+        gateState: h.state(),
+        workspaceKey: 'gbl',
+        timeZone: 'UTC',
+        onBehalf,
+      });
+      const html = renderToStaticMarkup(
+        (el?.props as { children: ReactNode }).children as ReactElement,
+      );
+      expect(html.includes(ON_BEHALF_CONFIRM_LINE)).toBe(onBehalf);
+    }
   });
 });

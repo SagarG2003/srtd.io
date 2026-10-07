@@ -8,7 +8,7 @@ vi.mock('agora-chat', () => ({
 }));
 
 import { PcsApproveConfirm, StageButtons } from '@/components/pages/PostDetailPage';
-import { visibleStageActions } from '@/components/pages/pcs/stage-actions';
+import { ON_BEHALF_CONFIRM_LINE, visibleStageActions } from '@/components/pages/pcs/stage-actions';
 import {
   GATE_IDLE,
   createApproveGate,
@@ -80,6 +80,7 @@ function sheet(
     targetDate: 'Oct 2',
     busy: false,
     error: null,
+    onBehalf: false,
     ...over,
   });
 }
@@ -166,5 +167,36 @@ describe('PCS approve confirm', () => {
       'Approve GBL-4?',
     );
     expect((sheet(h).props as { title: string }).title).toBe('GBL-4 · Carousel');
+  });
+
+  it('T7: agency approves with the same two-step confirm plus the on-behalf line', () => {
+    const h = harness();
+    press(rail(h, 'review', 'agency'), 'Approve');
+    expect(h.move).not.toHaveBeenCalled();
+    const el = sheet(h, { onBehalf: true });
+    expect((el.props as { open: boolean }).open).toBe(true);
+    const all: ReactElement[] = [];
+    collect((el.props as { children: ReactNode }).children, all);
+    const texts = all.map((n) => (n.props as { children?: unknown }).children);
+    expect(texts).toContain(ON_BEHALF_CONFIRM_LINE);
+    confirmOf(el).onConfirm();
+    expect(h.move).toHaveBeenCalledWith('p1', 'approved');
+  });
+
+  it('T8: the client confirm carries no on-behalf line', () => {
+    const h = harness();
+    press(rail(h, 'review', 'client'), 'Approve');
+    const all: ReactElement[] = [];
+    collect((sheet(h).props as { children: ReactNode }).children, all);
+    const texts = all.map((n) => (n.props as { children?: unknown }).children);
+    expect(texts).not.toContain(ON_BEHALF_CONFIRM_LINE);
+  });
+
+  it('T9: agency Reject from review and from approved moves at once', () => {
+    for (const stage of ['review', 'approved'] as Stage[]) {
+      const h = harness();
+      press(rail(h, stage, 'agency'), 'Reject');
+      expect(h.move).toHaveBeenCalledWith('p1', 'rejected');
+    }
   });
 });

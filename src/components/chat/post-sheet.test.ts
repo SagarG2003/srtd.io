@@ -66,9 +66,9 @@ describe('sheetActions', () => {
     expect(set.hint).toBeNull();
   });
 
-  it('agency elsewhere: open in pipeline; review waits on the client since the stage date', () => {
+  it('agency in review: approve on their behalf, open in pipeline; elsewhere open in pipeline', () => {
     const review = sheetActions('agency', row({ stage: 'review' }), TZ);
-    expect(review.actions).toEqual(['open_pipeline']);
+    expect(review.actions).toEqual(['approve', 'open_pipeline']);
     expect(review.hint).toBe('Waiting on the client since Sep 20');
     for (const stage of ['approved', 'parked', 'rejected']) {
       const set = sheetActions('agency', row({ stage }), TZ);
@@ -117,7 +117,9 @@ describe('labels and copy', () => {
   it('send-for-review confirm has its own copy', () => {
     const copy = confirmCopy('send_review', { ref: 'GBL-12', mediaCount: 3, targetDate: 'Oct 2' });
     expect(copy.question).toBe('Send GBL-12 to the client for review?');
-    expect(copy.detail).toBe('It leaves draft, and the client can approve it or comment.');
+    expect(copy.detail).toBe(
+      'It leaves draft, and the client can approve it or comment, or you can approve on their behalf.',
+    );
     expect(copy.confirmLabel).toBe('Send for review');
   });
 
@@ -288,5 +290,31 @@ describe('runStageChange', () => {
     dispatchPostChanged(target, 'p9');
     expect(POST_CHANGED_EVENT).toBe('sorted:post-changed');
     expect(seen).toHaveBeenCalledWith({ postId: 'p9' });
+  });
+});
+
+describe('detailRows approver suffix', () => {
+  const approved = row({
+    stage: 'approved',
+    approved_by: 'u1',
+    approved_at: '2026-09-21T14:05:00Z',
+  });
+
+  it('suffixes an agency-side approver', () => {
+    const value = detailRows(approved, 'Chitra', TZ, 'agency').find((r) => r.key === 'approved');
+    expect(value?.value.startsWith('Chitra on behalf of client · ')).toBe(true);
+  });
+
+  it('a client approver or a missing role: name only', () => {
+    for (const role of ['client', null]) {
+      const value = detailRows(approved, 'Asha', TZ, role).find((r) => r.key === 'approved');
+      expect(value?.value.startsWith('Asha · ')).toBe(true);
+    }
+  });
+
+  it('the approved pill matches', () => {
+    expect(approvedPillLabel('Chitra', 'agency')).toBe('Approved by Chitra on behalf of client');
+    expect(approvedPillLabel('Asha', 'client')).toBe('Approved by Asha');
+    expect(approvedPillLabel('Asha')).toBe('Approved by Asha');
   });
 });

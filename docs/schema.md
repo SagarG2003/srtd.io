@@ -257,6 +257,13 @@ Chat files stay in chat (20261005040000_chat_files_stay_in_chat.sql):
 - comment_batch_create: raises 'attachment not available' for an attachment version whose asset is origin 'chat' or soft-deleted.
 - asset_delete: raises 'chat files are deleted with their message' for an origin 'chat' asset.
 - asset_delete_many: raises 'chat files are deleted with their message' when the set holds a live origin 'chat' asset.
+- Agency actions (20261007100000_agency_actions_activity.sql, applied 7 Oct):
+  - post_deleted inbox event: post_soft_delete writes one row per other active member (entity_type post, entity_id post id, scope posts, tier active), payload {number, title (<=120), actor_role}, actor_user_id = actor.
+  - assets_deleted inbox event: asset_delete / asset_delete_many write ONE row per other active member per call (entity_type workspace, entity_id = scope_key = workspace id, scope everything, tier active), payload {count, filenames (up to 3), actor_role}. Bulk = one row; nothing deleted = no row. Any active member may delete assets.
+  - post_deleted for a draft goes only to roles with pipeline.view_all_stages.
+  - stage_change payload is {from, to, actor_role} (also in the audit row); approved / rejected need post.approve, parked / review need post.edit. Rows written before 7 Oct have no actor_role.
+  - workspace_role_permissions: agency has post.delete (post_soft_delete is owner, admin, agency).
+  - workspace_role_permissions: client has asset.delete (all workspaces and seed_workspace_role_defaults).
 
 ### asset_attachments
 
@@ -511,7 +518,7 @@ PK id. Fields: operator_user_id FK, flow_type (billing_override / sentry_inspect
 - workspace.subscription_state: trial, active, read_only, grace, soft_pause, full_pause, soft_delete
 - brief.status: open, closed
 - approval (table removed): n/a, approval is now a post.stage value
-- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent), reminder (tier urgent) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas)
+- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent), reminder (tier urgent), post_deleted (tier active), assets_deleted (tier active) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas; 21 values)
 - inbox_entries.scope: everything, posts, briefs, people, groups, clients
 - inbox_entries.tier: urgent, active, ambient
 - chat_channels.channel_type: dm, group, notes

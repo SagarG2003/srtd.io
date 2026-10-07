@@ -13,7 +13,8 @@ import {
 } from '@/components/pages/pipeline/approve-gate';
 import type { PresignCache } from '@/lib/asset-presign';
 import { useWorkspace } from '@/lib/workspace-context';
-import { canTransition } from '@srtdio/posts';
+import { isAgencySide } from '@/components/pages/pcs/roles';
+import { ON_BEHALF_CONFIRM_LINE, canRoleMove } from '@/components/pages/pcs/stage-actions';
 import type { PipelinePost, Stage } from '@srtdio/posts';
 
 export interface PipelineBoardProps {
@@ -31,6 +32,8 @@ export interface PipelineBoardProps {
   onViewAll: (stage: Stage) => void;
   /** A confirmed, legal drop calls up to the page's single move handler. */
   onMovePost: (postId: string, toStage: Stage) => void;
+  /** The viewer's workspace role: a client may only drop into Approved / Rejected. */
+  role: string | null;
 }
 
 // Native HTML5 DnD keeps dataTransfer unreadable during dragover (it is exposed
@@ -53,9 +56,13 @@ function onCardDragEnd(): void {
   draggingFrom = null;
 }
 
-function onColumnDragOver(event: DragEvent<HTMLDivElement>, toStage: Stage): void {
-  // Allow the drop (and show the affordance) only for a legal target.
-  if (draggingFrom === null || !canTransition(draggingFrom, toStage)) {
+function onColumnDragOver(
+  event: DragEvent<HTMLDivElement>,
+  toStage: Stage,
+  role: string | null,
+): void {
+  // Allow the drop (and show the affordance) only for a target legal for this role.
+  if (draggingFrom === null || !canRoleMove(role, draggingFrom, toStage)) {
     return;
   }
   event.preventDefault();
@@ -71,6 +78,7 @@ function onColumnDrop(
   event: DragEvent<HTMLDivElement>,
   toStage: Stage,
   onMovePost: (postId: string, toStage: Stage) => void,
+  role: string | null,
 ): void {
   event.preventDefault();
   event.currentTarget.classList.remove(...DROP_OK);
@@ -80,8 +88,8 @@ function onColumnDrop(
     return;
   }
   // Bounce an illegal drop: no state change, no error toast (the proc would only
-  // re-reject it). canTransition is the same UI mirror the move sheet uses.
-  if (!canTransition(fromStage as Stage, toStage)) {
+  // re-reject it). canRoleMove is the same UI mirror the move sheet uses.
+  if (!canRoleMove(role, fromStage as Stage, toStage)) {
     return;
   }
   onMovePost(postId, toStage);
@@ -114,6 +122,7 @@ export function PipelineBoard(props: PipelineBoardProps): ReactElement {
         gateState={state}
         workspaceKey={props.workspaceKey ?? null}
         timeZone={timeZone}
+        onBehalf={isAgencySide(props.role)}
       />
     </>
   );
@@ -146,6 +155,8 @@ export function BoardApproveConfirm(props: {
   gateState: GateState;
   workspaceKey: string | null;
   timeZone: string;
+  /** Agency side: the confirm adds the on-behalf-of-client line. */
+  onBehalf: boolean;
 }): ReactElement | null {
   const { post, gate, gateState } = props;
   if (post === null) return null;
@@ -169,6 +180,11 @@ export function BoardApproveConfirm(props: {
       <p data-approve-title="" className="truncate text-sm font-medium text-fg">
         {post.title}
       </p>
+      {props.onBehalf ? (
+        <p data-approve-on-behalf="" className="mt-2 text-sm text-fg-2">
+          {ON_BEHALF_CONFIRM_LINE}
+        </p>
+      ) : null}
     </Sheet>
   );
 }
@@ -177,7 +193,7 @@ export function BoardApproveConfirm(props: {
  * Desktop kanban: one fixed-width column per stage (a single-stage view renders
  * the full-width {@link SingleStageGrid} instead) in the locked STAGE order,
  * horizontally scrolled. Cards are native-draggable items and columns are drop
- * targets; a drop onto a legal target (canTransition) calls up to the page's move
+ * targets; a drop onto a legal target for the viewer's role (canRoleMove) calls up to the page's move
  * handler, an illegal drop bounces. No DnD library, native events only, and no
  * stageTransition call lives here. Capped columns surface a View all control at
  * the foot. Hookless (drag affordance toggles classes on the event target and the
@@ -193,6 +209,7 @@ export function PipelineBoardView({
   workspaceKey = null,
   onViewAll,
   onMovePost,
+  role,
 }: PipelineBoardProps): ReactElement {
   const only = stages.length === 1 ? stages[0] : undefined;
   if (only !== undefined) {
@@ -222,9 +239,9 @@ export function PipelineBoardView({
             key={stage}
             data-drag-container
             data-stage={stage}
-            onDragOver={(event) => onColumnDragOver(event, stage)}
+            onDragOver={(event) => onColumnDragOver(event, stage, role)}
             onDragLeave={onColumnDragLeave}
-            onDrop={(event) => onColumnDrop(event, stage, onMovePost)}
+            onDrop={(event) => onColumnDrop(event, stage, onMovePost, role)}
             className="flex w-[260px] shrink-0 flex-col rounded-xl border border-border bg-panel-2"
           >
             <div className="flex h-11 items-center gap-2 border-b border-border px-3">

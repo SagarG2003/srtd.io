@@ -23,6 +23,7 @@ import {
   SHARED_CARD,
   SharedPostCardList,
   loadPostCardBatch,
+  readApproverRoles,
   type CardContext,
 } from '@/components/chat/PostCard';
 import {
@@ -234,7 +235,7 @@ function makeClient(results: Record<string, TableResult>) {
 }
 
 describe('loadPostCardBatch', () => {
-  it('one batch = posts + attachments + ONE users read, regardless of card count', async () => {
+  it('one batch = posts + attachments + ONE users read + ONE roles read, regardless of card count', async () => {
     const { client, from } = makeClient({
       posts: {
         data: [
@@ -249,11 +250,26 @@ describe('loadPostCardBatch', () => {
         data: [{ id: 'u1', display_name: 'Asha Rao', avatar_url: null }],
         error: null,
       },
+      workspace_members: { data: [{ user_id: 'u1', role: 'agency' }], error: null },
     });
     const batch = await loadPostCardBatch(client, 'ws', ['p1', 'p2', 'p3']);
-    expect(from.mock.calls.map((c) => c[0])).toEqual(['posts', 'asset_attachments', 'users']);
+    expect(from.mock.calls.map((c) => c[0]).sort()).toEqual(
+      ['asset_attachments', 'posts', 'users', 'workspace_members'].sort(),
+    );
     expect(batch?.posts).toHaveLength(3);
     expect(batch?.names.get('u1')).toBe('Asha Rao');
+    expect(batch?.roles.get('u1')).toBe('agency');
+  });
+
+  it('a failed role read keeps the names and drops only the roles', async () => {
+    const { client } = makeClient({
+      posts: { data: [cardRow('p1', { approved_by: 'u1' })], error: null },
+      users: { data: [{ id: 'u1', display_name: 'Asha Rao', avatar_url: null }], error: null },
+      workspace_members: { data: null, error: { message: 'boom' } },
+    });
+    const batch = await loadPostCardBatch(client, 'ws', ['p1']);
+    expect(batch?.names.get('u1')).toBe('Asha Rao');
+    expect(batch?.roles.size).toBe(0);
   });
 
   it('skips the name lookup when no post has an approver', async () => {
@@ -428,5 +444,30 @@ describe('F9: a hold that starts on the KEY', () => {
     expect(onOpenThread).toHaveBeenCalledTimes(1);
     expect(onTalkAbout).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
+  });
+});
+
+describe('readApproverRoles', () => {
+  it('settles empty at its cap when the read never answers', async () => {
+    const from = vi.fn(() => {
+      const b: Record<string, unknown> = {};
+      for (const method of ['select', 'eq', 'in']) b[method] = () => b;
+      b.then = () => new Promise(() => {});
+      return b;
+    });
+    const roles = await readApproverRoles(
+      { from } as unknown as Client,
+      'ws',
+      ['u1'],
+      undefined,
+      5,
+    );
+    expect(roles.size).toBe(0);
+  });
+
+  it('skips the read for no approvers', async () => {
+    const from = vi.fn();
+    await readApproverRoles({ from } as unknown as Client, 'ws', []);
+    expect(from).not.toHaveBeenCalled();
   });
 });

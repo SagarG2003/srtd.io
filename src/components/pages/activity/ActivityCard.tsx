@@ -7,8 +7,11 @@ import { Thumbnail, type ThumbnailFallback } from '@/components/media';
 import { FORMAT_GLYPH_LABEL, type FormatGlyphToken } from '@/components/ui/format-icon';
 import type { PresignCache } from '@/lib/asset-presign';
 import { IconClock } from '@/components/ui/icons';
+import { useWorkspace } from '@/lib/workspace-context';
 import {
+  ACTOR_ROW_EVENTS,
   MENTION_EVENT_TYPE,
+  UNKNOWN_ACTOR,
   activityLine,
   cardBodyLine,
   cardTitle,
@@ -138,6 +141,9 @@ function pointsPhrase(n: number): string {
 function actorLine(item: ActivityItem, who: string | null): string {
   // A chat mention's title already reads "<who> mentioned you ...": the top line is the name.
   if (isChatMention(item)) return who ?? 'New mention';
+  // Actor rows (approve, reject, park, review, deletes): the body line says who
+  // did what, so the top line is the actor's name.
+  if (ACTOR_ROW_EVENTS.has(item.eventType)) return who ?? UNKNOWN_ACTOR;
   switch (item.eventType) {
     case 'comment':
       return who !== null ? `${who} commented` : 'New comment';
@@ -154,13 +160,29 @@ function actorLine(item: ActivityItem, who: string | null): string {
       return who !== null ? `${who} asked a question` : 'Question asked';
     case 'checkpoint_reopened':
       return who !== null ? `${who} reopened a point` : 'Point reopened';
-    case 'stage_change':
-      return `Moved to ${item.toStage ?? 'a new stage'}`;
     case 'post_ready':
       return 'Ready for review';
     default:
       return who !== null ? who : activityLine(item);
   }
+}
+
+/**
+ * The active workspace key for KEY-N refs, or null outside a WorkspaceProvider
+ * (the card is also rendered standalone): refs then read "post N". useWorkspace
+ * always calls useContext before it throws, so the hook order is stable.
+ */
+function useWorkspaceKey(): string | null {
+  try {
+    return useWorkspace().workspaceKey;
+  } catch {
+    return null;
+  }
+}
+
+/** A deleted post has nowhere to open: its entries are not tappable. */
+function opensNothing(item: ActivityItem): boolean {
+  return item.eventType === 'post_deleted';
 }
 
 /**
@@ -181,6 +203,7 @@ export function ActivityCard({
   selfName,
 }: ActivityCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const workspaceKey = useWorkspaceKey();
 
   const lead = group[0];
   if (lead === undefined) return null;
@@ -189,7 +212,16 @@ export function ActivityCard({
   const unread = lead.readAt === null;
   const snoozed = isSnoozed(lead, nowMs);
   const hasEntity = lead.entityType === 'post' || lead.entityType === 'brief';
-  const title = hasEntity ? cardTitle(lead) : activityLine(lead);
+  // An assets_deleted card has no entity: a short title, and the who-did-what
+  // line in the body so it is never cut off.
+  const assetsDeleted = lead.eventType === 'assets_deleted';
+  const showsBody = hasEntity || assetsDeleted;
+  const title = hasEntity
+    ? cardTitle(lead)
+    : assetsDeleted
+      ? 'Assets'
+      : activityLine(lead, workspaceKey);
+  const leadTappable = !opensNothing(lead);
   const tag = SCOPE_TAG[lead.scope];
   const actorEntry = group.find((entry) => entry.actorName !== null) ?? null;
   const actorName = actorEntry?.actorName ?? null;
@@ -217,11 +249,19 @@ export function ActivityCard({
 
       <div className="min-w-0 flex-1">
         <div
-          role="button"
-          tabIndex={0}
-          onClick={() => onOpenGroup(group)}
-          onKeyDown={onKeyDown}
-          className="flex cursor-pointer items-start gap-3 p-[14px] transition-colors hover:bg-panel-2"
+          {...(leadTappable
+            ? {
+                role: 'button',
+                tabIndex: 0,
+                onClick: () => onOpenGroup(group),
+                onKeyDown,
+              }
+            : {})}
+          data-activity-lead=""
+          className={cn(
+            'flex items-start gap-3 p-[14px]',
+            leadTappable && 'cursor-pointer transition-colors hover:bg-panel-2',
+          )}
         >
           <div className="min-w-0 flex-1">
             <div className="mb-1.5 flex items-center gap-[7px]">
@@ -246,9 +286,9 @@ export function ActivityCard({
 
             <p className="truncate text-[15px] font-semibold leading-[1.3] text-fg">{title}</p>
 
-            {hasEntity ? (
+            {showsBody ? (
               <p className="mt-[3px] line-clamp-2 text-sm leading-[1.4] text-fg-2">
-                {cardBodyLine(lead)}
+                {cardBodyLine(lead, workspaceKey)}
               </p>
             ) : null}
 
@@ -301,16 +341,23 @@ export function ActivityCard({
             {rest.map((entry) => (
               <li
                 key={entry.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => onOpenEntry(entry)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    onOpenEntry(entry);
-                  }
-                }}
-                className="flex min-h-[44px] cursor-pointer items-center gap-2 py-2 pl-[14px] pr-3 transition-colors hover:bg-panel-2"
+                {...(opensNothing(entry)
+                  ? {}
+                  : {
+                      role: 'button',
+                      tabIndex: 0,
+                      onClick: () => onOpenEntry(entry),
+                      onKeyDown: (event: KeyboardEvent<HTMLLIElement>) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          onOpenEntry(entry);
+                        }
+                      },
+                    })}
+                className={cn(
+                  'flex min-h-[44px] items-center gap-2 py-2 pl-[14px] pr-3',
+                  !opensNothing(entry) && 'cursor-pointer transition-colors hover:bg-panel-2',
+                )}
               >
                 <div className="min-w-0 flex-1">
                   <p
@@ -319,7 +366,7 @@ export function ActivityCard({
                       entry.readAt === null ? 'font-medium text-fg' : 'text-fg-2',
                     )}
                   >
-                    {cardBodyLine(entry)}
+                    {cardBodyLine(entry, workspaceKey)}
                   </p>
                   <p className="mt-0.5 text-xs text-fg-3">{relativeTime(entry.createdAt, nowMs)}</p>
                 </div>

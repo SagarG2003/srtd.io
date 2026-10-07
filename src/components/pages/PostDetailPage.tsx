@@ -44,8 +44,13 @@ import {
   toVersionViews,
 } from '@/lib/post-versions';
 import { usePostMembers } from '@/components/pages/pcs/use-post-members';
-import { isAgencySide, isClient, isOwnerOrAdmin } from '@/components/pages/pcs/roles';
-import { visibleStageActions, type StageAction } from '@/components/pages/pcs/stage-actions';
+import { canDeletePost, isAgencySide, isClient } from '@/components/pages/pcs/roles';
+import {
+  AGENCY_REVIEW_HELPER,
+  ON_BEHALF_CONFIRM_LINE,
+  visibleStageActions,
+  type StageAction,
+} from '@/components/pages/pcs/stage-actions';
 import { sheetTitle } from '@/components/chat/post-sheet';
 import {
   useApproveGate,
@@ -204,6 +209,8 @@ export function PcsApproveConfirm(props: {
   targetDate: string;
   busy: boolean;
   error: string | null;
+  /** Agency side: the confirm adds the on-behalf-of-client line. */
+  onBehalf: boolean;
 }) {
   const { gate, gateState } = props;
   return (
@@ -226,6 +233,11 @@ export function PcsApproveConfirm(props: {
       <p data-approve-title="" className="truncate text-sm font-medium text-fg">
         {props.title}
       </p>
+      {props.onBehalf ? (
+        <p data-approve-on-behalf="" className="mt-2 text-sm text-fg-2">
+          {ON_BEHALF_CONFIRM_LINE}
+        </p>
+      ) : null}
     </Sheet>
   );
 }
@@ -431,7 +443,7 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
 
   const agencySide = isAgencySide(role);
   const clientRole = isClient(role);
-  const canDelete = isOwnerOrAdmin(role);
+  const canDelete = canDeletePost(role);
 
   // Resolve the post owner to a display name + avatar from the active members,
   // never a raw uuid: an owner who is no longer a current member reads "(ex-member)".
@@ -823,7 +835,7 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
     });
   });
 
-  // Soft-delete the whole post (owner/admin only; the proc re-checks the
+  // Soft-delete the whole post (owner, admin or agency via canDeletePost; the proc re-checks the
   // capability). On success leave PCS for the pipeline; a failure stays put with
   // a toast, mirroring handleTransition's friendly-error shape.
   async function handleDeletePost(): Promise<void> {
@@ -1114,9 +1126,7 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
         </>
       ) : currentStage === 'review' && agencySide ? (
         <>
-          <p className="mb-3 text-sm text-fg-2">
-            Waiting on the client. Content edits create a new version.
-          </p>
+          <p className="mb-3 text-sm text-fg-2">{AGENCY_REVIEW_HELPER}</p>
           {stageButtons}
         </>
       ) : stageActions.length > 0 ? (
@@ -1548,6 +1558,7 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
         targetDate={approveTargetDate(post.target_date, approveTimeZone)}
         busy={transitioning}
         error={actionError}
+        onBehalf={agencySide}
       />
 
       <SlideActionsSheet
