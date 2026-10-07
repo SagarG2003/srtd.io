@@ -835,7 +835,7 @@ export function PostDetailPage({ postId: postIdProp }: { postId?: string } = {})
     });
   });
 
-  // Soft-delete the whole post (owner/admin only; the proc re-checks the
+  // Soft-delete the whole post (owner, admin or agency via canDeletePost; the proc re-checks the
   // capability). On success leave PCS for the pipeline; a failure stays put with
   // a toast, mirroring handleTransition's friendly-error shape.
   async function handleDeletePost(): Promise<void> {

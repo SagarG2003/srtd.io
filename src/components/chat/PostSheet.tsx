@@ -45,7 +45,7 @@ import {
 import { ON_BEHALF_CONFIRM_LINE } from '@/components/pages/pcs/stage-actions';
 import type { PresignCache, PresignDeps } from '@/lib/asset-presign';
 import { formatShortDate } from '@/lib/chat/time-format';
-import type { ViewerSide } from '@/lib/chat/viewer-role';
+import { actsOnBehalfOfClient, type ViewerSide } from '@/lib/chat/viewer-role';
 import { cn } from '@/lib/cn';
 import { formatEntityRef } from '@/lib/entityRef';
 import { supabase } from '@/lib/supabase';
@@ -565,7 +565,7 @@ export function PostSheet(props: PostSheetProps): ReactElement {
             refLabel={ref}
             approverName={view.approverName}
             approverRole={view.approverRole ?? null}
-            onBehalf={side === 'agency'}
+            onBehalf={actsOnBehalfOfClient(side)}
             mediaCount={post.mediaCount}
             targetDate={targetDate}
             busy={busy}
