@@ -8,6 +8,7 @@
 import type { PostCardRow } from '../../../packages/posts/src/reads';
 import { formatClockTime, formatShortDate } from '@/lib/chat/time-format';
 import type { ViewerSide } from '@/lib/chat/viewer-role';
+import { onBehalfSuffix } from '@/components/pages/pcs/roles';
 
 /** The route a shared post card navigates to (the existing /posts/:id view). */
 export function postRoute(id: string): string {
@@ -16,7 +17,14 @@ export function postRoute(id: string): string {
 
 /** The render branch for one shared post id. */
 export type SharedPostView =
-  | { kind: 'post'; postId: string; post: PostCardRow; approverName: string | null }
+  | {
+      kind: 'post';
+      postId: string;
+      post: PostCardRow;
+      approverName: string | null;
+      /** The approver's workspace role (one batched read); null or absent when unread or failed. */
+      approverRole?: string | null;
+    }
   | { kind: 'not_visible'; postId: string };
 
 /** Copy for the neutral card shown when the reader's RLS hides a shared post. */
@@ -45,7 +53,8 @@ export function firstName(displayName: string): string {
 /**
  * One view per shared post id, preserving the message's order. An id present in
  * the resolve renders as a card; an id the resolve did not return renders as a
- * "not visible" card. `names` maps approver user ids to display names. The
+ * "not visible" card. `names` maps approver user ids to display names and
+ * `roles` maps them to workspace roles (both from the same batched pass). The
  * viewer's RLS is the security boundary: a post the viewer cannot see simply
  * never appears in `postsById`.
  */
@@ -53,14 +62,34 @@ export function sharedPostViews(
   ids: readonly string[],
   postsById: Map<string, PostCardRow>,
   names: ReadonlyMap<string, string> = new Map(),
+  roles: ReadonlyMap<string, string> = new Map(),
 ): SharedPostView[] {
   return ids.map((postId) => {
     const post = postsById.get(postId);
     if (post === undefined) return { kind: 'not_visible', postId };
     const name = post.approved_by !== null ? names.get(post.approved_by) : undefined;
     const first = name !== undefined ? firstName(name) : '';
-    return { kind: 'post', postId, post, approverName: first !== '' ? first : null };
+    const role = post.approved_by !== null ? (roles.get(post.approved_by) ?? null) : null;
+    return {
+      kind: 'post',
+      postId,
+      post,
+      approverName: first !== '' ? first : null,
+      approverRole: role,
+    };
   });
+}
+
+/**
+ * The approver as a label names them: "Chitra", or "Chitra on behalf of client"
+ * when the approver is agency-side. No role (old data or a failed read) is the
+ * name alone; no name is null.
+ */
+export function approverLabel(
+  approverName: string | null,
+  approverRole: string | null | undefined,
+): string | null {
+  return approverName !== null ? `${approverName}${onBehalfSuffix(approverRole)}` : null;
 }
 
 /** The card footer: the state on the left, one action label on the right. */
@@ -81,7 +110,8 @@ function dateTime(iso: string, timeZone: string): string {
 
 /**
  * The footer for a card, by stage and the viewer's side. Approved names the
- * approver (first name) and when; with no approver on record (or no resolvable
+ * approver (first name, plus "on behalf of client" when agency-side; pass it
+ * through approverLabel) and when; with no approver on record (or no resolvable
  * name) it falls back to the date the post entered approved. Review words by
  * side: the client is waited on ("Review"), the agency waits; an unknown side
  * reads neutral. Every other stage is its label with "Open".

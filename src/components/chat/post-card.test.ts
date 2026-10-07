@@ -4,6 +4,7 @@ import {
   POST_CHANGED_EVENT,
   REFETCH_AFTER_MS,
   approverIds,
+  approverLabel,
   cardFooter,
   eventTouchesBatch,
   firstName,
@@ -232,5 +233,46 @@ describe('freshness', () => {
     t.document.visibilityState = 'visible';
     t.document.dispatchEvent(new Event('visibilitychange'));
     expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('approver label (on behalf of client)', () => {
+  it('an agency-side approver reads "<name> on behalf of client"', () => {
+    for (const role of ['agency', 'admin', 'owner']) {
+      expect(approverLabel('Chitra', role)).toBe('Chitra on behalf of client');
+    }
+  });
+
+  it('a client approver, an old row with no role, or a failed role read: name only', () => {
+    expect(approverLabel('Asha', 'client')).toBe('Asha');
+    expect(approverLabel('Asha', null)).toBe('Asha');
+    expect(approverLabel('Asha', undefined)).toBe('Asha');
+    expect(approverLabel(null, 'agency')).toBeNull();
+  });
+
+  it('sharedPostViews carries each approver role from the same batch', () => {
+    const byId = indexPostsById([
+      cardRow('p1', { approved_by: 'u1' }),
+      cardRow('p2', { approved_by: 'u2' }),
+    ]);
+    const views = sharedPostViews(
+      ['p1', 'p2'],
+      byId,
+      new Map([
+        ['u1', 'Chitra Iyer'],
+        ['u2', 'Asha Rao'],
+      ]),
+      new Map([['u1', 'agency']]),
+    );
+    expect(views[0]).toMatchObject({ approverName: 'Chitra', approverRole: 'agency' });
+    expect(views[1]).toMatchObject({ approverName: 'Asha', approverRole: null });
+  });
+
+  it('the card footer prints the suffixed approver', () => {
+    deviceLocale('en-GB');
+    const approved = cardRow('p1', { approved_by: 'u1', approved_at: '2026-09-21T14:05:00Z' });
+    expect(cardFooter(approved, approverLabel('Chitra', 'agency'), 'client', TZ).state).toBe(
+      'Approved by Chitra on behalf of client · Sep 21 14:05',
+    );
   });
 });

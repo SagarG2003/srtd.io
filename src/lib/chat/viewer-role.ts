@@ -24,6 +24,11 @@ export function sideForRole(role: string | null): ViewerSide {
   return 'unknown';
 }
 
+/** The agency side acts on the client's behalf (an approve adds the on-behalf line). */
+export function actsOnBehalfOfClient(side: ViewerSide): boolean {
+  return side === 'agency';
+}
+
 const resolved = new Map<string, ViewerSide>();
 const inFlight = new Map<string, Promise<ViewerSide>>();
 

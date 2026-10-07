@@ -6,7 +6,7 @@ import {
   fetchInboxUnreadCount,
   fetchUnreadMentionCount,
 } from '@/lib/inbox/inbox-reads';
-import type { InboxRow } from '@/lib/inbox/inbox-live';
+import { toastFromEnriched, type InboxRow } from '@/lib/inbox/inbox-live';
 
 type InboxEntryRow = Database['public']['Tables']['inbox_entries']['Row'];
 
@@ -212,7 +212,24 @@ describe('enrichNewRows', () => {
       body: 'Ship it!',
       title: 'Q3 Launch',
       mentionNames: new Map(),
+      toStage: null,
     });
+  });
+
+  it('carries a stage_change lead toStage so the toast names the outcome', async () => {
+    const client = fakeClient({ posts: okData([{ id: 'p1', title: 'Q3 Launch' }]) });
+    for (const [to, label] of [
+      ['approved', 'Post approved'],
+      ['rejected', 'Post rejected'],
+      ['parked', 'Post parked'],
+      ['review', 'Post moved'],
+    ]) {
+      const res = await enrichNewRows(client, [
+        row({ event_type: 'stage_change', payload: { from: 'review', to } }),
+      ]);
+      expect(res.lead?.toStage).toBe(to);
+      expect(toastFromEnriched(res)?.title).toBe(label);
+    }
   });
 
   const MANISHA = '0b9d7c1e-1f2a-4c3b-9d8e-7f6a5b4c3d2e';

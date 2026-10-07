@@ -2,8 +2,8 @@
 // thread reads through the thread's card cache (shared-cards.ts, provided by
 // SharedCardsProvider): all the thread's shared post ids resolve in ONE
 // batched readPostCards (a posts IN read plus one asset_attachments IN read,
-// chunks of 100, 5s each) and one readProfiles call for the distinct approvers,
-// never one read per bubble; the briefs the same way (BriefCard). The
+// chunks of 100, 5s each) and one readProfiles call plus one workspace_members
+// role read (in parallel) for the distinct approvers, never one read per bubble; the briefs the same way (BriefCard). The
 // viewer's RLS gates visibility: a post they cannot see comes back absent and
 // renders as a neutral "not visible" card, no content leaks. Cards
 // paint only once the batch AND the viewer's side have resolved, so the footer
@@ -70,6 +70,7 @@ import {
   NOT_VISIBLE_BODY,
   NOT_VISIBLE_TITLE,
   approverIds,
+  approverLabel,
   cardFooter,
   indexPostsById,
   mediaPills,
@@ -83,17 +84,62 @@ function stageLabel(stage: string): string {
   return stage.charAt(0).toUpperCase() + stage.slice(1);
 }
 
-/** One resolved batch: the visible posts plus approver display names by user id. */
+/** One resolved batch: the visible posts plus approver names and roles by user id. */
 export interface PostCardBatch {
   posts: PostCardRow[];
   names: Map<string, string>;
+  roles: Map<string, string>;
+}
+
+/**
+ * The approver role read is capped inside the names read's own 5s budget, so a
+ * hung role read degrades to "name only" instead of taking the names down too.
+ */
+export const APPROVER_ROLE_CAP_MS = READ_TIMEOUT_MS - 1_000;
+
+/**
+ * ONE workspace_members IN read of the approvers' roles, for the "on behalf of
+ * client" suffix. Best-effort: a failed or capped read is an empty map, so the
+ * label reads the name only. Never throws.
+ */
+export async function readApproverRoles(
+  client: Client,
+  workspaceId: string,
+  userIds: readonly string[],
+  signal?: AbortSignal,
+  capMs: number = APPROVER_ROLE_CAP_MS,
+): Promise<Map<string, string>> {
+  const roles = new Map<string, string>();
+  if (userIds.length === 0) return roles;
+  const base = client
+    .from('workspace_members')
+    .select('user_id, role')
+    .eq('workspace_id', workspaceId)
+    .in('user_id', [...userIds]);
+  const query = signal !== undefined ? base.abortSignal(signal) : base;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const capped = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), capMs);
+  });
+  const rows = await Promise.race([
+    Promise.resolve(query).then(
+      (res) => (res.error ? null : (res.data ?? [])),
+      () => null,
+    ),
+    capped,
+  ]).finally(() => clearTimeout(timer));
+  for (const row of rows ?? []) {
+    if (typeof row.role === 'string') roles.set(row.user_id, row.role);
+  }
+  return roles;
 }
 
 /**
  * Resolve one message's batch: readPostCards (at most two queries) then ONE
- * readProfiles over the distinct approver ids (skipped when there are none).
- * Null when the posts read fails; a failed name read only drops the names (the
- * approved footer falls back to its date).
+ * readProfiles and ONE role read over the distinct approver ids, in parallel
+ * (skipped when there are none). Null when the posts read fails; a failed name
+ * read only drops the names (the approved footer falls back to its date), a
+ * failed role read only drops the suffix.
  */
 export async function loadPostCardBatch(
   client: Client,
@@ -103,27 +149,45 @@ export async function loadPostCardBatch(
   const result = await readPostCards(client, { workspaceId, ids });
   if (!result.ok) return null;
   const names = new Map<string, string>();
+  let roles = new Map<string, string>();
   const approvers = approverIds(result.data);
   if (approvers.length > 0) {
-    const profiles = await readProfiles(client, approvers);
+    const [profiles, found] = await Promise.all([
+      readProfiles(client, approvers),
+      readApproverRoles(client, workspaceId, approvers),
+    ]);
     if (profiles.ok) for (const p of profiles.data) names.set(p.userId, p.displayName);
+    roles = found;
   }
-  return { posts: result.data, names };
+  return { posts: result.data, names, roles };
 }
 
 /** One thread's card cache: its shared posts and briefs, batched. */
 export type ThreadCardCache = SharedCardCache<PostCardRow, BriefCardFields>;
 
-/** The existing batched readers, bound to one workspace, for a thread's card cache. */
+/**
+ * The existing batched readers, bound to one workspace, for a thread's card
+ * cache. The approver name read also reads their roles (one workspace_members
+ * IN read, in parallel) into `roles`, so a name and its "on behalf of client"
+ * suffix land in the same render: the label never flips after first paint.
+ */
 export function threadCardReaders(
   client: Client,
   workspaceId: string,
+  roles: Map<string, string> = new Map(),
 ): SharedCardReaders<PostCardRow, BriefCardFields> {
   return {
     // readPostCards takes no signal (a shared package): its reads are bounded, not aborted.
     readPosts: (ids) => readPostCards(client, { workspaceId, ids }),
     readBriefs: (ids, signal) => readBriefsByIds(client, { workspaceId, ids, signal }),
-    readNames: (userIds, signal) => readProfiles(client, userIds, signal),
+    readNames: async (userIds, signal) => {
+      const [profiles, found] = await Promise.all([
+        readProfiles(client, userIds, signal),
+        readApproverRoles(client, workspaceId, userIds, signal),
+      ]);
+      for (const [userId, role] of found) roles.set(userId, role);
+      return profiles;
+    },
     postId: (post) => post.id,
     briefId: (brief) => brief.id,
     approverIds: (posts) => approverIds(posts),
@@ -131,6 +195,23 @@ export function threadCardReaders(
 }
 
 const SharedCardsContext = createContext<ThreadCardCache | null>(null);
+
+/** Each card cache's approver roles, filled by its own name reads. */
+const approverRolesByCache = new WeakMap<ThreadCardCache, Map<string, string>>();
+const NO_ROLES: ReadonlyMap<string, string> = new Map();
+
+/** A thread card cache over the batched readers, with its approver-role map. */
+export function createThreadCardCache(client: Client, workspaceId: string): ThreadCardCache {
+  const roles = new Map<string, string>();
+  const cache = createSharedCardCache(threadCardReaders(client, workspaceId, roles));
+  approverRolesByCache.set(cache, roles);
+  return cache;
+}
+
+/** The approver roles a cache's name reads have resolved (empty for none). */
+export function approverRolesOf(cache: ThreadCardCache | null): ReadonlyMap<string, string> {
+  return cache !== null ? (approverRolesByCache.get(cache) ?? NO_ROLES) : NO_ROLES;
+}
 
 /**
  * The thread's card cache, one per open chat and workspace (a switch or unmount
@@ -152,7 +233,7 @@ export function SharedCardsProvider(props: {
   const cache = useMemo(
     () =>
       workspaceId !== null && channelId !== null
-        ? createSharedCardCache(threadCardReaders(supabase, workspaceId))
+        ? createThreadCardCache(supabase, workspaceId)
         : null,
     [workspaceId, channelId],
   );
@@ -270,9 +351,7 @@ export function useThreadCardCache(): ThreadCardCache | null {
   const shared = useContext(SharedCardsContext);
   const local = useMemo(
     () =>
-      shared === null && workspaceId !== null
-        ? createSharedCardCache(threadCardReaders(supabase, workspaceId))
-        : null,
+      shared === null && workspaceId !== null ? createThreadCardCache(supabase, workspaceId) : null,
     [shared, workspaceId],
   );
   useEffect(() => {
@@ -326,7 +405,13 @@ function useSharedPosts(postIds: string[]): {
       : { loading: false, posts: [], failed: [], names: new Map<string, string>() };
   const version = cache?.version() ?? 0;
   const views = useMemo(
-    () => sharedPostViews(postIds, indexPostsById(snapshot.posts), snapshot.names),
+    () =>
+      sharedPostViews(
+        postIds,
+        indexPostsById(snapshot.posts),
+        snapshot.names,
+        approverRolesOf(cache),
+      ),
     // The snapshot is keyed by the ids and the cache version.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [batchKey, cache, version],
@@ -684,10 +769,11 @@ export function PostCardItem(
   const { view, side, workspaceKey, timeZone } = props;
   const { post } = view;
   const ref = entityRef(workspaceKey, post.number);
+  const approver = approverLabel(view.approverName, view.approverRole);
   const footer = approvedWithoutName(
-    cardFooter(post, view.approverName, side, timeZone),
+    cardFooter(post, approver, side, timeZone),
     post,
-    view.approverName,
+    approver,
     timeZone,
   );
   const target = post.target_date !== null ? formatShortDate(post.target_date, timeZone) : '';
