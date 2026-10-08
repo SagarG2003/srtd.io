@@ -8,6 +8,7 @@ import { ChatPage } from '@/components/pages/ChatPage';
 import { ActivityPage } from '@/components/pages/ActivityPage';
 import { AssetsPage } from '@/components/pages/AssetsPage';
 import { SettingsPage } from '@/components/pages/SettingsPage';
+import { HelpPage } from '@/components/pages/HelpPage';
 import { DeletedPage } from '@/components/pages/DeletedPage';
 import { SignInPage } from '@/components/auth/SignInPage';
 import { AuthCallbackPage } from '@/components/auth/AuthCallbackPage';
@@ -64,6 +65,7 @@ export default function App() {
               <Route path="/activity" element={<ActivityPage />} />
               <Route path="/assets" element={<AssetsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/help" element={<HelpPage />} />
               <Route path="/deleted" element={<DeletedPage />} />
               <Route path="*" element={<Navigate to="/pipeline" replace />} />
             </Route>
