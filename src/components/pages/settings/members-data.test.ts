@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatProfile } from '@/lib/chat-reads';
 import {
+  activeMemberRole,
+  canInviteMembers,
   canManageMembers,
   deriveMembers,
   formatJoined,
@@ -135,6 +137,29 @@ describe('canManageMembers', () => {
       row({ user_id: 'u-owner', role: 'owner', removed_at: '2026-03-01T00:00:00Z' }),
     ];
     expect(canManageMembers(removed, 'u-owner')).toBe(false);
+  });
+});
+
+describe('client invitations', () => {
+  const rows = [
+    row({ user_id: 'u-owner', role: 'owner' }),
+    row({ user_id: 'u-admin', role: 'admin' }),
+    row({ user_id: 'u-agency', role: 'agency' }),
+    row({ user_id: 'u-client', role: 'client' }),
+  ];
+
+  it('allows active clients to invite, but not manage members', () => {
+    expect(activeMemberRole(rows, 'u-client')).toBe('client');
+    expect(canInviteMembers(rows, 'u-client')).toBe(true);
+    expect(canManageMembers(rows, 'u-client')).toBe(false);
+    expect(canInviteMembers(rows, 'u-agency')).toBe(false);
+  });
+
+  it('does not allow removed or unknown users to invite', () => {
+    const removed = [row({ user_id: 'u-client', role: 'client', removed_at: '2026-03-01' })];
+    expect(activeMemberRole(removed, 'u-client')).toBeNull();
+    expect(canInviteMembers(removed, 'u-client')).toBe(false);
+    expect(canInviteMembers(rows, 'u-nobody')).toBe(false);
   });
 });
 

@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import { z } from 'zod';
 import { Button } from '@/components/ui/Button';
 import { Field } from '@/components/ui/Field';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import type { SelectOption } from '@/components/ui/Select';
+import { Textarea } from '@/components/ui/Textarea';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/lib/workspace-context';
 import { useNewTrace } from '@/lib/trace-context';
@@ -15,6 +17,53 @@ export type InviteRole = 'admin' | 'agency' | 'client';
 // edge function is the authoritative check on email / role / membership.
 export const INVITE_ERROR_MESSAGE =
   "Couldn't send the invitation. Check the email and that you have permission to invite, then try again.";
+export const INVITE_INVALID_EMAIL_MESSAGE = 'Enter a valid email address.';
+const INVITE_DUPLICATE_EMAIL_MESSAGE = 'That email is already on the invite list.';
+
+const emailFormat = z.string().email();
+
+function hasValidEmailDomain(email: string): boolean {
+  const domain = email.slice(email.lastIndexOf('@') + 1).toLowerCase();
+  const labels = domain.split('.');
+  const topLevelDomain = labels.at(-1) ?? '';
+  const isValidLabel = (label: string) =>
+    label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label);
+
+  return (
+    domain.length <= 253 &&
+    labels.length >= 2 &&
+    labels.every(isValidLabel) &&
+    (/^[a-z]{2,}$/.test(topLevelDomain) || /^xn--[a-z0-9-]{2,}$/.test(topLevelDomain))
+  );
+}
+
+export function isValidInviteEmail(email: string): boolean {
+  const trimmed = email.trim();
+  return emailFormat.safeParse(trimmed).success && hasValidEmailDomain(trimmed);
+}
+
+export function parseInviteEmails(value: string): {
+  emails: string[];
+  invalid: string[];
+} {
+  const emails: string[] = [];
+  const invalid: string[] = [];
+  const seen = new Set<string>();
+
+  for (const token of value.split(/[,\s;]+/).filter(Boolean)) {
+    if (!isValidInviteEmail(token)) {
+      invalid.push(token);
+      continue;
+    }
+    const email = token.trim().toLowerCase();
+    if (!seen.has(email)) {
+      emails.push(email);
+      seen.add(email);
+    }
+  }
+
+  return { emails, invalid };
+}
 
 // Minimal structural shape of the invite-send invoke. Kept narrow so the pure
 // helper unit-tests with a plain mock; supabase.functions.invoke is assignable.
@@ -88,16 +137,29 @@ export async function sendInvite(deps: {
   invoke: InvokeInviteSend;
   onSuccess: () => void;
   onError: (detail: string | null) => void;
-}): Promise<void> {
-  const { error } = await deps.invoke('invite-send', {
-    body: { workspace_id: deps.workspaceId, email: deps.email, role: deps.role },
-    headers: { 'x-trace-id': deps.traceId },
-  });
-  if (error !== null && error !== undefined) {
-    deps.onError(await readInviteErrorDetail(error));
-    return;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!isValidInviteEmail(deps.email)) {
+    deps.onError(INVITE_INVALID_EMAIL_MESSAGE);
+    return { ok: false, message: INVITE_INVALID_EMAIL_MESSAGE };
+  }
+
+  const email = deps.email.trim();
+  try {
+    const { error } = await deps.invoke('invite-send', {
+      body: { workspace_id: deps.workspaceId, email, role: deps.role },
+      headers: { 'x-trace-id': deps.traceId },
+    });
+    if (error !== null && error !== undefined) {
+      const detail = await readInviteErrorDetail(error);
+      deps.onError(detail);
+      return { ok: false, message: detail ?? INVITE_ERROR_MESSAGE };
+    }
+  } catch {
+    deps.onError(null);
+    return { ok: false, message: INVITE_ERROR_MESSAGE };
   }
   deps.onSuccess();
+  return { ok: true };
 }
 
 const ROLE_OPTIONS: SelectOption[] = [
@@ -105,19 +167,38 @@ const ROLE_OPTIONS: SelectOption[] = [
   { value: 'agency', label: 'Agency (team member)' },
   { value: 'client', label: 'Client (reviewer)' },
 ];
+const CLIENT_ROLE_OPTION: SelectOption = { value: 'client', label: 'Client (reviewer)' };
+
+export function getInviteRoleOptions(clientOnly: boolean): readonly SelectOption[] {
+  return clientOnly ? [CLIENT_ROLE_OPTION] : ROLE_OPTIONS;
+}
 
 function isInviteRole(value: string): value is InviteRole {
   return value === 'admin' || value === 'agency' || value === 'client';
 }
 
-export function MembersInviteForm({ onInvited }: { onInvited?: () => void } = {}) {
+export function MembersInviteForm({
+  clientOnly = false,
+  onInvited,
+}: {
+  clientOnly?: boolean;
+  onInvited?: () => void;
+} = {}) {
   const { workspaceId } = useWorkspace();
   const newTrace = useNewTrace();
-  const [email, setEmail] = useState('');
-  const [role, setRole] = useState<InviteRole>('client');
-  const [submitting, setSubmitting] = useState(false);
-  const [sentTo, setSentTo] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const roleOptions = getInviteRoleOptions(clientOnly);
+  const [singleEmail, setSingleEmail] = useState('');
+  const [singleRole, setSingleRole] = useState<InviteRole>('client');
+  const [singleSubmitting, setSingleSubmitting] = useState(false);
+  const [singleSentTo, setSingleSentTo] = useState<string | null>(null);
+  const [singleError, setSingleError] = useState<string | null>(null);
+  const [singleEmailTouched, setSingleEmailTouched] = useState(false);
+  const [emailInput, setEmailInput] = useState('');
+  const [invitees, setInvitees] = useState<Array<{ email: string; role: InviteRole }>>([]);
+  const [groupSubmitting, setGroupSubmitting] = useState(false);
+  const [entryError, setEntryError] = useState<string | null>(null);
+  const [inviteErrors, setInviteErrors] = useState<Record<string, string>>({});
+  const [sentCount, setSentCount] = useState<number | null>(null);
 
   // No active workspace: there is nothing to invite into. Say so and stop.
   if (workspaceId === null) {
@@ -126,68 +207,289 @@ export function MembersInviteForm({ onInvited }: { onInvited?: () => void } = {}
   // Capture the narrowed id so the async submit closure keeps the string type.
   const activeWorkspaceId = workspaceId;
 
-  const trimmed = email.trim();
-  // Light client guard; the function does the authoritative email check.
-  const canSubmit = !submitting && trimmed.length > 0 && trimmed.includes('@');
+  const trimmedSingleEmail = singleEmail.trim();
+  const singleEmailValid = isValidInviteEmail(trimmedSingleEmail);
+  const singleEmailError = singleEmailTouched && trimmedSingleEmail.length > 0 && !singleEmailValid;
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function handleSingleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (!canSubmit) return;
-    const target = trimmed;
-    setSubmitting(true);
-    setSentTo(null);
-    setErrorMessage(null);
+    setSingleEmailTouched(true);
+    if (singleSubmitting || !singleEmailValid) return;
+
+    const target = trimmedSingleEmail;
+    setSingleSubmitting(true);
+    setSingleSentTo(null);
+    setSingleError(null);
     await sendInvite({
       workspaceId: activeWorkspaceId,
       email: target,
-      role,
+      role: clientOnly ? 'client' : singleRole,
       traceId: newTrace(),
       invoke: (name, options) => supabase.functions.invoke(name, options),
       onSuccess: () => {
-        // Clear the email so another can be sent; keep the selected role.
-        setEmail('');
-        setSentTo(target);
-        setSubmitting(false);
+        setSingleEmail('');
+        setSingleSentTo(target);
+        setSingleSubmitting(false);
         onInvited?.();
       },
       onError: (detail) => {
-        // Keep the email so the user can retry. Prefer the function's real
-        // reason; fall back to the generic copy when no body could be read.
-        setErrorMessage(detail ?? INVITE_ERROR_MESSAGE);
-        setSubmitting(false);
+        setSingleError(detail ?? INVITE_ERROR_MESSAGE);
+        setSingleSubmitting(false);
       },
     });
   }
 
+  function addEmails(): void {
+    const parsed = parseInviteEmails(emailInput);
+    const existing = new Set(invitees.map(({ email }) => email.toLowerCase()));
+    const added: string[] = [];
+    const duplicates: string[] = [];
+
+    for (const email of parsed.emails) {
+      if (existing.has(email)) {
+        duplicates.push(email);
+      } else {
+        existing.add(email);
+        added.push(email);
+      }
+    }
+
+    if (added.length > 0) {
+      setInvitees((current) => [
+        ...current,
+        ...added.map((email) => ({ email, role: 'client' as const })),
+      ]);
+      setSentCount(null);
+    }
+
+    setEmailInput(parsed.invalid.join(', '));
+    const messages = [
+      parsed.invalid.length > 0
+        ? `${INVITE_INVALID_EMAIL_MESSAGE} Check: ${parsed.invalid.join(', ')}.`
+        : null,
+      duplicates.length > 0 ? `${INVITE_DUPLICATE_EMAIL_MESSAGE} ${duplicates.join(', ')}.` : null,
+    ].filter((message): message is string => message !== null);
+    setEntryError(
+      messages.length > 0
+        ? messages.join(' ')
+        : added.length === 0
+          ? 'Enter at least one valid email address.'
+          : null,
+    );
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (groupSubmitting || invitees.length === 0) return;
+
+    const batch = invitees;
+    setGroupSubmitting(true);
+    setSentCount(null);
+    setInviteErrors({});
+
+    const results = await Promise.all(
+      batch.map(async (invitee) => {
+        const result = await sendInvite({
+          workspaceId: activeWorkspaceId,
+          email: invitee.email,
+          role: clientOnly ? 'client' : invitee.role,
+          traceId: newTrace(),
+          invoke: (name, options) => supabase.functions.invoke(name, options),
+          onSuccess: () => {},
+          onError: () => {},
+        });
+        return { invitee, result };
+      }),
+    );
+
+    const failed = results.filter(({ result }) => !result.ok);
+    const errors: Record<string, string> = {};
+    for (const { invitee, result } of failed) {
+      if (!result.ok) errors[invitee.email] = result.message;
+    }
+    setInviteErrors(errors);
+    setInvitees(failed.map(({ invitee }) => invitee));
+    setSentCount(results.length - failed.length);
+    setGroupSubmitting(false);
+    if (failed.length < results.length) onInvited?.();
+  }
+
   return (
-    <form className="max-w-[520px] flex flex-col gap-4" onSubmit={handleSubmit}>
-      <Field label="Email" htmlFor="invite-email" required>
-        <Input
-          id="invite-email"
-          type="email"
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          placeholder="name@example.com"
-          autoComplete="off"
-        />
-      </Field>
-      <Field label="Role" htmlFor="invite-role">
-        <Select
-          label="Role"
-          value={role}
-          options={ROLE_OPTIONS}
-          onChange={(value) => {
-            if (isInviteRole(value)) setRole(value);
-          }}
-        />
-      </Field>
-      <div>
-        <Button variant="primary" size="lg" type="submit" disabled={!canSubmit}>
-          {submitting ? 'Sending' : 'Send invite'}
-        </Button>
-      </div>
-      {sentTo !== null ? <p className="text-sm text-good">Invitation sent to {sentTo}.</p> : null}
-      {errorMessage !== null ? <p className="text-sm text-bad">{errorMessage}</p> : null}
-    </form>
+    <div className="flex max-w-[520px] flex-col gap-8">
+      <section className="flex flex-col gap-4">
+        <h3 className="text-base font-semibold">Invite member</h3>
+        <form className="flex flex-col gap-4" onSubmit={handleSingleSubmit}>
+          <Field label="Email" htmlFor="invite-email" required>
+            <Input
+              id="invite-email"
+              type="email"
+              value={singleEmail}
+              aria-invalid={singleEmailError}
+              aria-describedby={singleEmailError ? 'invite-email-error' : undefined}
+              onChange={(event) => {
+                setSingleEmail(event.target.value);
+                setSingleError(null);
+              }}
+              onBlur={() => setSingleEmailTouched(true)}
+              placeholder="name@example.com"
+              autoComplete="off"
+              disabled={singleSubmitting}
+            />
+            {singleEmailError ? (
+              <p id="invite-email-error" role="alert" className="mt-1.5 text-xs text-bad">
+                {INVITE_INVALID_EMAIL_MESSAGE}
+              </p>
+            ) : null}
+          </Field>
+          <Field label="Role" htmlFor="invite-role">
+            <Select
+              label="Role"
+              value={clientOnly ? 'client' : singleRole}
+              options={roleOptions}
+              disabled={singleSubmitting}
+              onChange={(value) => {
+                if (!clientOnly && isInviteRole(value)) setSingleRole(value);
+              }}
+            />
+          </Field>
+          <div>
+            <Button
+              variant="primary"
+              size="lg"
+              type="submit"
+              disabled={singleSubmitting || !singleEmailValid}
+            >
+              {singleSubmitting ? 'Sending' : 'Send invite'}
+            </Button>
+          </div>
+          {singleSentTo !== null ? (
+            <p className="text-sm text-good">Invitation sent to {singleSentTo}.</p>
+          ) : null}
+          {singleError !== null ? <p className="text-sm text-bad">{singleError}</p> : null}
+        </form>
+      </section>
+
+      <section className="flex flex-col gap-4">
+        <h3 className="text-base font-semibold">Invite group members</h3>
+        <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
+          <Field
+            label="Add people"
+            htmlFor="invite-emails"
+            hint="Enter one or more email addresses, separated by commas, spaces, or new lines."
+          >
+            <Textarea
+              id="invite-emails"
+              value={emailInput}
+              aria-invalid={entryError !== null}
+              aria-describedby={entryError !== null ? 'invite-entry-error' : undefined}
+              onChange={(event) => {
+                setEmailInput(event.target.value);
+                setEntryError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  addEmails();
+                }
+              }}
+              placeholder="name@example.com, another@example.com"
+              autoComplete="off"
+              disabled={groupSubmitting}
+            />
+            {entryError !== null ? (
+              <p id="invite-entry-error" role="alert" className="mt-1.5 text-xs text-bad">
+                {entryError}
+              </p>
+            ) : null}
+          </Field>
+          <div>
+            <Button
+              variant="default"
+              size="lg"
+              type="button"
+              onClick={addEmails}
+              disabled={groupSubmitting}
+            >
+              Add email
+            </Button>
+          </div>
+
+          {invitees.length > 0 ? (
+            <ul aria-label="People to invite" className="flex flex-col gap-2">
+              {invitees.map((invitee) => (
+                <li
+                  key={invitee.email}
+                  className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-panel-2 p-2"
+                >
+                  <span className="min-w-0 flex-1 break-all px-2 text-sm">{invitee.email}</span>
+                  <div className="w-48 max-w-full">
+                    <Select
+                      label={`Role for ${invitee.email}`}
+                      value={clientOnly ? 'client' : invitee.role}
+                      options={roleOptions}
+                      disabled={groupSubmitting}
+                      onChange={(value) => {
+                        if (!clientOnly && isInviteRole(value)) {
+                          setInvitees((current) =>
+                            current.map((item) =>
+                              item.email === invitee.email ? { ...item, role: value } : item,
+                            ),
+                          );
+                        }
+                      }}
+                    />
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="md"
+                    type="button"
+                    className="h-11 min-w-[44px]"
+                    aria-label={`Remove ${invitee.email}`}
+                    disabled={groupSubmitting}
+                    onClick={() => {
+                      setInvitees((current) =>
+                        current.filter((item) => item.email !== invitee.email),
+                      );
+                      setInviteErrors((current) => {
+                        const next = { ...current };
+                        delete next[invitee.email];
+                        return next;
+                      });
+                      setSentCount(null);
+                    }}
+                  >
+                    Remove
+                  </Button>
+                  {inviteErrors[invitee.email] !== undefined ? (
+                    <p role="alert" className="basis-full px-2 text-xs text-bad">
+                      {inviteErrors[invitee.email]}
+                    </p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          <div>
+            <Button
+              variant="primary"
+              size="lg"
+              type="submit"
+              disabled={groupSubmitting || invitees.length === 0}
+            >
+              {groupSubmitting
+                ? 'Sending invitations'
+                : `Send ${invitees.length} invitation${invitees.length === 1 ? '' : 's'}`}
+            </Button>
+          </div>
+          {sentCount !== null && sentCount > 0 ? (
+            <p className="text-sm text-good">
+              Sent {sentCount} invitation{sentCount === 1 ? '' : 's'}.
+              {invitees.length > 0 ? ` ${invitees.length} failed; review and retry.` : ''}
+            </p>
+          ) : null}
+        </form>
+      </section>
+    </div>
   );
 }

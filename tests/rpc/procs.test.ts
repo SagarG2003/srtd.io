@@ -452,6 +452,38 @@ describe.runIf(RPC_SUITE)('SECURITY DEFINER write procs (authenticated role)', (
       const rows = res.data as Array<{ active: boolean }> | null;
       expect(rows?.[0]?.active).toBe(true);
     });
+
+    it('client can invite clients but cannot assign agency or admin roles', async () => {
+      const env = loadRlsEnv();
+      const invitee = await seedUser(env, admin);
+      invitees.push(invitee);
+
+      const memberId = expectOk(
+        await memberInvite(clientClient, {
+          p_workspace_id: wsA.id,
+          p_email: invitee.email,
+          p_role: 'client',
+          p_trace_id: generateTraceId(),
+        }),
+      );
+
+      const res = await asGeneric(admin)
+        .from('workspace_members')
+        .select('role')
+        .eq('id', memberId);
+      const rows = res.data as Array<{ role: string }> | null;
+      expect(rows?.[0]?.role).toBe('client');
+
+      for (const role of ['agency', 'admin']) {
+        const denied = await memberInvite(clientClient, {
+          p_workspace_id: wsA.id,
+          p_email: invitee.email,
+          p_role: role,
+          p_trace_id: generateTraceId(),
+        });
+        expect(expectError(denied).code).toBe('forbidden_role');
+      }
+    });
   });
 
   // -------------------------------------------------------------------------

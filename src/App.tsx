@@ -8,9 +8,11 @@ import { ChatPage } from '@/components/pages/ChatPage';
 import { ActivityPage } from '@/components/pages/ActivityPage';
 import { AssetsPage } from '@/components/pages/AssetsPage';
 import { SettingsPage } from '@/components/pages/SettingsPage';
+import { HelpPage } from '@/components/pages/HelpPage';
 import { DeletedPage } from '@/components/pages/DeletedPage';
 import { SignInPage } from '@/components/auth/SignInPage';
 import { AuthCallbackPage } from '@/components/auth/AuthCallbackPage';
+import { LegalPolicyPage } from '@/components/auth/LegalPolicyPage';
 import { SignUpPage } from '@/components/auth/SignUpPage';
 import { AcceptInvitePage } from '@/components/auth/AcceptInvitePage';
 import { PostRefResolver } from '@/components/refs/PostRefResolver';
@@ -43,6 +45,7 @@ export default function App() {
       <SessionProvider>
         <Routes>
           <Route path="/auth/callback" element={<AuthCallbackPage />} />
+          <Route path="/legal/:policy" element={<LegalPolicyPage />} />
           <Route element={<RequireGuest />}>
             <Route path="/signin" element={<SignInPage />} />
             <Route path="/signup" element={<SignUpPage />} />
@@ -62,6 +65,7 @@ export default function App() {
               <Route path="/activity" element={<ActivityPage />} />
               <Route path="/assets" element={<AssetsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/help" element={<HelpPage />} />
               <Route path="/deleted" element={<DeletedPage />} />
               <Route path="*" element={<Navigate to="/pipeline" replace />} />
             </Route>

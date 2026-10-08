@@ -12,12 +12,13 @@ interface AuthShellProps {
   subtitle: string;
   children: ReactNode;
   footer: ReactNode;
+  wide?: boolean;
 }
 
-export function AuthShell({ title, subtitle, children, footer }: AuthShellProps) {
+export function AuthShell({ title, subtitle, children, footer, wide = false }: AuthShellProps) {
   return (
     <div className="min-h-full w-full grid place-items-center px-4 py-10 bg-bg bg-[radial-gradient(circle_at_50%_-10%,var(--accent-soft),transparent_55%)]">
-      <div className="w-full max-w-[400px]">
+      <div className={`w-full ${wide ? 'max-w-3xl' : 'max-w-[400px]'}`}>
         <div className="rounded-2xl border border-border bg-panel p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_12px_40px_-12px_rgba(0,0,0,0.12)]">
           <div className="mb-6">
             <div className="text-lg font-semibold tracking-tight">{title}</div>

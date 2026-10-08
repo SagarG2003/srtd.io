@@ -9,21 +9,97 @@ vi.mock('@/lib/supabase', () => ({ supabase: { functions: { invoke: mockInvoke }
 // without providers and a workspace id is always present.
 vi.mock('@/lib/workspace-context', () => ({ useWorkspace: () => ({ workspaceId: 'ws-1' }) }));
 vi.mock('@/lib/trace-context', () => ({ useNewTrace: () => () => 't-1' }));
+vi.mock('@/components/ui/Textarea', () => ({ Textarea: 'textarea' }));
 
-import { MembersInviteForm, sendInvite, INVITE_ERROR_MESSAGE } from './MembersInviteForm';
+import {
+  MembersInviteForm,
+  sendInvite,
+  INVITE_ERROR_MESSAGE,
+  INVITE_INVALID_EMAIL_MESSAGE,
+  isValidInviteEmail,
+  getInviteRoleOptions,
+  parseInviteEmails,
+} from './MembersInviteForm';
+
+describe('isValidInviteEmail', () => {
+  it.each(['name@example.com', 'name@mail.example.co.uk', 'name@example.technology'])(
+    'accepts %s',
+    (email) => {
+      expect(isValidInviteEmail(email)).toBe(true);
+    },
+  );
+
+  it.each([
+    'name@example',
+    'name@example.c',
+    'name@.com',
+    'name@example..com',
+    'name@example-.com',
+    'name@exa_mple.com',
+    'name@example.123',
+  ])('rejects %s', (email) => {
+    expect(isValidInviteEmail(email)).toBe(false);
+  });
+});
+
+describe('parseInviteEmails', () => {
+  it('splits common separators, trims, normalizes case, and removes duplicates', () => {
+    expect(parseInviteEmails(' Alice@example.com,\nbob@example.com; alice@example.com ')).toEqual({
+      emails: ['alice@example.com', 'bob@example.com'],
+      invalid: [],
+    });
+  });
+
+  it('returns invalid addresses without dropping valid addresses', () => {
+    expect(parseInviteEmails('valid@example.com, not-an-email')).toEqual({
+      emails: ['valid@example.com'],
+      invalid: ['not-an-email'],
+    });
+  });
+});
+
+describe('invite role options', () => {
+  it('limits client inviters to the client reviewer role', () => {
+    expect(getInviteRoleOptions(true).map(({ value }) => value)).toEqual(['client']);
+  });
+
+  it('keeps all existing role options for owners and admins', () => {
+    expect(getInviteRoleOptions(false).map(({ value }) => value)).toEqual([
+      'admin',
+      'agency',
+      'client',
+    ]);
+  });
+});
 
 describe('MembersInviteForm render', () => {
-  it('shows email, role defaulting to client, and Send invite, with no status and no invoke', () => {
+  it('keeps individual invites and adds group invites below without invoking on render', () => {
     mockInvoke.mockReset();
     const out = renderToStaticMarkup(<MembersInviteForm />);
-    expect(out).toContain('Email');
-    expect(out).toContain('type="email"');
-    // The closed Select trigger shows the selected option's label.
+    expect(out).toContain('Invite member');
     expect(out).toContain('Client (reviewer)');
+    expect(out).toContain('type="email"');
     expect(out).toContain('Send invite');
-    expect(out).not.toContain('Invitation sent to');
+    expect(out).toContain('Invite group members');
+    expect(out).toContain('Add people');
+    expect(out).toContain('<textarea');
+    expect(out).toContain('Add email');
+    expect(out).toContain('Send 0 invitations');
     expect(out).not.toContain(INVITE_ERROR_MESSAGE);
     expect(mockInvoke).not.toHaveBeenCalled();
+
+    const individualInviteIndex = out.indexOf('Invite member');
+    const groupInviteIndex = out.indexOf('Invite group members');
+    expect(individualInviteIndex).toBeLessThan(groupInviteIndex);
+    expect(out.indexOf('Client (reviewer)')).toBeLessThan(groupInviteIndex);
+  });
+
+  it('restricts client invite forms to the client role', () => {
+    const out = renderToStaticMarkup(<MembersInviteForm clientOnly />);
+    expect(out).toContain('Invite group members');
+    expect(out.match(/Client \(reviewer\)/g)).toHaveLength(1);
+    expect(out).not.toContain('Agency (team member)');
+    expect(out).not.toContain('>Admin<');
   });
 });
 
@@ -68,6 +144,46 @@ describe('sendInvite', () => {
     });
 
     expect(onError).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke invite-send for an invalid domain', async () => {
+    const invoke = vi.fn();
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+
+    await sendInvite({
+      workspaceId: 'ws-1',
+      email: 'name@example',
+      role: 'client',
+      traceId: 't-1',
+      invoke,
+      onSuccess,
+      onError,
+    });
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(INVITE_INVALID_EMAIL_MESSAGE);
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it('reports transport failures instead of leaving the invite pending', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('network failure'));
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+
+    await expect(
+      sendInvite({
+        workspaceId: 'ws-1',
+        email: 'name@example.com',
+        role: 'client',
+        traceId: 't-1',
+        invoke,
+        onSuccess,
+        onError,
+      }),
+    ).resolves.toEqual({ ok: false, message: INVITE_ERROR_MESSAGE });
+    expect(onError).toHaveBeenCalledWith(null);
     expect(onSuccess).not.toHaveBeenCalled();
   });
 });

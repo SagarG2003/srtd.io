@@ -156,7 +156,7 @@ Subscription is per workspace. No caps on workspaces per account.
 
 | Item | Decision |
 | --- | --- |
-| Signup form | Single scroll. Required: name (-> display_name), email, password, workspace name, workspace timezone (auto-detected). |
+| Signup form | Single scroll. Required: name (-> display_name), email, password, workspace name, workspace timezone (auto-detected), and consent to the Privacy Policy and Terms & Conditions. Each policy opens on a separate public page. |
 | Workspaces at signup | Exactly one |
 | Additional workspaces | From workspace switcher |
 | First-run state | Empty Pipeline, empty Activity, empty Assets |
@@ -345,7 +345,7 @@ Client writes the brief; it lands in the Briefs section and can be linked to a p
 | Workspace name | Editable by Admin/Owner |
 | Timezone | Editable by Admin/Owner |
 | Default email digest time | Workspace default, user can override |
-| Member roles | Add, remove, change role |
+| Member roles | Add, remove, change role. Owners and Admins can invite members individually or as a group and select invitee roles. Clients can invite members individually or as a group, with invitee role restricted to Client (reviewer). |
 | Billing | Tier, payment method, invoices |
 | Workspace deletion | 7-day soft-delete. Recoverable via Recently deleted. After 7 days: hard delete. |
 | Transfer ownership | Immediate. Existing member only. Password confirm. Old owner downgrades to Admin. New owner gets persistent 'Update billing info' banner. Old owner's card continues billing until replaced. 30-day grace before billing-failure ladder. |

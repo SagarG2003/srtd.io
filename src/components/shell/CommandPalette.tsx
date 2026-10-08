@@ -51,6 +51,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       { id: 'goto-pipeline', group: 'Go to', label: 'Pipeline', run: () => navigate('/pipeline') },
       { id: 'goto-briefs', group: 'Go to', label: 'Briefs', run: () => navigate('/briefs') },
       { id: 'goto-activity', group: 'Go to', label: 'Activity', run: () => navigate('/activity') },
+      { id: 'goto-help', group: 'Go to', label: 'Help', run: () => navigate('/help') },
       {
         id: 'new-post',
         group: 'Actions',
