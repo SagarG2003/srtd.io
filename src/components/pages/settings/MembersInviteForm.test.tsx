@@ -80,7 +80,7 @@ describe('MembersInviteForm render', () => {
     expect(out).toContain('Client (reviewer)');
     expect(out).toContain('type="email"');
     expect(out).toContain('Send invite');
-    expect(out).toContain('Invite Group members');
+    expect(out).toContain('Invite group members');
     expect(out).toContain('Add people');
     expect(out).toContain('<textarea');
     expect(out).toContain('Add email');
@@ -89,16 +89,15 @@ describe('MembersInviteForm render', () => {
     expect(mockInvoke).not.toHaveBeenCalled();
 
     const individualInviteIndex = out.indexOf('Invite member');
-    const groupInviteIndex = out.indexOf('Invite Group members');
+    const groupInviteIndex = out.indexOf('Invite group members');
     expect(individualInviteIndex).toBeLessThan(groupInviteIndex);
     expect(out.indexOf('Client (reviewer)')).toBeLessThan(groupInviteIndex);
   });
 
   it('restricts client invite forms to the client role', () => {
     const out = renderToStaticMarkup(<MembersInviteForm clientOnly />);
-    expect(out).toContain('As a Client, you can invite members as Client (reviewer).');
-    expect(out).toContain('Invite Group members');
-    expect(out.match(/Client \(reviewer\)/g)).toHaveLength(2);
+    expect(out).toContain('Invite group members');
+    expect(out.match(/Client \(reviewer\)/g)).toHaveLength(1);
     expect(out).not.toContain('Agency (team member)');
     expect(out).not.toContain('>Admin<');
   });

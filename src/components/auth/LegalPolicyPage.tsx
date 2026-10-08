@@ -57,9 +57,7 @@ function PrivacyPolicyContent() {
             </p>
             <ul className="list-disc space-y-1 pl-6">
               <li>Which plan a workspace is on, billing status and payment history.</li>
-              <li>
-                Payments are handled by our payment provider, CashFree/Razorpay.
-              </li>
+              <li>Payments are handled by our payment provider, CashFree/Razorpay.</li>
             </ul>
           </div>
         </div>
@@ -68,9 +66,11 @@ function PrivacyPolicyContent() {
       <section>
         <h2 className="mb-2 text-base font-semibold text-fg">3. What we don&apos;t collect</h2>
         <ul className="list-disc pl-6">
-          <li>We don&apos;t ask for your social media account passwords. We do not see or store your
+          <li>
+            We don&apos;t ask for your social media account passwords. We do not see or store your
             full card number, UPI PIN or net banking credentials. We keep identifiers and status
-            information returned by the provider.</li>
+            information returned by the provider.
+          </li>
         </ul>
       </section>
 
@@ -129,8 +129,8 @@ function PrivacyPolicyContent() {
             name, email content.
           </li>
           <li>
-            <strong className="font-medium text-fg">CashFree/Razorpay:</strong> Payments. Name, email,
-            payment details you enter with them.
+            <strong className="font-medium text-fg">CashFree/Razorpay:</strong> Payments. Name,
+            email, payment details you enter with them.
           </li>
         </ul>
       </section>
