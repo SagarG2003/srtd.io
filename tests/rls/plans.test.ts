@@ -313,6 +313,66 @@ describe.runIf(RLS_SUITE)('plans RLS', () => {
     expect(await own(agency, 'plan_items', clientConceptId)).toBe(1);
   });
 
+  async function comment(
+    user: SeededUser,
+    itemId: string,
+    visibility: 'everyone' | 'team',
+  ): Promise<string> {
+    return must(
+      'plan_item_comment_create',
+      await as(user).rpc(
+        'plan_item_comment_create',
+        rpcArgs({
+          p_item_id: itemId,
+          p_body: `Comment ${randomSuffix()}`,
+          p_visibility: visibility,
+          p_trace_id: uuidv7(),
+        }),
+      ),
+    );
+  }
+
+  it("a 'team' plan item comment is invisible to the client and visible to agency", async () => {
+    const commentId = await comment(agency, clientConceptId, 'team');
+    expect(await read(client, 'plan_item_comments', commentId)).toBe(0);
+    expect(await own(agency, 'plan_item_comments', commentId)).toBe(1);
+    expect(await own(owner, 'plan_item_comments', commentId)).toBe(1);
+  });
+
+  it("an 'everyone' comment on a client plan is visible to both sides", async () => {
+    const fromAgency = await comment(agency, clientConceptId, 'everyone');
+    const fromClient = await comment(client, clientPostItemId, 'everyone');
+    for (const user of [client, agency]) {
+      expect(await own(user, 'plan_item_comments', fromAgency)).toBe(1);
+      expect(await own(user, 'plan_item_comments', fromClient)).toBe(1);
+    }
+    expect(await read(outsiderClient, 'plan_item_comments', fromAgency)).toBe(0);
+  });
+
+  it('authenticated has no INSERT, UPDATE or DELETE on plan_item_comments (permission denied)', async () => {
+    const commentId = await comment(agency, clientConceptId, 'everyone');
+    const c = as(agency);
+    const denied = (error: { code?: string; message: string } | null): boolean =>
+      error !== null && (error.code === '42501' || /permission denied/i.test(error.message));
+    const insert = await c.from('plan_item_comments').insert({
+      workspace_id: ws.id,
+      item_id: clientConceptId,
+      author_user_id: agency.id,
+      body: 'x',
+      visibility: 'everyone',
+    });
+    expect(denied(insert.error)).toBe(true);
+    const update = await c
+      .from('plan_item_comments')
+      .update({ body: 'edited' })
+      .eq('id', commentId);
+    expect(denied(update.error)).toBe(true);
+    const del = await c.from('plan_item_comments').delete().eq('id', commentId);
+    expect(denied(del.error)).toBe(true);
+    // Nothing changed.
+    expect(await own(agency, 'plan_item_comments', commentId)).toBe(1);
+  });
+
   it('a client in the chat reads a plan-share message row, but a team plan id on it is not readable', async () => {
     // A team plan cannot be shared into a chat with a client (chat_plan_share
     // refuses it), so the row is seeded through the service role to prove the

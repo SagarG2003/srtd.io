@@ -27,6 +27,7 @@ export * from './zod/idempotency_keys';
 export * from './zod/inbox_entries';
 export * from './zod/intent_ledger';
 export * from './zod/pending_flows';
+export * from './zod/plan_item_comments';
 export * from './zod/plan_item_reviews';
 export * from './zod/plan_items';
 export * from './zod/plans';

@@ -285,6 +285,16 @@ Applied 9 Oct 2026 (step 3a plans), restated in migration 20261009110000_plans_c
 
 - plan_item_reviews_select_member: its item readable; team reviews only for owner/admin/agency, client reviews for every member who can read the item.
 
+### plan_item_comments
+
+Applied 9 Oct 2026 (step 3b plan comments), restated in migration 20261009205500_plan_item_comments.sql. RLS on; authenticated has SELECT only.
+
+- Columns: id uuid PK default uuidv7(); workspace_id FK workspaces.id CASCADE; item_id FK plan_items.id CASCADE; author_user_id nullable FK users.id SET NULL.
+- Content: body text, trimmed length 1 to 5000 (plan_item_comments_body_check); visibility text 'everyone' / 'team' (plan_item_comments_visibility_check).
+- Timestamps: created_at default now(); edited_at / deleted_at nullable.
+- Indexes: (item_id, created_at) where not deleted; workspace_id; author_user_id where not null.
+- plan_item_comments_select_member: not deleted, its item readable, and visibility 'everyone' or the caller is_agency_side_member.
+
 ### Plan procs
 
 All SECURITY DEFINER, search_path '', EXECUTE to authenticated, each takes p_trace_id and writes one audit_log row named after the proc on success. Owner/admin/agency only unless noted (forbidden_role otherwise).
@@ -299,8 +309,9 @@ All SECURITY DEFINER, search_path '', EXECUTE to authenticated, each takes p_tra
 - plan_posts_add(p_plan_id, p_post_ids, p_trace_id) returns integer: append 1 to 50 posts, skipping ones already in the plan; plan_has_drafts for a draft into a client plan.
 - plan_item_remove(p_item_id, p_trace_id): soft-delete an item.
 - plan_items_reorder(p_plan_id, p_item_ids, p_trace_id): set positions from the full, exact list of live item ids.
-- plan_item_review(p_item_id, p_side, p_status, p_trace_id): upsert a review; team side for owner/admin/agency, client side for an active client on a client plan's concepts only (use_stage_transition on a post item).
-- Internal, no EXECUTE for authenticated: _plan_check_versions (same-workspace, library, not deleted; 'attachment not available' for chat-origin or deleted files) and _plan_attach_versions.
+- plan_item_review(p_item_id, p_side, p_status, p_trace_id): upsert a review; team side for owner/admin/agency, client side for an active client on a client plan's concepts only (use_stage_transition on a post item). A status other than waiting writes plan_review inbox rows via _plan_item_notify (team side to owner/admin/agency only).
+- plan_item_comment_create(p_item_id, p_body, p_visibility, p_trace_id) returns uuid: any active member; a client only on a client plan and only 'everyone' (forbidden_role otherwise); invalid_payload for a missing item, a bad visibility or an empty or over-5000 body; writes plan_comment inbox rows via _plan_item_notify ('team' to owner/admin/agency only).
+- Internal, no EXECUTE for authenticated: _plan_check_versions (same-workspace, library, not deleted; 'attachment not available' for chat-origin or deleted files), _plan_attach_versions, and _plan_item_notify(p_item_id, p_event_type, p_team_only, p_payload) (one inbox row per other active member: owner/admin/agency always, clients too when not team-only on a client plan; payload gains plan_id).
 
 ## 5. Assets
 
@@ -520,7 +531,7 @@ Inbox is the only permanent in-app event surface. Email is out-of-app catch-up, 
 | actor_user_id | uuid | nullable, FK public.users.id ON DELETE SET NULL: the user who performed the event, distinct from user_id which is the recipient |
 | workspace_id | uuid | FK workspaces.id |
 | event_type | text | see enums (publish/approval/plan values removed) |
-| entity_type | text | nullable: post / brief / plan_cell / plan_period / chat_channel / workspace (see section 12) |
+| entity_type | text | nullable: post / brief / plan_cell / plan_period / chat_channel / workspace / plan_item (see section 12) |
 | entity_id | text | nullable, 1 to 200 |
 | scope | text | everything / posts / briefs / people / groups / clients |
 | scope_key | text | nullable |
@@ -538,6 +549,7 @@ Where inbox entries are shown:
 - Chat bell only, never Activity: mention with entity_type chat_channel, scheduled_sent, scheduled_failed, reminder.
 - Activity: everything else, including mentions on posts and briefs.
 - inbox_mark_all_read (Activity Mark all read) skips bell types.
+- plan_comment and plan_review (entity_type plan_item, entity_id = item id, tier active; 20261009205500_plan_item_comments.sql): plan events use scope 'posts', scope_key = plan id.
 
 Decision 3 Oct 2026 (Shubham): Activity is posts only; chat notifications live in the chat bell.
 
@@ -594,7 +606,7 @@ PK id. Fields: operator_user_id FK, flow_type (billing_override / sentry_inspect
 - workspace.subscription_state: trial, active, read_only, grace, soft_pause, full_pause, soft_delete
 - brief.status: open, closed
 - approval (table removed): n/a, approval is now a post.stage value
-- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent), reminder (tier urgent), post_deleted (tier active), assets_deleted (tier active) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas; 21 values)
+- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent), reminder (tier urgent), post_deleted (tier active), assets_deleted (tier active), plan_comment (tier active), plan_review (tier active) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas; 21 values, plan_comment and plan_review not yet added there)
 - inbox_entries.scope: everything, posts, briefs, people, groups, clients
 - inbox_entries.tier: urgent, active, ambient
 - chat_channels.channel_type: dm, group, notes
