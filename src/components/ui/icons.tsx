@@ -100,6 +100,17 @@ export function IconBriefs(props: IconProps) {
   );
 }
 
+/** A draft: a page with a pencil over its corner. */
+export function IconDraft(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M13 3H6v18h12v-7" />
+      <path d="M9 12h3M9 16h4" />
+      <path d="M17.5 4.5l2 2L14 12h-2v-2z" />
+    </Svg>
+  );
+}
+
 export function IconChat(props: IconProps) {
   return (
     <Svg {...props}>
