@@ -226,6 +226,7 @@ async function agencyFlow(page: Page, prefix: string): Promise<void> {
   await expect(item.getByText('Post 1 of 1')).toBeVisible();
   await expect(item.locator('[data-plan-pipeline]')).toBeVisible();
   await expect(item.locator('[data-plan-approve]')).toHaveText('Team approve');
+  await expect(item.locator('[data-plan-ask]')).toHaveCount(0);
   await page.waitForTimeout(400);
   await shot(page, `${prefix}-10-item-post-agency`);
   await page.goBack();

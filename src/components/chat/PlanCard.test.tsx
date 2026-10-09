@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 // The card's import graph pulls the message factory, which imports the real
@@ -9,7 +11,7 @@ vi.mock('agora-chat', () => ({
 
 import { renderToStaticMarkup } from 'react-dom/server';
 import { PlanCardBody, type PlanCardView } from '@/components/chat/PlanCard';
-import { itemActions, statusRows } from '@/components/chat/PlanItemScreen';
+import { actionLabels, itemActions, statusRows } from '@/components/chat/PlanItemScreen';
 import { postChangedId } from '@/components/chat/PlanCardsProvider';
 import { isPlanMessage } from '@/components/chat/MessageActionMenu';
 import { threadCardIds } from '@/components/chat/MessageThread';
@@ -116,6 +118,23 @@ describe('Item screen rules', () => {
       side: 'team',
       openInPipeline: true,
     });
+  });
+
+  it('agency on a post item: "Open in pipeline" and "Team approve" only (no Ask changes)', () => {
+    expect(actionLabels(itemActions('agency', { kind: 'post' }, 'client'))).toEqual([
+      'Open in pipeline',
+      'Team approve',
+    ]);
+    expect(actionLabels(itemActions('agency', { kind: 'concept' }, 'client'))).toEqual([
+      'Ask changes',
+      'Team approve',
+    ]);
+    expect(actionLabels(itemActions('client', { kind: 'post' }, 'client'))).toEqual(['Open post']);
+    const src = readFileSync(
+      fileURLToPath(new URL('./PlanItemScreen.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(src.match(/data-plan-ask=""/g)).toHaveLength(1);
   });
 
   it('client approves a concept on a client plan; on a post only "Open post"', () => {

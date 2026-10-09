@@ -103,6 +103,16 @@ export function itemActions(
   return { kind: 'none' };
 }
 
+/**
+ * The action buttons in order: the agency on a post item gets "Open in
+ * pipeline" and "Team approve" only (changes are asked in Pipeline). Pure.
+ */
+export function actionLabels(actions: ItemActions): string[] {
+  if (actions.kind === 'open-post') return ['Open post'];
+  if (actions.kind === 'none') return [];
+  return [actions.openInPipeline ? 'Open in pipeline' : 'Ask changes', actions.approveLabel];
+}
+
 /** The status box rows: Pipeline (post), Team (agency), Client. Pure. */
 export function statusRows(
   bundle: PlanBundle,
@@ -420,17 +430,6 @@ export function PlanItemScreen(props: {
                   {actions.approveLabel}
                 </Button>
               </div>
-              {actions.openInPipeline ? (
-                <Button
-                  size="lg"
-                  variant="ghost"
-                  data-plan-ask=""
-                  disabled={busy}
-                  onClick={() => void review('changes')}
-                >
-                  Ask changes
-                </Button>
-              ) : null}
               {actionError !== null && !confirmOpen ? (
                 <p role="alert" className="text-[13px] text-bad">
                   {actionError}
