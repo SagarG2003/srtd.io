@@ -38,6 +38,8 @@ export const INBOX_EVENT_TYPES = [
   'reminder',
   'post_deleted',
   'assets_deleted',
+  'plan_comment',
+  'plan_review',
 ] as const;
 
 /** One inbox_entries.event_type value, derived from the canonical list. */
