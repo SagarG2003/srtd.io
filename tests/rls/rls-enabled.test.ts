@@ -2,7 +2,7 @@
 // We read pg_class.relrowsecurity directly (catalogs are not exposed over
 // PostgREST) via psql against the local container's connection string.
 //
-// Expected: 148 relations = 46 base tables + 3 partition parents + 99 partition
+// Expected: 149 relations = 47 base tables + 3 partition parents + 99 partition
 // children, all with RLS on.
 
 import { execFileSync } from 'node:child_process';
@@ -53,7 +53,7 @@ describe.runIf(RLS_SUITE)('RLS is enabled on every public relation', () => {
     relations = JSON.parse(out.trim()) as Relation[];
   });
 
-  it('covers exactly 148 relations (46 base + 3 parents + 99 children)', () => {
+  it('covers exactly 149 relations (47 base + 3 parents + 99 children)', () => {
     expect(relations).toHaveLength(EXPECTED_RELATION_COUNT);
   });
 

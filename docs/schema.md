@@ -606,7 +606,7 @@ PK id. Fields: operator_user_id FK, flow_type (billing_override / sentry_inspect
 - workspace.subscription_state: trial, active, read_only, grace, soft_pause, full_pause, soft_delete
 - brief.status: open, closed
 - approval (table removed): n/a, approval is now a post.stage value
-- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent), reminder (tier urgent), post_deleted (tier active), assets_deleted (tier active), plan_comment (tier active), plan_review (tier active) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas; 21 values, plan_comment and plan_review not yet added there)
+- inbox_entries.event_type: comment, mention, stage_change, comment_resolved, brief_created, brief_closed, asset_uploaded, asset_version_added, invite, trial_warning, billing_failure, system, checkpoints_added, post_ready, scheduled_sent (tier active), scheduled_failed (tier urgent), reminder (tier urgent), post_deleted (tier active), assets_deleted (tier active), plan_comment (tier active), plan_review (tier active) (canonical list: INBOX_EVENT_TYPES in @srtdio/schemas; 23 values)
 - inbox_entries.scope: everything, posts, briefs, people, groups, clients
 - inbox_entries.tier: urgent, active, ambient
 - chat_channels.channel_type: dm, group, notes
