@@ -7241,6 +7241,196 @@ export type Database = {
         }
         Relationships: []
       }
+      plan_item_reviews: {
+        Row: {
+          item_id: string
+          reviewed_at: string
+          reviewed_by: string | null
+          side: string
+          status: string
+          workspace_id: string
+        }
+        Insert: {
+          item_id: string
+          reviewed_at?: string
+          reviewed_by?: string | null
+          side: string
+          status: string
+          workspace_id: string
+        }
+        Update: {
+          item_id?: string
+          reviewed_at?: string
+          reviewed_by?: string | null
+          side?: string
+          status?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "plan_item_reviews_item_id_fkey"
+            columns: ["item_id"]
+            isOneToOne: false
+            referencedRelation: "plan_items"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "plan_item_reviews_reviewed_by_fkey"
+            columns: ["reviewed_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "plan_item_reviews_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      plan_items: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          description: string | null
+          id: string
+          kind: string
+          plan_id: string
+          position: number
+          post_id: string | null
+          title: string | null
+          updated_at: string
+          workspace_id: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          description?: string | null
+          id?: string
+          kind: string
+          plan_id: string
+          position?: number
+          post_id?: string | null
+          title?: string | null
+          updated_at?: string
+          workspace_id: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          description?: string | null
+          id?: string
+          kind?: string
+          plan_id?: string
+          position?: number
+          post_id?: string | null
+          title?: string | null
+          updated_at?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "plan_items_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "plan_items_plan_id_fkey"
+            columns: ["plan_id"]
+            isOneToOne: false
+            referencedRelation: "plans"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "plan_items_post_id_fkey"
+            columns: ["post_id"]
+            isOneToOne: false
+            referencedRelation: "posts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "plan_items_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      plans: {
+        Row: {
+          audience: string
+          created_at: string
+          created_by: string | null
+          deleted_at: string | null
+          ends_on: string
+          id: string
+          shared_with_client_at: string | null
+          shared_with_client_by: string | null
+          starts_on: string
+          title: string
+          updated_at: string
+          workspace_id: string
+        }
+        Insert: {
+          audience: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          ends_on: string
+          id?: string
+          shared_with_client_at?: string | null
+          shared_with_client_by?: string | null
+          starts_on: string
+          title: string
+          updated_at?: string
+          workspace_id: string
+        }
+        Update: {
+          audience?: string
+          created_at?: string
+          created_by?: string | null
+          deleted_at?: string | null
+          ends_on?: string
+          id?: string
+          shared_with_client_at?: string | null
+          shared_with_client_by?: string | null
+          starts_on?: string
+          title?: string
+          updated_at?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "plans_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "plans_shared_with_client_by_fkey"
+            columns: ["shared_with_client_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "plans_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       platform_operators: {
         Row: {
           granted_at: string
@@ -8025,6 +8215,18 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      _plan_attach_versions: {
+        Args: {
+          p_item_id: string
+          p_version_ids: string[]
+          p_workspace_id: string
+        }
+        Returns: undefined
+      }
+      _plan_check_versions: {
+        Args: { p_version_ids: string[]; p_workspace_id: string }
+        Returns: undefined
+      }
       _post_snapshot: { Args: { p_post_id: string }; Returns: Json }
       annotation_create: {
         Args: {
@@ -8639,6 +8841,10 @@ export type Database = {
         Args: { p_workspace_id: string }
         Returns: boolean
       }
+      is_agency_side_member: {
+        Args: { p_workspace_id: string }
+        Returns: boolean
+      }
       is_group_member: { Args: { p_group_id: string }; Returns: boolean }
       member_accept: {
         Args: { p_invite_id: string; p_trace_id: string }
@@ -8660,6 +8866,76 @@ export type Database = {
       notes_channel_ensure: {
         Args: { p_trace_id: string; p_workspace_id: string }
         Returns: string
+      }
+      plan_concept_add: {
+        Args: {
+          p_attachment_version_ids: string[]
+          p_description: string
+          p_plan_id: string
+          p_title: string
+          p_trace_id: string
+        }
+        Returns: string
+      }
+      plan_concept_edit: {
+        Args: {
+          p_attachment_version_ids: string[]
+          p_description: string
+          p_item_id: string
+          p_title: string
+          p_trace_id: string
+        }
+        Returns: undefined
+      }
+      plan_create: {
+        Args: {
+          p_audience: string
+          p_ends_on: string
+          p_starts_on: string
+          p_title: string
+          p_trace_id: string
+          p_workspace_id: string
+        }
+        Returns: string
+      }
+      plan_delete: {
+        Args: { p_plan_id: string; p_trace_id: string }
+        Returns: undefined
+      }
+      plan_item_remove: {
+        Args: { p_item_id: string; p_trace_id: string }
+        Returns: undefined
+      }
+      plan_item_review: {
+        Args: {
+          p_item_id: string
+          p_side: string
+          p_status: string
+          p_trace_id: string
+        }
+        Returns: undefined
+      }
+      plan_items_reorder: {
+        Args: { p_item_ids: string[]; p_plan_id: string; p_trace_id: string }
+        Returns: undefined
+      }
+      plan_posts_add: {
+        Args: { p_plan_id: string; p_post_ids: string[]; p_trace_id: string }
+        Returns: number
+      }
+      plan_share_with_client: {
+        Args: { p_plan_id: string; p_trace_id: string }
+        Returns: undefined
+      }
+      plan_update: {
+        Args: {
+          p_ends_on: string
+          p_plan_id: string
+          p_starts_on: string
+          p_title: string
+          p_trace_id: string
+        }
+        Returns: undefined
       }
       post_caption_update: {
         Args: { p_caption: string; p_post_id: string; p_trace_id: string }
