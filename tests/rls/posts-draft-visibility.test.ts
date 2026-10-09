@@ -2,7 +2,7 @@
 // an active member reads non-deleted posts; a draft is visible only to owner,
 // admin and agency. A client sees review, approved, parked and rejected but no
 // draft. An inactive member and a client of another workspace see nothing.
-// Comments on a draft post are invisible to the client.
+// Comments and asset attachments on a draft post are invisible to the client.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -15,6 +15,7 @@ import {
   nextEntityNumber,
   ownReadCount,
   randomSuffix,
+  seedAsset,
   seedMember,
   seedUser,
   seedWorkspace,
@@ -47,6 +48,7 @@ describe.runIf(RLS_SUITE)('posts_select_member draft visibility', () => {
   const postIds = {} as Record<Stage, string>;
   let draftCommentId: string;
   let reviewCommentId: string;
+  let draftAttachmentId: string;
 
   async function seedPost(bucketId: string, stage: Stage): Promise<string> {
     const post = await insertRow(g, 'posts', {
@@ -106,6 +108,16 @@ describe.runIf(RLS_SUITE)('posts_select_member draft visibility', () => {
     for (const stage of STAGES) postIds[stage] = await seedPost(String(bucket.id), stage);
     draftCommentId = await seedComment(postIds.draft);
     reviewCommentId = await seedComment(postIds.review);
+    const asset = await seedAsset(g, ws.id, owner.id);
+    const attachment = await insertRow(g, 'asset_attachments', {
+      asset_id: asset.assetId,
+      asset_version_id: asset.versionId,
+      entity_type: 'post',
+      entity_id: postIds.draft,
+      workspace_id: ws.id,
+      attached_by: owner.id,
+    });
+    draftAttachmentId = String(attachment.id);
   });
 
   afterAll(async () => {
@@ -156,5 +168,13 @@ describe.runIf(RLS_SUITE)('posts_select_member draft visibility', () => {
       await ownReadCount(asGeneric(clientFor(owner.id)), 'comments', [['id', draftCommentId]]),
     ).toBe(1);
     expect(await visibleRowCount(asClient, 'comments', [['id', draftCommentId]])).toBe(0);
+  });
+
+  it('asset attachment on a draft post is invisible to the client, visible to agency', async () => {
+    const match: [string, string][] = [['id', draftAttachmentId]];
+    expect(await ownReadCount(asGeneric(clientFor(agency.id)), 'asset_attachments', match)).toBe(1);
+    expect(await visibleRowCount(asGeneric(clientFor(client.id)), 'asset_attachments', match)).toBe(
+      0,
+    );
   });
 });
