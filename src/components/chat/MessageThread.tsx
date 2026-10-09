@@ -396,6 +396,12 @@ interface MessageThreadProps {
    */
   mentionMembers?: readonly MentionMember[] | null;
   /**
+   * Whether this chat has a client among its other active members; null or
+   * absent while unknown. Passed to the composer only (the Draft tile and the
+   * hash picker's drafts).
+   */
+  channelHasClient?: boolean | null;
+  /**
    * True for a stored mention's person a successful member read confirmed has
    * left; only those drop from a restored draft or an edit. Absent: none.
    */
@@ -5109,6 +5115,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
    */
   const composerShared = (active: boolean): Omit<ComposerProps, 'onSend'> => ({
     disabled: !props.canSend,
+    channelHasClient: props.channelHasClient ?? null,
     viewerUserId: props.currentUserId,
     ...(canAttach ? { uploadFile } : {}),
     ...(active && editing !== null && onEditMessage !== undefined

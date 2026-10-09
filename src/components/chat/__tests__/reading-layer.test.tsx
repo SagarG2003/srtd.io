@@ -7,7 +7,14 @@ vi.mock('@/lib/logger', () => ({
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { ComposerTray, trayTiles } from '@/components/chat/ComposerTray';
+import {
+  ComposerTray,
+  DRAFT_UNAVAILABLE_LABEL,
+  TrayGrid,
+  channelHasClient,
+  draftTileEnabled,
+  trayTiles,
+} from '@/components/chat/ComposerTray';
 import { ComposerEmoji, showsEmojiButton } from '@/components/chat/ComposerEmoji';
 import {
   LatestButton,
@@ -22,12 +29,97 @@ import { chatLayout } from '@/components/chat/chat-type';
 const EM_DASH = String.fromCharCode(0x2014);
 
 describe('T8 tray and emoji button by pointer', () => {
-  it('Schedule replaces Camera and shows last on touch and laptop', () => {
+  it('the D1 tiles in order on touch and laptop, Schedule last', () => {
     const laptop = chatLayout({ finePointer: true, widthPx: 1280 });
     const touch = chatLayout({ finePointer: false, widthPx: 390 });
-    expect(trayTiles(laptop).map((t) => t.id)).toEqual(['photos', 'file', 'post', 'schedule']);
-    expect(trayTiles(touch).map((t) => t.id)).toEqual(['photos', 'file', 'post', 'schedule']);
-    expect(trayTiles(touch).map((t) => t.label)).toEqual(['Photos', 'File', 'Post', 'Schedule']);
+    const ids = ['photos', 'file', 'assets', 'brief', 'post', 'draft', 'schedule'];
+    expect(trayTiles(laptop).map((t) => t.id)).toEqual(ids);
+    expect(trayTiles(touch).map((t) => t.id)).toEqual(ids);
+    expect(trayTiles(touch, { draft: true }).map((t) => t.id)).toEqual(ids);
+    expect(trayTiles(touch).map((t) => t.label)).toEqual([
+      'Photos',
+      'File',
+      'Assets',
+      'Brief',
+      'Post',
+      'Draft',
+      'Schedule',
+    ]);
+  });
+
+  it('Draft is disabled unless the tray is told it is live', () => {
+    const draftOf = (opts: { draft?: boolean }) =>
+      trayTiles('touch', opts).find((t) => t.id === 'draft');
+    expect(draftOf({})).toMatchObject({ disabled: true, ariaLabel: DRAFT_UNAVAILABLE_LABEL });
+    expect(draftOf({ draft: false })).toMatchObject({ disabled: true });
+    expect(draftOf({ draft: true })?.disabled).toBeUndefined();
+    expect(
+      trayTiles('touch')
+        .filter((t) => t.disabled === true)
+        .map((t) => t.id),
+    ).toEqual(['draft']);
+  });
+
+  it('Draft is live only for an agency-side viewer in a chat known to have no client', () => {
+    // Client viewer: never.
+    expect(draftTileEnabled('client', false)).toBe(false);
+    // Agency viewer in a chat with a client: no.
+    expect(draftTileEnabled('agency', true)).toBe(false);
+    // Unknown chat (members loading or failed) or unknown side: no (first paint final).
+    expect(draftTileEnabled('agency', null)).toBe(false);
+    expect(draftTileEnabled('unknown', false)).toBe(false);
+    // Agency viewer in an agency-only chat, or in notes (no other members): yes.
+    expect(draftTileEnabled('agency', false)).toBe(true);
+    expect(draftTileEnabled('agency', channelHasClient([]))).toBe(true);
+  });
+
+  it('channelHasClient reads the other members role list; null while unknown', () => {
+    expect(channelHasClient(null)).toBeNull();
+    expect(channelHasClient([])).toBe(false);
+    expect(channelHasClient([{ role: 'agency' }, { role: 'admin' }])).toBe(false);
+    expect(channelHasClient([{ role: 'agency' }, { role: 'client' }])).toBe(true);
+  });
+
+  it('the grid: 4 columns, every tile at least 44x44, a disabled Draft faded and inert', () => {
+    const picks: string[] = [];
+    const html = renderToStaticMarkup(
+      <TrayGrid tiles={trayTiles('touch')} onPick={(id) => picks.push(id)} />,
+    );
+    expect(html).toContain('grid-cols-4');
+    expect(html.match(/data-tray-tile=/g)).toHaveLength(7);
+    expect(html.match(/min-h-\[72px\] min-w-\[44px\]/g)).toHaveLength(7);
+    const draft = /<button[^>]*data-tray-tile="draft"[^>]*>/.exec(html)?.[0] ?? '';
+    expect(draft).toContain('disabled=""');
+    expect(draft).toContain('aria-disabled="true"');
+    expect(draft).toContain(`aria-label="${DRAFT_UNAVAILABLE_LABEL}"`);
+    expect(draft).toContain('disabled:opacity-50');
+    const live = renderToStaticMarkup(
+      <TrayGrid tiles={trayTiles('touch', { draft: true })} onPick={() => undefined} />,
+    );
+    const liveDraft = /<button[^>]*data-tray-tile="draft"[^>]*>/.exec(live)?.[0] ?? '';
+    expect(liveDraft).not.toContain('disabled=""');
+    expect(liveDraft).not.toContain('aria-disabled');
+    // The disabled tile's handler is a no-op even if invoked directly.
+    const el = TrayGrid({ tiles: trayTiles('touch'), onPick: (id) => picks.push(id) });
+    const buttons = (el.props as { children: Array<{ props: { onClick: () => void } }> }).children;
+    buttons[5]?.props.onClick();
+    expect(picks).toEqual([]);
+    buttons[4]?.props.onClick();
+    expect(picks).toEqual(['post']);
+  });
+
+  it('the composer maps every tile id explicitly (no fallthrough to the post picker)', () => {
+    const src = readFileSync(fileURLToPath(new URL('../Composer.tsx', import.meta.url)), 'utf8');
+    for (const id of ['photos', 'file', 'assets', 'brief', 'post', 'draft', 'schedule']) {
+      expect(src).toContain(`case '${id}':`);
+    }
+    expect(src).toContain("if (draftEnabled) openPicker('drafts');");
+    // Library picks count as attachments everywhere the draft is weighed:
+    // Send vs mic, Send enabled, and the schedule preview.
+    expect(src).toContain('attachmentCount: pending.length + library.length,');
+    expect(src).toContain('fileCount: pending.length + library.length,');
+    expect(src).toContain('draftFileCounts(pending, library)');
+    expect(src).toContain('draft={draftEnabled}');
   });
 
   it('the emoji button is hidden on a coarse pointer (touch, any width)', () => {

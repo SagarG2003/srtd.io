@@ -1,23 +1,31 @@
 // The composer's plus button and its tray (replaces the paperclip). The button
 // is a 44x44 circle on the panel; while the tray is open it turns accent and
 // its plus rotates 45deg into an X (rotate only). The tray sits above the
-// composer: a 4-column grid of tiles (Photos, File, Post, Schedule on touch
-// and laptop alike) that slides on translateY and fades, 180ms, no X and no
-// scale. A tap outside, Escape, or picking a tile closes it. Photos / File /
-// Post run the composer's existing attach paths (the Photos picker still
-// offers Take Photo on phones); Schedule opens the Schedule sheet. Tokens
-// only, so light and dark stay at parity.
+// composer: a 4-column grid of tiles (Photos, File, Assets, Brief, Post, Draft,
+// Schedule on touch and laptop alike) that slides on translateY and fades,
+// 180ms, no X and no scale. A tap outside, Escape, or picking a tile closes it.
+// Photos / File run the composer's attach paths (the Photos picker still offers
+// Take Photo on phones); Assets opens the library picker; Brief, Post and Draft
+// open the share picker in that mode; Schedule opens the Schedule sheet. Draft
+// is live only for an agency-side viewer in a chat with no client: otherwise
+// (or while either is unknown) it renders faded and disabled from the first
+// frame. Tokens only, so light and dark stay at parity.
 
 import { useEffect, useRef, useState } from 'react';
 import type { ComponentType, ReactElement } from 'react';
 import {
+  IconBriefs,
   IconCalendarClock,
+  IconDraft,
   IconFile,
+  IconFolder,
   IconImage,
   IconPipeline,
   IconPlus,
 } from '@/components/ui/icons';
+import { isClient } from '@/components/pages/pcs/roles';
 import { cn } from '@/lib/cn';
+import type { ViewerSide } from '@/lib/chat/viewer-role';
 import { NO_TOUCH_SELECT, type ChatLayout } from '@/components/chat/chat-type';
 
 /** The tray and the plus icon move for this long. */
@@ -25,23 +33,67 @@ export const TRAY_MOTION_MS = 180;
 
 type TileIcon = ComponentType<{ size?: number; className?: string }>;
 
-/** One tray tile. */
+/** Every tray tile id, in display order. */
+export type TrayTileId = 'photos' | 'file' | 'assets' | 'brief' | 'post' | 'draft' | 'schedule';
+
+/** One tray tile. A disabled tile renders faded, has no tap action and says why. */
 export interface TrayTile {
-  id: 'photos' | 'file' | 'post' | 'schedule';
+  id: TrayTileId;
   label: string;
   Icon: TileIcon;
+  disabled?: true;
+  /** The accessible name when it differs from the label (a disabled Draft says why). */
+  ariaLabel?: string;
+}
+
+/** The disabled Draft tile's accessible name. */
+export const DRAFT_UNAVAILABLE_LABEL = 'Draft, not available in chats with clients';
+
+/**
+ * Whether the open chat has a client among its other active members: null
+ * while the member list is loading or failed (unknown), never true or false on
+ * a guess. The viewer is never in the list; their own side is read apart. Pure.
+ */
+export function channelHasClient(
+  members: ReadonlyArray<{ role: string | null }> | null,
+): boolean | null {
+  if (members === null) return null;
+  return members.some((member) => isClient(member.role));
 }
 
 /**
- * The tiles: the same four on touch and laptop, Schedule last. A chat that
- * cannot schedule (Personal notes) leaves Schedule out. Pure.
+ * Whether the Draft tile is live: an agency-side viewer in a chat with no
+ * client, both known. Anything unknown keeps it disabled. Pure.
  */
-export function trayTiles(layout: ChatLayout, opts: { schedule?: boolean } = {}): TrayTile[] {
+export function draftTileEnabled(side: ViewerSide, hasClient: boolean | null): boolean {
+  return side === 'agency' && hasClient === false;
+}
+
+/**
+ * The tiles: the same set on touch and laptop, Schedule last. A chat that
+ * cannot schedule (Personal notes) leaves Schedule out. Draft is disabled
+ * unless `draft` is true (absent counts as unknown, so disabled). Pure.
+ */
+export function trayTiles(
+  layout: ChatLayout,
+  opts: { schedule?: boolean; draft?: boolean } = {},
+): TrayTile[] {
   void layout;
   const tiles: TrayTile[] = [
     { id: 'photos', label: 'Photos', Icon: IconImage },
     { id: 'file', label: 'File', Icon: IconFile },
+    { id: 'assets', label: 'Assets', Icon: IconFolder },
+    { id: 'brief', label: 'Brief', Icon: IconBriefs },
     { id: 'post', label: 'Post', Icon: IconPipeline },
+    opts.draft === true
+      ? { id: 'draft', label: 'Draft', Icon: IconDraft }
+      : {
+          id: 'draft',
+          label: 'Draft',
+          Icon: IconDraft,
+          disabled: true,
+          ariaLabel: DRAFT_UNAVAILABLE_LABEL,
+        },
   ];
   if (opts.schedule !== false) {
     tiles.push({ id: 'schedule', label: 'Schedule', Icon: IconCalendarClock });
@@ -51,9 +103,11 @@ export function trayTiles(layout: ChatLayout, opts: { schedule?: boolean } = {})
 
 export function ComposerTray(props: {
   layout: ChatLayout;
-  onPick: (id: TrayTile['id']) => void;
+  onPick: (id: TrayTileId) => void;
   /** False: the chat cannot schedule, so no Schedule tile. Absent is true. */
   schedule?: boolean;
+  /** True: the Draft tile is live. Absent or false: faded and disabled. */
+  draft?: boolean;
 }): ReactElement {
   const [open, setOpen] = useState(false);
   // Kept mounted through the exit; `shown` drives the transition.
@@ -93,7 +147,10 @@ export function ComposerTray(props: {
     };
   }, [open]);
 
-  const tiles = trayTiles(props.layout, { schedule: props.schedule !== false });
+  const tiles = trayTiles(props.layout, {
+    schedule: props.schedule !== false,
+    draft: props.draft === true,
+  });
   return (
     <div ref={rootRef} className={cn('shrink-0', NO_TOUCH_SELECT)} onContextMenu={preventDefault}>
       <button
@@ -133,27 +190,51 @@ export function ComposerTray(props: {
             shown ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0',
           )}
         >
-          <div className="grid grid-cols-4 gap-2">
-            {tiles.map((tile) => (
-              <button
-                key={tile.id}
-                type="button"
-                data-tray-tile={tile.id}
-                onClick={() => {
-                  setOpen(false);
-                  props.onPick(tile.id);
-                }}
-                className="flex min-h-[72px] flex-col items-center justify-center gap-1.5 rounded-lg text-fg-2 hover:bg-panel-2 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              >
-                <span className="flex h-11 w-11 items-center justify-center rounded-full bg-panel-2 text-fg">
-                  <tile.Icon size={22} />
-                </span>
-                <span className="text-xs font-medium">{tile.label}</span>
-              </button>
-            ))}
-          </div>
+          <TrayGrid
+            tiles={tiles}
+            onPick={(id) => {
+              setOpen(false);
+              props.onPick(id);
+            }}
+          />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * The tray's tile grid, 4 columns (7 tiles: the second row holds 3). A
+ * disabled tile is faded, carries the disabled attribute and aria-disabled,
+ * says why in its name, and never calls onPick.
+ */
+export function TrayGrid(props: {
+  tiles: readonly TrayTile[];
+  onPick: (id: TrayTileId) => void;
+}): ReactElement {
+  const tiles = props.tiles;
+  return (
+    <div className="grid grid-cols-4 gap-2">
+      {tiles.map((tile) => (
+        <button
+          key={tile.id}
+          type="button"
+          data-tray-tile={tile.id}
+          disabled={tile.disabled === true}
+          {...(tile.disabled === true ? { 'aria-disabled': true } : {})}
+          {...(tile.ariaLabel !== undefined ? { 'aria-label': tile.ariaLabel } : {})}
+          onClick={() => {
+            if (tile.disabled === true) return;
+            props.onPick(tile.id);
+          }}
+          className="flex min-h-[72px] min-w-[44px] flex-col items-center justify-center gap-1.5 rounded-lg text-fg-2 hover:bg-panel-2 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:pointer-events-none disabled:opacity-50"
+        >
+          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-panel-2 text-fg">
+            <tile.Icon size={22} />
+          </span>
+          <span className="text-xs font-medium">{tile.label}</span>
+        </button>
+      ))}
     </div>
   );
 }

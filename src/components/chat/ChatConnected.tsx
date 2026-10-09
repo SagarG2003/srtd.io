@@ -88,6 +88,7 @@ import {
 } from '@/lib/chat/use-history-step';
 import { startDmChannel } from '@/components/chat/chat-actions';
 import { mentionGone, useChannelMembersState } from '@/components/chat/use-channel-members';
+import { channelHasClient } from '@/components/chat/ComposerTray';
 import {
   knownMentionName,
   mentionIds,
@@ -1543,6 +1544,11 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     peerUserId: selected?.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
   });
   const mentionMembers = membersLoad === null ? null : membersLoad.ok ? membersLoad.members : [];
+  // A client among the chat's other active members (null while the list is
+  // loading or failed): the composer's Draft tile and hash picker gate on it.
+  const hasClient = channelHasClient(
+    membersLoad !== null && membersLoad.ok ? membersLoad.members : null,
+  );
 
   // Tapping a mentioned name opens my DM with them (created on first use).
   const onOpenMention = useCallback(
@@ -1790,6 +1796,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                         selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
                       onOpen: onOpenMention,
                     }}
+                    channelHasClient={hasClient}
                     initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
                     onInitialJumpTaken={() => setPendingJump(null)}
                     searchRequest={
