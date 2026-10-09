@@ -7343,6 +7343,64 @@ export type Database = {
         }
         Relationships: []
       }
+      plan_item_comments: {
+        Row: {
+          author_user_id: string | null
+          body: string
+          created_at: string
+          deleted_at: string | null
+          edited_at: string | null
+          id: string
+          item_id: string
+          visibility: string
+          workspace_id: string
+        }
+        Insert: {
+          author_user_id?: string | null
+          body: string
+          created_at?: string
+          deleted_at?: string | null
+          edited_at?: string | null
+          id?: string
+          item_id: string
+          visibility: string
+          workspace_id: string
+        }
+        Update: {
+          author_user_id?: string | null
+          body?: string
+          created_at?: string
+          deleted_at?: string | null
+          edited_at?: string | null
+          id?: string
+          item_id?: string
+          visibility?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "plan_item_comments_author_user_id_fkey"
+            columns: ["author_user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "plan_item_comments_item_id_fkey"
+            columns: ["item_id"]
+            isOneToOne: false
+            referencedRelation: "plan_items"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "plan_item_comments_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       plan_item_reviews: {
         Row: {
           item_id: string
@@ -8329,6 +8387,15 @@ export type Database = {
         Args: { p_version_ids: string[]; p_workspace_id: string }
         Returns: undefined
       }
+      _plan_item_notify: {
+        Args: {
+          p_event_type: string
+          p_item_id: string
+          p_payload: Json
+          p_team_only: boolean
+        }
+        Returns: undefined
+      }
       _post_snapshot: { Args: { p_post_id: string }; Returns: Json }
       annotation_create: {
         Args: {
@@ -9044,6 +9111,15 @@ export type Database = {
       plan_delete: {
         Args: { p_plan_id: string; p_trace_id: string }
         Returns: undefined
+      }
+      plan_item_comment_create: {
+        Args: {
+          p_body: string
+          p_item_id: string
+          p_trace_id: string
+          p_visibility: string
+        }
+        Returns: string
       }
       plan_item_remove: {
         Args: { p_item_id: string; p_trace_id: string }
