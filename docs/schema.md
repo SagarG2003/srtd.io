@@ -3,7 +3,7 @@
 Generated from live database movnexawfhsyuluspxoc (srtdio-v2) after the MVP stripdown.
 This file is the human-readable design reference. The migrations folder is implementation truth.
 
-Sorted v2 MVP is a social-media approval tool: client writes a brief, agency drafts a post, post moves through review to approved, rejected, or parked. No publishing, no scheduling, no plan. Chat history is the Postgres record (chat_messages); Agora is live delivery only. Email is out-of-app catch-up.
+Sorted v2 MVP is a social-media approval tool: client writes a brief, agency drafts a post, post moves through review to approved, rejected, or parked. No publishing, no scheduling. Plans exist from 9 Oct 2026 (plans tables, step 3a). Chat history is the Postgres record (chat_messages); Agora is live delivery only. Email is out-of-app catch-up.
 
 All tables are in schema `public`, all have RLS enabled. `id` uses `uuidv7()` unless noted. Timestamps are `timestamptz`. `*_by` FK columns are SET NULL on delete except `workspaces.owner_user_id` (RESTRICT) and `asset_attachments` (NO ACTION).
 
@@ -229,6 +229,78 @@ Client writes the brief; it lands in the Briefs section and can be linked to a p
 Indexes: (workspace_id, status, created_at desc), target_date partial, created_by, FTS on title+objective.
 
 brief_create(p_workspace_id, p_payload, p_trace_id) SECURITY DEFINER: client-only create gated on an active member with the brief.create capability. The payload also accepts an optional field attachment_asset_version_ids (an ordered array of asset_version ids, any kind: image / video / pdf / Office-doc / link). Because briefs are read-only after creation, creation is the only attach point: each id is written as an asset_attachments row with entity_type='brief', entity_id = the new brief id, and position = array order. A non-array value, a non-uuid element, or an id whose asset_version is missing or in another workspace raises invalid_payload and writes no brief and no attachments.
+
+## 4a. plans / plan_items / plan_item_reviews
+
+Applied 9 Oct 2026 (step 3a plans), restated in migration 20261009110000_plans_core.sql. A plan is a shared object in chat holding concepts and posts with team and client approval. RLS on all three; authenticated has SELECT only (no INSERT, UPDATE or DELETE); every write goes through the procs below. No proc hard-deletes a row.
+
+### plans
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| id | uuid | PK, default uuidv7() |
+| workspace_id | uuid | FK workspaces.id, CASCADE |
+| title | text | 1 to 200 |
+| starts_on / ends_on | date | ends_on >= starts_on, at most 92 days apart (plans_dates) |
+| audience | text | team / client |
+| shared_with_client_at | timestamptz | nullable |
+| shared_with_client_by | uuid | nullable, FK users.id, SET NULL |
+| created_by | uuid | nullable, FK users.id, SET NULL |
+| created_at / updated_at / deleted_at | timestamptz | deleted_at nullable |
+
+- plans_shared_consistency: audience team has both shared_with_client columns null; audience client has shared_with_client_at set.
+- plans_select_member: active member, not deleted; team plans only for owner/admin/agency.
+- Indexes: (workspace_id, starts_on desc) where not deleted; created_by and shared_with_client_by partial.
+
+### plan_items
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| id | uuid | PK, default uuidv7() |
+| workspace_id | uuid | FK workspaces.id, CASCADE |
+| plan_id | uuid | FK plans.id, CASCADE |
+| kind | text | concept / post |
+| position | int | default 0 |
+| title | text | concept only, 1 to 200 |
+| description | text | concept only, nullable, up to 5000 |
+| post_id | uuid | post only, FK posts.id, CASCADE |
+| created_by | uuid | nullable, FK users.id, SET NULL |
+| created_at / updated_at / deleted_at | timestamptz | deleted_at nullable |
+
+- plan_items_shape: a concept has a title and no post_id; a post item has post_id and no title or description.
+- plan_items_post_once: a post appears at most once per plan among live post items (partial unique on plan_id, post_id).
+- plan_items_select_member: not deleted, its plan readable, and for a post item its post readable (so a draft post item stays hidden from a client, via posts_select_member).
+- Concept files: asset_attachments rows with entity_type plan_item; asset_attachments_select_member checks the plan item is readable.
+
+### plan_item_reviews
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| item_id | uuid | PK part, FK plan_items.id, CASCADE |
+| workspace_id | uuid | FK workspaces.id, CASCADE |
+| side | text | PK part, team / client |
+| status | text | waiting / approved / changes |
+| reviewed_by | uuid | nullable, FK users.id, SET NULL |
+| reviewed_at | timestamptz | default now() |
+
+- plan_item_reviews_select_member: its item readable; team reviews only for owner/admin/agency, client reviews for every member who can read the item.
+
+### Plan procs
+
+All SECURITY DEFINER, search_path '', EXECUTE to authenticated, each takes p_trace_id and writes one audit_log row named after the proc on success. Owner/admin/agency only unless noted (forbidden_role otherwise).
+
+- is_agency_side_member(p_workspace_id): true when the caller is an active owner, admin or agency member.
+- plan_create(p_workspace_id, p_title, p_starts_on, p_ends_on, p_audience, p_trace_id) returns uuid: create a plan; a client plan is shared at once.
+- plan_update(p_plan_id, p_title, p_starts_on, p_ends_on, p_trace_id): rename or move dates.
+- plan_share_with_client(p_plan_id, p_trace_id): one-way team to client; plan_has_drafts while it holds a draft post.
+- plan_delete(p_plan_id, p_trace_id): soft-delete the plan.
+- plan_concept_add(p_plan_id, p_title, p_description, p_attachment_version_ids, p_trace_id) returns uuid: append a concept with up to 20 library files.
+- plan_concept_edit(p_item_id, p_title, p_description, p_attachment_version_ids, p_trace_id): edit a concept (null files keeps them); resets its reviews to waiting.
+- plan_posts_add(p_plan_id, p_post_ids, p_trace_id) returns integer: append 1 to 50 posts, skipping ones already in the plan; plan_has_drafts for a draft into a client plan.
+- plan_item_remove(p_item_id, p_trace_id): soft-delete an item.
+- plan_items_reorder(p_plan_id, p_item_ids, p_trace_id): set positions from the full, exact list of live item ids.
+- plan_item_review(p_item_id, p_side, p_status, p_trace_id): upsert a review; team side for owner/admin/agency, client side for an active client on a client plan's concepts only (use_stage_transition on a post item).
+- Internal, no EXECUTE for authenticated: _plan_check_versions (same-workspace, library, not deleted; 'attachment not available' for chat-origin or deleted files) and _plan_attach_versions.
 
 ## 5. Assets
 
