@@ -332,6 +332,28 @@ export function PlanScreen(props: {
   }, [props.open, planId, reload]);
 
   const bundle = read.status === 'ready' ? read.data.bundle : null;
+
+  // A re-read that drops the open item (removed) or the plan itself (deleted,
+  // no longer readable) closes that layer through its own close path, so its
+  // history step is released and Back lands on the layer below.
+  const hadPlan = useRef(false);
+  useEffect(() => {
+    if (!props.open) {
+      hadPlan.current = false;
+      return;
+    }
+    const drop = droppedLayer({
+      status: read.status,
+      bundle,
+      itemId,
+      hadPlan: hadPlan.current,
+    });
+    if (bundle !== null) hadPlan.current = true;
+    if (drop === 'plan') props.onClose();
+    else if (drop === 'item') setItemId(null);
+    // props.onClose is the parent's stable close; the read and item decide.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.open, read, bundle, itemId]);
   const counts = read.status === 'ready' ? read.data.commentCounts : {};
   // First paint: the thread's card cache already holds the title.
   const planCards = usePlanCards();
@@ -463,6 +485,25 @@ export function planHeaderTitle(
 ): string {
   if (status === 'ready') return readTitle ?? PLAN_NOT_AVAILABLE;
   return cachedTitle ?? 'Plan';
+}
+
+/**
+ * Which open layer a settled read dropped: 'plan' when a plan that was
+ * readable is gone, 'item' when the open item is no longer in the plan, else
+ * null (a plan never readable keeps its "Plan not available" body). Pure.
+ */
+export function droppedLayer(input: {
+  status: ScreenRead<unknown>['status'];
+  bundle: Pick<PlanBundle, 'items'> | null;
+  itemId: string | null;
+  hadPlan: boolean;
+}): 'plan' | 'item' | null {
+  if (input.status !== 'ready') return null;
+  if (input.bundle === null) return input.hadPlan ? 'plan' : null;
+  if (input.itemId !== null && !input.bundle.items.some((i) => i.id === input.itemId)) {
+    return 'item';
+  }
+  return null;
 }
 
 /** A row's title: a concept's own, or its post's. Pure. */

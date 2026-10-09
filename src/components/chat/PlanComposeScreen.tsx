@@ -552,13 +552,27 @@ export function noticeShown(count: number, expired: number): boolean {
   return count > 0 && count !== expired;
 }
 
+/**
+ * The chat's composer form inside `host`: the last form holding a text area.
+ * Walks elements from the notice's ref (no selector strings), so it runs on
+ * every engine. Null when none is mounted.
+ */
+export function composerFormIn(host: Pick<Element, 'getElementsByTagName'>): Element | null {
+  const forms = Array.from(host.getElementsByTagName('form'));
+  for (let i = forms.length - 1; i >= 0; i -= 1) {
+    const form = forms[i];
+    if (form !== undefined && form.getElementsByTagName('textarea').length > 0) return form;
+  }
+  return null;
+}
+
 /** How long the "Plan shared" notice stays. */
 export const PLAN_SHARED_NOTICE_MS = 4_000;
 
 /**
  * The "Plan shared" notice, drawn inside the chat just above its composer (so
- * it never covers a plan page header, which sits above the chat). It measures
- * the composer form in its own chat surface; opacity motion only; the timer
+ * it never covers a plan page header, which sits above the chat). From its own
+ * ref it measures the composer form in its chat surface; opacity motion only; the timer
  * and frame are cleared on unmount and on a new notice.
  */
 export function PlanSharedNotice(props: {
@@ -575,7 +589,7 @@ export function PlanSharedNotice(props: {
   useEffect(() => {
     if (count === 0) return;
     const host = ref.current?.parentElement ?? null;
-    const form = host?.querySelector('form:has(textarea)') ?? null;
+    const form = host !== null ? composerFormIn(host) : null;
     if (host !== null && form !== null) {
       setBottom(host.getBoundingClientRect().bottom - form.getBoundingClientRect().top + 8);
     }

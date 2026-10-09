@@ -21,6 +21,7 @@ import {
   type PlanCardCache,
 } from '@/lib/chat/plans';
 import { supabase } from '@/lib/supabase';
+import type { ChatMessageRow } from '@/lib/chat/thread';
 
 /** What the Plan screen needs to open from a card. */
 export interface OpenPlanRequest {
@@ -34,6 +35,10 @@ export interface PlanCardsContextValue {
   /** The open chat's title (the agency's "Shared with"). */
   chatTitle: string;
   openPlan: (request: OpenPlanRequest) => void;
+  /** The open chat's channel id. */
+  channelId: string;
+  /** Put a recorded own row into the open thread (and publish it live). */
+  addRowHere: (row: ChatMessageRow, traceId: string) => void;
 }
 
 const PlanCardsContext = createContext<PlanCardsContextValue | null>(null);
@@ -72,6 +77,8 @@ export function PlanCardsProvider(props: {
   planIds: readonly string[];
   chatTitle: string;
   onOpenPlan: (request: OpenPlanRequest) => void;
+  /** A plan message recorded into this chat from a card (Forward here). */
+  onRowHere: (row: ChatMessageRow, traceId: string) => void;
   /** The chat connection status: each transition to 'connected' retries failed reads. */
   status?: string;
   children: ReactNode;
@@ -130,11 +137,21 @@ export function PlanCardsProvider(props: {
   const onOpenPlan = props.onOpenPlan;
   const openRef = useRef(onOpenPlan);
   openRef.current = onOpenPlan;
+  const rowHereRef = useRef(props.onRowHere);
+  rowHereRef.current = props.onRowHere;
   const chatTitle = props.chatTitle;
   const value = useMemo<PlanCardsContextValue | null>(
     () =>
-      cache !== null ? { cache, chatTitle, openPlan: (request) => openRef.current(request) } : null,
-    [cache, chatTitle],
+      cache !== null && channelId !== null
+        ? {
+            cache,
+            chatTitle,
+            channelId,
+            openPlan: (request) => openRef.current(request),
+            addRowHere: (row, traceId) => rowHereRef.current(row, traceId),
+          }
+        : null,
+    [cache, chatTitle, channelId],
   );
   return <PlanCardsContext.Provider value={value}>{props.children}</PlanCardsContext.Provider>;
 }

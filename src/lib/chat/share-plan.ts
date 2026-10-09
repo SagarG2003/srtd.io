@@ -12,6 +12,18 @@ import type { ChatMessageRow, LiveMessageIds } from '@/lib/chat/thread';
 import type { InFlightGuard } from '@/lib/chat/thread-actions';
 import { shareFailureCopy } from '@/lib/chat/plans';
 
+/**
+ * Whether a forward lands in the chat that is open: its row then goes into
+ * the open thread at once (the thread's own add-row path, which also
+ * publishes it live), instead of a separate live publish. Pure.
+ */
+export function forwardLandsInOpenChat(
+  targetChannelId: string,
+  openChannelId: string | null,
+): boolean {
+  return openChannelId !== null && targetChannelId === openChannelId;
+}
+
 /** The one guard key: a share runs at a time per picker. */
 export const SHARE_PLAN_GUARD_KEY = 'share-plan';
 

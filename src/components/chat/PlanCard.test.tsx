@@ -18,8 +18,8 @@ import {
   statusRows,
 } from '@/components/chat/PlanItemScreen';
 import { postChangedId } from '@/components/chat/PlanCardsProvider';
-import { planHeaderTitle } from '@/components/chat/PlanScreen';
-import { PlanSharedNotice, noticeShown } from '@/components/chat/PlanComposeScreen';
+import { droppedLayer, planHeaderTitle } from '@/components/chat/PlanScreen';
+import { PlanSharedNotice, composerFormIn, noticeShown } from '@/components/chat/PlanComposeScreen';
 import { isPlanMessage, selectionForwardable } from '@/components/chat/MessageActionMenu';
 import { threadCardIds } from '@/components/chat/MessageThread';
 import { PLAN_CHANGED_EVENT, dispatchPlanChanged, planChangedId } from '@/lib/chat/plans';
@@ -279,5 +279,51 @@ describe('round 3 fixes', () => {
     expect(isLiveItem({ itemId: 'i1', open: true }, 'i1')).toBe(true);
     expect(isLiveItem({ itemId: 'i2', open: true }, 'i1')).toBe(false);
     expect(isLiveItem({ itemId: 'i1', open: false }, 'i1')).toBe(false);
+  });
+});
+
+describe('fix round 2', () => {
+  it('G1: the composer form is found by walking elements, no has-selector anywhere', () => {
+    const form = (textareas: number) => ({
+      getElementsByTagName: (tag: string) => (tag === 'textarea' ? new Array(textareas) : []),
+    });
+    const search = form(0);
+    const composer = form(1);
+    const host = {
+      getElementsByTagName: (tag: string) =>
+        (tag === 'form' ? [composer, search] : []) as unknown as HTMLCollectionOf<Element>,
+    } as unknown as Element;
+    expect(composerFormIn(host)).toBe(composer);
+    const empty = { getElementsByTagName: () => [] } as unknown as Element;
+    expect(composerFormIn(empty)).toBeNull();
+    const dir = fileURLToPath(new URL('.', import.meta.url));
+    for (const name of [
+      'PlanComposeScreen.tsx',
+      'PlanScreen.tsx',
+      'PlanItemScreen.tsx',
+      'PlanCard.tsx',
+    ]) {
+      expect(readFileSync(`${dir}${name}`, 'utf8')).not.toContain(':' + 'has(');
+    }
+  });
+
+  it('G2: a re-read that drops the open item or a readable plan closes that layer', () => {
+    const b = { items: [{ id: 'i1' }] } as unknown as Parameters<typeof droppedLayer>[0]['bundle'];
+    expect(droppedLayer({ status: 'ready', bundle: b, itemId: 'i1', hadPlan: true })).toBeNull();
+    expect(droppedLayer({ status: 'ready', bundle: b, itemId: 'gone', hadPlan: true })).toBe(
+      'item',
+    );
+    expect(droppedLayer({ status: 'ready', bundle: null, itemId: 'i1', hadPlan: true })).toBe(
+      'plan',
+    );
+    // Never readable: the screen keeps its "Plan not available" body.
+    expect(
+      droppedLayer({ status: 'ready', bundle: null, itemId: null, hadPlan: false }),
+    ).toBeNull();
+    // An unsettled read never closes anything.
+    expect(
+      droppedLayer({ status: 'loading', bundle: null, itemId: 'i1', hadPlan: true }),
+    ).toBeNull();
+    expect(droppedLayer({ status: 'error', bundle: null, itemId: 'i1', hadPlan: true })).toBeNull();
   });
 });

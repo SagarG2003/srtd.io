@@ -1772,6 +1772,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                 planIds={cardIds.planIds}
                 chatTitle={(shown ?? selected).title}
                 onOpenPlan={onOpenPlan}
+                onRowHere={(row, traceId) => void thread.addSentRow(row, traceId)}
                 status={status}
               >
                 <ChatScheduleProvider value={scheduleWiring}>

@@ -239,11 +239,27 @@ async function agencyFlow(page: Page, prefix: string): Promise<void> {
   await expect(item.locator('[data-plan-ask]')).toHaveCount(0);
   await page.waitForTimeout(400);
   await shot(page, `${prefix}-10-item-post-agency`);
-  await page.goBack();
+
+  // G2: the open item is removed elsewhere; the re-read closes the Item layer
+  // through its own close (its history step released), the Plan stays.
+  const openItems = network.world.tables.plan_items ?? [];
+  const postAt = openItems.findIndex((i) => i.plan_id === planId && i.kind === 'post');
+  expect(postAt).toBeGreaterThanOrEqual(0);
+  openItems.splice(postAt, 1);
+  await page.evaluate((id) => {
+    window.dispatchEvent(new CustomEvent('sorted:plan-changed', { detail: { planId: id } }));
+  }, planId);
   await expect(item).toBeHidden();
+  await expect(plan).toBeVisible();
+  await page.waitForTimeout(400);
+  // No extra pop: the Plan layer is still open after the Item closed itself.
+  await expect(plan).toBeVisible();
+  await expect(plan.locator('[data-plan-tab="post"]')).toHaveText('Posts 0');
+  // Back once returns to the thread.
   await page.goBack();
   await expect(plan).toBeHidden();
   await expect(page.locator('[data-msg-id]').first()).toBeVisible();
+  await expect(page).toHaveURL(/\/chat/);
   expectClean(network);
 }
 
@@ -271,7 +287,7 @@ async function clientFlow(page: Page, prefix: string): Promise<void> {
   await page.keyboard.press('Escape');
 
   // D3: the client's card has Forward.
-  const card = page.locator(`[data-plan-card="${PLAN_ID}"]`);
+  const card = page.locator(`[data-plan-card="${PLAN_ID}"]`).first();
   await card.scrollIntoViewIfNeeded();
   await expect(card).toBeVisible();
   await expect(card.getByText(PLAN_TITLE)).toBeVisible();
@@ -291,6 +307,20 @@ async function clientFlow(page: Page, prefix: string): Promise<void> {
     (m) => m.channel_id === THREAD_DM && Array.isArray(m.shared_plan_ids),
   );
   expect(forwarded.map((m) => m.shared_plan_ids)).toEqual([[PLAN_ID]]);
+
+  // G3: Forward into the chat that is open: the new card shows at once.
+  const cards = page.locator(`[data-plan-card="${PLAN_ID}"]`);
+  await expect(cards).toHaveCount(1);
+  await card.locator('[data-plan-forward]').click();
+  await expect(picker).toBeVisible();
+  await picker.getByRole('button', { name: new RegExp(PEER_NAME) }).click();
+  await expect(page.getByText(`Forwarded to ${PEER_NAME}`)).toBeVisible();
+  await expect(cards).toHaveCount(2);
+  expect(
+    (network.world.tables.chat_messages ?? []).filter(
+      (m) => m.channel_id === DM_CHANNEL && Array.isArray(m.shared_plan_ids),
+    ),
+  ).toHaveLength(2);
 
   // D4: the client's Plan screen (one pill per row).
   await card.locator('[data-plan-open]').click();

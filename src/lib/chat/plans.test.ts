@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import type { Client, Result } from '@srtdio/rpc';
 import {
@@ -18,7 +20,7 @@ import {
   type PlanDraft,
   type PlanShareDeps,
 } from '@/lib/chat/plans';
-import { sharePlanToChannel } from '@/lib/chat/share-plan';
+import { forwardLandsInOpenChat, sharePlanToChannel } from '@/lib/chat/share-plan';
 import { createInFlightGuard } from '@/lib/chat/thread-actions';
 import type { ChatMessageRow } from '@/lib/chat/thread';
 
@@ -469,5 +471,38 @@ describe('readItemFiles (F5)', () => {
     expect(calls).toContainEqual(['eq', ['entity_type', 'plan_item']]);
     expect(calls).toContainEqual(['is', ['deleted_at', null]]);
     expect(calls).toContainEqual(['in', ['entity_id', ['item1']]]);
+  });
+});
+
+describe('Forward into the open chat (G3)', () => {
+  it('lands in the open thread only when the target is the open chat', () => {
+    expect(forwardLandsInOpenChat('c1', 'c1')).toBe(true);
+    expect(forwardLandsInOpenChat('c2', 'c1')).toBe(false);
+    expect(forwardLandsInOpenChat('c1', null)).toBe(false);
+  });
+
+  it('with no separate publish (the thread adds and publishes), the row comes back for the thread', async () => {
+    const row = { id: 'm9', channel_id: 'c1' } as unknown as ChatMessageRow;
+    const result = await sharePlanToChannel(
+      {
+        guard: createInFlightGuard(),
+        record: async () => ok(row),
+        publish: null,
+        newMessageId: () => 'm9',
+        newTraceId: () => 't9',
+        onPublishFailed: () => {},
+      },
+      { channelId: 'c1', planId: 'plan1' },
+    );
+    expect(result).toEqual({ ok: true, row, traceId: 't9' });
+  });
+
+  it('PlanCard wires it: no live publish here, then addRowHere with the row', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../../components/chat/PlanCard.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(src).toContain('!here && connection !== null && target !== null');
+    expect(src).toContain('if (here) planCards?.addRowHere(result.row, result.traceId);');
   });
 });

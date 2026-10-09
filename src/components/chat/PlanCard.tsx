@@ -33,7 +33,7 @@ import { listChannelSummaries, type ChannelSummary } from '@/lib/chat-reads';
 import { createTextMessage } from '@/lib/chat/message-factory';
 import { newMessageId } from '@/lib/chat/message-id';
 import type { PlanBundle } from '@/lib/chat/plans';
-import { sharePlanToChannel } from '@/lib/chat/share-plan';
+import { forwardLandsInOpenChat, sharePlanToChannel } from '@/lib/chat/share-plan';
 import {
   sendText,
   targetFromSummary,
@@ -254,6 +254,7 @@ function PlanForwardSheet(props: {
   const [load, setLoad] = useState<LoadState>({ status: 'loading' });
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [guard] = useState(createInFlightGuard);
+  const planCards = usePlanCards();
   const open = props.open;
 
   useEffect(() => {
@@ -281,6 +282,9 @@ function PlanForwardSheet(props: {
       target = null;
     }
     const connection = client;
+    // Into the open chat: the thread adds (and publishes) the row itself.
+    const here =
+      planCards !== null && forwardLandsInOpenChat(channel.channelId, planCards.channelId);
     const result = await sharePlanToChannel(
       {
         guard,
@@ -294,7 +298,7 @@ function PlanForwardSheet(props: {
           });
         },
         publish:
-          connection !== null && target !== null
+          !here && connection !== null && target !== null
             ? (liveIds) =>
                 sendText({
                   connection: connection as ThreadConnection,
@@ -321,6 +325,7 @@ function PlanForwardSheet(props: {
     if (!result.ok && result.reason === 'busy') return;
     setSendingId(null);
     if (result.ok) {
+      if (here) planCards?.addRowHere(result.row, result.traceId);
       toast.show({ title: forwardedToast(channel.title) });
       props.onClose();
       return;
