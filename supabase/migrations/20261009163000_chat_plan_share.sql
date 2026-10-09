@@ -1,10 +1,12 @@
 -- Applied out of band 9 Oct 2026 (step 3a-ii chat plan share). No-op on movnexawfhsyuluspxoc.
 --
 -- chat_messages.shared_plan_ids (added on the partitioned parent, so every
--- partition including chat_messages_default inherits it); chat_plan_share
--- (agency side shares one plan into a chat, refusing a team plan where a client
--- is a member; idempotent on p_id; one audit_log row); chat_message_delete now
--- also clears shared_plan_ids. Both functions are copied verbatim from live.
+-- partition including chat_messages_default inherits it); chat_plan_share (any
+-- active member of the chat shares one plan: a client plan into any chat they
+-- are in, a team plan only from the agency side and never into a chat with a
+-- client member; idempotent on p_id; one audit_log row with by_client); and
+-- chat_message_delete now also clears shared_plan_ids. Both functions are
+-- copied verbatim from live (chat_plan_share as replaced 9 Oct 2026, 17:22 IST).
 
 ALTER TABLE public.chat_messages ADD COLUMN IF NOT EXISTS shared_plan_ids uuid[];
 
@@ -14,21 +16,24 @@ CREATE OR REPLACE FUNCTION public.chat_plan_share(p_id uuid, p_channel_id text, 
  SECURITY DEFINER
  SET search_path TO ''
 AS $function$
-declare v_actor uuid := auth.uid(); v_ws uuid; v_plan_ws uuid; v_aud text; v_row public.chat_messages;
+declare v_actor uuid := auth.uid(); v_ws uuid; v_plan_ws uuid; v_aud text; v_agency boolean; v_row public.chat_messages;
 begin
   if v_actor is null then raise exception 'not authenticated'; end if;
   if p_id is null or p_trace_id is null or p_plan_id is null then raise exception 'p_id, p_plan_id and p_trace_id are required'; end if;
   if length(p_body) > 5000 then raise exception 'body exceeds 5000 characters'; end if;
   if not public.chat_channel_member(p_channel_id, v_actor) then raise exception 'not a member of this chat'; end if;
   select workspace_id into v_ws from public.chat_channels where channel_id = p_channel_id;
-  if not public.is_agency_side_member(v_ws) then raise exception 'forbidden_role'; end if;
+  if not public.is_active_workspace_member(v_ws) then raise exception 'workspace_member_only'; end if;
+  v_agency := public.is_agency_side_member(v_ws);
   select workspace_id, audience into v_plan_ws, v_aud from public.plans where id = p_plan_id and deleted_at is null;
   if v_plan_ws is null or v_plan_ws <> v_ws then raise exception 'plan not available'; end if;
-  if v_aud = 'team' and exists (
-       select 1 from public.workspace_members wm
-        where wm.workspace_id = v_ws and wm.active = true and wm.role = 'client'
-          and public.chat_channel_member(p_channel_id, wm.user_id)) then
-    raise exception 'plan_not_shared_with_client';
+  if v_aud = 'team' then
+    if not v_agency then raise exception 'plan not available'; end if;
+    if exists (select 1 from public.workspace_members wm
+                where wm.workspace_id = v_ws and wm.active = true and wm.role = 'client'
+                  and public.chat_channel_member(p_channel_id, wm.user_id)) then
+      raise exception 'plan_not_shared_with_client';
+    end if;
   end if;
   perform set_config('app.trace_id', p_trace_id::text, true);
   perform pg_advisory_xact_lock(hashtext(p_id::text));
@@ -39,7 +44,7 @@ begin
   returning * into v_row;
   perform public.audit_log_write(p_action=>'chat_plan_share', p_outcome=>'success', p_trace_id=>p_trace_id,
     p_workspace_id=>v_ws, p_entity_type=>'plan', p_entity_id=>p_plan_id::text,
-    p_payload=>jsonb_build_object('channel_id', p_channel_id, 'message_id', p_id::text));
+    p_payload=>jsonb_build_object('channel_id', p_channel_id, 'message_id', p_id::text, 'by_client', not v_agency));
   return v_row;
 end $function$;
 

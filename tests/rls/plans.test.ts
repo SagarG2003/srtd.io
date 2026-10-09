@@ -24,6 +24,8 @@ import {
   nextEntityNumber,
   ownReadCount,
   randomSuffix,
+  partitionTimestamp,
+  seedDmChannel,
   seedMember,
   seedUser,
   seedWorkspace,
@@ -309,6 +311,29 @@ describe.runIf(RLS_SUITE)('plans RLS', () => {
     // Nothing changed.
     expect(await own(agency, 'plans', clientPlanId)).toBe(1);
     expect(await own(agency, 'plan_items', clientConceptId)).toBe(1);
+  });
+
+  it('a client in the chat reads a plan-share message row, but a team plan id on it is not readable', async () => {
+    // A team plan cannot be shared into a chat with a client (chat_plan_share
+    // refuses it), so the row is seeded through the service role to prove the
+    // plans read stays gated even when an id leaks into a message.
+    const hiddenTeamPlanId = await createPlan('team');
+    const channelId = await seedDmChannel(g, ws.id, agency, client);
+    const messageId = uuidv7();
+    await insertRow(g, 'chat_messages', {
+      id: messageId,
+      channel_id: channelId,
+      workspace_id: ws.id,
+      sender_user_id: agency.id,
+      body: 'Plans',
+      shared_plan_ids: [hiddenTeamPlanId, clientPlanId],
+      agora_event_id: null,
+      created_at: partitionTimestamp,
+    });
+    expect(await own(client, 'chat_messages', messageId)).toBe(1);
+    expect(await read(client, 'plans', hiddenTeamPlanId)).toBe(0);
+    expect(await own(client, 'plans', clientPlanId)).toBe(1);
+    expect(await own(agency, 'plans', hiddenTeamPlanId)).toBe(1);
   });
 
   // Runs last: it turns the team plan client-visible with its draft still inside.
