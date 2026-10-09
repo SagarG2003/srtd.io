@@ -111,6 +111,16 @@ export function IconDraft(props: IconProps) {
   );
 }
 
+/** A plan: two layered sheets. */
+export function IconPlan(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M12 3l9 5-9 5-9-5 9-5z" />
+      <path d="M3 13l9 5 9-5" />
+    </Svg>
+  );
+}
+
 export function IconChat(props: IconProps) {
   return (
     <Svg {...props}>

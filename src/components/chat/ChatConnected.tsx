@@ -74,6 +74,10 @@ import {
 } from '@/lib/chat/scheduled';
 import { newMessageId } from '@/lib/chat/message-id';
 import { SharedCardsProvider } from '@/components/chat/PostCard';
+import { PlanCardsProvider, type OpenPlanRequest } from '@/components/chat/PlanCardsProvider';
+import { PlanComposeScreen } from '@/components/chat/PlanComposeScreen';
+import { PlanScreen } from '@/components/chat/PlanScreen';
+import { PLAN_SHARED_TOAST } from '@/components/chat/plan-card';
 import { useChatLayout } from '@/components/chat/chat-type';
 import { NewChatSheet } from '@/components/chat/NewChatSheet';
 import { GroupInfoSheet, type GroupInfoTabsWiring } from '@/components/chat/GroupInfoSheet';
@@ -1410,6 +1414,24 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
   );
   useHistoryStep(newChatOpen, HISTORY_STEP_KEYS.newChat, () => setNewChatOpen(false));
   useEffect(() => setScheduledListOpen(false), [selectedChannelId]);
+  // Plans: the New plan screen and the Plan screen (the Item screen is the
+  // Plan screen's own step). Each open layer is one history step; a chat
+  // switch closes both.
+  const [planComposeOpen, setPlanComposeOpen] = useState(false);
+  const [openPlan, setOpenPlan] = useState<OpenPlanRequest | null>(null);
+  const [planShown, setPlanShown] = useState(false);
+  useHistoryStep(planComposeOpen && selected !== null, HISTORY_STEP_KEYS.planCompose, () =>
+    setPlanComposeOpen(false),
+  );
+  useHistoryStep(planShown && selected !== null, HISTORY_STEP_KEYS.plan, () => setPlanShown(false));
+  useEffect(() => {
+    setPlanComposeOpen(false);
+    setPlanShown(false);
+  }, [selectedChannelId]);
+  const onOpenPlan = useCallback((request: OpenPlanRequest) => {
+    setOpenPlan(request);
+    setPlanShown(true);
+  }, []);
   // The last one sent or cancelled: nothing left to show.
   useEffect(() => {
     if (scheduledSettled && scheduledRows.length === 0) setScheduledListOpen(false);
@@ -1738,118 +1760,154 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               briefIds={cardIds.briefIds}
               status={status}
             >
-              <ChatScheduleProvider value={scheduleWiring}>
-                <SavedFromProvider value={savedWiring}>
-                  <MessageThread
-                    key={selected.channelId}
-                    title={(shown ?? selected).title}
+              <PlanCardsProvider
+                workspaceId={workspaceId}
+                channelId={selected.channelId}
+                planIds={cardIds.planIds}
+                chatTitle={(shown ?? selected).title}
+                onOpenPlan={onOpenPlan}
+                status={status}
+              >
+                <ChatScheduleProvider value={scheduleWiring}>
+                  <SavedFromProvider value={savedWiring}>
+                    <MessageThread
+                      key={selected.channelId}
+                      title={(shown ?? selected).title}
+                      channelId={selected.channelId}
+                      avatarUrl={(shown ?? selected).avatarUrl}
+                      {...(!isGroup && !notesOpen && workspace !== undefined
+                        ? { subtitle: workspace.name }
+                        : {})}
+                      {...(!isGroup && !notesOpen
+                        ? { role: (shown ?? selected).role ?? null }
+                        : {})}
+                      notes={notesOpen}
+                      {...(!notesOpen ? { onSaveToNotes: saveToNotes } : {})}
+                      isGroup={isGroup}
+                      profiles={profiles}
+                      messages={threadCurrent ? threadMessages : NO_MESSAGES}
+                      loading={threadLoading}
+                      loadFailed={threadCurrent && (thread.loadFailed || notesFailed)}
+                      onRetryLoad={notesFailed ? notesRetry : thread.retryLoad}
+                      loadingOlder={thread.loadingOlder}
+                      hasMore={thread.hasMore}
+                      onLoadOlder={thread.loadOlder}
+                      onNewestVisible={thread.markNewestVisible}
+                      timeZone={timeZone}
+                      canSend
+                      onSend={thread.send}
+                      onRetry={thread.retry}
+                      typingUserIds={notesOpen ? NO_TYPING : typingUserIds}
+                      {...(!notesOpen ? { onTyping: typing.notifyTyping } : {})}
+                      onToggleReaction={thread.toggleReaction}
+                      {...(notesOpen
+                        ? { marksLoaded: true }
+                        : {
+                            marks: marks.marks,
+                            marksLoaded: marks.loaded,
+                            marksFailed: marks.failed,
+                            markedMessages: marks.markedMessages,
+                            onSetMark: marks.setMark,
+                            onResolveMark: marks.resolve,
+                            onReopenMark: marks.reopen,
+                          })}
+                      currentUserId={currentUserId}
+                      onDeleteMessages={thread.deleteMessages}
+                      onEditMessage={thread.editMessage}
+                      forwardChannels={chatRoster}
+                      onForward={forwardWithNotes}
+                      onEnsureLoaded={thread.ensureLoaded}
+                      {...(!notesOpen
+                        ? {
+                            mentionMembers,
+                            mentionGone: mentionGone(membersLoad, currentUserId, workspaceId),
+                          }
+                        : {})}
+                      mentions={{
+                        peerUserId:
+                          selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
+                        onOpen: onOpenMention,
+                      }}
+                      channelHasClient={hasClient}
+                      {...(!notesOpen ? { onOpenPlanCompose: () => setPlanComposeOpen(true) } : {})}
+                      initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
+                      onInitialJumpTaken={() => setPendingJump(null)}
+                      searchRequest={
+                        searchRequest?.channelId === selected.channelId ? searchRequest : null
+                      }
+                      onSearchRequestTaken={() => setSearchRequest(null)}
+                      showTicks={selected.channelType === 'dm'}
+                      {...(threadCurrent && !notesOpen ? { readState: thread.readState } : {})}
+                      peerUserId={
+                        selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null
+                      }
+                      unreadAtOpen={
+                        unreadAtOpen.channelId === selected.channelId ? unreadAtOpen.unread : 0
+                      }
+                      {...(selected.peerUserId != null ? { presence } : {})}
+                      {...(isDesktop ? {} : { onBack })}
+                      {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
+                      {...(infoGroupId !== null
+                        ? {
+                            renderGroupInfo: (tabs: GroupInfoTabsWiring) => (
+                              <GroupInfoSheet
+                                open={groupInfoOpen}
+                                onClose={() => setGroupInfoOpen(false)}
+                                workspaceId={workspaceId}
+                                workspaceName={workspace?.name}
+                                groupId={infoGroupId}
+                                groupName={(shown ?? selected).title}
+                                avatarUrl={(shown ?? selected).avatarUrl}
+                                createdBy={(shown ?? selected).createdBy ?? null}
+                                viewerRole={
+                                  mentionMembers?.find((m) => m.userId === currentUserId)?.role ??
+                                  null
+                                }
+                                currentUserId={currentUserId}
+                                onChanged={onGroupChanged}
+                                signalRoster={(change) => signalRoster(shown ?? selected, change)}
+                                membersVersion={rosterVersion}
+                                onLeft={onGroupLeft}
+                                tabs={tabs}
+                              />
+                            ),
+                          }
+                        : {})}
+                    />
+                  </SavedFromProvider>
+                </ChatScheduleProvider>
+                <ScheduledListSheet
+                  open={scheduledListOpen}
+                  onClose={() => setScheduledListOpen(false)}
+                  rows={scheduledRows}
+                  nameOf={scheduleNameOf}
+                  {...scheduledActions}
+                />
+                {!notesOpen ? (
+                  <PlanComposeScreen
+                    open={planComposeOpen}
+                    workspaceId={workspaceId}
                     channelId={selected.channelId}
-                    avatarUrl={(shown ?? selected).avatarUrl}
-                    {...(!isGroup && !notesOpen && workspace !== undefined
-                      ? { subtitle: workspace.name }
-                      : {})}
-                    {...(!isGroup && !notesOpen ? { role: (shown ?? selected).role ?? null } : {})}
-                    notes={notesOpen}
-                    {...(!notesOpen ? { onSaveToNotes: saveToNotes } : {})}
-                    isGroup={isGroup}
-                    profiles={profiles}
-                    messages={threadCurrent ? threadMessages : NO_MESSAGES}
-                    loading={threadLoading}
-                    loadFailed={threadCurrent && (thread.loadFailed || notesFailed)}
-                    onRetryLoad={notesFailed ? notesRetry : thread.retryLoad}
-                    loadingOlder={thread.loadingOlder}
-                    hasMore={thread.hasMore}
-                    onLoadOlder={thread.loadOlder}
-                    onNewestVisible={thread.markNewestVisible}
                     timeZone={timeZone}
-                    canSend
-                    onSend={thread.send}
-                    onRetry={thread.retry}
-                    typingUserIds={notesOpen ? NO_TYPING : typingUserIds}
-                    {...(!notesOpen ? { onTyping: typing.notifyTyping } : {})}
-                    onToggleReaction={thread.toggleReaction}
-                    {...(notesOpen
-                      ? { marksLoaded: true }
-                      : {
-                          marks: marks.marks,
-                          marksLoaded: marks.loaded,
-                          marksFailed: marks.failed,
-                          markedMessages: marks.markedMessages,
-                          onSetMark: marks.setMark,
-                          onResolveMark: marks.resolve,
-                          onReopenMark: marks.reopen,
-                        })}
-                    currentUserId={currentUserId}
-                    onDeleteMessages={thread.deleteMessages}
-                    onEditMessage={thread.editMessage}
-                    forwardChannels={chatRoster}
-                    onForward={forwardWithNotes}
-                    onEnsureLoaded={thread.ensureLoaded}
-                    {...(!notesOpen
-                      ? {
-                          mentionMembers,
-                          mentionGone: mentionGone(membersLoad, currentUserId, workspaceId),
-                        }
-                      : {})}
-                    mentions={{
-                      peerUserId:
-                        selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null,
-                      onOpen: onOpenMention,
-                    }}
                     channelHasClient={hasClient}
-                    initialMessageId={initialJumpFor(pendingJump, selected.channelId)}
-                    onInitialJumpTaken={() => setPendingJump(null)}
-                    searchRequest={
-                      searchRequest?.channelId === selected.channelId ? searchRequest : null
-                    }
-                    onSearchRequestTaken={() => setSearchRequest(null)}
-                    showTicks={selected.channelType === 'dm'}
-                    {...(threadCurrent && !notesOpen ? { readState: thread.readState } : {})}
-                    peerUserId={
-                      selected.channelType === 'dm' ? (selected.peerUserId ?? null) : null
-                    }
-                    unreadAtOpen={
-                      unreadAtOpen.channelId === selected.channelId ? unreadAtOpen.unread : 0
-                    }
-                    {...(selected.peerUserId != null ? { presence } : {})}
-                    {...(isDesktop ? {} : { onBack })}
-                    {...(isGroup ? { onOpenInfo: () => setGroupInfoOpen(true) } : {})}
-                    {...(infoGroupId !== null
-                      ? {
-                          renderGroupInfo: (tabs: GroupInfoTabsWiring) => (
-                            <GroupInfoSheet
-                              open={groupInfoOpen}
-                              onClose={() => setGroupInfoOpen(false)}
-                              workspaceId={workspaceId}
-                              workspaceName={workspace?.name}
-                              groupId={infoGroupId}
-                              groupName={(shown ?? selected).title}
-                              avatarUrl={(shown ?? selected).avatarUrl}
-                              createdBy={(shown ?? selected).createdBy ?? null}
-                              viewerRole={
-                                mentionMembers?.find((m) => m.userId === currentUserId)?.role ??
-                                null
-                              }
-                              currentUserId={currentUserId}
-                              onChanged={onGroupChanged}
-                              signalRoster={(change) => signalRoster(shown ?? selected, change)}
-                              membersVersion={rosterVersion}
-                              onLeft={onGroupLeft}
-                              tabs={tabs}
-                            />
-                          ),
-                        }
-                      : {})}
+                    onClose={() => setPlanComposeOpen(false)}
+                    onShared={(row, traceId) => {
+                      setPlanComposeOpen(false);
+                      void thread.addSentRow(row, traceId);
+                      toast.show({ title: PLAN_SHARED_TOAST });
+                    }}
                   />
-                </SavedFromProvider>
-              </ChatScheduleProvider>
-              <ScheduledListSheet
-                open={scheduledListOpen}
-                onClose={() => setScheduledListOpen(false)}
-                rows={scheduledRows}
-                nameOf={scheduleNameOf}
-                {...scheduledActions}
-              />
+                ) : null}
+                {openPlan !== null ? (
+                  <PlanScreen
+                    open={planShown}
+                    planId={openPlan.planId}
+                    senderName={openPlan.senderName}
+                    chatTitle={(shown ?? selected).title}
+                    onClose={() => setPlanShown(false)}
+                  />
+                ) : null}
+              </PlanCardsProvider>
             </SharedCardsProvider>
           ) : (
             <div className="flex h-full flex-col justify-center bg-bg">

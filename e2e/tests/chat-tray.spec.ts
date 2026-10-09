@@ -2,14 +2,14 @@ import { expect, test, type Page } from '@playwright/test';
 import { installHarnessNetwork, type HarnessNetwork } from '../fixtures/harness-routes';
 import { DM_CHANNEL, GROUP_NAME, PEER_NAME, WORKSPACE_ID, ME } from '../fixtures/chat-data';
 
-// The composer tray (D1 to D5): seven tiles in order, Draft faded and inert in
+// The composer tray (D1 to D5): eight tiles in order, Draft faded and inert in
 // a chat with a client and live in an agency-only group, each share picker
 // mode, and the Assets tile sending library files with no upload. The viewer
 // is the workspace owner (agency side); the DM peer is a client and the group
 // is agency only. Runs in both colour schemes (the dark and light projects),
 // on the iPhone viewport and on a laptop. Linux WebKit approximates iOS WebKit.
 
-const TILE_ORDER = ['photos', 'file', 'assets', 'brief', 'post', 'draft', 'schedule'];
+const TILE_ORDER = ['photos', 'file', 'assets', 'brief', 'post', 'draft', 'plan', 'schedule'];
 const LIB_IMAGE = '0190e000-0000-7000-8000-0000000000a1';
 const LIB_IMAGE_VERSION = '0190e100-0000-7000-8000-0000000000a1';
 const LIB_PDF = '0190e000-0000-7000-8000-0000000000a2';
@@ -97,7 +97,7 @@ async function tileIds(page: Page): Promise<string[]> {
 async function trayAndPickers(page: Page, prefix: string): Promise<void> {
   const network = await installHarnessNetwork(page);
 
-  // A DM with a client: seven tiles in order, Draft faded and inert.
+  // A DM with a client: eight tiles in order, Draft faded and inert; Plan live (agency).
   await openChat(page, PEER_NAME);
   await openTray(page);
   expect(await tileIds(page)).toEqual(TILE_ORDER);
@@ -112,6 +112,7 @@ async function trayAndPickers(page: Page, prefix: string): Promise<void> {
     expect(box.width).toBeGreaterThanOrEqual(44);
     expect(box.height).toBeGreaterThanOrEqual(44);
   }
+  await expect(page.locator('[data-tray-tile="plan"]')).toBeEnabled();
   await shot(page, `${prefix}-1-tray-client-dm`);
   await draft.click({ force: true });
   await expect(page.getByRole('dialog', { name: 'Share a draft' })).toHaveCount(0);

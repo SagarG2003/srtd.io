@@ -496,3 +496,17 @@ describe('mark reads and live signal', () => {
     expect(connection.removeEventHandler).toHaveBeenCalledWith(MARKS_EVENT_HANDLER_ID);
   });
 });
+
+describe('plan card rows', () => {
+  it('a bodyless plan message reads its card title, else "Shared plan"', () => {
+    const plan = {
+      body: '',
+      attachments: [],
+      sharedPostIds: [],
+      sharedBriefIds: [],
+      sharedPlanIds: ['plan1'],
+    };
+    expect(markRowText(plan, 'Week of 12 Oct')).toBe('Week of 12 Oct');
+    expect(markRowText(plan, undefined)).toBe('Shared plan');
+  });
+});

@@ -122,6 +122,14 @@ export function ownMessageActions(
   };
 }
 
+/**
+ * A plan card message (chat_plan_share): its menu hides Forward, Save to notes
+ * and Edit; Reply, Copy (the plan's title), Mark as and Delete stay. Pure.
+ */
+export function isPlanMessage(message: Pick<ThreadMessage, 'sharedPlanIds'>): boolean {
+  return (message.sharedPlanIds ?? []).length > 0;
+}
+
 interface MessageActionMenuProps {
   open: boolean;
   onClose: () => void;

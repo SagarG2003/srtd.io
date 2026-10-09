@@ -44,6 +44,7 @@ import {
 import { readHeader, rememberRecorderMime, voiceFileType } from '@/lib/chat/audio-sniff';
 import { voicePeaks } from '@/lib/chat/voice-peaks';
 import { ComposerTray, draftTileEnabled } from '@/components/chat/ComposerTray';
+import { planTileEnabled } from '@/components/chat/plan-card';
 import { AssetPicker } from '@/components/chat/AssetPicker';
 import { PRESIGN_ENABLED, sharedCardPresignCache } from '@/components/chat/PostCard';
 import { Thumbnail } from '@/components/media';
@@ -135,6 +136,11 @@ export interface ComposerProps {
    * and the viewer is agency side; the hash picker leaves drafts out otherwise.
    */
   channelHasClient?: boolean | null | undefined;
+  /**
+   * The tray's Plan tile: opens the New plan screen. The tile is live only for
+   * an agency-side viewer (and when this is set); otherwise faded and disabled.
+   */
+  onOpenPlanCompose?: (() => void) | undefined;
   /**
    * Queues the trimmed text plus any picked files (local attachments that upload
    * in the background) and shared posts and briefs. Synchronous: uploads,
@@ -1064,6 +1070,9 @@ export function Composer(props: ComposerProps): ReactElement {
     viewerSide.ready ? viewerSide.side : 'unknown',
     props.channelHasClient ?? null,
   );
+  const planEnabled =
+    props.onOpenPlanCompose !== undefined &&
+    planTileEnabled(viewerSide.ready ? viewerSide.side : 'unknown');
 
   const formRef = useRef<HTMLFormElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -1924,6 +1933,7 @@ export function Composer(props: ComposerProps): ReactElement {
                   layout={layout}
                   schedule={props.noSchedule !== true}
                   draft={draftEnabled}
+                  plan={planEnabled}
                   onPick={(id) => {
                     if (scheduleBusy) return;
                     switch (id) {
@@ -1944,6 +1954,9 @@ export function Composer(props: ComposerProps): ReactElement {
                         return;
                       case 'draft':
                         if (draftEnabled) openPicker('drafts');
+                        return;
+                      case 'plan':
+                        if (planEnabled) props.onOpenPlanCompose?.();
                         return;
                       case 'schedule':
                         openSchedule();
