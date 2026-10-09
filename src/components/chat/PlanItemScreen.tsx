@@ -9,7 +9,7 @@
 // A comment appends at once and keeps its text on failure. One read per table
 // per open, bounded at 5s; the body paints once it settles. Tokens only.
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { FormEvent, ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { planItemCommentCreate, planItemReview } from '@srtdio/rpc';
@@ -69,6 +69,11 @@ import { useSession } from '@/lib/session-context';
 import { supabase } from '@/lib/supabase';
 import { generateTraceId } from '@/lib/trace';
 import { useWorkspace } from '@/lib/workspace-context';
+
+/** Whether a write started on `itemId` still belongs to the screen as it is now. Pure. */
+export function isLiveItem(live: { itemId: string; open: boolean }, itemId: string): boolean {
+  return live.open && live.itemId === itemId;
+}
 
 /** What the action row offers. Pure. */
 export type ItemActions =
@@ -203,22 +208,42 @@ export function PlanItemScreen(props: {
     setSendError(null);
   }, [props.open, item.id]);
 
+  // A write that lands after the viewer moved on (another item, or closed)
+  // never touches the screen they are on now.
+  const liveRef = useRef({ itemId: item.id, open: props.open });
+  liveRef.current = { itemId: item.id, open: props.open };
+  const stillOn = (itemId: string): boolean => isLiveItem(liveRef.current, itemId);
+  // Another item starts clean: no draft, pending row, error or override carries over.
+  useEffect(() => {
+    setText('');
+    setPending([]);
+    setSendError(null);
+    setActionError(null);
+    setConfirmOpen(false);
+    setOverrides({});
+  }, [item.id]);
+
   const actions = itemActions(side, item, bundle.plan.audience);
   const title = rowTitle(bundle, item);
   const description = item.kind === 'concept' ? (item.description ?? '') : '';
 
   const review = async (status: ReviewStatus): Promise<void> => {
     if (actions.kind !== 'review' || busy) return;
+    const forItem = item.id;
     setBusy(true);
     setActionError(null);
     const traceId = generateTraceId();
     const result = await planItemReview(supabase, {
-      p_item_id: item.id,
+      p_item_id: forItem,
       p_side: actions.side,
       p_status: status,
       p_trace_id: traceId,
     });
     setBusy(false);
+    if (!stillOn(forItem)) {
+      if (result.ok) dispatchPlanChanged(window, bundle.plan.id);
+      return;
+    }
     if (!result.ok) {
       logger.warn('chat: plan item review failed', {
         trace_id: traceId,
@@ -259,6 +284,7 @@ export function PlanItemScreen(props: {
     if (body === '' || sending) return;
     const vis: CommentVisibility = side === 'agency' ? visibility : 'everyone';
     const localId = `local-${Date.now()}`;
+    const forItem = item.id;
     setSending(true);
     setSendError(null);
     setPending((prev) => [
@@ -274,12 +300,16 @@ export function PlanItemScreen(props: {
     ]);
     const traceId = generateTraceId();
     const result = await planItemCommentCreate(supabase, {
-      p_item_id: item.id,
+      p_item_id: forItem,
       p_body: body,
       p_visibility: vis,
       p_trace_id: traceId,
     });
     setSending(false);
+    if (!stillOn(forItem)) {
+      if (result.ok) dispatchPlanChanged(window, bundle.plan.id);
+      return;
+    }
     if (!result.ok) {
       logger.warn('chat: plan comment failed', {
         trace_id: traceId,

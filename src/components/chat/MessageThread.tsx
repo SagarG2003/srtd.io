@@ -158,6 +158,7 @@ import {
   MessageActionMenu,
   isPlanMessage,
   ownMessageActions,
+  selectionForwardable,
   scheduleWindowBoundary,
 } from '@/components/chat/MessageActionMenu';
 import { useCancelUpload, useServerNow } from '@/components/chat/ChatStoreProvider';
@@ -5128,7 +5129,7 @@ export function MessageThread(props: MessageThreadProps): ReactElement {
         count={selected.size}
         block={deleteBlock}
         canDelete={selected.size > 0 && deleteBlock === null}
-        {...(canForwardHere
+        {...(canForwardHere && selectionForwardable(selected, selectable)
           ? { onForward: () => setForwardFor(selectedForForward(selected, selectable)) }
           : {})}
         {...(selectionStar !== null ? { star: selectionStar } : {})}

@@ -11,11 +11,16 @@ vi.mock('agora-chat', () => ({
 
 import { renderToStaticMarkup } from 'react-dom/server';
 import { PlanCardBody, type PlanCardView } from '@/components/chat/PlanCard';
-import { actionLabels, itemActions, statusRows } from '@/components/chat/PlanItemScreen';
+import {
+  actionLabels,
+  isLiveItem,
+  itemActions,
+  statusRows,
+} from '@/components/chat/PlanItemScreen';
 import { postChangedId } from '@/components/chat/PlanCardsProvider';
 import { planHeaderTitle } from '@/components/chat/PlanScreen';
-import { PlanSharedNotice } from '@/components/chat/PlanComposeScreen';
-import { isPlanMessage } from '@/components/chat/MessageActionMenu';
+import { PlanSharedNotice, noticeShown } from '@/components/chat/PlanComposeScreen';
+import { isPlanMessage, selectionForwardable } from '@/components/chat/MessageActionMenu';
 import { threadCardIds } from '@/components/chat/MessageThread';
 import { PLAN_CHANGED_EVENT, dispatchPlanChanged, planChangedId } from '@/lib/chat/plans';
 import type { PlanBundle } from '@/lib/chat/plans';
@@ -236,5 +241,43 @@ describe('Plan shared notice (F6)', () => {
     expect(html).not.toContain('translate');
     expect(html).toContain('data-plan-shared-notice="hidden"');
     expect(html).not.toContain('Plan shared');
+  });
+});
+
+describe('round 3 fixes', () => {
+  const m = (id: string, plan: boolean) => ({ id, ...(plan ? { sharedPlanIds: ['p1'] } : {}) });
+
+  it('MAJ-1: a selection holding a plan card cannot be forwarded', () => {
+    const messages = [m('a', false), m('b', true), m('c', false)];
+    expect(selectionForwardable(new Set(['a', 'c']), messages)).toBe(true);
+    expect(selectionForwardable(new Set(['a', 'b']), messages)).toBe(false);
+    expect(selectionForwardable(new Set(['b']), messages)).toBe(false);
+    const src = readFileSync(
+      fileURLToPath(new URL('./MessageThread.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(src).toContain('canForwardHere && selectionForwardable(selected, selectable)');
+  });
+
+  it('MAJ-2: the notice hides at once in another chat (count 0) and after its time', () => {
+    expect(noticeShown(1, 0)).toBe(true);
+    expect(noticeShown(0, 0)).toBe(false);
+    // Switched chat before the timer ran out: the count reads 0, hidden.
+    expect(noticeShown(0, 0)).toBe(false);
+    // Time ran out for share 1; share 2 shows again.
+    expect(noticeShown(1, 1)).toBe(false);
+    expect(noticeShown(2, 1)).toBe(true);
+    const src = readFileSync(
+      fileURLToPath(new URL('./ChatConnected.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(src).toContain('planShares.channelId === selectedChannelId');
+    expect(src).not.toContain('setPlanShares(0)');
+  });
+
+  it('MIN-1: a late write on another item (or a closed screen) is dropped', () => {
+    expect(isLiveItem({ itemId: 'i1', open: true }, 'i1')).toBe(true);
+    expect(isLiveItem({ itemId: 'i2', open: true }, 'i1')).toBe(false);
+    expect(isLiveItem({ itemId: 'i1', open: false }, 'i1')).toBe(false);
   });
 });

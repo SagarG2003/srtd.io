@@ -547,6 +547,11 @@ export function PlanComposeScreen(props: {
   );
 }
 
+/** Whether the notice shows: a share is counted for this chat and its time has not run out. Pure. */
+export function noticeShown(count: number, expired: number): boolean {
+  return count > 0 && count !== expired;
+}
+
 /** How long the "Plan shared" notice stays. */
 export const PLAN_SHARED_NOTICE_MS = 4_000;
 
@@ -562,7 +567,9 @@ export function PlanSharedNotice(props: {
   text: string;
 }): ReactElement | null {
   const ref = useRef<HTMLDivElement>(null);
-  const [shown, setShown] = useState(false);
+  // The last count whose time ran out: visibility is derived, so a count of 0
+  // (another chat) hides the notice at once, with no timer left to clear it.
+  const [expired, setExpired] = useState(0);
   const [bottom, setBottom] = useState<number | null>(null);
   const count = props.shareCount;
   useEffect(() => {
@@ -572,10 +579,10 @@ export function PlanSharedNotice(props: {
     if (host !== null && form !== null) {
       setBottom(host.getBoundingClientRect().bottom - form.getBoundingClientRect().top + 8);
     }
-    setShown(true);
-    const timer = setTimeout(() => setShown(false), PLAN_SHARED_NOTICE_MS);
+    const timer = setTimeout(() => setExpired(count), PLAN_SHARED_NOTICE_MS);
     return () => clearTimeout(timer);
   }, [count]);
+  const shown = noticeShown(count, expired);
   return (
     <div
       ref={ref}

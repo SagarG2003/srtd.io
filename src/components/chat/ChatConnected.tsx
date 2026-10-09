@@ -1429,8 +1429,11 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     setPlanShown(false);
   }, [selectedChannelId]);
   // "Plan shared" shows above the composer (never over a plan page header).
-  const [planShares, setPlanShares] = useState(0);
-  useEffect(() => setPlanShares(0), [selectedChannelId]);
+  // A monotonic count tagged with its chat: another chat reads 0 (hidden).
+  const [planShares, setPlanShares] = useState<{ channelId: string | null; count: number }>({
+    channelId: null,
+    count: 0,
+  });
   const onOpenPlan = useCallback((request: OpenPlanRequest) => {
     setOpenPlan(request);
     setPlanShown(true);
@@ -1899,7 +1902,10 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                       // A share from a form since closed only lands its row.
                       if (stale) return;
                       setPlanComposeOpen(false);
-                      setPlanShares((n) => n + 1);
+                      setPlanShares((prev) => ({
+                        channelId: row.channel_id,
+                        count: prev.count + 1,
+                      }));
                     }}
                   />
                 ) : null}
@@ -1919,7 +1925,14 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               <EmptyState icon={<IconChat size={22} />} title="Select a conversation" />
             </div>
           )}
-          <PlanSharedNotice shareCount={planShares} text={PLAN_SHARED_TOAST} />
+          <PlanSharedNotice
+            shareCount={
+              planShares.channelId !== null && planShares.channelId === selectedChannelId
+                ? planShares.count
+                : 0
+            }
+            text={PLAN_SHARED_TOAST}
+          />
         </div>
       ) : null}
 
