@@ -132,6 +132,8 @@ The approval unit. stage is the only workflow state. No publish_status.
 
 Stage CHECK: draft, review, approved, parked, rejected. No publish/schedule/platform columns. Indexes: (workspace_id, stage, created_at desc), (workspace_id, target_date) where target_date not null, brief_id partial, owner partial. All where deleted_at null.
 
+posts_select_member: active member, not deleted; drafts only for owner/admin/agency. comments and asset_attachments on posts inherit this via EXISTS on posts.
+
 ### post_versions
 
 Immutable edit history. No deleted_at. PK id. Fields: post_id FK, workspace_id FK, version_number, snapshot jsonb, created_by FK users.id SET NULL, legacy_author_name (text, nullable: frozen original v1 author/creator name shown when the live created_by is null, used by the detail pages with an "(ex-member)" fallback), created_at. Unique (post_id, version_number).
