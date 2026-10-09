@@ -31,6 +31,7 @@ import {
   type StatusPill,
 } from '@/components/chat/plan-card';
 import { PlanItemScreen } from '@/components/chat/PlanItemScreen';
+import { usePlanCards } from '@/components/chat/PlanCardsProvider';
 import { LATE_READ_GRACE_MS, READ_TIMEOUT_MS, withLateRead } from '@/lib/chat-reads';
 import {
   PLAN_CHANGED_EVENT,
@@ -332,7 +333,10 @@ export function PlanScreen(props: {
 
   const bundle = read.status === 'ready' ? read.data.bundle : null;
   const counts = read.status === 'ready' ? read.data.commentCounts : {};
-  const title = bundle?.plan.title ?? (read.status === 'ready' ? PLAN_NOT_AVAILABLE : 'Plan');
+  // First paint: the thread's card cache already holds the title.
+  const planCards = usePlanCards();
+  const cachedTitle = planCards?.cache.snapshot([planId]).bundles.get(planId)?.plan.title ?? null;
+  const title = planHeaderTitle(read.status, bundle?.plan.title ?? null, cachedTitle);
   const subtitle =
     side !== 'unknown'
       ? planSharedLine(side, side === 'agency' ? props.chatTitle : props.senderName)
@@ -445,6 +449,20 @@ export function PlanScreen(props: {
       />
     </>
   );
+}
+
+/**
+ * The Plan screen's header: the read's title once ready (or "Plan not
+ * available"), else the cached card's title, else "Plan" when nothing is
+ * cached. Pure.
+ */
+export function planHeaderTitle(
+  status: ScreenRead<unknown>['status'],
+  readTitle: string | null,
+  cachedTitle: string | null,
+): string {
+  if (status === 'ready') return readTitle ?? PLAN_NOT_AVAILABLE;
+  return cachedTitle ?? 'Plan';
 }
 
 /** A row's title: a concept's own, or its post's. Pure. */

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   canForwardPlan,
@@ -5,6 +7,7 @@ import {
   defaultPlanRange,
   draftProblem,
   draftsButtonShown,
+  teamPlanBlocked,
   itemKindLabel,
   itemPills,
   planChips,
@@ -184,5 +187,25 @@ describe('New plan defaults and checks', () => {
     expect(draftsButtonShown('team', true)).toBe(false);
     expect(draftsButtonShown('team', null)).toBe(false);
     expect(draftsButtonShown('client', false)).toBe(false);
+  });
+});
+
+describe('team only plan gating (F1)', () => {
+  it('blocks a Team only plan unless the chat is known to have no client', () => {
+    expect(teamPlanBlocked('team', true)).toBe(true);
+    expect(teamPlanBlocked('team', null)).toBe(true);
+    expect(teamPlanBlocked('team', false)).toBe(false);
+    expect(teamPlanBlocked('client', true)).toBe(false);
+    expect(teamPlanBlocked('client', null)).toBe(false);
+  });
+
+  it('the screen disables Share, shows the line and never runs the share when blocked', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('./PlanComposeScreen.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(src).toContain('if (busy || problem !== null || teamBlocked) return;');
+    expect(src).toContain('disabled={busy || problem !== null || teamBlocked}');
+    expect(src).toContain('{TEAM_PLAN_CLIENT_CHAT}');
   });
 });

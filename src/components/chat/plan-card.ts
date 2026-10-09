@@ -205,6 +205,14 @@ export function planTileEnabled(side: ViewerSide): boolean {
   return side === 'agency';
 }
 
+/**
+ * Whether a Team only plan is blocked here: the chat has a client, or its
+ * members are still unknown (never shared on a guess). Pure.
+ */
+export function teamPlanBlocked(audience: PlanAudience, hasClient: boolean | null): boolean {
+  return audience === 'team' && hasClient !== false;
+}
+
 /** Whether "Add drafts" shows: a team plan in a chat known to have no client. Pure. */
 export function draftsButtonShown(audience: PlanAudience, hasClient: boolean | null): boolean {
   return audience === 'team' && hasClient === false;

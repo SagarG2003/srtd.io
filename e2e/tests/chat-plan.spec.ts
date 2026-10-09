@@ -149,7 +149,17 @@ async function agencyFlow(page: Page, prefix: string): Promise<void> {
   // Share in chat: the screen closes, the card lands, the toast says so.
   await compose.locator('[data-plan-share]').click();
   await expect(compose).toBeHidden();
-  await expect(page.getByText('Plan shared')).toBeVisible();
+  // "Plan shared" sits just above the composer (never over a page header).
+  const notice = page.locator('[data-plan-shared-notice="shown"]');
+  await expect(notice).toHaveText('Plan shared');
+  const noticeBox = await notice.locator('span').boundingBox();
+  const composerBox = await page.locator('form:has(textarea)').first().boundingBox();
+  expect(noticeBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  if (noticeBox !== null && composerBox !== null) {
+    expect(noticeBox.y + noticeBox.height).toBeLessThanOrEqual(composerBox.y);
+    expect(noticeBox.y).toBeGreaterThan(80);
+  }
   const tables = network.world.tables;
   expect(tables.plans).toHaveLength(1);
   const planId = String(tables.plans?.[0]?.id);
@@ -366,14 +376,24 @@ async function teamAndHidden(page: Page, prefix: string): Promise<void> {
   await page.locator('[data-tray-tile="plan"]').click();
   await expect(compose).toBeVisible();
   await compose.locator('[data-plan-title]').fill('Internal week');
+  await expect(compose.locator('[data-plan-share]')).toBeEnabled();
   await compose.locator('[data-plan-audience="team"]').click();
-  await compose.locator('[data-plan-share]').click();
-  await expect(compose.locator('[data-plan-share-error]')).toHaveText(
+  // Team only in a chat with a client: Share is off and says why; nothing is written.
+  await expect(compose.locator('[data-plan-team-blocked]')).toHaveText(
     "Team only plans can't be shared in chats with clients.",
   );
+  await expect(compose.locator('[data-plan-share]')).toBeDisabled();
+  const plansBefore = (network.world.tables.plans ?? []).length;
+  const messagesBefore = (network.world.tables.chat_messages ?? []).length;
+  await compose.locator('[data-plan-share]').click({ force: true });
+  await page.waitForTimeout(300);
+  // No plan_create (and no share): the fixture tables are unchanged.
+  expect(network.world.tables.plans ?? []).toHaveLength(plansBefore);
+  expect(network.world.tables.chat_messages ?? []).toHaveLength(messagesBefore);
+  await expect(compose.locator('[data-plan-share-error]')).toHaveCount(0);
   await expect(compose).toBeVisible();
   await page.waitForTimeout(300);
-  await shot(page, `${prefix}-03-team-plan-refused`);
+  await shot(page, `${prefix}-03-team-plan-blocked`);
   expectClean(network);
 }
 
@@ -390,7 +410,7 @@ test.describe('phone', () => {
     await clientFlow(page, 'plan-phone-client');
   });
 
-  test('team only and not available cards; team plan refused in a client chat', async ({
+  test('team only and not available cards; team plan blocked in a client chat', async ({
     page,
   }) => {
     await teamAndHidden(page, 'plan-phone-team');

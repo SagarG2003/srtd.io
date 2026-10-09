@@ -13,6 +13,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { PlanCardBody, type PlanCardView } from '@/components/chat/PlanCard';
 import { actionLabels, itemActions, statusRows } from '@/components/chat/PlanItemScreen';
 import { postChangedId } from '@/components/chat/PlanCardsProvider';
+import { planHeaderTitle } from '@/components/chat/PlanScreen';
+import { PlanSharedNotice } from '@/components/chat/PlanComposeScreen';
 import { isPlanMessage } from '@/components/chat/MessageActionMenu';
 import { threadCardIds } from '@/components/chat/MessageThread';
 import { PLAN_CHANGED_EVENT, dispatchPlanChanged, planChangedId } from '@/lib/chat/plans';
@@ -212,5 +214,27 @@ describe('plan message plumbing', () => {
     expect(seen).toEqual(['plan1']);
     expect(postChangedId(new CustomEvent('x', { detail: { postId: 'post1' } }))).toBe('post1');
     expect(postChangedId(new CustomEvent('x', { detail: {} }))).toBeNull();
+  });
+});
+
+describe('Plan screen header (F3)', () => {
+  it('first paint uses the cached title; "Plan" only when nothing is cached', () => {
+    expect(planHeaderTitle('loading', null, 'Week of 12 Oct')).toBe('Week of 12 Oct');
+    expect(planHeaderTitle('loading', null, null)).toBe('Plan');
+    expect(planHeaderTitle('error', null, 'Week of 12 Oct')).toBe('Week of 12 Oct');
+    expect(planHeaderTitle('ready', 'Renamed', 'Week of 12 Oct')).toBe('Renamed');
+    expect(planHeaderTitle('ready', null, 'Week of 12 Oct')).toBe('Plan not available');
+  });
+});
+
+describe('Plan shared notice (F6)', () => {
+  it('sits in the chat (absolute, below plan pages), opacity only, hidden until a share', () => {
+    const html = renderToStaticMarkup(<PlanSharedNotice shareCount={0} text="Plan shared" />);
+    expect(html).toContain('absolute');
+    expect(html).toContain('z-30');
+    expect(html).not.toContain('fixed');
+    expect(html).not.toContain('translate');
+    expect(html).toContain('data-plan-shared-notice="hidden"');
+    expect(html).not.toContain('Plan shared');
   });
 });

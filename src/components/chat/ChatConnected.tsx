@@ -75,7 +75,7 @@ import {
 import { newMessageId } from '@/lib/chat/message-id';
 import { SharedCardsProvider } from '@/components/chat/PostCard';
 import { PlanCardsProvider, type OpenPlanRequest } from '@/components/chat/PlanCardsProvider';
-import { PlanComposeScreen } from '@/components/chat/PlanComposeScreen';
+import { PlanComposeScreen, PlanSharedNotice } from '@/components/chat/PlanComposeScreen';
 import { PlanScreen } from '@/components/chat/PlanScreen';
 import { PLAN_SHARED_TOAST } from '@/components/chat/plan-card';
 import { useChatLayout } from '@/components/chat/chat-type';
@@ -1428,6 +1428,9 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
     setPlanComposeOpen(false);
     setPlanShown(false);
   }, [selectedChannelId]);
+  // "Plan shared" shows above the composer (never over a plan page header).
+  const [planShares, setPlanShares] = useState(0);
+  useEffect(() => setPlanShares(0), [selectedChannelId]);
   const onOpenPlan = useCallback((request: OpenPlanRequest) => {
     setOpenPlan(request);
     setPlanShown(true);
@@ -1749,7 +1752,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
         </div>
       ) : null}
       {showThread ? (
-        <div className="h-full min-w-0 flex-1">
+        <div className="relative h-full min-w-0 flex-1">
           {opening !== null ? (
             threadOpeningSkeleton(layout, isDesktop ? undefined : onBackFromOpening)
           ) : selected !== null ? (
@@ -1891,10 +1894,12 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
                     timeZone={timeZone}
                     channelHasClient={hasClient}
                     onClose={() => setPlanComposeOpen(false)}
-                    onShared={(row, traceId) => {
-                      setPlanComposeOpen(false);
+                    onShared={(row, traceId, stale) => {
                       void thread.addSentRow(row, traceId);
-                      toast.show({ title: PLAN_SHARED_TOAST });
+                      // A share from a form since closed only lands its row.
+                      if (stale) return;
+                      setPlanComposeOpen(false);
+                      setPlanShares((n) => n + 1);
                     }}
                   />
                 ) : null}
@@ -1914,6 +1919,7 @@ export function ChatConnected(props: ChatConnectedProps): ReactElement {
               <EmptyState icon={<IconChat size={22} />} title="Select a conversation" />
             </div>
           )}
+          <PlanSharedNotice shareCount={planShares} text={PLAN_SHARED_TOAST} />
         </div>
       ) : null}
 

@@ -32,16 +32,20 @@ import {
   draftProblem,
   draftsButtonShown,
   stageLabel,
+  teamPlanBlocked,
 } from '@/components/chat/plan-card';
 import type { LibraryAsset } from '@/lib/chat/asset-picker';
 import { newMessageId } from '@/lib/chat/message-id';
 import {
   PLAN_SHARE_FAILED,
+  TEAM_PLAN_CLIENT_CHAT,
+  createShareEpoch,
   initialShareProgress,
   runPlanShare,
   type DraftConcept,
   type PlanAudience,
   type PlanDraft,
+  type ShareEpoch,
   type ShareProgress,
 } from '@/lib/chat/plans';
 import type { ChatMessageRow } from '@/lib/chat/thread';
@@ -71,7 +75,12 @@ export function PlanComposeScreen(props: {
   channelHasClient: boolean | null;
   onClose: () => void;
   /** The share landed: the recorded message row and the trace it carried. */
-  onShared: (row: ChatMessageRow, traceId: string) => void;
+  /**
+   * The share landed: the recorded message row and the trace it carried.
+   * `stale` is true when the screen was closed (or reopened) meanwhile: the
+   * row still goes into the thread, but the current form is left alone.
+   */
+  onShared: (row: ChatMessageRow, traceId: string, stale: boolean) => void;
 }): ReactElement | null {
   const [title, setTitle] = useState('');
   const [range, setRange] = useState(() => defaultPlanRange(new Date(), props.timeZone));
@@ -97,8 +106,17 @@ export function PlanComposeScreen(props: {
     };
   }, []);
 
-  // Each open starts a fresh plan (a closed screen keeps nothing).
+  // Every open and close starts a new epoch: a share still running from an
+  // earlier form never lands its progress or error on the current one.
   const open = props.open;
+  const epochRef = useRef<ShareEpoch | null>(null);
+  epochRef.current ??= createShareEpoch();
+  const epoch = epochRef.current;
+  useEffect(() => {
+    epoch.next();
+  }, [open, epoch]);
+
+  // Each open starts a fresh plan (a closed screen keeps nothing).
   const timeZone = props.timeZone;
   useEffect(() => {
     if (!open) return;
@@ -122,6 +140,10 @@ export function PlanComposeScreen(props: {
   const locked = progress.planId !== null || busy;
   const problem = draftProblem({ title, startsOn: range.startsOn, endsOn: range.endsOn });
   const showDrafts = draftsButtonShown(audience, props.channelHasClient);
+  // A Team only plan is never shared into a chat that has (or may have) a
+  // client: Share stays off and nothing is written. The server check stays as
+  // the fallback.
+  const teamBlocked = teamPlanBlocked(audience, props.channelHasClient);
   // A client plan holds no drafts: switching drops any picked ones.
   const shownPosts = useMemo(
     () => (audience === 'client' ? posts.filter((p) => p.stage !== 'draft') : posts),
@@ -130,7 +152,8 @@ export function PlanComposeScreen(props: {
 
   const share = async (): Promise<void> => {
     setTriedShare(true);
-    if (busy || problem !== null) return;
+    if (busy || problem !== null || teamBlocked) return;
+    const token = epoch.current();
     setBusy(true);
     setError(null);
     const traceId = traceRef.current ?? generateTraceId();
@@ -189,7 +212,11 @@ export function PlanComposeScreen(props: {
       progress,
       traceId,
     );
-    if (!mounted.current) return;
+    if (!mounted.current || !epoch.isCurrent(token)) {
+      // The form this share started from is gone: only the landed row counts.
+      if (result.ok && row !== null) props.onShared(row, traceId, true);
+      return;
+    }
     setBusy(false);
     setProgress(result.progress);
     if (!result.ok) {
@@ -202,7 +229,7 @@ export function PlanComposeScreen(props: {
       setError(result.copy);
       return;
     }
-    if (row !== null) props.onShared(row, traceId);
+    if (row !== null) props.onShared(row, traceId, false);
   };
 
   const addConcept = (): void => {
@@ -225,7 +252,7 @@ export function PlanComposeScreen(props: {
         variant="primary"
         data-plan-share=""
         className="min-h-[50px] w-full"
-        disabled={busy || problem !== null}
+        disabled={busy || problem !== null || teamBlocked}
         onClick={() => void share()}
       >
         {busy ? 'Sharing…' : error === PLAN_SHARE_FAILED ? 'Retry' : 'Share in chat'}
@@ -318,6 +345,15 @@ export function PlanComposeScreen(props: {
               ))}
             </div>
             <p className="text-[13px] leading-[18px] text-fg-3">{AUDIENCE_HINTS[audience]}</p>
+            {teamBlocked ? (
+              <p
+                role="status"
+                data-plan-team-blocked=""
+                className="rounded-md border border-warn bg-warn-soft px-3 py-2 text-[13px] leading-[18px] text-warn"
+              >
+                {TEAM_PLAN_CLIENT_CHAT}
+              </p>
+            ) : null}
           </div>
 
           <section className="flex flex-col gap-2" aria-label="Concepts">
@@ -508,5 +544,55 @@ export function PlanComposeScreen(props: {
         }}
       />
     </>
+  );
+}
+
+/** How long the "Plan shared" notice stays. */
+export const PLAN_SHARED_NOTICE_MS = 4_000;
+
+/**
+ * The "Plan shared" notice, drawn inside the chat just above its composer (so
+ * it never covers a plan page header, which sits above the chat). It measures
+ * the composer form in its own chat surface; opacity motion only; the timer
+ * and frame are cleared on unmount and on a new notice.
+ */
+export function PlanSharedNotice(props: {
+  /** Bumped per share; 0 shows nothing. */
+  shareCount: number;
+  text: string;
+}): ReactElement | null {
+  const ref = useRef<HTMLDivElement>(null);
+  const [shown, setShown] = useState(false);
+  const [bottom, setBottom] = useState<number | null>(null);
+  const count = props.shareCount;
+  useEffect(() => {
+    if (count === 0) return;
+    const host = ref.current?.parentElement ?? null;
+    const form = host?.querySelector('form:has(textarea)') ?? null;
+    if (host !== null && form !== null) {
+      setBottom(host.getBoundingClientRect().bottom - form.getBoundingClientRect().top + 8);
+    }
+    setShown(true);
+    const timer = setTimeout(() => setShown(false), PLAN_SHARED_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [count]);
+  return (
+    <div
+      ref={ref}
+      role="status"
+      aria-live="polite"
+      data-plan-shared-notice={shown ? 'shown' : 'hidden'}
+      style={{ bottom: bottom ?? 96 }}
+      className={cn(
+        'pointer-events-none absolute inset-x-0 z-30 flex justify-center px-3 transition-opacity duration-base motion-reduce:transition-none',
+        shown ? 'opacity-100' : 'opacity-0',
+      )}
+    >
+      {shown ? (
+        <span className="rounded-lg border border-border-strong bg-panel px-3.5 py-2.5 text-sm font-medium text-fg shadow-lg">
+          {props.text}
+        </span>
+      ) : null}
+    </div>
   );
 }

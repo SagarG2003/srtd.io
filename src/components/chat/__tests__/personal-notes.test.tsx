@@ -367,7 +367,10 @@ describe('menu matrix', () => {
       'draft',
       'plan',
     ]);
-    // Notes never shares a plan: the tile stays faded there.
+    // Notes never shares a plan: the tile stays faded there and says why.
+    expect(trayTiles('touch', { schedule: false }).find((t) => t.id === 'plan')?.ariaLabel).toBe(
+      'Plan, not available in Personal notes',
+    );
     expect(trayTiles('touch', { schedule: false }).find((t) => t.id === 'plan')?.disabled).toBe(
       true,
     );

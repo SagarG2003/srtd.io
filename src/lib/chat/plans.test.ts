@@ -6,6 +6,8 @@ import {
   PLAN_SHARE_FAILED,
   TEAM_PLAN_CLIENT_CHAT,
   assembleBundles,
+  createShareEpoch,
+  readItemFiles,
   createPlanCardCache,
   initialShareProgress,
   planChunks,
@@ -427,5 +429,45 @@ describe('sharePlanToChannel (Forward)', () => {
     );
     expect(result).toMatchObject({ ok: false, reason: 'record', copy: PLAN_SHARE_FAILED });
     expect(publish).not.toHaveBeenCalled();
+  });
+});
+
+describe('share epoch (F2)', () => {
+  it('a share started before a close or reopen is no longer current', () => {
+    const epoch = createShareEpoch();
+    epoch.next(); // open
+    const token = epoch.current();
+    expect(epoch.isCurrent(token)).toBe(true);
+    epoch.next(); // close
+    epoch.next(); // reopen
+    expect(epoch.isCurrent(token)).toBe(false);
+    expect(epoch.isCurrent(epoch.current())).toBe(true);
+  });
+});
+
+describe('readItemFiles (F5)', () => {
+  it('filters plan_item attachments on entity and deleted_at is null', async () => {
+    const calls: Array<[string, unknown[]]> = [];
+    const q: Record<string, unknown> = {};
+    for (const m of ['select', 'in', 'eq', 'is', 'order', 'abortSignal']) {
+      q[m] = (...args: unknown[]) => {
+        calls.push([m, args]);
+        return q;
+      };
+    }
+    q.then = (resolve: (v: unknown) => unknown) =>
+      Promise.resolve({
+        data: [
+          { asset_version_id: 'v2', position: 1 },
+          { asset_version_id: 'v1', position: 0 },
+        ],
+        error: null,
+      }).then(resolve);
+    const client = { from: () => q } as unknown as Client;
+    const result = await readItemFiles(client, 'item1');
+    expect(result.ok && result.data).toEqual(['v1', 'v2']);
+    expect(calls).toContainEqual(['eq', ['entity_type', 'plan_item']]);
+    expect(calls).toContainEqual(['is', ['deleted_at', null]]);
+    expect(calls).toContainEqual(['in', ['entity_id', ['item1']]]);
   });
 });

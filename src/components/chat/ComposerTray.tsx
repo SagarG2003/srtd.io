@@ -61,6 +61,9 @@ export const DRAFT_UNAVAILABLE_LABEL = 'Draft, not available in chats with clien
 /** The disabled Plan tile's accessible name. */
 export const PLAN_UNAVAILABLE_LABEL = 'Plan, only the agency team can share a plan';
 
+/** The Plan tile's accessible name in Personal notes (a plan is shared into a chat). */
+export const PLAN_NOTES_LABEL = 'Plan, not available in Personal notes';
+
 /**
  * Whether the open chat has a client among its other active members: null
  * while the member list is loading or failed (unknown), never true or false on
@@ -114,7 +117,8 @@ export function trayTiles(
           label: 'Plan',
           Icon: IconPlan,
           disabled: true,
-          ariaLabel: PLAN_UNAVAILABLE_LABEL,
+          // No Schedule means Personal notes, where a plan is never shared.
+          ariaLabel: opts.schedule === false ? PLAN_NOTES_LABEL : PLAN_UNAVAILABLE_LABEL,
         },
   ];
   if (opts.schedule !== false) {

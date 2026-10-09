@@ -337,7 +337,11 @@ export async function readItemFiles(
       'entity_id',
       [itemId],
       signal,
-      (q) => q.eq('entity_type', 'plan_item').order('position', { ascending: true }),
+      (q) =>
+        q
+          .eq('entity_type', 'plan_item')
+          .is('deleted_at', null)
+          .order('position', { ascending: true }),
     );
     if (!rows.ok) return rows;
     return {
@@ -604,6 +608,29 @@ export interface ShareProgress {
   /** The chat message id, minted once per New plan screen. */
   messageId: string;
   shared: boolean;
+}
+
+/**
+ * A share's epoch: bumped on every open and close of the New plan screen. A
+ * share captures the epoch it started in and drops its result when it is no
+ * longer current (a reopened form never takes an old share's progress).
+ */
+export interface ShareEpoch {
+  next: () => number;
+  current: () => number;
+  isCurrent: (token: number) => boolean;
+}
+
+export function createShareEpoch(): ShareEpoch {
+  let value = 0;
+  return {
+    next: () => {
+      value += 1;
+      return value;
+    },
+    current: () => value,
+    isCurrent: (token) => token === value,
+  };
 }
 
 export function initialShareProgress(messageId: string): ShareProgress {
