@@ -10,12 +10,14 @@ import { fileURLToPath } from 'node:url';
 import {
   ComposerTray,
   DRAFT_UNAVAILABLE_LABEL,
+  PLAN_UNAVAILABLE_LABEL,
   TrayGrid,
   channelHasClient,
   draftTileEnabled,
   trayTiles,
 } from '@/components/chat/ComposerTray';
 import { ComposerEmoji, showsEmojiButton } from '@/components/chat/ComposerEmoji';
+import { planTileEnabled } from '@/components/chat/plan-card';
 import {
   LatestButton,
   ReadByLine,
@@ -32,10 +34,11 @@ describe('T8 tray and emoji button by pointer', () => {
   it('the D1 tiles in order on touch and laptop, Schedule last', () => {
     const laptop = chatLayout({ finePointer: true, widthPx: 1280 });
     const touch = chatLayout({ finePointer: false, widthPx: 390 });
-    const ids = ['photos', 'file', 'assets', 'brief', 'post', 'draft', 'schedule'];
+    const ids = ['photos', 'file', 'assets', 'brief', 'post', 'draft', 'plan', 'schedule'];
     expect(trayTiles(laptop).map((t) => t.id)).toEqual(ids);
     expect(trayTiles(touch).map((t) => t.id)).toEqual(ids);
     expect(trayTiles(touch, { draft: true }).map((t) => t.id)).toEqual(ids);
+    expect(trayTiles(touch, { plan: true }).map((t) => t.id)).toEqual(ids);
     expect(trayTiles(touch).map((t) => t.label)).toEqual([
       'Photos',
       'File',
@@ -43,8 +46,24 @@ describe('T8 tray and emoji button by pointer', () => {
       'Brief',
       'Post',
       'Draft',
+      'Plan',
       'Schedule',
     ]);
+  });
+
+  it('Plan is disabled unless the tray is told it is live (agency side only)', () => {
+    const planOf = (opts: { plan?: boolean }) =>
+      trayTiles('touch', opts).find((t) => t.id === 'plan');
+    expect(planOf({})).toMatchObject({ disabled: true, ariaLabel: PLAN_UNAVAILABLE_LABEL });
+    expect(planOf({ plan: false })).toMatchObject({ disabled: true });
+    expect(planOf({ plan: true })?.disabled).toBeUndefined();
+    // Client viewer and an unknown side (first paint) keep it off; agency turns it on.
+    expect(planTileEnabled('client')).toBe(false);
+    expect(planTileEnabled('unknown')).toBe(false);
+    expect(planTileEnabled('agency')).toBe(true);
+    expect(planOf({ plan: planTileEnabled('client') })?.disabled).toBe(true);
+    expect(planOf({ plan: planTileEnabled('unknown') })?.disabled).toBe(true);
+    expect(planOf({ plan: planTileEnabled('agency') })?.disabled).toBeUndefined();
   });
 
   it('Draft is disabled unless the tray is told it is live', () => {
@@ -55,6 +74,11 @@ describe('T8 tray and emoji button by pointer', () => {
     expect(draftOf({ draft: true })?.disabled).toBeUndefined();
     expect(
       trayTiles('touch')
+        .filter((t) => t.disabled === true)
+        .map((t) => t.id),
+    ).toEqual(['draft', 'plan']);
+    expect(
+      trayTiles('touch', { plan: true })
         .filter((t) => t.disabled === true)
         .map((t) => t.id),
     ).toEqual(['draft']);
@@ -80,14 +104,18 @@ describe('T8 tray and emoji button by pointer', () => {
     expect(channelHasClient([{ role: 'agency' }, { role: 'client' }])).toBe(true);
   });
 
-  it('the grid: 4 columns, every tile at least 44x44, a disabled Draft faded and inert', () => {
+  it('the grid: 4 columns (two rows of 4), every tile at least 44x44, a disabled Draft faded and inert', () => {
     const picks: string[] = [];
     const html = renderToStaticMarkup(
       <TrayGrid tiles={trayTiles('touch')} onPick={(id) => picks.push(id)} />,
     );
     expect(html).toContain('grid-cols-4');
-    expect(html.match(/data-tray-tile=/g)).toHaveLength(7);
-    expect(html.match(/min-h-\[72px\] min-w-\[44px\]/g)).toHaveLength(7);
+    expect(html.match(/data-tray-tile=/g)).toHaveLength(8);
+    expect(html.match(/min-h-\[72px\] min-w-\[44px\]/g)).toHaveLength(8);
+    const plan = /<button[^>]*data-tray-tile="plan"[^>]*>/.exec(html)?.[0] ?? '';
+    expect(plan).toContain('disabled=""');
+    expect(plan).toContain('aria-disabled="true"');
+    expect(plan).toContain(`aria-label="${PLAN_UNAVAILABLE_LABEL}"`);
     const draft = /<button[^>]*data-tray-tile="draft"[^>]*>/.exec(html)?.[0] ?? '';
     expect(draft).toContain('disabled=""');
     expect(draft).toContain('aria-disabled="true"');
@@ -104,16 +132,20 @@ describe('T8 tray and emoji button by pointer', () => {
     const buttons = (el.props as { children: Array<{ props: { onClick: () => void } }> }).children;
     buttons[5]?.props.onClick();
     expect(picks).toEqual([]);
+    buttons[6]?.props.onClick();
+    expect(picks).toEqual([]);
     buttons[4]?.props.onClick();
     expect(picks).toEqual(['post']);
   });
 
   it('the composer maps every tile id explicitly (no fallthrough to the post picker)', () => {
     const src = readFileSync(fileURLToPath(new URL('../Composer.tsx', import.meta.url)), 'utf8');
-    for (const id of ['photos', 'file', 'assets', 'brief', 'post', 'draft', 'schedule']) {
+    for (const id of ['photos', 'file', 'assets', 'brief', 'post', 'draft', 'plan', 'schedule']) {
       expect(src).toContain(`case '${id}':`);
     }
     expect(src).toContain("if (draftEnabled) openPicker('drafts');");
+    expect(src).toContain('if (planEnabled) props.onOpenPlanCompose?.();');
+    expect(src).toContain('plan={planEnabled}');
     // Library picks count as attachments everywhere the draft is weighed:
     // Send vs mic, Send enabled, and the schedule preview.
     expect(src).toContain('attachmentCount: pending.length + library.length,');

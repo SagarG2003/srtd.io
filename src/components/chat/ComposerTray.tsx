@@ -2,14 +2,14 @@
 // is a 44x44 circle on the panel; while the tray is open it turns accent and
 // its plus rotates 45deg into an X (rotate only). The tray sits above the
 // composer: a 4-column grid of tiles (Photos, File, Assets, Brief, Post, Draft,
-// Schedule on touch and laptop alike) that slides on translateY and fades,
+// Plan, Schedule on touch and laptop alike) that slides on translateY and fades,
 // 180ms, no X and no scale. A tap outside, Escape, or picking a tile closes it.
 // Photos / File run the composer's attach paths (the Photos picker still offers
 // Take Photo on phones); Assets opens the library picker; Brief, Post and Draft
-// open the share picker in that mode; Schedule opens the Schedule sheet. Draft
-// is live only for an agency-side viewer in a chat with no client: otherwise
-// (or while either is unknown) it renders faded and disabled from the first
-// frame. Tokens only, so light and dark stay at parity.
+// open the share picker in that mode; Plan opens the New plan screen; Schedule
+// opens the Schedule sheet. Draft is live only for an agency-side viewer in a
+// chat with no client, Plan only for an agency-side viewer: otherwise (or while
+// either is unknown) they render faded and disabled from the first frame. Tokens only, so light and dark stay at parity.
 
 import { useEffect, useRef, useState } from 'react';
 import type { ComponentType, ReactElement } from 'react';
@@ -21,6 +21,7 @@ import {
   IconFolder,
   IconImage,
   IconPipeline,
+  IconPlan,
   IconPlus,
 } from '@/components/ui/icons';
 import { isClient } from '@/components/pages/pcs/roles';
@@ -34,7 +35,15 @@ export const TRAY_MOTION_MS = 180;
 type TileIcon = ComponentType<{ size?: number; className?: string }>;
 
 /** Every tray tile id, in display order. */
-export type TrayTileId = 'photos' | 'file' | 'assets' | 'brief' | 'post' | 'draft' | 'schedule';
+export type TrayTileId =
+  | 'photos'
+  | 'file'
+  | 'assets'
+  | 'brief'
+  | 'post'
+  | 'draft'
+  | 'plan'
+  | 'schedule';
 
 /** One tray tile. A disabled tile renders faded, has no tap action and says why. */
 export interface TrayTile {
@@ -48,6 +57,12 @@ export interface TrayTile {
 
 /** The disabled Draft tile's accessible name. */
 export const DRAFT_UNAVAILABLE_LABEL = 'Draft, not available in chats with clients';
+
+/** The disabled Plan tile's accessible name. */
+export const PLAN_UNAVAILABLE_LABEL = 'Plan, only the agency team can share a plan';
+
+/** The Plan tile's accessible name in Personal notes (a plan is shared into a chat). */
+export const PLAN_NOTES_LABEL = 'Plan, not available in Personal notes';
 
 /**
  * Whether the open chat has a client among its other active members: null
@@ -71,12 +86,13 @@ export function draftTileEnabled(side: ViewerSide, hasClient: boolean | null): b
 
 /**
  * The tiles: the same set on touch and laptop, Schedule last. A chat that
- * cannot schedule (Personal notes) leaves Schedule out. Draft is disabled
- * unless `draft` is true (absent counts as unknown, so disabled). Pure.
+ * cannot schedule (Personal notes) leaves Schedule out. Draft and Plan are
+ * disabled unless `draft` / `plan` is true (absent counts as unknown, so
+ * disabled). Pure.
  */
 export function trayTiles(
   layout: ChatLayout,
-  opts: { schedule?: boolean; draft?: boolean } = {},
+  opts: { schedule?: boolean; draft?: boolean; plan?: boolean } = {},
 ): TrayTile[] {
   void layout;
   const tiles: TrayTile[] = [
@@ -94,6 +110,16 @@ export function trayTiles(
           disabled: true,
           ariaLabel: DRAFT_UNAVAILABLE_LABEL,
         },
+    opts.plan === true
+      ? { id: 'plan', label: 'Plan', Icon: IconPlan }
+      : {
+          id: 'plan',
+          label: 'Plan',
+          Icon: IconPlan,
+          disabled: true,
+          // No Schedule means Personal notes, where a plan is never shared.
+          ariaLabel: opts.schedule === false ? PLAN_NOTES_LABEL : PLAN_UNAVAILABLE_LABEL,
+        },
   ];
   if (opts.schedule !== false) {
     tiles.push({ id: 'schedule', label: 'Schedule', Icon: IconCalendarClock });
@@ -108,6 +134,8 @@ export function ComposerTray(props: {
   schedule?: boolean;
   /** True: the Draft tile is live. Absent or false: faded and disabled. */
   draft?: boolean;
+  /** True: the Plan tile is live. Absent or false: faded and disabled. */
+  plan?: boolean;
 }): ReactElement {
   const [open, setOpen] = useState(false);
   // Kept mounted through the exit; `shown` drives the transition.
@@ -150,6 +178,7 @@ export function ComposerTray(props: {
   const tiles = trayTiles(props.layout, {
     schedule: props.schedule !== false,
     draft: props.draft === true,
+    plan: props.plan === true,
   });
   return (
     <div ref={rootRef} className={cn('shrink-0', NO_TOUCH_SELECT)} onContextMenu={preventDefault}>
@@ -204,7 +233,7 @@ export function ComposerTray(props: {
 }
 
 /**
- * The tray's tile grid, 4 columns (7 tiles: the second row holds 3). A
+ * The tray's tile grid, 4 columns (8 tiles: two rows of 4; 7 in notes). A
  * disabled tile is faded, carries the disabled attribute and aria-disabled,
  * says why in its name, and never calls onPick.
  */

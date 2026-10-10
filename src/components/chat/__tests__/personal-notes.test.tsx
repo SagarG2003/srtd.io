@@ -357,7 +357,7 @@ describe('menu matrix', () => {
     expect(deleteSelectionBlock(ids, [own], new Map(), NOW, true)).toBeNull();
   });
 
-  it('notes tray has no Schedule tile (6 tiles); other chats keep it', () => {
+  it('notes tray has no Schedule tile (7 tiles); other chats keep it', () => {
     expect(trayTiles('touch', { schedule: false }).map((t) => t.id)).toEqual([
       'photos',
       'file',
@@ -365,7 +365,15 @@ describe('menu matrix', () => {
       'brief',
       'post',
       'draft',
+      'plan',
     ]);
+    // Notes never shares a plan: the tile stays faded there and says why.
+    expect(trayTiles('touch', { schedule: false }).find((t) => t.id === 'plan')?.ariaLabel).toBe(
+      'Plan, not available in Personal notes',
+    );
+    expect(trayTiles('touch', { schedule: false }).find((t) => t.id === 'plan')?.disabled).toBe(
+      true,
+    );
     expect(trayTiles('touch').map((t) => t.id)).toContain('schedule');
   });
 
