@@ -124,6 +124,7 @@ const CORS = {
 type RpcHandler = (args: Record<string, unknown>, tables: Tables) => unknown;
 
 const RPC: Record<string, RpcHandler> = {
+  user_dashboard_tour_state: () => true,
   chat_unread_counts: (_args, tables) => {
     const cursors = tables.chat_read_cursors ?? [];
     const channels = tables.chat_channels ?? [];
