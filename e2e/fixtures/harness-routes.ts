@@ -865,3 +865,116 @@ export async function installHarnessNetwork(page: Page): Promise<HarnessNetwork>
 }
 
 export { WORKSPACE_ID };
+
+// ---------------------------------------------------------------------------
+// Activity plan rows (plan_comment / plan_review), the live writer's shape:
+// entity_type 'plan_item', entity_id the item, scope 'posts', scope_key and
+// payload.plan_id the plan. Seed a plan first (seedClientPlan).
+// ---------------------------------------------------------------------------
+
+/** The plan comment an Activity plan_comment row points at (on the concept). */
+export const ACTIVITY_PLAN_COMMENT_ID = '0190d300-0000-7000-8000-00000000d3a1';
+export const ACTIVITY_PLAN_COMMENT_BODY = 'Love the morning light. Can the first shot be wider?';
+export const ACTIVITY_PLAN_COMMENT_ROW = '0190f100-0000-7000-8000-0000000000d1';
+export const ACTIVITY_PLAN_REVIEW_ROW = '0190f100-0000-7000-8000-0000000000d2';
+
+/** One inbox row for the viewer (ME) of a plan event, created `agoMs` ago. */
+function planInboxRow(input: {
+  id: string;
+  eventType: 'plan_comment' | 'plan_review';
+  itemId: string;
+  planId: string;
+  actor: string;
+  payload: Record<string, unknown>;
+  agoMs: number;
+}): Row {
+  return {
+    id: input.id,
+    user_id: ME,
+    actor_user_id: input.actor,
+    workspace_id: WORKSPACE_ID,
+    event_type: input.eventType,
+    entity_type: 'plan_item',
+    entity_id: input.itemId,
+    scope: 'posts',
+    scope_key: input.planId,
+    tier: 'active',
+    payload: { ...input.payload, plan_id: input.planId },
+    read_at: null,
+    snoozed_until: null,
+    email_sent_at: null,
+    deleted_at: null,
+    created_at: new Date(Date.now() - input.agoMs).toISOString(),
+  };
+}
+
+/**
+ * A plan_comment row on `itemId` (with its Everyone comment by `actor`, listed
+ * among a few older comments so the item screen has to scroll to it).
+ */
+export function seedActivityPlanComment(
+  world: ChatWorld,
+  opts: { planId: string; itemId: string; actor: string },
+): void {
+  const t = world.tables;
+  const comments = (t.plan_item_comments ??= []);
+  for (let k = 0; k < 6; k += 1) {
+    comments.push({
+      id: `0190d300-0000-7000-8000-00000000d3b${k}`,
+      workspace_id: WORKSPACE_ID,
+      item_id: opts.itemId,
+      author_user_id: ME,
+      body: `Earlier note ${k + 1} on the cut and the caption length.`,
+      visibility: 'everyone',
+      created_at: `2026-10-09T10:0${k}:00Z`,
+      edited_at: null,
+      deleted_at: null,
+    });
+  }
+  comments.push({
+    id: ACTIVITY_PLAN_COMMENT_ID,
+    workspace_id: WORKSPACE_ID,
+    item_id: opts.itemId,
+    author_user_id: opts.actor,
+    body: ACTIVITY_PLAN_COMMENT_BODY,
+    visibility: 'everyone',
+    created_at: '2026-10-09T11:00:00Z',
+    edited_at: null,
+    deleted_at: null,
+  });
+  (t.inbox_entries ??= []).push(
+    planInboxRow({
+      id: ACTIVITY_PLAN_COMMENT_ROW,
+      eventType: 'plan_comment',
+      itemId: opts.itemId,
+      planId: opts.planId,
+      actor: opts.actor,
+      payload: { comment_id: ACTIVITY_PLAN_COMMENT_ID, visibility: 'everyone' },
+      agoMs: 60_000,
+    }),
+  );
+}
+
+/** A plan_review row on `itemId` by `actor` (side and status as the writer records them). */
+export function seedActivityPlanReview(
+  world: ChatWorld,
+  opts: {
+    planId: string;
+    itemId: string;
+    actor: string;
+    side: 'team' | 'client';
+    status: 'approved' | 'changes';
+  },
+): void {
+  (world.tables.inbox_entries ??= []).push(
+    planInboxRow({
+      id: ACTIVITY_PLAN_REVIEW_ROW,
+      eventType: 'plan_review',
+      itemId: opts.itemId,
+      planId: opts.planId,
+      actor: opts.actor,
+      payload: { side: opts.side, status: opts.status },
+      agoMs: 120_000,
+    }),
+  );
+}

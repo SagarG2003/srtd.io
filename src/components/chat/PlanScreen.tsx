@@ -292,10 +292,20 @@ type PlanTab = 'concept' | 'post';
 export function PlanScreen(props: {
   open: boolean;
   planId: string;
-  /** The message sender (client's "Shared by"). */
-  senderName: string;
-  /** The open chat's title (agency's "Shared with"). */
-  chatTitle: string;
+  /** The message sender (client's "Shared by"). Absent outside a chat. */
+  senderName?: string;
+  /** The open chat's title (agency's "Shared with"). Absent outside a chat. */
+  chatTitle?: string;
+  /**
+   * Outside a chat (the standalone page): the item open on entry. It takes no
+   * history step of its own (the page's entry is its step), so closing it
+   * closes the screen and one Back leaves.
+   */
+  initialItemId?: string;
+  /** Outside a chat: the comment the entry item scrolls to and highlights. */
+  highlightCommentId?: string;
+  /** Outside a chat: a plan of another workspace reads as not available. */
+  onlyWorkspaceId?: string;
   onClose: () => void;
 }): ReactElement | null {
   const { workspaceId } = useWorkspace();
@@ -306,11 +316,16 @@ export function PlanScreen(props: {
     readPlanScreen(supabase, planId, signal),
   );
   const [tab, setTab] = useState<PlanTab>('concept');
-  const [itemId, setItemId] = useState<string | null>(null);
+  const [itemId, setItemId] = useState<string | null>(props.initialItemId ?? null);
+  const entryItemId = props.initialItemId ?? null;
   const [removing, setRemoving] = useState<PlanItemRow | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  useHistoryStep(itemId !== null && props.open, HISTORY_STEP_KEYS.planItem, () => setItemId(null));
+  useHistoryStep(
+    itemId !== null && itemId !== entryItemId && props.open,
+    HISTORY_STEP_KEYS.planItem,
+    () => setItemId(null),
+  );
 
   // A closed screen forgets its item, tab and confirms.
   useEffect(() => {
@@ -331,7 +346,13 @@ export function PlanScreen(props: {
     return () => window.removeEventListener(PLAN_CHANGED_EVENT, onChanged);
   }, [props.open, planId, reload]);
 
-  const bundle = read.status === 'ready' ? read.data.bundle : null;
+  const readBundle = read.status === 'ready' ? read.data.bundle : null;
+  const bundle =
+    readBundle !== null &&
+    props.onlyWorkspaceId !== undefined &&
+    readBundle.plan.workspace_id !== props.onlyWorkspaceId
+      ? null
+      : readBundle;
 
   // A re-read that drops the open item (removed) or the plan itself (deleted,
   // no longer readable) closes that layer through its own close path, so its
@@ -359,10 +380,9 @@ export function PlanScreen(props: {
   const planCards = usePlanCards();
   const cachedTitle = planCards?.cache.snapshot([planId]).bundles.get(planId)?.plan.title ?? null;
   const title = planHeaderTitle(read.status, bundle?.plan.title ?? null, cachedTitle);
+  const sharedName = side === 'agency' ? props.chatTitle : props.senderName;
   const subtitle =
-    side !== 'unknown'
-      ? planSharedLine(side, side === 'agency' ? props.chatTitle : props.senderName)
-      : undefined;
+    side !== 'unknown' && sharedName !== undefined ? planSharedLine(side, sharedName) : undefined;
 
   const shareWithClient = async (): Promise<void> => {
     if (busy) return;
@@ -452,7 +472,15 @@ export function PlanScreen(props: {
           bundle={bundle}
           item={item}
           side={side}
-          onClose={() => setItemId(null)}
+          {...(itemId === entryItemId
+            ? {
+                backLabel: 'Back',
+                ...(props.highlightCommentId !== undefined
+                  ? { highlightCommentId: props.highlightCommentId }
+                  : {}),
+              }
+            : {})}
+          onClose={() => (itemId === entryItemId ? props.onClose() : setItemId(null))}
         />
       ) : null}
       <PlanConfirmSheet
