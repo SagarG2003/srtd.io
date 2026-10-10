@@ -1461,7 +1461,9 @@ describe('plan comments and approvals', () => {
     // A review never carries &comment= even if a comment id leaked in.
     expect(entityHref({ ...review, commentId: COMMENT })).toBe(`/plans/${PLAN}?item=${ITEM}`);
     expect(entityHref({ ...comment, planId: null })).toBeNull();
-    expect(entityHref({ ...comment, planId: undefined })).toBeNull();
+    const noPlanField: ActivityItem = { ...comment };
+    delete noPlanField.planId;
+    expect(entityHref(noPlanField)).toBeNull();
     expect(entityHref({ ...comment, entityId: null })).toBeNull();
   });
 
