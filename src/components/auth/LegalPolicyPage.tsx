@@ -14,6 +14,7 @@ function PrivacyPolicyContent() {
   return (
     <div className="space-y-6 text-sm leading-6 text-fg-2">
       <p>Last Updated: 08 Oct 2026</p>
+      <p>Last Updated 08 Oct 2026</p>
       <p>
         This Privacy Policy explains how we collect, use, share and protect your personal data when
         you use srtd.io and the Sorted app. Sorted is a tool for social media agencies and their
