@@ -50,7 +50,7 @@ export const InboxEntrySchema = z.object({
   user_id: z.string().uuid(),
   workspace_id: z.string().uuid(),
   event_type: z.enum(INBOX_EVENT_TYPES),
-  entity_type: z.enum(['post', 'brief', 'chat_channel', 'workspace']).nullable(),
+  entity_type: z.enum(['post', 'brief', 'chat_channel', 'workspace', 'plan_item']).nullable(),
   entity_id: z.string().nullable(),
   scope: z.enum(['everything', 'posts', 'briefs', 'people', 'groups', 'clients']),
   scope_key: z.string().nullable(),

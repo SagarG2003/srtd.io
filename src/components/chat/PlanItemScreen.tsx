@@ -10,7 +10,7 @@
 // per open, bounded at 5s; the body paints once it settles. Tokens only.
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { FormEvent, ReactElement } from 'react';
+import type { FormEvent, ReactElement, RefObject } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { planItemCommentCreate, planItemReview } from '@srtdio/rpc';
 import { Button } from '@/components/ui/Button';
@@ -173,6 +173,10 @@ export function PlanItemScreen(props: {
   bundle: PlanBundle;
   item: PlanItemRow;
   side: ViewerSide;
+  /** The header back label; "Back to plan" when absent (the chat). */
+  backLabel?: string;
+  /** A comment to scroll to and briefly highlight once listed; none when absent. */
+  highlightCommentId?: string;
   onClose: () => void;
 }): ReactElement | null {
   const { bundle, item, side } = props;
@@ -328,6 +332,25 @@ export function PlanItemScreen(props: {
     dispatchPlanChanged(window, bundle.plan.id);
   };
 
+  // The deep-linked comment: once the read lists it, scroll to it and
+  // highlight it briefly. Not listed (deleted, hidden): nothing happens.
+  const highlightId = props.highlightCommentId ?? null;
+  const [highlighted, setHighlighted] = useState<string | null>(null);
+  const highlightRef = useRef<HTMLDivElement | null>(null);
+  const highlightDone = useRef(false);
+  const listed = read.status === 'ready' && shown.some((c) => c.id === highlightId);
+  useEffect(() => {
+    if (highlightId === null || !props.open || !listed || highlightDone.current) return;
+    highlightDone.current = true;
+    setHighlighted(highlightId);
+    highlightRef.current?.scrollIntoView({ block: 'center' });
+  }, [highlightId, props.open, listed]);
+  useEffect(() => {
+    if (highlighted === null) return;
+    const timer = setTimeout(() => setHighlighted(null), HIGHLIGHT_MS);
+    return () => clearTimeout(timer);
+  }, [highlighted]);
+
   const teamNote = side === 'agency' && visibility === 'team';
   return (
     <>
@@ -336,7 +359,7 @@ export function PlanItemScreen(props: {
         testId="item"
         title={itemKindLabel(bundle.items, item)}
         subtitle={bundle.plan.title}
-        backLabel="Back to plan"
+        backLabel={props.backLabel ?? 'Back to plan'}
         onBack={props.onClose}
         footer={
           <form
@@ -485,7 +508,19 @@ export function PlanItemScreen(props: {
             ) : shown.length === 0 ? (
               <p className="text-[13px] text-fg-3">No comments yet.</p>
             ) : (
-              shown.map((c) => <CommentRow key={c.id} comment={c} timeZone={timeZone} />)
+              shown.map((c) =>
+                c.id === highlightId ? (
+                  <CommentRow
+                    key={c.id}
+                    comment={c}
+                    timeZone={timeZone}
+                    highlighted={highlighted === c.id}
+                    rowRef={highlightRef}
+                  />
+                ) : (
+                  <CommentRow key={c.id} comment={c} timeZone={timeZone} />
+                ),
+              )
             )}
           </section>
         </div>
@@ -562,16 +597,28 @@ function ItemMedia(props: {
   );
 }
 
-function CommentRow(props: { comment: ShownComment; timeZone: string }): ReactElement {
+/** How long a deep-linked comment stays highlighted. */
+const HIGHLIGHT_MS = 2400;
+
+function CommentRow(props: {
+  comment: ShownComment;
+  timeZone: string;
+  highlighted?: boolean;
+  rowRef?: RefObject<HTMLDivElement>;
+}): ReactElement {
   const c = props.comment;
   const team = c.visibility === 'team';
   return (
     <div
+      {...(props.rowRef !== undefined ? { ref: props.rowRef, 'data-plan-comment-id': c.id } : {})}
+      {...(props.highlighted === true ? { 'data-plan-comment-highlight': '' } : {})}
       data-plan-comment={c.visibility}
       className={cn(
         'flex flex-col gap-1 rounded-lg border px-3 py-2.5',
         team ? 'border-warn bg-warn-soft' : 'border-border bg-panel',
         c.pending && 'opacity-70',
+        props.highlighted === true &&
+          'ring-2 ring-accent transition-shadow duration-slow motion-reduce:transition-none',
       )}
     >
       <div className="flex items-center gap-1.5 text-[13px]">
